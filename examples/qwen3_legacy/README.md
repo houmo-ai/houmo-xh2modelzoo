@@ -6,7 +6,7 @@
 batch_size
 context-length
 input-sequence-length
-quant-type: for example: w4a8h0-ssfp、w8a8h1-sefp
+quant-type: for example: w4a8-ssfp、w8a8-sefp
 quant-weight : GPTQ、Quarot量化后的权重文件
 ```
 
@@ -23,13 +23,13 @@ transformers库需要升级到4.51.0以上版本，否则会报错。
 #### 1. 导出
 
 ```bash
-python examples/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w8a8h1_sefp
+python examples/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w8a8_sefp
 ```
 
 #### 2. GPU仿真
 
 ```bash
-python examples/qwen3_legacy/qwen3_legacy_xh2a_hmonnx_test.py --config work_dirs/Qwen3-8B-XH2a-2k-w8a8h1_sefp/meta.json 
+python examples/qwen3_legacy/qwen3_legacy_xh2a_hmonnx_test.py --config work_dirs/Qwen3-8B-XH2a-2k-w8a8_sefp/meta.json 
 ```
 
 ### w4a8
@@ -46,11 +46,11 @@ python examples/qwen3_legacy/qwen3_xh2a_common_quant.py  --model data/models/Qwe
 #### 2. 导出
 
 ```bash
-python examples/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w4a8h0_ssfp --quant-weight work_dirs/Qwen3-8B_quarot_gptq/quarot_gptq-state-dict.safetensors
+python examples/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w4a_ssfp --quant-weight work_dirs/Qwen3-8B_quarot_gptq/quarot_gptq-state-dict.safetensors
 ```
 
 #### 3. GPU仿真
 
 ```bash
-python examples/qwen3_legacy/qwen3_legacy_xh2a_hmonnx_test.py --config work_dirs/Qwen3-8B-XH2a-2k-w4a8h0_ssfp/meta.json 
+python examples/qwen3_legacy/qwen3_legacy_xh2a_hmonnx_test.py --config work_dirs/Qwen3-8B-XH2a-2k-w4a8_ssfp/meta.json 
 ```

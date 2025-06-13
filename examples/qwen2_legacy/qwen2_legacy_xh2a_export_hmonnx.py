@@ -42,7 +42,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="data/models/Qwen2.5-7B-Instruct")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w4a8h0_ssfp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant-weight",
         type=str,

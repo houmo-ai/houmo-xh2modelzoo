@@ -98,7 +98,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/Qwen3-8B-XH2a-2k-w4a8h0_ssfp/meta.json",
+        default="work_dirs/Qwen3-8B-XH2a-2k-w4a8_ssfp/meta.json",
     )
     parser.add_argument("--hf-model", type=str)
     parser.add_argument("--device", type=str, default="cuda:0")

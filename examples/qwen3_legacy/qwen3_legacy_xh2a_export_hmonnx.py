@@ -18,7 +18,6 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-    # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
     config = Qwen2ConvertConfig(
         batch_size=1,
         context_length=args.context_length,
@@ -43,7 +42,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="data/models/Qwen3-8B")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w4a8h0_ssfp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w4a8_ssfp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant-weight",
         type=str,
