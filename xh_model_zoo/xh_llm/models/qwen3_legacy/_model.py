@@ -150,9 +150,13 @@ class _Qwen3Attention(DynamicModule):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = self.q_norm(query_states.view(bsz, q_len, -1, self.head_dim)).transpose(1, 2)
-        key_states = self.k_norm(key_states.view(bsz, q_len, -1, self.head_dim)).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+        query_states = self.q_norm(
+            query_states.view(bsz, q_len, self.config.num_attention_heads, self.head_dim)
+        ).transpose(1, 2)
+        key_states = self.k_norm(key_states.view(bsz, q_len, self.config.num_key_value_heads, self.head_dim)).transpose(
+            1, 2
+        )
+        value_states = value_states.view(bsz, q_len, self.config.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         # cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
         # sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)

@@ -46,7 +46,7 @@ def add_mim_extension():
     # filenames = ["tools", "configs", "model-index.yml", "dataset-index.yml"]
     filenames = []
     repo_path = osp.dirname(__file__)
-    mim_path = osp.join(repo_path, "xhquant_llm", ".mim")
+    mim_path = osp.join(repo_path, "xh_model_zoo", ".mim")
     os.makedirs(mim_path, exist_ok=True)
 
     for filename in filenames:
