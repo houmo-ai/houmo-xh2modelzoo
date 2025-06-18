@@ -1,5 +1,9 @@
 # XH Model Zoo
 
+## 开发手册
+
+这里(<https://houmo.feishu.cn/wiki/GjWNwICABiBm8Ykn0GAcRKnen6d>)
+
 ## 依赖项
 
 使用xhquanttool工程的python环境
