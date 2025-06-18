@@ -177,5 +177,5 @@ report_dynamo_export.sarif
 /data/models/
 xhquant
 
-/xh2_model_zoo.egg-info/
+/xh_model_zoo.egg-info/
 mypy.ini

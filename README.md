@@ -1,5 +1,9 @@
 # XH Model Zoo
 
+## 依赖项
+
+使用xhquanttool工程的python环境
+
 ## 代码提交  
 
 ```拉取代码

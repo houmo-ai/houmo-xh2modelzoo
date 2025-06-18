@@ -192,7 +192,7 @@ if __name__ == "__main__":
         # url="",
         author="houmo_xh_model_zoo",
         author_email="ywpqZ90QoD5pa@houmo.ai",
-        url="http://10.30.0.11/hmquantbook01/intro.html",
+        url="https://houmo.feishu.cn/wiki/ICKSwBxJeiKmNukBR01chBLenRc",
         description="xh_model_zoo is an example project that uses xhquant tools.",
         packages=find_packages(exclude=("configs", "tools", "demo", "examples")),
         include_package_data=True,
