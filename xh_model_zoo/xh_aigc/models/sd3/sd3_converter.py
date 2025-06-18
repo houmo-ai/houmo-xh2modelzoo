@@ -1,24 +1,19 @@
-import dataclasses
 import json
 import math
 import tempfile
 import time
 import types
-from asyncio import FastChildWatcher
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import bitsandbytes.functional as BNBF
 import onnx
 import onnxsim
 import torch
-import torch.nn as nn
 import transformers
 from bitsandbytes.nn.modules import Linear4bit, bnb
 from diffusers import SD3Transformer2DModel, StableDiffusion3Pipeline
-from sympy import Q
 from torch import Tensor
 from transformers.models.clip.modeling_clip import (
     BaseModelOutputWithPooling,
@@ -28,7 +23,7 @@ from transformers.models.clip.modeling_clip import (
     _prepare_4d_attention_mask,
     is_torch_greater_or_equal_than_2_2,
 )
-from transformers.models.t5.modeling_t5 import T5Block, T5LayerFF, T5LayerNorm, T5Stack
+from transformers.models.t5.modeling_t5 import T5Block, T5Stack
 from xhquant.api import QuantScheme, convert_onnx_to_hmonnx
 from xhquant.nn.modules import Clip
 from xhquant.utils import digit_version, get_root_logger
