@@ -16,5 +16,5 @@ vae, clip, clip_l 都使用开源版本
 ## 导出模型
 
 ```bash
- python examples/sd3/sd3_lenovo_export.py --model data/models/stable-diffusion-3-medium-diffusers --lenovo-model data/models/sd3_2b_lenovo --guidance-scale 2.5 --width 512 --height 512  
+ python examples/aigc/sd3/sd3_lenovo_export.py --model data/models/stable-diffusion-3-medium-diffusers --lenovo-model data/models/sd3_2b_lenovo --guidance-scale 2.5 --width 512 --height 512  
 ```
