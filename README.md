@@ -2,7 +2,7 @@
 
 ## 开发手册
 
-这里(<https://houmo.feishu.cn/wiki/GjWNwICABiBm8Ykn0GAcRKnen6d>)
+[这里](<https://houmo.feishu.cn/wiki/GjWNwICABiBm8Ykn0GAcRKnen6d>)
 
 ## 依赖项
 
@@ -21,13 +21,17 @@ git push origin HEAD:refs/for/develop
 
 ## 量化格式
 
-- w8a8-sefp: 8bit 权重, 8bit 激活, 计算模式：sefp
-- w4a8-ssfp: 4bit 权重, 8bit 激活, 计算模式：ssfp
-- w8a16-sefp: 8bit 权重, 16bit 激活, 计算模式：sefp
+需要量化的算子：Conv、Linear、MatMul、Gemm
+
+| 量化模式 | 权重位宽 | 激活位宽 | 计算模式 |
+|----------|----------|----------|----------|
+| w8a8-sefp | 8bit | 8bit | sefp |
+| w8a16-sefp | 8bit | 16bit | sefp |
+| w4a8-ssfp | 4bit | 8bit | ssfp |
 
 ## Model zoo
 
-<table align="center">
+<table align="left">
   <tbody>
     <tr align="center" valign="bottom">
       <td>
