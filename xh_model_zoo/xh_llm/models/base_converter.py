@@ -1,4 +1,6 @@
-from typing import Any, Dict
+import copy
+import re
+from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,33 @@ class BaseConverter:
 
     def __init__(self):
         pass
+
+    @staticmethod
+    def xh1_hmonnx_compatible(input_names: List[str]):
+        input_names = copy.deepcopy(input_names)
+        input_names_mapping = {
+            "inputs_embeds": "input_1",
+            "past_seq_length": "valid_length",
+            "current_input_length": "current_length",
+        }
+        for idx in range(len(input_names)):
+            in_name = input_names[idx]
+            if in_name in input_names_mapping:
+                input_names[idx] = input_names_mapping[in_name]
+            else:
+                # 匹配past_key_cache_后面跟数字的字符串
+                kcache_pattern = r"^past_key_cache_\d+$"  # \d+表示匹配一个或多个数字
+                kcache_match = re.match(kcache_pattern, in_name)
+                if kcache_match:
+                    kcache_idx = kcache_match.group(0).split("_")[-1]
+                    input_names[idx] = "model_layers_{}_self_attn_kcache_input".format(kcache_idx)
+                else:
+                    vcache_pattern = r"^past_value_cache_\d+$"  # \d+表示匹配一个或多个数字
+                    vcache_match = re.match(vcache_pattern, in_name)
+                    if vcache_match:
+                        vcache_idx = vcache_match.group(0).split("_")[-1]
+                        input_names[idx] = "model_layers_{}_self_attn_vcache_input".format(vcache_idx)
+        return input_names
 
 
 class HFTransfromersConverter(BaseConverter):

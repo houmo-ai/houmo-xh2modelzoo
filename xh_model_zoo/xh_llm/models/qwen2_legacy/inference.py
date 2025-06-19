@@ -8,9 +8,8 @@ from torch import Tensor
 from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
 
-from xh_model_zoo.xh_llm.utils import decode_next_token
-
 from ....utils import DeviceDtypeMixin
+from ...utils import decode_next_token
 
 
 class Qwen2LegacyInference(DeviceDtypeMixin):

@@ -15,7 +15,7 @@ from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
 
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .data_preprocess import Qwen2VLDataPreprocess
 from .qwen2_vl_convert_config import Qwen2VLConvertConfig
@@ -354,6 +354,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
             quant_graph_model = convert_fx_model_to_quanted_model(
                 wraped_llm_model, prefill_inputs, target_device, quant_config
             )
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(
                 quant_graph_model, prefill_inputs, prefill_onnx_file, onnx_input_names, onnx_output_names
             )
@@ -387,6 +388,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
                     wraped_llm_model, prefill_inputs, target_device, quant_config
                 )
             quant_graph_model.apply(update_cfg_fn)
+            onnx_input_names = BaseConverter.xh1_hmonnx_compatible(onnx_input_names)
             convert_quanted_model_to_hmonnx(
                 quant_graph_model, decode_inputs, decode_onnx_file, onnx_input_names, onnx_output_names
             )

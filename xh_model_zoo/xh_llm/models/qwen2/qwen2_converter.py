@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 import torch
+from torch import Tensor
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen2ForCausalLM
 
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .qwen2_convert_config import Qwen2ConvertConfig
 
@@ -169,12 +170,12 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
             position_ids.append(position_id)
             input_ids.append(input_id)
 
-        input_ids = torch.cat(input_ids, dim=0)
-        position_ids = torch.cat(position_ids, dim=0)
+        input_ids: Tensor = torch.cat(input_ids, dim=0)
+        position_ids: Tensor = torch.cat(position_ids, dim=0)
 
         inputs_embeds = token_embedding(input_ids)
-        past_seq_length = torch.tensor([0] * wrap_cfg.batch_size, dtype=torch.int32)
-        current_input_length = torch.tensor(current_input_length, dtype=torch.int32)
+        past_seq_length: Tensor = torch.tensor([0] * wrap_cfg.batch_size, dtype=torch.int32)
+        current_input_length: Tensor = torch.tensor(current_input_length, dtype=torch.int32)
 
         inputs = (
             inputs_embeds,
@@ -211,6 +212,7 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
         )
         # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
@@ -233,7 +235,7 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
         decode_onnx_file = work_dir / "hmonnx" / f"{prefix}_decode.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
-
+        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
 
         logger.info(f"Export decode model to {decode_onnx_file}")

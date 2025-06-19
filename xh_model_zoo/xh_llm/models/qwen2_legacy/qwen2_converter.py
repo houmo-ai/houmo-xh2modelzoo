@@ -7,7 +7,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen2ForCausalLM
 from xhquant import nn as xhnn
 
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .qwen2_convert_config import Qwen2LegacyConvertConfig
 
@@ -233,6 +233,7 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
 
         # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
@@ -255,7 +256,7 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decode.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
-
+        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
 
         logger.info(f"Export decode model to {decode_onnx_file}")
