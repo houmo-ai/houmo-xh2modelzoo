@@ -4,6 +4,7 @@ from typing import Optional
 
 from xhquant.api import HMONNXInference
 
+
 from ....utils import DeviceDtypeMixin
 
 

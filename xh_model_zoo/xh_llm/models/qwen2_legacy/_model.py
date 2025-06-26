@@ -309,7 +309,7 @@ class _Qwen2Attention(DynamicModule):
 
         self.enable_rope = cfg.get("enable_rope", True)
         if self.enable_rope:
-            self.ropoe = xhnn.Rope()
+            self.rope = xhnn.Rope()
 
         self.slice_1 = xhnn.Slice([0], [self.head_dim // 2], [3], [1])
         self.slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])

@@ -28,6 +28,8 @@ from xhquant.api import QuantScheme, convert_onnx_to_hmonnx
 from xhquant.nn.modules import Clip
 from xhquant.utils import digit_version, get_root_logger
 
+from .t5_method_patch import hadmard_t5
+
 
 @dataclass
 class SD3ConvertConfig:
@@ -36,6 +38,7 @@ class SD3ConvertConfig:
     num_inference_steps: int = 28
     width: int = 512
     height: int = 512
+    hadmard_t5: bool = False
 
 
 def _gelu_tanh(self, input):
@@ -897,14 +900,17 @@ class SD3Converter:
     @classmethod
     def export_onnx_t5(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
-        export_model = hf_model.text_encoder_3
-        mode_dtype = export_model.dtype
-        if export_model is None:
-            return
-        simplify_onnx = True
         no_clip_fp16_t5 = False
         custom_patch_t5 = False
         legacy_onnx = True
+        if convert_config.hadmard_t5:
+            logger.info("hadmard t5................")
+            hf_model.text_encoder_3 = hadmard_t5(hf_model.text_encoder_3)
+            no_clip_fp16_t5 = True
+        export_model = hf_model.text_encoder_3
+        # mode_dtype = export_model.dtype
+        if export_model is None:
+            return
 
         onnx_name = Path(output_onnx_file).stem
         # if args.t5_quant:
@@ -967,7 +973,7 @@ class SD3Converter:
             export_model.eval()
             export_model = export_model.to(torch.float32)
             onnx_inputs_name = list()
-            onnx_args = tuple()
+            onnx_args: Tuple[Any] = tuple()
             onnx_kwargs = dict()
             for i, ip in enumerate(inputs):
                 name, dtype, value = ip
