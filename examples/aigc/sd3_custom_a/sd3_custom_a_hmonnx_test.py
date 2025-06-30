@@ -6,7 +6,8 @@ import torch
 from PIL import ImageDraw
 from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
-from xh_model_zoo.xh_aigc.models.sd3_lenovo import SD3LenovoHFCompatible
+from xh2_model_zoo.utils.time_profiler import TimeProfiler
+from xh2_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAHFCompatible, SD3CustomAInference
 
 
 def main(args):
@@ -18,14 +19,12 @@ def main(args):
     steps = 8
     height = 512
     width = 512
-    # sd3_inference = SD3LenovoInference(args.config, fast_mode=args.fast)
-    # sd3_inference.to(device)
     set_random_seed(args.seed, deterministic=False)
-    pipe = SD3LenovoHFCompatible.to_hf_compatible(args.hf_model, lenovo_model=args.lenovo_model)
+    pipe = SD3CustomAHFCompatible.to_hf_compatible(args.hf_model, custom_a_model=args.custom_a_model)
     # pipe.to(torch.float16)  # type: ignore # noqa: F401
     pipe.to(device)  # type: ignore # noqa: F401
 
-    prompts = [
+    prompts: List[str] = [
         "A beautiful woman on the beach",
         "A beautiful woman on the street",
         "Waterfall on a high mountain, oil painting",
@@ -33,6 +32,7 @@ def main(args):
         "A cat holding a sign that says hello world",
         "a portrait of young girl.",
         "A cat holding a sign that says haha",
+        "a panda eating bamboo,Photo - realistic, 8k.",
     ]
     for idx, prompt in enumerate(prompts):
         logger.info(f"prompt {idx}: {prompt}")
@@ -67,10 +67,10 @@ if __name__ == "__main__":
         default="work_dirs/stable-diffusion-3-medium-diffusers_XH2a_512x512/meta.json",
     )
     parser.add_argument("--hf-model", type=str, default="data/models/stable-diffusion-3-medium-diffusers")
-    parser.add_argument("--lenovo-model", type=str, default="data/models/sd3_2b_lenovo")
+    parser.add_argument("--custom-a-model", type=str, default="data/models/sd3_2b_custom_a")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=8)
-    parser.add_argument("--output", type=str, default="work_dirs/sd3_2b_lenovo_XH2a_512x512/tests/sd3-test.png")
+    parser.add_argument("--output", type=str, default="work_dirs/sd3_2b_custom_a_XH2a_512x512/tests/sd3-test.png")
     args = parser.parse_args()
     main(args)

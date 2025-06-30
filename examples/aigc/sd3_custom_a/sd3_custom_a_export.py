@@ -1,19 +1,21 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
+from sympy import im
 from xhquant.api import DeviceType, QuantScheme, xhquant_init
 from xhquant.utils import set_random_seed
 
-from xh_model_zoo.xh_aigc.models.sd3_lenovo import SD3LenovoConvertConfig, SD3LenovoConverter
+from xh2_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAConvertConfig, SD3CustomAConverter
 
 
 def main(args):
     model = args.model
     model_dir = os.path.normpath(model)
-    lenovo_model_dir = args.lenovo_model
-    lenovo_model_dir = os.path.normpath(lenovo_model_dir)
-    model_name = Path(lenovo_model_dir).name
+    custom_a_model_dir = args.custom_a_model
+    custom_a_model_dir = os.path.normpath(custom_a_model_dir)
+    model_name = Path(custom_a_model_dir).name
     target_device = DeviceType.XH2a
     height = args.height
     width = args.width
@@ -26,14 +28,14 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = "w8a8_sefp"
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-    convert_config = SD3LenovoConvertConfig(
+    convert_config = SD3CustomAConvertConfig(
         quant_scheme=quant_scheme,
         guidance_scale=args.guidance_scale,
         height=height,
         width=width,
     )
 
-    SD3LenovoConverter.from_pretrained(model_dir, convert_config, str(work_dir), lenovo_model=lenovo_model_dir)
+    SD3CustomAConverter.from_pretrained(model_dir, convert_config, str(work_dir), custom_a_model=custom_a_model_dir)
 
 
 def parse_arguments():
@@ -43,7 +45,7 @@ def parse_arguments():
         type=str,
         default="data/models/stable-diffusion-3-medium-diffusers",
     )
-    parser.add_argument("--lenovo-model", type=str, default="data/models/sd3_2b_lenovo")
+    parser.add_argument("--custom-a-model", type=str, default="data/models/sd3_2b_custom_a")
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1024)

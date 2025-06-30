@@ -15,6 +15,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLModel,
     Qwen2VLRotaryEmbedding,
     Qwen2VLSdpaAttention,
+    rotate_half,
 )
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
@@ -144,16 +145,27 @@ class _Qwen2VLSdpaAttention(DynamicModule):
         return q_embed, k_embed
 
     def apply_rotary_pos_emb(self, q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, unsqueeze_dim: int = 1):
-        cos = cos.unsqueeze(unsqueeze_dim)
-        sin = sin.unsqueeze(unsqueeze_dim)
+        # cos = cos.unsqueeze(unsqueeze_dim)
+        # sin = sin.unsqueeze(unsqueeze_dim)
         # cos = self.cos_unsqueeze(cos)
         # sin = self.sin_unsqueeze(sin)
-        q_embed = (q * cos) + (self.rotate_half(q) * sin)
-        q_embed = (q * cos) + (self.rotate_half(q) * sin)
-        k_embed = (k * cos) + (self.rotate_half(k) * sin)
+        # q_embed = (q * cos) + (self.rotate_half(q) * sin)
+        # k_embed = (k * cos) + (self.rotate_half(k) * sin)
+        # return q_embed, k_embed
+
+        if self.enable_rope:
+            q_embed = self.rope(q, cos, sin)
+            k_embed = self.rope(k, cos, sin)
+        else:
+            q_embed = (q * cos) + (self.rotate_half(q) * sin)
+            k_embed = (k * cos) + (self.rotate_half(k) * sin)
         return q_embed, k_embed
 
     def _setup(self, cfg: ConfigDict):
+        self.enable_rope = cfg.get("enable_rope", True)
+        if self.enable_rope:
+            self.rope = xhnn.Rope()
+
         self.slice_1 = xhnn.Slice([0], [self.head_dim // 2], [3], [1])
         self.slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])
         self.masked_softmax = MaskedSoftmax(dim=-1)
@@ -235,7 +247,7 @@ class _Qwen2VLSdpaAttention(DynamicModule):
         attn_output = torch.matmul(attn_weights, value_states)  # [4, 28, 256, 32768], [4, 28, 32768, 128]
 
         attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, -1, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
 
@@ -411,7 +423,8 @@ class _Qwen2VLModel(DynamicModule):
 
         cos = torch.cat(cos_list, dim=-1)
         sin = torch.cat(sin_list, dim=-1)
-
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
         position_embeddings = (cos, sin)
 
         for idx, decoder_layer in enumerate(self.layers):
