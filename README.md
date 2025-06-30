@@ -59,7 +59,7 @@ git push origin HEAD:refs/for/develop
       <td>
       <ul>
         <li><a href="examples/aigc/sd3/README.md">SD3</a></li>
-        <li><a href="examples/aigc/sd3_lenovo/README.md">SD3 2B Lenovo</a></li>
+        <li><a href="examples/aigc/sd3_custom_a/README.md">SD3 2B Custom A</a></li>
         <li><a href="examples/aigc/sd3_5/README.md">SD3.5</a></li>
       </ul>
       </td>
