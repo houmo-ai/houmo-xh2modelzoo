@@ -2,7 +2,7 @@
 
 ## 依赖项
 
-联想模型需要transformers版本4.46.2
+客户A模型需要transformers版本4.46.2, 该客户模型量化版本必须要有GPU
 
 ```text
 mmdit_hypersd_fp16_v1.3.0.0.safetensors :微调后的fp16
@@ -16,5 +16,11 @@ vae, clip, clip_l 都使用开源版本
 ## 导出模型
 
 ```bash
-python examples/aigc/sd3_custom_a/sd3_custom_a_export.py --model data/models/stable-diffusion-3-medium-diffusers --custom-a-model data/models/sd3_2b_custom_a --guidance-scale 2.5 --width 512 --height 512  
+python examples/aigc/sd3_custom_a/sd3_custom_a_export.py --config --model data/models/stable-diffusion-3-medium-diffusers --custom-a-model data/models/sd3_2b_custom_a --guidance-scale 2.5 --width 512 --height 512  
+```
+
+## 验证
+
+```bash
+python examples/aigc/sd3_custom_a/sd3_custom_a_hmonnx_test.py --config work_dirs/sd3_2b_custom_a_XH2a_512x512/meta.json --hf-model data/models/stable-diffusion-3-medium-diffusers --custom-a-model data/models/sd3_2b_custom_a --steps 4
 ```

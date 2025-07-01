@@ -1,11 +1,13 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
-from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init
+from sympy import im
+from xhquant.api import DeviceType, QuantScheme, xhquant_init
 from xhquant.utils import set_random_seed
 
-from xh_model_zoo.xh_aigc.models.sd3_5 import SD3_5_Converter, SD3ConvertConfig
+from xh2_model_zoo.xh_aigc.models.sd3_5 import SD3_5_Converter, SD3ConvertConfig
 
 
 def main(args):
@@ -20,8 +22,6 @@ def main(args):
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / f"{cfg_name}.log"
     xhquant_init(log_file, debug=False)
-    logger = get_root_logger()
-    logger.info(f"{work_dir}")
 
     target_device = DeviceType.XH2a
     quant_type = "w8a8_sefp"

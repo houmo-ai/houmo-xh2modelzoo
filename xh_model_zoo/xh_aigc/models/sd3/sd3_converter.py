@@ -40,6 +40,10 @@ class SD3ConvertConfig:
     height: int = 512
     hadmard_t5: bool = False
 
+    # 内部配置参数，不建议外部修改
+    no_clip_fp16_t5: bool = False
+    custom_patch_t5: bool = False
+
 
 def _gelu_tanh(self, input):
     return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
@@ -585,7 +589,7 @@ class SD3Converter:
     def export_onnx_clip_l(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
         export_model = hf_model.text_encoder_2
-        export_model.to(device="cpu", dtype=torch.float)
+        export_model.to(device="cpu", dtype=torch.float32)
         fuse_clip_l = True
         legacy_onnx = True
         simplify_onnx = True
@@ -717,7 +721,7 @@ class SD3Converter:
     def export_onnx_clip(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
         export_model = hf_model.text_encoder
-        export_model.to(device="cpu", dtype=torch.float)
+        export_model.to(device="cpu", dtype=torch.float32)
 
         onnx_name = Path(output_onnx_file).stem
         legacy_onnx = True
@@ -900,8 +904,8 @@ class SD3Converter:
     @classmethod
     def export_onnx_t5(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
-        no_clip_fp16_t5 = False
-        custom_patch_t5 = False
+        no_clip_fp16_t5 = convert_config.no_clip_fp16_t5
+        custom_patch_t5 = convert_config.custom_patch_t5
         legacy_onnx = True
         if convert_config.hadmard_t5:
             logger.info("hadmard t5................")

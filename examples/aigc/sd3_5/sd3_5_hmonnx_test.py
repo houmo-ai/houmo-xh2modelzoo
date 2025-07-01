@@ -6,8 +6,8 @@ import torch
 from PIL import ImageDraw
 from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
-from xh_model_zoo.utils.time_profiler import TimeProfiler
-from xh_model_zoo.xh_aigc.models.sd3_5 import SD3HFCompatible, SD3Inference
+from xh2_model_zoo.utils.time_profiler import TimeProfiler
+from xh2_model_zoo.xh_aigc.models.sd3_5 import SD3HFCompatible, SD3Inference
 
 
 def main(args):
@@ -22,7 +22,7 @@ def main(args):
     # pipe.to(torch.float16)  # type: ignore # noqa: F401
     pipe.to(device)  # type: ignore # noqa: F401
     generator = torch.Generator(device=device).manual_seed(args.seed)
-    prompts = [
+    prompts: List[str] = [
         "A beautiful woman on the beach",
         "A beautiful woman on the street",
         "Waterfall on a high mountain, oil painting",

@@ -1,11 +1,13 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
+from sympy import im
 from xhquant.api import DeviceType, QuantScheme, xhquant_init
 from xhquant.utils import set_random_seed
 
-from xh_model_zoo.xh_aigc.models.sd3 import SD3ConvertConfig, SD3Converter
+from xh2_model_zoo.xh_aigc.models.sd3 import SD3ConvertConfig, SD3Converter
 
 
 def main(args):
@@ -29,6 +31,7 @@ def main(args):
         guidance_scale=args.guidance_scale,
         height=height,
         width=width,
+        hadmard_t5=True,
     )
 
     SD3Converter.from_pretrained(model_dir, convert_config, str(work_dir))

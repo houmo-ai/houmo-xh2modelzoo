@@ -6,8 +6,8 @@ import torch
 from PIL import ImageDraw
 from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
-from xh_model_zoo.utils.time_profiler import TimeProfiler
-from xh_model_zoo.xh_aigc.models.sd3 import SD3HFCompatible, SD3Inference
+from xh2_model_zoo.utils.time_profiler import TimeProfiler
+from xh2_model_zoo.xh_aigc.models.sd3 import SD3HFCompatible, SD3Inference
 
 
 def main(args):
@@ -22,7 +22,7 @@ def main(args):
     # pipe.to(torch.float16)  # type: ignore # noqa: F401
     pipe.to(device)  # type: ignore # noqa: F401
     generator = torch.Generator(device=device).manual_seed(args.seed)
-    prompts = [
+    prompts: List[str] = [
         "A beautiful woman on the beach",
         "A beautiful woman on the street",
         "Waterfall on a high mountain, oil painting",
@@ -30,8 +30,9 @@ def main(args):
         "A cat holding a sign that says hello world",
         "a portrait of young girl.",
         "A cat holding a sign that says haha",
+        "a panda eating bamboo,Photo - realistic, 8k.",
     ]
-    prompt = prompts[0]
+    prompt = prompts[-1]
     images = pipe(
         prompt,
         negative_prompt="",
@@ -62,7 +63,7 @@ if __name__ == "__main__":
     parser.add_argument("--hf-model", type=str, default="data/models/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--steps", type=int, default=28)
+    parser.add_argument("--steps", type=int, default=10)
     parser.add_argument(
         "--output", type=str, default="work_dirs/stable-diffusion-3-medium-diffusers_XH2a_512x512/tests/sd3-test.png"
     )

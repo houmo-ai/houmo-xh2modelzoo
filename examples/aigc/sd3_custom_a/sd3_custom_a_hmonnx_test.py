@@ -16,7 +16,7 @@ def main(args):
     logger = get_root_logger()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guidance_scale = 2.5
-    steps = 8
+    steps = args.steps
     height = 512
     width = 512
     set_random_seed(args.seed, deterministic=False)
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/stable-diffusion-3-medium-diffusers_XH2a_512x512/meta.json",
+        default="work_dirs/sd3_2b_custom_a_XH2a_512x512/meta.json",
     )
     parser.add_argument("--hf-model", type=str, default="data/models/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--custom-a-model", type=str, default="data/models/sd3_2b_custom_a")

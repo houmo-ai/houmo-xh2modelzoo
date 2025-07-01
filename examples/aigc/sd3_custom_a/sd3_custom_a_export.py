@@ -31,6 +31,7 @@ def main(args):
     convert_config = SD3CustomAConvertConfig(
         quant_scheme=quant_scheme,
         guidance_scale=args.guidance_scale,
+        num_inference_steps=8,
         height=height,
         width=width,
     )
