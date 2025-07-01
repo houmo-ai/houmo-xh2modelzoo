@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, HMONNXInference
 
-from ...utils import decode_next_token
+from ....xh_llm.utils import decode_next_token
 
 
 class Qwen2Inference:

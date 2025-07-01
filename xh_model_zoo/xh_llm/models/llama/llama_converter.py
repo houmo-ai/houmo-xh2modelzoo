@@ -220,7 +220,7 @@ class LlamaConverterXH2a(HFTransfromersConverter):
             if hasattr(m, "_update_cfg"):
                 m._update_cfg(wrap_cfg)
 
-        decode_onnx_file = work_dir / "hmonnx" / f"{prefix}_decode.onnx"
+        decode_onnx_file = work_dir / "hmonnx" / f"{prefix}_decoder.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
