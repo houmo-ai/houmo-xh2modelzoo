@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -96,13 +97,15 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             "vocab.json",
             "tokenizer.json",
         ]
-        for cfg_file in hf_config_files:
-            import shutil
 
-            shutil.copyfile(
-                Path(hf_model_path) / cfg_file,
-                Path(hf_config_dir) / cfg_file,
-            )
+        for cfg_file in hf_config_files:
+            src_file = Path(hf_model_path) / cfg_file
+            dst_file = Path(hf_config_dir) / cfg_file
+            if src_file.exists():
+                shutil.copyfile(src_file, dst_file)
+            else:
+                logger.warning(f"{src_file} not exists, skip copy")
+
         meta_info["hf_config"] = str(hf_config_dir.relative_to(work_dir))
 
         token_embedding = native_model.model.get_input_embeddings()
