@@ -1,5 +1,11 @@
 # SD3.5
 
+## 依赖
+
+```bash
+pip install transformers>=4.47.0
+```
+
 ## 导出SD3-large-turbo模型
 
 ```bash
