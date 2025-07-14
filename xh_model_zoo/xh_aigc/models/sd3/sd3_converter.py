@@ -3,7 +3,7 @@ import math
 import tempfile
 import time
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -33,7 +33,7 @@ from .t5_method_patch import hadmard_t5
 
 @dataclass
 class SD3ConvertConfig:
-    quant_scheme: QuantScheme = QuantScheme()
+    quant_scheme: QuantScheme = field(default_factory=QuantScheme)
     guidance_scale: float = 7.0
     num_inference_steps: int = 28
     width: int = 512
@@ -696,7 +696,9 @@ class SD3Converter:
                 print(f"output[{i}]: {output.name}")
 
             if simplify_onnx:
-                model_opt, check_ok = onnxsim.simplify(
+                from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
+
+                model_opt, check_ok = simplify_large_onnx(
                     onnx_model,
                     skipped_optimizers=[
                         "fuse_pad_into_conv",
@@ -704,7 +706,19 @@ class SD3Converter:
                         "eliminate_common_subexpression",
                         "fuse_qkv",
                     ],
+                    const2init=False,
                 )
+                if check_ok:
+                    onnx_model = model_opt
+                # model_opt, check_ok = onnxsim.simplify(
+                #     onnx_model,
+                #     skipped_optimizers=[
+                #         "fuse_pad_into_conv",
+                #         "fuse_consecutive_slices",
+                #         "eliminate_common_subexpression",
+                #         "fuse_qkv",
+                #     ],
+                # )
                 if check_ok:
                     onnx_model = model_opt
 
