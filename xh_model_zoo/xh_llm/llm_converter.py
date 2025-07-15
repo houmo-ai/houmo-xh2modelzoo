@@ -70,6 +70,10 @@ class LLMConverter:
             from .models.qwen2_legacy import Qwen2LegacyConverterXH2a
 
             converter_cls = Qwen2LegacyConverterXH2a
+        elif architecture == "BertModel_Reranker":
+            from .models.bge_reranker import BGERerankerConverterXH2a
+
+            converter_cls = BGERerankerConverterXH2a
 
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
