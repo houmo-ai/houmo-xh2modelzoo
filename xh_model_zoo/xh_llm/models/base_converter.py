@@ -8,6 +8,18 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from xhquant.api import DeviceType, get_root_logger
 
+def update_cfg_after_quanted(model,yaml_dict):
+    # rmsnorm update compute mode
+    rmsnorm_update_cfg = yaml_dict['rmsnorm_update_cfg']
+    compute_mode = rmsnorm_update_cfg['compute_mode']
+    for name,module in model.named_modules():
+        if "norm" in name and hasattr(module,'norm'):
+            if name in rmsnorm_update_cfg['customize_pre_sub_exp']:
+                pre_sub_exp = rmsnorm_update_cfg['customize_pre_sub_exp'][name]
+            else:
+                pre_sub_exp = 0
+            module.norm.update_compute_mode(compute_mode, pre_sub_exp)
+    return model
 
 class BaseConverter:
     target_device: DeviceType

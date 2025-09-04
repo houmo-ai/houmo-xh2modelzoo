@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+import yaml
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen3ForCausalLM
 
-from ..base_converter import BaseConverter, HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter,update_cfg_after_quanted
 from ..builder import wrap_llm_model
 from .qwen3_convert_config import Qwen3LegacyConvertConfig
 
@@ -21,7 +22,6 @@ from xhquant.api import (  # type: ignore # isort:skip
     create_quant_config,
     is_ssfp_quant_config,
 )
-
 
 class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
@@ -219,6 +219,10 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         )
         # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+        if self.config.update_cfg is not None:
+            with open(self.config.update_cfg, "r") as f:
+                yaml_dict = yaml.safe_load(f)
+            quanted_model = update_cfg_after_quanted(quanted_model,yaml_dict)
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
         logger.info(f"Export Prefill model to {prefill_onnx_file}")

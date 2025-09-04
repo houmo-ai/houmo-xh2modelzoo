@@ -24,6 +24,7 @@ def main(args):
         input_sequence_length=args.input_sequence_length,
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
+        update_cfg = args.update_cfg
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length//1024}k-{quant_type}"
@@ -43,6 +44,7 @@ if __name__ == "__main__":
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
     parser.add_argument("--quant-type", default="w4a8_ssfp", help="quant type, default is w8a8")
+    parser.add_argument("--update_cfg",default= None,help="update some config")
     parser.add_argument(
         "--quant-weight",
         type=str,
