@@ -165,6 +165,61 @@ def general_qlinear_converter(self: nn.Module):
     self.in_features = self.infeatures
 
 
+def gptqmodel_torch_qlinear_converter(self: nn.Module):
+    import torch as t  # conflict with torch.py
+
+    if self.bits in [2, 4, 8]:
+        zeros = t.bitwise_right_shift(
+            t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            self.wf_unsqueeze_zero,  # self.wf.unsqueeze(0),
+        ).to(self.dequant_dtype)
+        zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+
+        weight = t.bitwise_and(
+            t.bitwise_right_shift(
+                t.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+                self.wf_unsqueeze_neg_one,  # self.wf.unsqueeze(-1)
+            ).to(self.dequant_dtype),
+            self.maxq,
+        )
+    elif self.bits == 3:
+        zeros = self.qzeros.reshape(self.qzeros.shape[0], self.qzeros.shape[1] // 3, 3, 1).expand(-1, -1, -1, 12)
+        zeros = zeros >> self.wf_unsqueeze_zero  # self.wf.unsqueeze(0)
+        zeros[:, :, 0, 10] = (zeros[:, :, 0, 10] & 0x3) | ((zeros[:, :, 1, 0] << 2) & 0x4)
+        zeros[:, :, 1, 11] = (zeros[:, :, 1, 11] & 0x1) | ((zeros[:, :, 2, 0] << 1) & 0x6)
+        zeros = zeros & 0x7
+        zeros = t.cat(
+            [zeros[:, :, 0, :11], zeros[:, :, 1, 1:12], zeros[:, :, 2, 1:11]],
+            dim=2,
+        ).reshape(self.scales.shape)
+
+        weight = self.qweight.reshape(self.qweight.shape[0] // 3, 3, 1, self.qweight.shape[1]).expand(-1, -1, 12, -1)
+        weight = (weight >> self.wf_unsqueeze_neg_one) & 0x7  # self.wf.unsqueeze(-1)
+        weight[:, 0, 10] = (weight[:, 0, 10] & 0x3) | ((weight[:, 1, 0] << 2) & 0x4)
+        weight[:, 1, 11] = (weight[:, 1, 11] & 0x1) | ((weight[:, 2, 0] << 1) & 0x6)
+        weight = weight & 0x7
+        weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
+    weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+
+    quant_weight = weight - zeros[self.g_idx.long()]
+    weight = self.scales[self.g_idx.long()] * quant_weight
+    maxq = (2**self.bits) / 2
+
+    assert quant_weight.max() < maxq and quant_weight.min() >= -maxq, f"{quant_weight.max()} {quant_weight}.min()"
+    if hasattr(self, "qweight"):
+        delattr(self, "qweight")
+    if hasattr(self, "qzeros"):
+        delattr(self, "qzeros")
+    if hasattr(self, "scales"):
+        delattr(self, "scales")
+    if hasattr(self, "g_idx"):
+        delattr(self, "g_idx")
+    weight = weight.t()
+    quant_weight = quant_weight.t()
+    self.register_parameter("weight", nn.Parameter(weight))
+    self.register_buffer("quant_weight", quant_weight)
+    self.__class__ = nn.Linear
+
 class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
