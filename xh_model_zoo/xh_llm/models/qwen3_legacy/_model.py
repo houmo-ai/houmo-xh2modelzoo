@@ -18,7 +18,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
-from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm, Rope
+from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm, Rope, LLMCacheV2
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
@@ -41,9 +41,10 @@ class _Qwen3RotaryEmbedding(DynamicModule):
         """
         4.45 版本实现
         """
-        position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0)
-        self.inv_freq = self.inv_freq.to(torch.float16)
-        cos, sin = self.forward(self.inv_freq, position_ids)
+        position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0).cuda()
+        # self.inv_freq = self.inv_freq.to(torch.float16)
+        x = torch.tensor(1.0).half().cuda()
+        cos, sin = self.forward(x, position_ids)
         sin = sin.squeeze(0)
         cos = cos.squeeze(0)
 
@@ -57,8 +58,8 @@ class _Qwen3RotaryEmbedding(DynamicModule):
         # self.cos_cached = nn.Parameter(cos.to(device=device, dtype=dtype), requires_grad=False)
 
     def _set_dtype(self, dtype: torch.dtype) -> None:
-        self.inv_freq = self.inv_freq.to(dtype)
-        self._setup_cos_sin_cache(seq_len=self.max_seq_len_cached, dtype=self.inv_freq.dtype)
+        # self.inv_freq = self.inv_freq.to(dtype)
+        self._setup_cos_sin_cache(seq_len=self.max_seq_len_cached, dtype=torch.float16)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         """
@@ -89,7 +90,7 @@ class _Qwen3RotaryEmbedding(DynamicModule):
         #     emb = torch.cat((freqs, freqs), dim=-1)
         #     cos = emb.cos()
         #     sin = emb.sin()
-        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+        freqs = (inv_freq_expanded.float().cuda() @ position_ids_expanded.float()).transpose(1, 2)
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos()
         sin = emb.sin()
@@ -334,17 +335,18 @@ class _Qwen3Attention(DynamicModule):
 
         if use_cache:
             cache_axis = cfg.kv_cache.cache_axis
-            self.k_cache = LLMCache(
+            self.k_cache = LLMCacheV2(
                 axis=cache_axis,
             )
-            self.v_cache = LLMCache(
+            self.v_cache = LLMCacheV2(
                 axis=cache_axis,
             )
         else:
             self.k_cache = None
             self.v_cache = None
         _kv_scale = 1 / math.sqrt(self.head_dim)
-        self.kv_scale = _kv_scale
+        # self.kv_scale = torch.tensor(_kv_scale,dtype=torch.float32).cuda()
+        self.register_buffer("kv_scale", torch.tensor(_kv_scale, dtype=torch.float32), persistent=False)
         # self.register_buffer("kv_scale", torch.tensor(_kv_scale, dtype=torch.float16), persistent=False)
         # self.register_parameter(
         #     "kv_scale", nn.Parameter(torch.tensor([_kv_scale], dtype=torch.float16), requires_grad=False)
