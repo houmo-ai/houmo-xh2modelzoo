@@ -331,7 +331,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         logger = get_root_logger()
         config = self.config
         if config.gptqmodel_cfg:
-            native_model = self.load_gptq_model(hf_model_path,trust_remote_code=True,device_map="cpu")
+            native_model = self.load_gptq_model(hf_model_path,trust_remote_code=True,torch_dtype=torch.float16, device_map="cpu")
         else:
             native_model = self.load_hf_model(
                 hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
