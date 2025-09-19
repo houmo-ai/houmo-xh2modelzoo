@@ -20,17 +20,29 @@ def main(args):
     hmonnx_file = str(model_dir_path / meta_info["hmonnx_file"])
 
     # golden
-    bz = 10
-    seq_length = 512
-    input_ids = torch.randint(0, 100, (bz, seq_length)).to(device)
-    token_type_ids = torch.zeros((bz, seq_length), dtype=torch.int32).to(device)
-    attention_mask = torch.ones((bz, seq_length), dtype=torch.int16).to(device)
+    # bz = 10
+    # seq_length = 512
+    # input_ids = torch.randint(0, 100, (bz, seq_length)).to(device)
+    # token_type_ids = torch.zeros((bz, seq_length), dtype=torch.int32).to(device)
+    # attention_mask = torch.ones((bz, seq_length), dtype=torch.int16).to(device)
 
     golden_dir_path = model_dir_path / "golden"
     golden_dir_path.mkdir(parents=True, exist_ok=True)
     golden_dir = str(golden_dir_path)
     hm_session = HMONNXInference(hmonnx_file)
     hm_session.initialize()
+
+    input_ids_info = hm_session.get_input("input_ids").shape
+    token_type_ids_shape = hm_session.get_input("token_type_ids").shape
+    attention_mask_shape = hm_session.get_input("attention_mask").shape
+
+    logger.info(f"input_ids_shape: {input_ids_shape}")
+    logger.info(f"token_type_ids_shape: {token_type_ids_shape}")
+    logger.info(f"attention_mask_shape: {attention_mask_shape}")
+    input_ids = torch.randint(0, 100, input_ids_shape).to(device)
+    token_type_ids = torch.zeros(token_type_ids_shape).to(device)
+    attention_mask = torch.ones(attention_mask_shape).to(device)
+
     hm_session.to(device)
     hm_session.save_golden = True
     hm_session.golden_dir = golden_dir

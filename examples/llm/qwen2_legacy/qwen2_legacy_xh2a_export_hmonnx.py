@@ -4,12 +4,12 @@ from pathlib import Path
 
 from transformers import AutoConfig
 
-from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyConvertConfig
+from xh2_model_zoo.xh_llm import LLMConverter
+from xh2_model_zoo.xh_llm.models.qwen2 import Qwen2ConvertConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
-from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
-from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+from xh2_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
+from xh2_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 
 def main(args):
@@ -18,7 +18,8 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-    config = Qwen2LegacyConvertConfig(
+    # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
+    config = Qwen2ConvertConfig(
         batch_size=1,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
@@ -42,7 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="data/models/Qwen2.5-7B-Instruct")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w4a8h0_ssfp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant-weight",
         type=str,

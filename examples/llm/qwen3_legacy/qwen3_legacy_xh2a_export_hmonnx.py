@@ -4,12 +4,12 @@ from pathlib import Path
 
 from transformers import AutoConfig
 
-from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen2 import Qwen2ConvertConfig
+from xh2_model_zoo.xh_llm import LLMConverter
+from xh2_model_zoo.xh_llm.models.qwen2 import Qwen2ConvertConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
-from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
-from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+from xh2_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
+from xh2_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 
 def main(args):
@@ -18,14 +18,14 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+    # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
     config = Qwen2ConvertConfig(
         batch_size=1,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
-        update_cfg = args.update_cfg,
-        gptqmodel_cfg = args.gptqmodel
+        mix_search=args.mix_search,
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length//1024}k-{quant_type}"
@@ -41,12 +41,11 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="/data/models/Qwen3-8B")
+    parser.add_argument("--model", type=str, default="data/models/Qwen3-8B")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w4a8_ssfp", help="quant type, default is w8a8")
-    parser.add_argument("--update_cfg",default= None,help="update some config")
-    parser.add_argument("--gptqmodel",action="store_true",default=False)
+    parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quant type, default is w8a8")
+    parser.add_argument("--mix_search", type=str, default=None, help="mix search settings")
     parser.add_argument(
         "--quant-weight",
         type=str,

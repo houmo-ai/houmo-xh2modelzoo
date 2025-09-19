@@ -83,6 +83,16 @@ def fuse_layer_norms(model, device=None):
                     layer.self_attn.v_proj,
                 ],
             )
+        elif model_type == model_utils.QWEN3MOE_MODEL:
+            linears = [layer.mlp.gate]
+            for expert in layer.mlp.experts:
+                linears.append(expert.gate_proj)
+                linears.append(expert.up_proj)
+            fuse_ln_linear(layer.post_attention_layernorm, linears)
+            fuse_ln_linear(
+                layer.input_layernorm,
+                [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj],
+            )
         elif model_type == model_utils.OPT_MODEL:
             fuse_ln_linear(
                 layer.self_attn_layer_norm,
@@ -179,6 +189,8 @@ def rotate_attention_output(layer, Q, model_type) -> None:
         W = layer.self_attn.out_proj
     elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
         W = layer.self_attn.o_proj
+    elif model_type == model_utils.QWEN3MOE_MODEL:
+        W = layer.self_attn.o_proj
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
@@ -209,6 +221,11 @@ def rotate_mlp_input(layer, Q, model_type):
         mlp_inputs = [layer.fc1]
     elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
         mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+    elif model_type == model_utils.QWEN3MOE_MODEL:
+        mlp_inputs = [layer.mlp.gate]
+        for expert in layer.mlp.experts:
+            mlp_inputs.append(expert.gate_proj)
+            mlp_inputs.append(expert.up_proj)
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
@@ -225,6 +242,28 @@ def rotate_mlp_input(layer, Q, model_type):
 
 def rotate_mlp_output(layer, Q, model_type):
     # Rotate the MLP output weights and bias.
+    if model_type == model_utils.QWEN3MOE_MODEL:
+        for expert in layer.mlp.experts:
+            W = expert.down_proj
+            dtype = W.weight.data.dtype
+            W_ = W.weight.data.to(dtype=torch.float64)
+            if Q.shape[0] != W_.shape[0]:
+                origin_shape = W_.shape
+                W_ = W_.reshape(Q.shape[0], -1)
+                W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype).reshape(origin_shape)
+            else:
+                W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype)
+
+            if W.bias is not None:
+                b = W.bias.data.to(dtype=torch.float64)
+                if Q.shape[0] != b.shape[0]:
+                    origin_shape = b.shape
+                    b = b.reshape(Q.shape[0], -1)
+                    W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
+                else:
+                    W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+        return
+
     if model_type == model_utils.LLAMA_MODEL:
         W = layer.mlp.down_proj
     elif model_type == model_utils.OPT_MODEL:
@@ -278,12 +317,17 @@ def rotate_faster_down_proj(layer, model_type, hardK):
 
     if model_type == model_utils.LLAMA_MODEL:
         W = layer.mlp.down_proj
+        dtype = W.weight.data.dtype
+        W.weight.data = matmul_hadU_cuda_had(W.weight.data.float().cuda(), hardK)
+        W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
+    elif model_type == model_utils.QWEN3MOE_MODEL:
+        for expert in layer.mlp.experts:
+            W = expert.down_proj
+            dtype = W.weight.data.dtype
+            W.weight.data = matmul_hadU_cuda_had(W.weight.data.float().cuda(), hardK)
+            W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
     else:
         raise ValueError(f"Faster MLP is onlu supported for LLaMa models!")
-
-    dtype = W.weight.data.dtype
-    W.weight.data = matmul_hadU_cuda_had(W.weight.data.float().cuda(), hardK)
-    W.weight.data = W.weight.data.to(device="cpu", dtype=dtype)
 
 
 def rotate_head(model, Q: torch.Tensor) -> None:
@@ -308,6 +352,8 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
     elif model_type == model_utils.OPT_MODEL:
         o_proj = layer.self_attn.out_proj
     elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
+        o_proj = layer.self_attn.o_proj
+    elif model_type == model_utils.QWEN3MOE_MODEL:
         o_proj = layer.self_attn.o_proj
     else:
         raise ValueError(f"Unknown model type {model_type}")

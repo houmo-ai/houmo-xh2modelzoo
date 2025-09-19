@@ -4,9 +4,9 @@ from pathlib import Path
 
 from transformers import AutoConfig
 
-from xh_model_zoo.utils import MemoryTracker, TimeProfiler
-from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLConvertConfig, VisualConfig
+from xh2_model_zoo.utils import MemoryTracker, TimeProfiler
+from xh2_model_zoo.xh_llm import LLMConverter
+from xh2_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLConvertConfig, VisualConfig
 
 from xhquant.api import DeviceType, get_root_logger, xhquant_init, QuantScheme  # isort:skip
 

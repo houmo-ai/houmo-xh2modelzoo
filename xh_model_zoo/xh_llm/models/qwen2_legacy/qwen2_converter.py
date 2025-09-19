@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from sympy import im
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen2ForCausalLM
 from xhquant import nn as xhnn
 
@@ -21,6 +22,7 @@ from xhquant.api import (  # type: ignore # isort:skip
     get_root_logger,
     create_quant_config,
     is_ssfp_quant_config,
+    CacheTensor,
 )
 
 
@@ -102,7 +104,6 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
             "vocab.json",
             "tokenizer.json",
         ]
-
         for cfg_file in hf_config_files:
             src_file = Path(hf_model_path) / cfg_file
             dst_file = Path(hf_config_dir) / cfg_file
@@ -110,7 +111,6 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
                 shutil.copyfile(src_file, dst_file)
             else:
                 logger.warning(f"{src_file} not exists, skip copy")
-
         meta_info["hf_config"] = str(hf_config_dir.relative_to(work_dir))
 
         token_embedding = native_model.model.get_input_embeddings()
@@ -163,8 +163,8 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         past_key_caches = []
         past_value_caches = []
         for _ in range(num_decoder_layers):
-            past_key_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            past_value_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
+            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
 
         # 导出Prefill模型
         input_ids = []
@@ -252,9 +252,7 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
 
         # 更新与input_sequence_length相关的Module
         wrap_cfg.input_sequence_length = 1
-        for _, m in quanted_model.named_modules():
-            if hasattr(m, "_update_cfg"):
-                m._update_cfg(wrap_cfg)
+        quanted_model.update_cfg(wrap_cfg)
 
         decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)

@@ -82,8 +82,17 @@ class _Qwen2RotaryEmbedding(DynamicModule):
         4.45 版本实现
         """
         position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0)
-        self.inv_freq = self.inv_freq.to(torch.float16)
-        cos, sin = self.forward(self.inv_freq, position_ids)
+
+        # use fp32 for cos and sin calculation
+        inv_freq = self.inv_freq.to(torch.float32)
+        device = self.inv_freq.device
+        if torch.cuda.is_available() and inv_freq.device.type != "cuda":
+            inv_freq = self.inv_freq.cuda()
+
+        cos, sin = self.forward(inv_freq, position_ids)
+        cos = cos.to(device)
+        sin = sin.to(device)
+
         sin = sin.squeeze(0)
         cos = cos.squeeze(0)
 

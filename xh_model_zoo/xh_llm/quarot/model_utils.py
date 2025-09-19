@@ -12,6 +12,7 @@ OPT_LAYER = transformers.models.opt.modeling_opt.OPTDecoderLayer
 LLAMA_MODEL = transformers.models.llama.modeling_llama.LlamaForCausalLM
 LLAMA_LAYER = transformers.models.llama.modeling_llama.LlamaDecoderLayer
 QWEN_MODEL = transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM
+QWEN3MOE_MODEL = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeForCausalLM
 QWEN_LAYER = transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
 QWEN3_MODEL = transformers.Qwen3ForCausalLM
 
@@ -23,6 +24,8 @@ def model_type_extractor(model):
         return OPT_MODEL
     elif isinstance(model, QWEN_MODEL):
         return QWEN_MODEL
+    elif isinstance(model, QWEN3MOE_MODEL):
+        return QWEN3MOE_MODEL
     elif isinstance(model, QWEN3_MODEL):
         return QWEN3_MODEL
     else:
@@ -125,13 +128,15 @@ def get_model_type(model):
         model_type = QWEN_MODEL
     elif isinstance(model, QWEN3_MODEL):
         model_type = QWEN3_MODEL
+    elif isinstance(model, QWEN3MOE_MODEL):
+        model_type = QWEN3MOE_MODEL
     else:
         raise ValueError(f"Unknown model type {model}")
     return model_type
 
 
 def get_embeddings(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         return [model.model.embed_tokens]
     elif model_type == OPT_MODEL:
         return [model.model.decoder.embed_tokens, model.model.decoder.embed_positions]
@@ -140,7 +145,7 @@ def get_embeddings(model, model_type):
 
 
 def get_transformer_layers(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         return [layer for layer in model.model.layers]
     elif model_type == OPT_MODEL:
         return [layer for layer in model.model.decoder.layers]
@@ -149,7 +154,7 @@ def get_transformer_layers(model, model_type):
 
 
 def get_lm_head(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         return model.lm_head
     elif model_type == OPT_MODEL:
         return model.lm_head
@@ -161,7 +166,7 @@ def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
         assert isinstance(pre_head_layernorm, transformers.models.llama.modeling_llama.LlamaRMSNorm)
-    elif model_type == QWEN_MODEL or model_type == QWEN3_MODEL:
+    elif model_type == QWEN_MODEL or model_type == QWEN3_MODEL or model_type == QWEN3MOE_MODEL:
         pre_head_layernorm = model.model.norm
 
     elif model_type == OPT_MODEL:
@@ -174,7 +179,12 @@ def get_pre_head_layernorm(model, model_type):
 
 def get_mlp_bottleneck_size(model):
     model_type = get_model_type(model)
-    if model_type == LLAMA_MODEL or model_type == QWEN_MODEL or model_type == QWEN3_MODEL:
+    if (
+        model_type == LLAMA_MODEL
+        or model_type == QWEN_MODEL
+        or model_type == QWEN3_MODEL
+        or model_type == QWEN3MOE_MODEL
+    ):
         return model.config.intermediate_size
     elif model_type == OPT_MODEL:
         return model.config.ffn_dim

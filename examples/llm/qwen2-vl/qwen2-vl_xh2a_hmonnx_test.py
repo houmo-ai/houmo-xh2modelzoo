@@ -12,8 +12,8 @@ from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 from xhquant.api import ConfigDict, HMONNXInference, get_root_logger
 from xhquant.core import CacheTensor
 
-from xh_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLDataPreprocess
-from xh_model_zoo.xh_llm.utils import decode_next_token
+from xh2_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLDataPreprocess
+from xh2_model_zoo.xh_llm.utils import decode_next_token
 
 
 def main(args):

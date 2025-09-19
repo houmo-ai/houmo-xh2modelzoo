@@ -142,8 +142,8 @@ class LlamaConverterXH2a(HFTransfromersConverter):
         past_key_caches = []
         past_value_caches = []
         for _ in range(num_decoder_layers):
-            past_key_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            past_value_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
+            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
 
         # 导出Prefill模型
         input_ids = []
@@ -216,9 +216,7 @@ class LlamaConverterXH2a(HFTransfromersConverter):
 
         # 更新与input_sequence_length相关的Module
         wrap_cfg.input_sequence_length = 1
-        for _, m in quanted_model.named_modules():
-            if hasattr(m, "_update_cfg"):
-                m._update_cfg(wrap_cfg)
+        quanted_model.update_cfg(wrap_cfg)
 
         decode_onnx_file = work_dir / "hmonnx" / f"{prefix}_decoder.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)

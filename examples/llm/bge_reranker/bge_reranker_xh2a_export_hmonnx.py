@@ -36,7 +36,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="data/models/bge-large-zh-v1.5")
+    parser.add_argument("--model", type=str, default="/data02/datasets/bge-reranker-v2_m3")
     parser.add_argument("--batch-size", type=int, default=10, help="batch size")
     parser.add_argument("--context-length", type=int, default=512, help="max sequence length")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8_sefp")

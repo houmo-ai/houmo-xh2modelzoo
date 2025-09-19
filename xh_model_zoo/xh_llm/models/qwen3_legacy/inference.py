@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from sympy import true
 from torch import Tensor
 from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
@@ -13,9 +14,12 @@ from ....xh_llm.utils import decode_next_token
 
 
 class Qwen3LegacyInference(DeviceDtypeMixin):
-    def __init__(self, model_config_file: str, fast_mode: bool = False):
+    def __init__(self, model_config_file: str, fast_mode=True, device: str = "cuda", execution_device: str = "cuda"):
         super().__init__()
+
         self.fast_mode = fast_mode
+        self._device = torch.device(device)
+        self.execution_device = torch.device(execution_device)
 
         model_dir = Path(model_config_file).parent
         meta_info = json.load(open(model_config_file, "r"))
@@ -85,8 +89,8 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         self.prefill_session = HMONNXInference(self.prefill_onnx_file)
         if self.fast_mode:
             self.prefill_session.to_fast_mode()
-        self.prefill_session.exec_device = self._exec_device
-        self.prefill_session.to(self.device)
+        self.prefill_session.exec_device = self.execution_device
+        self.prefill_session.to(self._device)
 
     def init_decode(self):
         if self.decode_session is not None:
@@ -94,8 +98,8 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         self.decode_session = HMONNXInference(self.decode_onnx_file)
         if self.fast_mode:
             self.decode_session.to_fast_mode()
-        self.decode_session.exec_device = self._exec_device
-        self.decode_session.to(self.device)
+        self.decode_session.exec_device = self.execution_device
+        self.decode_session.to(self._device)
 
     def get_input_sequence_length(self):
         return self.input_sequence_length
@@ -147,9 +151,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
             self.init_prefill()
             assert self.prefill_session is not None, "Prefill session is not initialized."
             out = self.prefill_session(
-                inputs_embeds.to(self.device),
-                past_seq_length.to(self.device),
-                current_input_length.to(self.device),
+                inputs_embeds.to(self._device),
+                past_seq_length.to(self._device),
+                current_input_length.to(self._device),
                 *past_key_caches,
                 *past_value_caches,
             )
@@ -160,9 +164,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
             self.init_decode()
             assert self.decode_session is not None, "Decode session is not initialized."
             out = self.decode_session(
-                inputs_embeds.to(self.device),
-                past_seq_length.to(self.device),
-                current_input_length.to(self.device),
+                inputs_embeds.to(self._device),
+                past_seq_length.to(self._device),
+                current_input_length.to(self._device),
                 *past_key_caches,
                 *past_value_caches,
             )

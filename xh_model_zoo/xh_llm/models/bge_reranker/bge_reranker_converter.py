@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -22,6 +23,7 @@ from xhquant.api import (  # type: ignore # isort:skip
     get_root_logger,
     create_quant_config,
     is_ssfp_quant_config,
+    HMONNXGoldenInference,
 )
 
 
@@ -59,7 +61,7 @@ class BGERerankerConverterXH2a(HFTransfromersConverter):
         native_model = self.load_hf_model(
             hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
         )
-        device = "cpu"
+        device = "cuda"
         wraped_model = Net(native_model)
         wraped_model.to(device)
 
@@ -108,13 +110,14 @@ class BGERerankerConverterXH2a(HFTransfromersConverter):
             onnx_model = onnx.load(onnx_file)
 
         logger.info(f"save onnx model to {onnx_file}")
-        onnx.save(
-            onnx_model,
-            onnx_file,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=f"{Path(onnx_file).stem}_external_data",
-        )
+        if not os.path.exists(onnx_file):
+            onnx.save(
+                onnx_model,
+                onnx_file,
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=f"{Path(onnx_file).stem}_external_data",
+            )
 
         prefix = f"{model_name}-{target_device}-{quant_type}-{bz}x{context_length}"
         hmonnx_file = work_dir / "hmonnx" / f"{prefix}.onnx"
@@ -135,6 +138,17 @@ class BGERerankerConverterXH2a(HFTransfromersConverter):
             )
         else:
             logger.warning(f"hmonnx model {hmonnx_file} is exists, skip.")
+
+        session = HMONNXGoldenInference(hmonnx_file)
+        session.to(device)
+        session.save_golden = True
+        session.golden_dir = work_dir / "hmonnx/golden"
+        session.step = 0
+        session(
+            input_ids.to(torch.int32).to(device),
+            token_type_ids.to(torch.int32).to(device),
+            attention_mask.to(torch.int16).to(device),
+        )
 
         logger.info(f"Export model to {hmonnx_file}")
         json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)

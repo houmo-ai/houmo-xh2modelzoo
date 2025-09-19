@@ -27,6 +27,7 @@ from xhquant.api import (  # isort:skip
     get_root_logger,
     create_quant_config,
     is_ssfp_quant_config,
+    CacheTensor,
 )
 
 
@@ -289,8 +290,8 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
         past_key_caches = []
         past_value_caches = []
         for _ in range(num_decoder_layers):
-            past_key_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            past_value_caches.append(torch.zeros(kv_cache_shape, dtype=torch.float16))
+            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
 
         # Export LLM model, prefill
         data_prefill = {
