@@ -1,5 +1,5 @@
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ...llm_convert_config import LLMConvertConfig
 
@@ -16,4 +16,6 @@ class VisualConfig:
 
 @dataclass
 class Qwen2_5_VLConvertConfig(LLMConvertConfig):
-    visual_config: VisualConfig = VisualConfig()
+    visual_config: VisualConfig = field(default_factory=VisualConfig)
+    gptqmodel_cfg: str = field(default_factory=str)
+    quant_weight: str = field(default_factory=str)

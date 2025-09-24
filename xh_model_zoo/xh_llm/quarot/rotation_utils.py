@@ -45,6 +45,41 @@ def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
         linear.bias.data = linear.bias.data.to(linear_dtype)
 
 
+def fuse_merger_linear(
+    layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]
+) -> None:
+    """
+    fuse the linear operations in Layernorm into the adjacent linear blocks.
+    """
+    for linear in linear_layers:
+        linear_dtype = linear.weight.dtype
+
+        # Calculating new weight and bias
+        W_ = linear.weight.data.double()
+        w_o, w_i = W_.shape
+        size = layernorm.weight.shape[0]
+        linear.weight.data = (
+            (W_.view(w_o, -1, size) * layernorm.weight.double())
+            .to(linear_dtype)
+            .view(w_o, w_i)
+        )
+
+        if hasattr(layernorm, "bias"):
+            if linear.bias is None:
+                linear.bias = torch.nn.Parameter(
+                    torch.zeros(linear.out_features,
+                                dtype=torch.float64).to(W_)
+                )
+            linear.bias.data = linear.bias.data.double() + torch.matmul(
+                W_.view(w_o, -1, size), layernorm.bias.double()
+            ).sum(dim=-1)
+            linear.bias.data = linear.bias.data.to(linear_dtype)
+
+    layernorm.weight.data = torch.ones_like(layernorm.weight.data)
+    if hasattr(layernorm, "bias"):
+        layernorm.bias.data = torch.zeros_like(layernorm.bias.data)
+
+
 def fuse_layer_norms(model, device=None):
     model_type = model_utils.get_model_type(model)
 
@@ -52,10 +87,22 @@ def fuse_layer_norms(model, device=None):
 
     # Embedding fusion
     for W in model_utils.get_embeddings(**kwargs):
-        if model_type in [model_utils.LLAMA_MODEL, model_utils.QWEN_MODEL]:
+        if model_type in [model_utils.LLAMA_MODEL, model_utils.QWEN_MODEL, model_utils.QWEN2_5_VL_MODEL]:
             continue
         W_ = W.weight.data.double()
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
+
+    if model_type == model_utils.QWEN2_5_VL_MODEL:
+        for layer in model.visual.blocks:
+            fuse_ln_linear(layer.norm1, [layer.attn.qkv])
+            layer.norm1.weight.fill_(1.0)
+            fuse_ln_linear(layer.norm2, [layer.mlp.gate_proj, layer.mlp.up_proj])
+            layer.norm2.weight.fill_(1.0)
+        fuse_merger_linear(
+            model.visual.merger.ln_q,
+            [model.visual.merger.mlp[0]],
+        )
+        model.visual.merger.ln_q.weight.fill_(1.0)
 
     layers = model_utils.get_transformer_layers(**kwargs)
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
@@ -73,7 +120,7 @@ def fuse_layer_norms(model, device=None):
                     layer.self_attn.v_proj,
                 ],
             )
-        elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
+        elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
             fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.up_proj, layer.mlp.gate_proj])
             fuse_ln_linear(
                 layer.input_layernorm,
@@ -119,6 +166,7 @@ def fuse_layer_norms(model, device=None):
         model_utils.get_pre_head_layernorm(**kwargs),
         [model_utils.get_lm_head(**kwargs)],
     )
+
     model.model.norm.weight.fill_(1.0)
     model.model.norm.fuse_weight = True
 
@@ -143,6 +191,125 @@ def random_orthogonal_matrix(size, device):
     return q
 
 
+def rotate_conv(layer, Q_v, embed_dims):
+    dtype = layer.weight.dtype
+    weight_shape = layer.weight.data.shape
+    layer.weight.data = (
+        torch.matmul(Q_v.T, layer.weight.data.double().view(embed_dims, -1))
+        .to(dtype)
+        .view(weight_shape)
+    )
+    if layer.bias is not None:
+        layer.bias.data = torch.matmul(layer.bias.data.double(), Q_v).to(dtype)
+
+def rotate_qwen2_5_vl_attention_inputs(layer, Q, is_visual=False) -> None:
+    # Rotate the WQ, WK and WV matrices of the self-attention layer.
+    layer_list = (
+        [layer.self_attn.qkv]
+        if not is_visual
+        else [layer.attn.qkv]
+    )
+    for W in layer_list:
+        dtype = W.weight.dtype
+        W_ = W.weight.to(dtype=torch.float64)
+        W.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+
+
+def rotate_qwen2_5_vl_attention_output(layer, Q, is_visual=False) -> None:
+    # Rotate output matrix of the self-attention layer.
+    if is_visual:
+        W = layer.attn.proj
+    else:
+        W = layer.self_attn.o_proj
+
+    dtype = W.weight.data.dtype
+    W_ = W.weight.data.to(dtype=torch.float64)
+    W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype)
+    if W.bias is not None:
+        b = W.bias.data.to(dtype=torch.float64)
+        W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+
+
+def rotate_qwen2_5_vl_mlp_input(layer, Q) -> None:
+    # Rotate the MLP input weights.
+    mlp_inputs = [layer.mlp.gate_proj, layer.mlp.up_proj]
+    for W in mlp_inputs:
+        dtype = W.weight.dtype
+        W_ = W.weight.data.to(dtype=torch.float64)
+        W.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+
+
+def rotate_qwen2_5_vl_mlp_output(layer, Q, online_hadamard=False):
+    out_layer = layer.mlp.down_proj
+    # out_layer = layer.mlp.c_proj if hasattr(layer.mlp, "c_proj") else layer.mlp.fc2
+    # Rotate the MLP output weights and bias.
+    dtype = out_layer.weight.data.dtype
+    W_ = out_layer.weight.data.to(dtype=torch.float64)
+    out_layer.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype)
+
+    if online_hadamard:
+        # input做hadamard变换, 它的输入做在线hadamard变换
+        apply_exact_had_to_linear(
+            out_layer, had_dim=-1, output=False
+        )  # apply exact (inverse) hadamard on the weights of mlp output
+
+    if out_layer.bias is not None:
+        b = out_layer.bias.data.to(dtype=torch.float64)
+        out_layer.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+
+def rotate_qwen2_5_vl_ov_proj(layer, head_num, head_dim, is_visual=False):
+    if is_visual:
+        qkv = layer.attn.qkv
+        o_proj = layer.attn.proj
+
+        qkv_weight = qkv.weight.data
+        split_qkv_weight = qkv_weight.split(qkv.out_features // 3, dim = 0)
+        v_weight = split_qkv_weight[2]
+
+        Q = get_orthogonal_matrix(head_dim, mode="hadamard")
+        dtype = v_weight.dtype
+        W_ = v_weight.to(dtype=torch.float64).T.reshape(-1, head_num, head_dim)
+
+        v_weight = (
+            torch.matmul(W_, Q).reshape(-1, head_num * head_dim).T.to(dtype=dtype)
+        )
+
+        qkv.weight.data = torch.cat([split_qkv_weight[0], split_qkv_weight[1], v_weight], dim = 0)
+        if qkv.bias is not None:
+            qkv_bias = qkv.bias.data
+            split_qkv_bias = qkv_bias.split(qkv.out_features // 3, dim = 0)
+            v_bias = split_qkv_bias[2]
+            v_bias = v_bias.to(dtype=torch.float64).reshape(head_num, head_dim)
+            v_bias = torch.matmul(v_bias, Q).to(dtype=dtype).reshape(-1)
+            qkv.bias.data = torch.cat([split_qkv_bias[0], split_qkv_bias[1], v_bias], dim = 0)
+
+        W_ = o_proj.weight.data.to(dtype=torch.float64).reshape(-1, head_num, head_dim)
+        o_proj.weight.data = (
+            torch.matmul(W_, Q).reshape(-1, head_num * head_dim).to(dtype=dtype)
+        )
+    else:
+        v_proj = layer.self_attn.v_proj
+        o_proj = layer.self_attn.o_proj
+        apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
+        apply_exact_had_to_linear(o_proj, had_dim=head_dim, output=False)
+
+def rotate_visual_merger(visual_model, Q: torch.Tensor) -> None:
+    # Rotate the head.
+    dtype = visual_model.merger.mlp[0].weight.dtype
+
+    q_shape = Q.shape[0]
+    o_shape, i_shape = visual_model.merger.mlp[0].weight.shape
+
+    W_ = (
+        visual_model.merger.mlp[0]
+        .weight.to(dtype=torch.float64)
+        .reshape(o_shape, -1, q_shape)
+    )
+    visual_model.merger.mlp[0].weight.data = (
+        torch.matmul(W_, Q).to(dtype=dtype).reshape(o_shape, i_shape).contiguous()
+    )
+
+
 def get_orthogonal_matrix(size, mode, device=utils.DEV):
     if mode == "random":
         return random_orthogonal_matrix(size, device)
@@ -151,6 +318,54 @@ def get_orthogonal_matrix(size, mode, device=utils.DEV):
     else:
         raise ValueError(f"Unknown mode {mode}")
 
+def rotate_visual_model(visual_model):
+    raw_device = next(visual_model.parameters()).device
+    visual_model.to(utils.DEV)
+
+    num_heads = visual_model.blocks[0].attn.num_heads
+    head_dim = visual_model.blocks[0].attn.qkv.in_features // num_heads
+    Q_v = get_orthogonal_matrix(visual_model.blocks[0].attn.qkv.in_features, mode="hadamard")
+
+    rotate_conv(
+        visual_model.patch_embed.proj,
+        Q_v,
+        visual_model.blocks[0].attn.qkv.in_features,
+    )
+
+    for idx, layer in enumerate(
+        tqdm.tqdm(
+            visual_model.blocks,
+            unit="layer",
+            desc="Rotating Qwen2_5 Visual",
+        )
+    ):
+        rotate_qwen2_5_vl_attention_inputs(layer, Q_v, is_visual=True)
+        rotate_qwen2_5_vl_attention_output(layer, Q_v, is_visual=True)
+        rotate_qwen2_5_vl_mlp_input(layer, Q_v)
+        rotate_qwen2_5_vl_mlp_output(layer, Q_v, False)
+
+        rotate_qwen2_5_vl_ov_proj(
+            layer,
+            num_heads,
+            head_dim,
+            is_visual=True,
+        )
+    rotate_visual_merger(visual_model, Q_v)
+    visual_model.to(raw_device)
+    utils.cleanup_memory()
+
+def rotate_qwen2_5_vl_embeddings(model, Q) -> None:
+    Q = Q.to(model.model.embed_tokens.weight.device)
+    dtype = model.model.embed_tokens.weight.data.dtype
+    W_ = model.model.embed_tokens.weight.data.to(dtype=torch.float64)
+    model.model.embed_tokens.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+
+    Q = Q.to(model.visual.merger.mlp[2].weight.device)
+    W_ = model.visual.merger.mlp[2].weight.data.to(dtype=torch.float64)
+    model.visual.merger.mlp[2].weight.data = torch.matmul(Q.T, W_).to(dtype=dtype)
+    if model.visual.merger.mlp[2].bias is not None:
+        b = model.visual.merger.mlp[2].bias.data.to(dtype=torch.float64)
+        model.visual.merger.mlp[2].bias.data = torch.matmul(b, Q).to(dtype=dtype)
 
 def rotate_embeddings(model, Q: torch.Tensor) -> None:
     # Rotate the embeddings.
@@ -187,7 +402,7 @@ def rotate_attention_output(layer, Q, model_type) -> None:
         W = layer.self_attn.o_proj
     elif model_type == model_utils.OPT_MODEL:
         W = layer.self_attn.out_proj
-    elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
         W = layer.self_attn.o_proj
     elif model_type == model_utils.QWEN3MOE_MODEL:
         W = layer.self_attn.o_proj
@@ -219,7 +434,7 @@ def rotate_mlp_input(layer, Q, model_type):
         mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
     elif model_type == model_utils.OPT_MODEL:
         mlp_inputs = [layer.fc1]
-    elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
         mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
     elif model_type == model_utils.QWEN3MOE_MODEL:
         mlp_inputs = [layer.mlp.gate]
@@ -268,7 +483,7 @@ def rotate_mlp_output(layer, Q, model_type):
         W = layer.mlp.down_proj
     elif model_type == model_utils.OPT_MODEL:
         W = layer.fc2
-    elif model_type == model_utils.QWEN_MODEL or model_type == model_utils.QWEN3_MODEL:
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
         W = layer.mlp.down_proj
     else:
         raise ValueError(f"Unknown model type {model_type}")
@@ -386,7 +601,14 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None):
     head_dim = model_dim // num_heads
 
     model_type = model_utils.model_type_extractor(model)
-    rotate_embeddings(model, Q)
+
+    if model_type == model_utils.QWEN2_5_VL_MODEL:
+        rotate_visual_model(model.visual)
+
+    if model_type == model_utils.QWEN2_5_VL_MODEL:
+        rotate_qwen2_5_vl_embeddings(model, Q)
+    else:
+        rotate_embeddings(model, Q)
     rotate_head(model, Q)
     utils.cleanup_memory()
 

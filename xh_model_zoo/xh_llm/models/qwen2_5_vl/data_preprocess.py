@@ -5,26 +5,25 @@ import torch.nn as nn
 
 
 class Qwen2_5_VLDataPreprocess(nn.Module):
-    def __init__(
-        self,
-        token_embedding: nn.Embedding,
-        input_sequence_length: int = 256,
-        image_size_w: int = 1204,
-        image_size_h: int = 1204,
-    ):
+    def __init__(self, 
+                token_embedding: nn.Embedding, 
+                input_sequence_length: int = 256,
+                image_size_w: int = 1204,
+                image_size_h: int = 1204,
+                ):
         super().__init__()
         self.token_embedding = token_embedding
         self.input_sequence_length = input_sequence_length
         self.rope_deltas = None
         self.pad_token_id = 0
-
+        
         self.image_token_id = 151655
         self.video_token_id = 151656
         self.vision_start_token_id = 151652
         self.vision_end_token_id = 151653
         self.vision_token_id = 151654
         self.spatial_merge_size = 2
-
+        
         self.window_size = 112
         self.patch_size = 14
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size

@@ -8,12 +8,6 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from xhquant import nn as xhnn
-from xhquant.api import ConfigDict
-from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
-from xhquant.utils.registry import DynamicModule
-
-from ..builder import XHLLM_TRACEABLE_MODULES
 from .modeling_qwen2_5_vl import (
     Qwen2_5_VLAttention,
     Qwen2_5_VLCausalLMOutputWithPast,
@@ -22,9 +16,17 @@ from .modeling_qwen2_5_vl import (
     Qwen2_5_VLModel,
     Qwen2_5_VLRotaryEmbedding,
     Qwen2_5_VLSdpaAttention,
+    Qwen2_5_VLAttention,
+    Qwen2_5_VLSdpaAttention,
     Qwen2RMSNorm,
     rotate_half,
 )
+from xhquant import nn as xhnn
+from xhquant.api import ConfigDict
+from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
+from xhquant.utils.registry import DynamicModule
+
+from ..builder import XHLLM_TRACEABLE_MODULES
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen2RMSNorm: "Qwen2RMSNorm"})

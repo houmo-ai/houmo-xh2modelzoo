@@ -4,20 +4,20 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from xhquant import nn as xhnn
-from xhquant.api import ConfigDict
-from xhquant.utils.registry import DynamicModule
-
-from ..builder import XHLLM_TRACEABLE_MODULES
 from .modeling_qwen2_5_vl import (  # apply_rotary_pos_emb_vision,; PatchEmbed,; VisionSdpaAttention,
     Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLDecoderLayer,
     Qwen2_5_VLVisionAttention,
-    Qwen2_5_VLVisionBlock,
     Qwen2_5_VLVisionSdpaAttention,
+    Qwen2_5_VLVisionBlock,
     rotate_half,
 )
+from xhquant import nn as xhnn
+from xhquant.api import ConfigDict
+from xhquant.utils.registry import DynamicModule
+
+from ..builder import XHLLM_TRACEABLE_MODULES
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(

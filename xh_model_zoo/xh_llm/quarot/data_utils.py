@@ -123,6 +123,43 @@ def get_ptb_new(nsamples, seed, seqlen, model, hf_token, eval_mode=False, cache_
         return trainloader
 
 
+def format_qwen2_vl_dataset(image, assistant):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "generate a caption for this image"},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
+
+def get_laion_220k_GPT4Vision_captions_from_LIVIS(nsamples, seed, seqlen, model, hf_token, eval_mode=False, cache_dir=None):
+    if hf_token is None:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+    else:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False, use_auth_token=hf_token)
+
+
+    if eval_mode:
+        testdata = datasets.load_dataset(
+            "laion/220k-GPT4Vision-captions-from-LIVIS",
+            split="test",
+            cache_dir=cache_dir,
+        )
+        testenc = tokenizer(" ".join(testdata["text"]), return_tensors="pt")
+        return testenc
+    else:
+        traindata = datasets.load_dataset(
+            "laion/220k-GPT4Vision-captions-from-LIVIS",
+            split="train",
+            cache_dir=cache_dir,
+        )
+        trainloader = [format_qwen2_vl_dataset(sample["url"], sample["caption"]) for sample in traindata]
+        return trainloader[:nsamples]
+
+
 def get_loaders(
     name,
     nsamples=128,
@@ -139,3 +176,5 @@ def get_loaders(
         return get_ptb_new(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
     if "c4" in name:
         return get_c4_new(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
+    if "laion/220k-GPT4Vision-captions-from-LIVIS" in name:
+        return get_laion_220k_GPT4Vision_captions_from_LIVIS(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)

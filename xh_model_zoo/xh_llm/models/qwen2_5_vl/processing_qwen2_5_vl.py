@@ -35,6 +35,7 @@ from transformers.processing_utils import (
 )
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
+
 from .image_processing_qwen2_vl import Qwen2VLImageProcessor
 
 

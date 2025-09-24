@@ -51,6 +51,9 @@ class LLMConverter:
                 from .models.qwen2 import Qwen2ConverterXH2a
 
                 converter_cls = Qwen2ConverterXH2a
+        elif architecture == "Qwen2_5_VLForConditionalGeneration":
+            from .models.qwen2_5_vl import Qwen2_5_VLConverterXH2a
+            converter_cls = Qwen2_5_VLConverterXH2a
         elif architecture == "LlamaForCausalLM":
             if hasattr(config, "quantization_config"):
                 raise ValueError("LlamaForCausalLM does not support quantization")

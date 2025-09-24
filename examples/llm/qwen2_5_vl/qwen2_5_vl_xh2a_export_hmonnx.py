@@ -4,12 +4,12 @@ from pathlib import Path
 
 from transformers import AutoConfig
 
-from xh2_model_zoo.xh_llm import LLMConverter
-from xh2_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig
+from xh_model_zoo.xh_llm import LLMConverter
+from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
-from xh2_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
-from xh2_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
+from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 
 def main(args):
@@ -18,11 +18,21 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-
+# ops=dict(MatMul=dict(
+#             act_scheme=dict(
+#                 bits=8,
+#                 fp_mode="sefp",
+#             ),
+#             w_scheme=dict(
+#                 bits=16,
+#                 fp_mode="sefp",
+#             ),))
     config = Qwen2_5_VLConvertConfig(
         batch_size=args.batch_size,
         context_length=args.context_length,
         quant_scheme=quant_scheme,
+        quant_weight=args.quant_weight,
+        gptqmodel_cfg=args.use_gptqmodel,
     )
 
     prefix = f"{model_name}-{target_device}"
@@ -45,5 +55,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_max_size_h", type=int, default=364, help="image max size height")
     parser.add_argument("--image_max_size_w", type=int, default=644, help="image max size width")
     parser.add_argument("--patch_size", type=int, default=14, help="patch size")
+    parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
+    parser.add_argument("--quant_weight", type=str, default=None, help="quant weight path, for example: gptq or quarot, if empty, use w8a8")
     args = parser.parse_args()
     main(args)

@@ -47,6 +47,8 @@ def gptq(
     device=torch.device("cuda"),
     cache_dir=None,
     layers_cache_dir=None,
+    is_qwen2_5_vl=False,
+    processor=None,
 ):
     yaml_dict = dict()
     if args is not None and hasattr(args, "gptq_config"):
@@ -123,5 +125,7 @@ def gptq(
         heading_gptq=heading_gptq,
         device=device,
         layers_cache_dir=layers_cache_dir,
+        is_qwen2_5_vl=is_qwen2_5_vl,
+        processor=processor,
     )
     return model

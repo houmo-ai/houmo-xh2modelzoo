@@ -26,6 +26,7 @@ class GPTQ:
         # self.scales = torch.zeros(self.rows, int(self.columns/64)).to(self.dev)
         self.W_int = None
         self.quantizer = None
+        self.damp_auto_increment = 0.01
 
     def add_batch(self, inp, out):
         if len(inp.shape) == 2:
@@ -80,25 +81,24 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        damp = percdamp * torch.mean(torch.diag(H))
+        mean = torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
-        H[diag, diag] += damp
 
-        # max_shifts = 10
-        # diag_shift = 1e-6  # Start with a small value
-        # for i in range(max_shifts):
-        #     try:
-        #         L = torch.linalg.cholesky(H)
-        #         H = L
-        #         break
-        #     except torch.linalg.LinAlgError:
-        #         diag_shift *= 10
-        #         H += torch.eye(H.size(0), device=H.device) * diag_shift
+        while 0 < percdamp < 1:
+            try:
+                H2 = H.clone()
+                H2[diag, diag] += percdamp * mean
+                H2 = torch.linalg.cholesky(H2)
+                H2 = torch.cholesky_inverse(H2)
+                Hinv = torch.linalg.cholesky(H2, upper=True)
+                del H, H2
+                break
+            except Exception as e:
+                percdamp += self.damp_auto_increment
+        
+        if not (0 < percdamp < 1):
+            raise ValueError(f"Failed to find Hinv with percdamp {percdamp}")
 
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
         # scales_list = []
         W_int = torch.zeros_like(W)
         for i1 in range(0, self.columns, blocksize):
@@ -184,6 +184,23 @@ def load_layer_cache(cache_file: str, layer: nn.Module) -> None:
     cache_state_dict = None
 
 
+def process_qwen2_5_vl_batch(batch, device, processor):
+    from qwen_vl_utils import process_vision_info
+    text = processor.apply_chat_template(
+        batch, tokenize=False, add_generation_prompt=True
+    )
+    image_inputs, video_inputs = process_vision_info(batch)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = inputs.to(device)
+    return inputs
+
+
 @torch.no_grad()
 def gptq_fwrd(
     model: nn.Module,
@@ -201,6 +218,8 @@ def gptq_fwrd(
     device: Optional[torch.device] = None,
     ddevice: Optional[torch.device] = None,
     layers_cache_dir: Optional[str] = None,
+    is_qwen2_5_vl: bool = False,
+    processor = None,
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -212,6 +231,9 @@ def gptq_fwrd(
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
+    
+    if is_qwen2_5_vl:
+        model.visual = model.visual.to(device)
 
     model.model.embed_tokens = model.model.embed_tokens.to(device)
     model.model.norm = model.model.norm.to(device)
@@ -224,7 +246,10 @@ def gptq_fwrd(
         ddevice = torch.device("cpu")
         # ddevice = device
     nsamples = len(dataloader)
-    inps = torch.zeros((nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=ddevice)
+    if is_qwen2_5_vl:
+        inps = list()
+    else:
+        inps = torch.zeros((nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=ddevice)
     cache = {"i": 0, "attention_mask": None}
 
     class Catcher(nn.Module):
@@ -233,7 +258,10 @@ def gptq_fwrd(
             self.module = module
 
         def forward(self, inp, **kwargs):
-            inps[cache["i"]] = inp.to(ddevice)
+            if is_qwen2_5_vl:
+                inps.append(inp.to(ddevice))
+            else:
+                inps[cache["i"]] = inp.to(ddevice)
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
@@ -247,7 +275,11 @@ def gptq_fwrd(
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(device))
+            if is_qwen2_5_vl:
+                inputs = process_qwen2_5_vl_batch(batch, device, processor)
+                model.generate(**inputs, max_new_tokens=seqlen)
+            else:
+                model(batch[0].to(device))
         except ValueError:
             pass
 
@@ -257,7 +289,10 @@ def gptq_fwrd(
     model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
 
-    outs = torch.zeros_like(inps)
+    if is_qwen2_5_vl:
+        outs = list()
+    else:
+        outs = torch.zeros_like(inps)
     attention_mask = cache["attention_mask"]
     position_ids = cache["position_ids"]
     position_embeddings = cache["position_embeddings"]
@@ -278,8 +313,8 @@ def gptq_fwrd(
     inps_cache_file: Optional[str] = None
     if layers_cache_dir is not None:
         inps_cache_file = str(Path(layers_cache_dir) / f"inps.pt")
-        if Path(inps_cache_file).exists():
-            inps = torch.load(inps_cache_file, map_location=inps.device, weights_only=True)
+        # if Path(inps_cache_file).exists():
+        #     inps = torch.load(inps_cache_file, map_location=inps.device, weights_only=True)
 
     for i in range(len(layers)):
         print(f"\nLayer {i}:", flush=True, end=" ")
@@ -337,8 +372,18 @@ def gptq_fwrd(
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
 
+            if is_qwen2_5_vl:
+                outs = list()
             for j in range(nsamples):
-                outs[j] = layer(
+                if is_qwen2_5_vl:
+                  outs.append(layer(
+                        inps[j].to(device=device, dtype=torch.float32),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                    )[0].to(device=ddevice, dtype=dtype))
+                else:
+                    outs[j] = layer(
                     inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -367,7 +412,15 @@ def gptq_fwrd(
 
         if True:
             for j in range(nsamples):
-                outs[j] = layer(
+                if is_qwen2_5_vl:
+                    outs[j] = layer(
+                        inps[j].to(device=device, dtype=torch.float32),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                    )[0].to(device=ddevice, dtype=dtype)
+                else:
+                    outs[j] = layer(
                     inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -417,7 +470,10 @@ def gptq_fwrd(
             handles = []
             handles.append(model.lm_head.register_forward_hook(add_batch("lm_head")))
             for j in range(nsamples):
-                model.lm_head(inps[j].unsqueeze(0).to(device=device, dtype=torch.float32))
+                if is_qwen2_5_vl:
+                    model.lm_head(inps[j].to(device=device, dtype=torch.float32))
+                else:
+                    model.lm_head(inps[j].unsqueeze(0).to(device=device, dtype=torch.float32))
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
