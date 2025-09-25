@@ -23,17 +23,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union
+from typing import List
+from typing import Union
 
 from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ImageInput, VideoInput
-from transformers.processing_utils import (
-    ProcessingKwargs,
-    ProcessorMixin,
-    Unpack,
-    VideosKwargs,
-)
-from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+from transformers.image_utils import ImageInput
+from transformers.image_utils import VideoInput
+from transformers.processing_utils import ProcessingKwargs
+from transformers.processing_utils import ProcessorMixin
+from transformers.processing_utils import Unpack
+from transformers.processing_utils import VideosKwargs
+from transformers.tokenization_utils_base import PreTokenizedInput
+from transformers.tokenization_utils_base import TextInput
 
 
 from .image_processing_qwen2_vl import Qwen2VLImageProcessor

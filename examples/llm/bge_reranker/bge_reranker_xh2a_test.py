@@ -4,7 +4,8 @@ from pathlib import Path
 
 import torch
 from xhquant.api import HMONNXGoldenInference as HMONNXInference
-from xhquant.api import get_root_logger, xhquant_init
+from xhquant.api import get_root_logger
+from xhquant.api import xhquant_init
 from xhquant.xhonnxruntime import config as xhonnxruntime_config
 
 

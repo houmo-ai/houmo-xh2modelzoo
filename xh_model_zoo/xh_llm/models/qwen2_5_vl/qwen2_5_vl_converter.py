@@ -4,24 +4,30 @@ import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, Callable
+from typing import Callable
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import onnx
 import torch
 import torch.nn as nn
 from PIL import Image
-
 from qwen_vl_utils import process_vision_info
-
-from ..base_converter import BaseConverter, HFTransfromersConverter
-from ..builder import wrap_llm_model
-from .qwen2_5_vl_convert_config import Qwen2_5_VLConvertConfig
-from .modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-from .data_preprocess import Qwen2_5_VLDataPreprocess
-
-from xhquant.api import convert_onnx_to_hmonnx, convert_fx_model_to_quanted_model, convert_quanted_model_to_hmonnx
-from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+from xhquant.api import convert_fx_model_to_quanted_model
+from xhquant.api import convert_onnx_to_hmonnx
+from xhquant.api import convert_quanted_model_to_hmonnx
+from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
+
+from ..base_converter import BaseConverter
+from ..base_converter import HFTransfromersConverter
+from ..builder import wrap_llm_model
+from .data_preprocess import Qwen2_5_VLDataPreprocess
+from .modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from .qwen2_5_vl_convert_config import Qwen2_5_VLConvertConfig
+
 from xhquant.api import (  # isort:skip
     Config,
     DeviceType,
@@ -88,6 +94,7 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     self.register_buffer("quant_weight", quant_weight)
     self.__class__ = nn.Linear
 
+
 class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
@@ -135,8 +142,10 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             setattr(m, attr_name, nn.Parameter(param.clone()))
         return module
 
-    def load_gptq_model(self, hf_model_dir:str, **kwargs):
-        hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(hf_model_dir, **kwargs).eval()  # quantization_config={"use_exllama": False}
+    def load_gptq_model(self, hf_model_dir: str, **kwargs):
+        hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            hf_model_dir, **kwargs
+        ).eval()  # quantization_config={"use_exllama": False}
         if hf_model.config.tie_word_embeddings:
             hf_model.config.torchscript = True
             hf_model.tie_weights()
@@ -144,11 +153,12 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             hf_model.config.torchscript = False
 
         hf_model = self.untied_weights(hf_model)
-        
+
         assert hasattr(hf_model, "hf_quantizer")
         hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        from transformers.utils import is_auto_gptq_available
+        from transformers.utils import is_gptqmodel_available
 
         converter: Optional[Callable] = None
 
@@ -193,7 +203,9 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model
 
-    def _export_vision(self, inputs, hf_model: Qwen2_5_VLForConditionalGeneration, vision_hmonnx_file: str, golden_dir: str):
+    def _export_vision(
+        self, inputs, hf_model: Qwen2_5_VLForConditionalGeneration, vision_hmonnx_file: str, golden_dir: str
+    ):
         logger = get_root_logger()
         logger.info("********************* start export vision model *********************")
         from ._vision_model_impl import register_wrap_cls as vision_register_wrap_cls
@@ -230,7 +242,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
                 verbose=False,
             )
             onnx_model = onnx.load(tmp_onnx_file, load_external_data=True)
-        
+
         logger.info(f"simplify onnx model............")
         onnx_model, check = simplify_large_onnx(onnx_model)
 
@@ -242,9 +254,10 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         )
 
         logger.info(f"Export vision model to {vision_hmonnx_file}")
-        
+
         logger.info(f"start export vision model golden............")
         from xhquant.api import HMONNXGoldenInference
+
         vision_model = HMONNXGoldenInference(vision_hmonnx_file)
         vision_model.save_golden = True
         vision_model.exec_device = torch.device("cuda:0")
@@ -253,7 +266,11 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         vision_model.golden_dir = str(golden_dir)
 
         with torch.no_grad():
-            vision_model.forward(hm_pixel_values.to(torch.device("cuda:0")).half(), window_index.to(torch.device("cuda:0")).int(), attention_bias.to(torch.device("cuda:0")).half())
+            vision_model.forward(
+                hm_pixel_values.to(torch.device("cuda:0")).half(),
+                window_index.to(torch.device("cuda:0")).int(),
+                attention_bias.to(torch.device("cuda:0")).half(),
+            )
         logger.info(f"Export vision model golden to {golden_dir}")
 
     def _convert(self, hf_model_path: str, output_dir: str):
@@ -261,17 +278,19 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         config = self.config
 
         if config.gptqmodel_cfg:
-            native_model = self.load_gptq_model(hf_model_path,trust_remote_code=True,torch_dtype=torch.float16, device_map="cpu")
+            native_model = self.load_gptq_model(
+                hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
+            )
         else:
             native_model = self.load_hf_model(
                 hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
             )
-        
+
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
         if resume_from is not None:
             self.load_quant_weight(resume_from, native_model)
-        
+
         lm_head = native_model.lm_head
         if not hasattr(lm_head, "quant_weight"):
             config.quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
@@ -289,7 +308,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         print(quant_config)
         work_dir = Path(output_dir)
         self.work_dir = output_dir
-        
+
         quant_config = ConfigDict(quant_config)
 
         wrap_cfg = Config(
@@ -355,12 +374,13 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         ]
 
         from . import Qwen2_5_VLProcessor
+
         processor = Qwen2_5_VLProcessor.from_pretrained(hf_model_path)
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         image_inputs, video_inputs = process_vision_info(messages)
 
         Path(work_dir / "hmonnx").mkdir(exist_ok=True, parents=True)
-        
+
         quant_type = config.quant_scheme.quant_type
         prefix = f"{model_name}-{target_device}-{quant_type}"
         vision_onnx_file = str(work_dir / "hmonnx" / f"{prefix}_vision.onnx")
@@ -380,8 +400,10 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         pad_img = Image.new("RGB", (image_max_size_w, image_max_size_h), (122, 116, 104))
         pad_img.paste(resized_img, (0, 0))
         image_inputs[0] = pad_img
-        processor.image_processor.max_pixels = max(image_max_size_w * image_max_size_h + 1, processor.image_processor.max_pixels)
-        
+        processor.image_processor.max_pixels = max(
+            image_max_size_w * image_max_size_h + 1, processor.image_processor.max_pixels
+        )
+
         inputs = processor(
             text=[text],
             images=image_inputs,
@@ -399,7 +421,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             )
             image_embeds = image_embeds.cpu()
             visual.cpu()
-        
+
         if not Path(vision_onnx_file).exists():
             self._export_vision(inputs, native_model, vision_onnx_file, vision_golden_dir)
 
@@ -447,8 +469,15 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             input_sequence_length * steps,
         )
         data_input = data_preprocess(data_prefill)
-        
-        inputs_embeds, time_position_ids, height_position_ids, width_position_ids, past_seq_length, current_seq_length = data_input
+
+        (
+            inputs_embeds,
+            time_position_ids,
+            height_position_ids,
+            width_position_ids,
+            past_seq_length,
+            current_seq_length,
+        ) = data_input
 
         from ._llm_model_impl import register_wrap_cls as llm_register_wrap_cls  # noqa: F401
 
@@ -467,7 +496,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             height_position_ids[:input_sequence_length],
             width_position_ids[:input_sequence_length],
             past_seq_length,
-            torch.tensor([input_sequence_length], dtype=torch.int32).to(inputs_embeds.device), 
+            torch.tensor([input_sequence_length], dtype=torch.int32).to(inputs_embeds.device),
             past_key_caches,
             past_value_caches,
         )
@@ -508,6 +537,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         if not Path(prefill_golden_dir).exists():
             logger.info(f"start export vision model golden............")
             from xhquant.api import HMONNXGoldenInference
+
             prefill_model = HMONNXGoldenInference(prefill_onnx_file)
             prefill_model.save_golden = True
             prefill_model.exec_device = torch.device("cuda:0")
@@ -567,6 +597,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         if not Path(decoder_golden_dir).exists():
             logger.info(f"start export decode model golden............")
             from xhquant.api import HMONNXGoldenInference
+
             decoder_model = HMONNXGoldenInference(decode_onnx_file)
             decoder_model.save_golden = True
             decoder_model.exec_device = torch.device("cuda:0")
@@ -586,7 +617,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
 
         meta_info["decoder_golden_dir"] = str(Path(decoder_golden_dir).relative_to(work_dir))
         json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
-       
+
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen2_5_VLConvertConfig, output_dir: str):
         quant_config = create_quant_config(config.quant_scheme)

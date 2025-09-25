@@ -1,18 +1,25 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
+from typing import List
+from typing import Optional
 
 import lm_eval
 import torch
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable, make_table, simple_parse_args_string
-from xhquant.api import ConfigDict, get_root_logger, xhquant_init
+from lm_eval.utils import handle_non_serializable
+from lm_eval.utils import make_table
+from lm_eval.utils import simple_parse_args_string
+from xhquant.api import ConfigDict
+from xhquant.api import get_root_logger
+from xhquant.api import xhquant_init
 from xhquant.xhonnxruntime import config as xh_xhonnxruntime_config
 
-from xh2_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyHFCompatible, Qwen2LegacyInference
-from xh2_model_zoo.xh_llm.utils import decode_next_token
+from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyHFCompatible
+from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyInference
+from xh_model_zoo.xh_llm.utils import decode_next_token
 
 """
 需要导出的HMONNX支持logits任务,默认只支持generate任务,即只输出下一个token

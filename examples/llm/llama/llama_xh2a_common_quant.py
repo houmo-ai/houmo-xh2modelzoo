@@ -14,7 +14,8 @@ from loguru import logger
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig
+from transformers import AutoModelForCausalLM
 
 
 def parse_arguments():
@@ -85,7 +86,7 @@ def main():
         quant_name = "_".join(quant_methods)
         filename = work_dir / f"{quant_name}-state-dict.safetensors"
         if not os.path.exists(filename):
-            from xh2_model_zoo.xh_llm.quarot.quantizer_utils import quarot
+            from xh_model_zoo.xh_llm.quarot.quantizer_utils import quarot
 
             logger.info(msg_output_format("Start quarot quantization"))
             native_model = quarot(native_model, device=device)
@@ -113,7 +114,7 @@ def main():
         logger.info(f"GPU memory cost for export {consumption}{unit}")
 
     if not args.skip_gptq:
-        from xh2_model_zoo.xh_llm.quarot.quantizer_utils import gptq
+        from xh_model_zoo.xh_llm.quarot.quantizer_utils import gptq
 
         gptq_config = dict(
             calib_dataset="wikitext2",

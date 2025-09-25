@@ -3,11 +3,13 @@ from pathlib import Path
 
 import torch
 from transformers import TextStreamer
-from xhquant.api import get_root_logger, xhquant_init
+from xhquant.api import get_root_logger
+from xhquant.api import xhquant_init
 from xhquant.xhonnxruntime import config as xhonnxruntime_config
 
-from xh2_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeHFCompatible, Qwen3MoeInference
-from xh2_model_zoo.xh_llm.utils import auto_offload
+from xh_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeHFCompatible
+from xh_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeInference
+from xh_model_zoo.xh_llm.utils import auto_offload
 
 
 def main(args):

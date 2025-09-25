@@ -4,18 +4,25 @@ import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import onnx
 import torch
 from PIL import Image
-from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+from transformers import AutoProcessor
+from transformers import Qwen2VLForConditionalGeneration
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx
+from xhquant.api import convert_fx_model_to_quanted_model
+from xhquant.api import convert_onnx_to_hmonnx
+from xhquant.api import convert_quanted_model_to_hmonnx
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
 
-from ..base_converter import BaseConverter, HFTransfromersConverter
+from ..base_converter import BaseConverter
+from ..base_converter import HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .data_preprocess import Qwen2VLDataPreprocess
 from .qwen2_vl_convert_config import Qwen2VLConvertConfig

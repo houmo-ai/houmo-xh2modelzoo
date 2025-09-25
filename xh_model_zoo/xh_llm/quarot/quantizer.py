@@ -1,5 +1,6 @@
 import math
-from typing import Literal, Union
+from typing import Literal
+from typing import Union
 
 import torch
 import torch.nn as nn

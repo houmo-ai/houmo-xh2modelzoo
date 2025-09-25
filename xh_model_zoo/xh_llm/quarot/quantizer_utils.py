@@ -3,9 +3,13 @@ import os
 import torch
 import yaml
 from attr import has
-from xhquant.api import Config, get_root_logger
+from xhquant.api import Config
+from xhquant.api import get_root_logger
 
-from . import data_utils, gptq_utils, rotation_utils, utils
+from . import data_utils
+from . import gptq_utils
+from . import rotation_utils
+from . import utils
 
 
 @torch.no_grad()

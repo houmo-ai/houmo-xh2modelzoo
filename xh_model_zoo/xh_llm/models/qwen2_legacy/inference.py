@@ -1,12 +1,16 @@
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers import AutoTokenizer
-from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
+from xhquant.api import CacheTensor
+from xhquant.api import GoldenMixin
+from xhquant.api import HMONNXInference
 
 from ....utils import DeviceDtypeMixin
 from ....xh_llm.utils import decode_next_token

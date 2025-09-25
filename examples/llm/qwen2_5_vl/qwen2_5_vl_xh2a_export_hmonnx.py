@@ -2,8 +2,6 @@ import argparse
 import os.path as osp
 from pathlib import Path
 
-from transformers import AutoConfig
-
 from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig
 
@@ -18,15 +16,15 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-# ops=dict(MatMul=dict(
-#             act_scheme=dict(
-#                 bits=8,
-#                 fp_mode="sefp",
-#             ),
-#             w_scheme=dict(
-#                 bits=16,
-#                 fp_mode="sefp",
-#             ),))
+    # ops=dict(MatMul=dict(
+    #             act_scheme=dict(
+    #                 bits=8,
+    #                 fp_mode="sefp",
+    #             ),
+    #             w_scheme=dict(
+    #                 bits=16,
+    #                 fp_mode="sefp",
+    #             ),))
     config = Qwen2_5_VLConvertConfig(
         batch_size=args.batch_size,
         context_length=args.context_length,
@@ -56,6 +54,11 @@ if __name__ == "__main__":
     parser.add_argument("--image_max_size_w", type=int, default=644, help="image max size width")
     parser.add_argument("--patch_size", type=int, default=14, help="patch size")
     parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
-    parser.add_argument("--quant_weight", type=str, default=None, help="quant weight path, for example: gptq or quarot, if empty, use w8a8")
+    parser.add_argument(
+        "--quant_weight",
+        type=str,
+        default=None,
+        help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
+    )
     args = parser.parse_args()
     main(args)

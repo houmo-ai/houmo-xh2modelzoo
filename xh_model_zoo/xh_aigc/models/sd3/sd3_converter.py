@@ -3,30 +3,38 @@ import math
 import tempfile
 import time
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any
+from typing import Dict
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import bitsandbytes.functional as BNBF
 import onnx
 import onnxsim
 import torch
 import transformers
-from bitsandbytes.nn.modules import Linear4bit, bnb
-from diffusers import SD3Transformer2DModel, StableDiffusion3Pipeline
+from bitsandbytes.nn.modules import Linear4bit
+from bitsandbytes.nn.modules import bnb
+from diffusers import SD3Transformer2DModel
+from diffusers import StableDiffusion3Pipeline
 from torch import Tensor
-from transformers.models.clip.modeling_clip import (
-    BaseModelOutputWithPooling,
-    CLIPSdpaAttention,
-    CLIPTextTransformer,
-    _create_4d_causal_attention_mask,
-    _prepare_4d_attention_mask,
-    is_torch_greater_or_equal_than_2_2,
-)
-from transformers.models.t5.modeling_t5 import T5Block, T5Stack
-from xhquant.api import QuantScheme, convert_onnx_to_hmonnx
+from transformers.models.clip.modeling_clip import BaseModelOutputWithPooling
+from transformers.models.clip.modeling_clip import CLIPSdpaAttention
+from transformers.models.clip.modeling_clip import CLIPTextTransformer
+from transformers.models.clip.modeling_clip import _create_4d_causal_attention_mask
+from transformers.models.clip.modeling_clip import _prepare_4d_attention_mask
+from transformers.models.clip.modeling_clip import is_torch_greater_or_equal_than_2_2
+from transformers.models.t5.modeling_t5 import T5Block
+from transformers.models.t5.modeling_t5 import T5Stack
+from xhquant.api import QuantScheme
+from xhquant.api import convert_onnx_to_hmonnx
 from xhquant.nn.modules import Clip
-from xhquant.utils import digit_version, get_root_logger
+from xhquant.utils import digit_version
+from xhquant.utils import get_root_logger
 
 from .t5_method_patch import hadmard_t5
 

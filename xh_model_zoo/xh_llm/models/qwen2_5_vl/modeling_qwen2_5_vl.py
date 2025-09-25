@@ -26,35 +26,36 @@
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
-
 from transformers.activations import ACT2FN
-from transformers.cache_utils import (
-    Cache,
-    DynamicCache,
-    SlidingWindowCache,
-    StaticCache,
-)
+from transformers.cache_utils import Cache
+from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import SlidingWindowCache
+from transformers.cache_utils import StaticCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
-    logging,
-    replace_return_docstrings,
-)
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
+from transformers.utils import add_start_docstrings
+from transformers.utils import add_start_docstrings_to_model_forward
+from transformers.utils import is_flash_attn_2_available
+from transformers.utils import is_flash_attn_greater_or_equal_2_10
+from transformers.utils import logging
+from transformers.utils import replace_return_docstrings
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func

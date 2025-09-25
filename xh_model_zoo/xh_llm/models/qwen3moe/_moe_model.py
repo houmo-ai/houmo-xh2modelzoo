@@ -2,7 +2,11 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import torch
 import torch.nn as nn
@@ -10,17 +14,17 @@ import torch.nn.functional as F
 import transformers
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen3_moe.modeling_qwen3_moe import (
-    Qwen3MoeAttention,
-    Qwen3MoeDecoderLayer,
-    Qwen3MoeForCausalLM,
-    Qwen3MoeModel,
-    Qwen3MoeRMSNorm,
-    Qwen3MoeRotaryEmbedding,
-    Qwen3MoeSparseMoeBlock,
-)
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeAttention
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeDecoderLayer
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeRMSNorm
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeRotaryEmbedding
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 from xhquant import nn as xhnn
-from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
+from xhquant.nn import LLMCacheV2
+from xhquant.nn import MaskedSoftmax
+from xhquant.nn import RMSNorm
 from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils import digit_version
 from xhquant.utils.registry import DynamicModule

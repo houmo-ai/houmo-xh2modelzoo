@@ -1,6 +1,8 @@
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager
+from contextlib import contextmanager
 from time import perf_counter
-from typing import Callable, Generator
+from typing import Callable
+from typing import Generator
 
 
 class TimeProfiler(AbstractContextManager):

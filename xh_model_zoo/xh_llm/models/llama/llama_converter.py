@@ -6,7 +6,8 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers.models.llama import LlamaForCausalLM
 
-from ..base_converter import BaseConverter, HFTransfromersConverter
+from ..base_converter import BaseConverter
+from ..base_converter import HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .llama_convert_config import LlamaConvertConfig
 

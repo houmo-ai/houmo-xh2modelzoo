@@ -1,7 +1,8 @@
 import transformers
 from xhquant.utils import digit_version
 
-from ..sd3 import SD3ConvertConfig, SD3Converter
+from ..sd3 import SD3ConvertConfig
+from ..sd3 import SD3Converter
 
 
 class SD3_5_Converter(SD3Converter):

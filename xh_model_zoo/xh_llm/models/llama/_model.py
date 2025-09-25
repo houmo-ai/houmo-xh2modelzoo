@@ -1,22 +1,26 @@
 import math
 import sys
 import types
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import torch
 import torch.nn as nn
 import transformers
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
-    LlamaSdpaAttention,
-)
+from transformers.models.llama.modeling_llama import LlamaAttention
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+from transformers.models.llama.modeling_llama import LlamaSdpaAttention
 from xhquant import nn as xhnn
-from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
+from xhquant.nn import LLMCacheV2
+from xhquant.nn import MaskedSoftmax
+from xhquant.nn import RMSNorm
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES

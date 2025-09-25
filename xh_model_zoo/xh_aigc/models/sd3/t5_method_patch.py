@@ -1,9 +1,12 @@
 import torch
 import torch.nn as nn
 from transformers import T5EncoderModel
-from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache
+from transformers.cache_utils import Cache
+from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
-from transformers.modeling_utils import is_torchdynamo_compiling, logger
+from transformers.modeling_utils import is_torchdynamo_compiling
+from transformers.modeling_utils import logger
 from transformers.models.t5.modeling_t5 import T5Stack
 
 from .hadamard_utils import random_hadamard_matrix

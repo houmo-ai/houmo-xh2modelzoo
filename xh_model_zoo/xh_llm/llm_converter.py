@@ -1,4 +1,5 @@
-from typing import Any, Optional
+from typing import Any
+from typing import Optional
 
 from transformers import AutoConfig
 from xhquant.api import get_root_logger

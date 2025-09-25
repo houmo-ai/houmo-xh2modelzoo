@@ -18,34 +18,38 @@ import copy
 import math
 import os
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import torch
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import BCEWithLogitsLoss
+from torch.nn import CrossEntropyLoss
+from torch.nn import MSELoss
 
 from ...activations import ACT2FN
-from ...modeling_outputs import (
-    BaseModelOutput,
-    BaseModelOutputWithPastAndCrossAttentions,
-    Seq2SeqLMOutput,
-    Seq2SeqModelOutput,
-    Seq2SeqQuestionAnsweringModelOutput,
-    Seq2SeqSequenceClassifierOutput,
-    TokenClassifierOutput,
-)
+from ...modeling_outputs import BaseModelOutput
+from ...modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+from ...modeling_outputs import Seq2SeqLMOutput
+from ...modeling_outputs import Seq2SeqModelOutput
+from ...modeling_outputs import Seq2SeqQuestionAnsweringModelOutput
+from ...modeling_outputs import Seq2SeqSequenceClassifierOutput
+from ...modeling_outputs import TokenClassifierOutput
 from ...modeling_utils import PreTrainedModel
-from ...pytorch_utils import ALL_LAYERNORM_LAYERS, find_pruneable_heads_and_indices, prune_linear_layer
-from ...utils import (
-    DUMMY_INPUTS,
-    DUMMY_MASK,
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_torch_fx_proxy,
-    logging,
-    replace_return_docstrings,
-)
-from ...utils.model_parallel_utils import assert_device_map, get_device_map
+from ...pytorch_utils import ALL_LAYERNORM_LAYERS
+from ...pytorch_utils import find_pruneable_heads_and_indices
+from ...pytorch_utils import prune_linear_layer
+from ...utils import DUMMY_INPUTS
+from ...utils import DUMMY_MASK
+from ...utils import add_start_docstrings
+from ...utils import add_start_docstrings_to_model_forward
+from ...utils import is_torch_fx_proxy
+from ...utils import logging
+from ...utils import replace_return_docstrings
+from ...utils.model_parallel_utils import assert_device_map
+from ...utils.model_parallel_utils import get_device_map
 from .configuration_t5 import T5Config
 
 logger = logging.get_logger(__name__)

@@ -1,13 +1,18 @@
 import copy
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
 try:
     from awq.modules.linear.gemm import WQLinear_GEMM
-    from awq.utils.packing_utils import reverse_awq_order, unpack_awq
+    from awq.utils.packing_utils import reverse_awq_order
+    from awq.utils.packing_utils import unpack_awq
 except ImportError:
     WQLinear_GEMM = None
     reverse_awq_order = None
@@ -16,7 +21,8 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
-from xhquant.api import DeviceType, get_root_logger
+from xhquant.api import DeviceType
+from xhquant.api import get_root_logger
 
 
 def qlinear_cuda_old_converter(self: nn.Module):
@@ -367,7 +373,8 @@ class HFTransfromersConverter(BaseConverter):
         assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
         hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        from transformers.utils import is_auto_gptq_available
+        from transformers.utils import is_gptqmodel_available
 
         converter: Optional[Callable] = None
 

@@ -20,32 +20,34 @@
 """Image processor class for Qwen2-VL."""
 
 import math
-from typing import Dict, List, Optional, Union
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
 import numpy as np
-from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
-from transformers.image_transforms import (
-    convert_to_rgb,
-    resize,
-    to_channel_dimension_format,
-)
-from transformers.image_utils import (
-    OPENAI_CLIP_MEAN,
-    OPENAI_CLIP_STD,
-    ChannelDimension,
-    ImageInput,
-    PILImageResampling,
-    VideoInput,
-    get_image_size,
-    infer_channel_dimension_format,
-    is_scaled_image,
-    is_valid_image,
-    make_list_of_images,
-    to_numpy_array,
-    valid_images,
-    validate_preprocess_arguments,
-)
-from transformers.utils import TensorType, is_vision_available, logging
+from transformers.image_processing_utils import BaseImageProcessor
+from transformers.image_processing_utils import BatchFeature
+from transformers.image_transforms import convert_to_rgb
+from transformers.image_transforms import resize
+from transformers.image_transforms import to_channel_dimension_format
+from transformers.image_utils import OPENAI_CLIP_MEAN
+from transformers.image_utils import OPENAI_CLIP_STD
+from transformers.image_utils import ChannelDimension
+from transformers.image_utils import ImageInput
+from transformers.image_utils import PILImageResampling
+from transformers.image_utils import VideoInput
+from transformers.image_utils import get_image_size
+from transformers.image_utils import infer_channel_dimension_format
+from transformers.image_utils import is_scaled_image
+from transformers.image_utils import is_valid_image
+from transformers.image_utils import make_list_of_images
+from transformers.image_utils import to_numpy_array
+from transformers.image_utils import valid_images
+from transformers.image_utils import validate_preprocess_arguments
+from transformers.utils import TensorType
+from transformers.utils import is_vision_available
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 

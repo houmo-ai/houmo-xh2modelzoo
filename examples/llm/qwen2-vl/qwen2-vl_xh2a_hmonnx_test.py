@@ -7,13 +7,16 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from qwen_vl_utils import process_vision_info
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoProcessor
+from transformers import AutoTokenizer
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-from xhquant.api import ConfigDict, HMONNXInference, get_root_logger
+from xhquant.api import ConfigDict
+from xhquant.api import HMONNXInference
+from xhquant.api import get_root_logger
 from xhquant.core import CacheTensor
 
-from xh2_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLDataPreprocess
-from xh2_model_zoo.xh_llm.utils import decode_next_token
+from xh_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLDataPreprocess
+from xh_model_zoo.xh_llm.utils import decode_next_token
 
 
 def main(args):

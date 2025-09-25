@@ -4,10 +4,12 @@ import typing
 import torch
 import tqdm
 
-from . import model_utils, utils
+from . import model_utils
+from . import utils
 
 # from quarot_quant import quant_utils
-from .hadamard_utils import is_pow2, random_hadamard_matrix
+from .hadamard_utils import is_pow2
+from .hadamard_utils import random_hadamard_matrix
 
 # from fast_hadamard_transform import hadamard_transform
 

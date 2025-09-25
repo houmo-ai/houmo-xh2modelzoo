@@ -1,18 +1,28 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import lm_eval
 import torch
 from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
-from lm_eval.utils import handle_non_serializable, make_table, simple_parse_args_string
-from xhquant.api import ConfigDict, get_root_logger, xhquant_init
+from lm_eval.utils import handle_non_serializable
+from lm_eval.utils import make_table
+from lm_eval.utils import simple_parse_args_string
+from xhquant.api import ConfigDict
+from xhquant.api import get_root_logger
+from xhquant.api import xhquant_init
 from xhquant.xhonnxruntime import config as xh_xhonnxruntime_config
 
-from xh2_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeHFCompatible, Qwen3MoeInference
-from xh2_model_zoo.xh_llm.utils import auto_offload, decode_next_token
+from xh_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeHFCompatible
+from xh_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeInference
+from xh_model_zoo.xh_llm.utils import auto_offload
+from xh_model_zoo.xh_llm.utils import decode_next_token
 
 
 class XH2LLM(HFLM):

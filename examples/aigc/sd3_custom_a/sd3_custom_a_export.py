@@ -1,13 +1,14 @@
 import argparse
-import json
 import os
 from pathlib import Path
 
-from sympy import im
-from xhquant.api import DeviceType, QuantScheme, xhquant_init
+from xhquant.api import DeviceType
+from xhquant.api import QuantScheme
+from xhquant.api import xhquant_init
 from xhquant.utils import set_random_seed
 
-from xh2_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAConvertConfig, SD3CustomAConverter
+from xh_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAConvertConfig
+from xh_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAConverter
 
 
 def main(args):

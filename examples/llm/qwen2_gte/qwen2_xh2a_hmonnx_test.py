@@ -6,11 +6,13 @@ from typing import List
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
-from xhquant.api import HMONNXInference, get_root_logger, xhquant_init
+from xhquant.api import HMONNXInference
+from xhquant.api import get_root_logger
+from xhquant.api import xhquant_init
 from xhquant.core import CacheTensor
 
-from xh2_model_zoo.xh_llm.models.qwen2 import Qwen2Inference
-from xh2_model_zoo.xh_llm.utils import decode_next_token
+from xh_model_zoo.xh_llm.models.qwen2 import Qwen2Inference
+from xh_model_zoo.xh_llm.utils import decode_next_token
 
 
 def main(args):

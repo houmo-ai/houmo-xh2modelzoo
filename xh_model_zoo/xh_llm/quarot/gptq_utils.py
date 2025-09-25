@@ -1,6 +1,8 @@
 import math
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
+from typing import Dict
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -8,7 +10,8 @@ import tqdm
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as safetensors_save_file
 
-from . import quant_utils, utils
+from . import quant_utils
+from . import utils
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
