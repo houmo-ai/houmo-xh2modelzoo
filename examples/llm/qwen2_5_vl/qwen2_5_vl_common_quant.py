@@ -25,6 +25,7 @@ def parse_arguments():
     parser.add_argument("--resume", action="store_true", help="resume from the cache")
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     parser.add_argument("--validate", action="store_true", help="validate")
+    parser.add_argument("--calib-samples", type=int, default=8)
     return parser
 
 
@@ -175,7 +176,7 @@ def main():
 
         gptq_config = dict(
             calib_dataset="laion/220k-GPT4Vision-captions-from-LIVIS",
-            calib_samples=1,
+            calib_samples=args.calib_samples,
             seqlen=2048,
             w_clip=True,
             w_bits=args.w_bits,

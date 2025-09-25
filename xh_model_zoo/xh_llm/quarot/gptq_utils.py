@@ -247,10 +247,12 @@ def gptq_fwrd(
 
     if ddevice is None:
         ddevice = torch.device("cpu")
-        # ddevice = device
     nsamples = len(dataloader)
     if is_qwen2_5_vl:
         inps = list()
+        attention_mask = list()
+        position_ids = list()
+        position_embeddings = list()
     else:
         inps = torch.zeros((nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=ddevice)
     cache = {"i": 0, "attention_mask": None}
@@ -263,15 +265,18 @@ def gptq_fwrd(
         def forward(self, inp, **kwargs):
             if is_qwen2_5_vl:
                 inps.append(inp.to(ddevice))
+                attention_mask.append(kwargs["attention_mask"])
+                position_ids.append(kwargs["position_ids"])
+                position_embeddings.append(kwargs["position_embeddings"])
             else:
-                inps[cache["i"]] = inp.to(ddevice)
+                inps[cache["i"]] = inp.to(ddevice)                
+                cache["attention_mask"] = kwargs["attention_mask"]
+                cache["position_ids"] = kwargs["position_ids"]
+                if "position_embeddings" in kwargs:
+                    cache["position_embeddings"] = kwargs["position_embeddings"]
+                else:
+                    cache["position_embeddings"] = None
             cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
-            cache["position_ids"] = kwargs["position_ids"]
-            if "position_embeddings" in kwargs:
-                cache["position_embeddings"] = kwargs["position_embeddings"]
-            else:
-                cache["position_embeddings"] = None
             raise ValueError
 
     # 获取第一个layer的输入用于标定样本
@@ -296,9 +301,9 @@ def gptq_fwrd(
         outs = list()
     else:
         outs = torch.zeros_like(inps)
-    attention_mask = cache["attention_mask"]
-    position_ids = cache["position_ids"]
-    position_embeddings = cache["position_embeddings"]
+        attention_mask = cache["attention_mask"]
+        position_ids = cache["position_ids"]
+        position_embeddings = cache["position_embeddings"]
 
     quantizers: Dict[str, Any] = {}
     sequential = [
@@ -381,9 +386,9 @@ def gptq_fwrd(
                 if is_qwen2_5_vl:
                   outs.append(layer(
                         inps[j].to(device=device, dtype=torch.float32),
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        position_embeddings=position_embeddings,
+                        attention_mask=attention_mask[j],
+                        position_ids=position_ids[j],
+                        position_embeddings=position_embeddings[j],
                     )[0].to(device=ddevice, dtype=dtype))
                 else:
                     outs[j] = layer(
@@ -418,9 +423,9 @@ def gptq_fwrd(
                 if is_qwen2_5_vl:
                     outs[j] = layer(
                         inps[j].to(device=device, dtype=torch.float32),
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        position_embeddings=position_embeddings,
+                        attention_mask=attention_mask[j],
+                        position_ids=position_ids[j],
+                        position_embeddings=position_embeddings[j],
                     )[0].to(device=ddevice, dtype=dtype)
                 else:
                     outs[j] = layer(

@@ -48,14 +48,21 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
-from transformers.utils import add_start_docstrings
-from transformers.utils import add_start_docstrings_to_model_forward
-from transformers.utils import is_flash_attn_2_available
-from transformers.utils import is_flash_attn_greater_or_equal_2_10
-from transformers.utils import logging
-from transformers.utils import replace_return_docstrings
+from transformers.utils import (
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    is_flash_attn_2_available,
+    is_flash_attn_greater_or_equal_2_10,
+    logging,
+    replace_return_docstrings,
+)
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
+from safetensors.torch import load_file
+from transformers.utils import WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
+from transformers import AutoConfig
+import json
+from pathlib import Path
+import torch
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
@@ -1573,6 +1580,18 @@ QWEN2_5_VL_INPUTS_DOCSTRING = r"""
 """
 
 
+def _remap_qwen2_5_vl_keys(state_dict: dict) -> dict:
+    remapped = {}
+    for k, v in state_dict.items():
+        new_k = k
+        if new_k.startswith("model.language_model."):
+            new_k = new_k.replace("model.language_model.", "model.", 1)
+        if new_k.startswith("model.visual."):
+            new_k = new_k.replace("model.visual.", "visual.", 1)
+        # 某些版本会把 lm_head 放在 model.language_model.lm_head 下（很少见）
+        remapped[new_k] = v
+    return remapped
+
 class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     config_class = Qwen2_5_VLConfig
@@ -1588,6 +1607,50 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
 
         # Initialize weights and apply final processing
         self.post_init()
+
+# 放到你的 Qwen2_5_VLForConditionalGeneration 定义内，作为 @classmethod 覆写
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str, *args, **kwargs):
+        # 1) 先读 config，实例化空模型
+        config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
+        model = cls(config)
+
+        # 2) 收集并加载权重（支持 safetensors 单/多分片）
+        p = Path(pretrained_model_path)
+        state_dict = {}
+        index_path = p / "model.safetensors.index.json"
+        if index_path.exists():
+            index = json.load(open(index_path))
+            weight_map = index.get("weight_map", {})
+            shard_to_keys = {}
+            for key, shard in weight_map.items():
+                shard_to_keys.setdefault(shard, []).append(key)
+            for shard, keys in shard_to_keys.items():
+                shard_path = p / shard
+                shard_sd = load_file(str(shard_path), device="cpu")
+                for key in keys:
+                    if key in shard_sd:
+                        state_dict[key] = shard_sd[key]
+        else:
+            st_safe = p / SAFE_WEIGHTS_NAME   # model.safetensors
+            st_pt = p / WEIGHTS_NAME          # pytorch_model.bin
+            if st_safe.exists():
+                state_dict = load_file(str(st_safe), device="cpu")
+            elif st_pt.exists():
+                state_dict = torch.load(str(st_pt), map_location="cpu")
+            else:
+                # 让父类尝试默认流程（老模型场景）
+                return super(cls, cls).from_pretrained(pretrained_model_path, *args, **kwargs)
+
+        # 3) 键名重映射
+        state_dict = _remap_qwen2_5_vl_keys(state_dict)
+
+        # 4) 加载（允许部分不匹配）
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if len(missing) > 0 or len(unexpected) > 0:
+            print(f"[qwen2.5-vl compat] missing={len(missing)}, unexpected={len(unexpected)}")
+        return model
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

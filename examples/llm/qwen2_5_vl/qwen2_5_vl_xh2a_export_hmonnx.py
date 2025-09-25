@@ -8,7 +8,65 @@ from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+from qwen_vl_utils import process_vision_info
+from xh_model_zoo.xh_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor
 
+
+def demo(model, processor):
+    from xh_model_zoo.xh_llm.quarot import utils
+    from accelerate import dispatch_model, infer_auto_device_map
+    from accelerate.utils import get_balanced_memory
+    raw_device = next(model.parameters()).device
+    # model.to(utils.DEV)
+
+    no_split_module_classes = ['LlamaDecoderLayer','QuantDecoderLayer',"RotateModule","SmoothModule","Qwen2DecoderLayer", "Qwen2_5_VLDecoderLayer"]
+    max_memory = get_balanced_memory(model, no_split_module_classes=no_split_module_classes)
+    device_map = infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=no_split_module_classes)
+    dispatch_model(model, device_map=device_map, offload_buffers=True, offload_dir="offload", state_dict=model.state_dict())
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                },
+                {"type": "text", "text": "Describe this image."},
+            ],
+        }
+    ]
+
+    # Preparation for inference
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = inputs.to("cuda")
+
+    # Inference: Generation of the output
+    generated_ids = model.generate(**inputs, max_new_tokens=512)
+    generated_ids_trimmed = [
+        out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
+    print(output_text)
+    from accelerate.hooks import remove_hook_from_module
+    remove_hook_from_module(model)
+    model.to(raw_device)
+    utils.cleanup_memory()
+
+import torch
 
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
@@ -16,15 +74,40 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-    # ops=dict(MatMul=dict(
-    #             act_scheme=dict(
-    #                 bits=8,
-    #                 fp_mode="sefp",
-    #             ),
-    #             w_scheme=dict(
-    #                 bits=16,
-    #                 fp_mode="sefp",
-    #             ),))
+
+
+    native_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        hf_model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="cpu",
+        # config=config,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+    )
+
+    if native_model.config.tie_word_embeddings:
+        old_torchscript = native_model.config.torchscript
+        native_model.config.torchscript = True
+        native_model.tie_weights()
+        native_model.config.tie_word_embeddings = False
+        native_model.config.torchscript = old_torchscript
+
+    native_model.eval()
+    native_model.to(torch.bfloat16)
+
+    processor = AutoProcessor.from_pretrained(hf_model_path)
+
+    demo(native_model, processor)
+
+# ops=dict(MatMul=dict(
+#             act_scheme=dict(
+#                 bits=8,
+#                 fp_mode="sefp",
+#             ),
+#             w_scheme=dict(
+#                 bits=16,
+#                 fp_mode="sefp",
+#             ),))
     config = Qwen2_5_VLConvertConfig(
         batch_size=args.batch_size,
         context_length=args.context_length,
