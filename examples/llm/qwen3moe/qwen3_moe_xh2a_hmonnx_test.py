@@ -101,11 +101,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/tmp_QQwen3-30B-A3B-XH2a-2k-w8a8h0_sefp/meta.json",
+        default="work_dirs/QQwen3-30B-A3B-XH2a-2k-w8a8h0_sefp/meta.json",
     )
     parser.add_argument("--hf-model", type=str)
-    parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--execution_device", type=str, default="cuda:0", help="execution device, default is cuda:0")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--execution_device", type=str, default="cuda", help="execution device, default is cuda:0")
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--fast", action="store_true", help="run in fast mode")
     args = parser.parse_args()

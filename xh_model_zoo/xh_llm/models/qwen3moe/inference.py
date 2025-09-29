@@ -19,7 +19,7 @@ class Qwen3MoeInference(DeviceDtypeMixin):
 
         self.fast_mode = fast_mode
         self._device = torch.device(device)
-        self.execution_device = torch.device(execution_device)
+        self._set_exec_device(torch.device(execution_device))
 
         model_dir = Path(model_config_file).parent
         meta_info = json.load(open(model_config_file, "r"))

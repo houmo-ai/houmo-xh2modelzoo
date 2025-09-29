@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--quant-weight",
         type=str,
-        default=None,
+        default='work_dirs/QQwen3-30B-A3B_quarot/quarot-state-dict.safetensors',
         help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
     )
     parser.add_argument("--mix_search", type=str, default=None, help="mix search settings")

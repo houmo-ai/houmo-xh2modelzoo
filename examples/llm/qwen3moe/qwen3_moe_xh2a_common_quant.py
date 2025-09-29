@@ -22,7 +22,7 @@ def parse_arguments():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model", type=str, default="data/datasets/QQwen3-30B-A3B")
-    parser.add_argument("--skip-quarot", action="store_true", default=True, help="skip_quarot")
+    parser.add_argument("--skip-quarot", action="store_true", default=False, help="skip_quarot")
     parser.add_argument("--skip-gptq", action="store_true", default=True, help="skip_quarot")
     parser.add_argument("--w-bits", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1024)

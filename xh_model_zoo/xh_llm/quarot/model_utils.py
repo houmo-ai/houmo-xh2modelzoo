@@ -134,13 +134,15 @@ def get_model_type(model):
         model_type = QWEN3_MODEL
     elif isinstance(model, QWEN2_5_VL_MODEL):
         model_type = QWEN2_5_VL_MODEL
+    elif isinstance(model, QWEN3MOE_MODEL):
+        model_type = QWEN3MOE_MODEL
     else:
         raise ValueError(f"Unknown model type {model}")
     return model_type
 
 
 def get_embeddings(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
         return [model.model.embed_tokens]
     elif model_type == OPT_MODEL:
         return [model.model.decoder.embed_tokens, model.model.decoder.embed_positions]
@@ -149,7 +151,7 @@ def get_embeddings(model, model_type):
 
 
 def get_transformer_layers(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
         return [layer for layer in model.model.layers]
     elif model_type == OPT_MODEL:
         return [layer for layer in model.model.decoder.layers]
@@ -158,7 +160,7 @@ def get_transformer_layers(model, model_type):
 
 
 def get_lm_head(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
         return model.lm_head
     elif model_type == OPT_MODEL:
         return model.lm_head
@@ -170,7 +172,7 @@ def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
         assert isinstance(pre_head_layernorm, transformers.models.llama.modeling_llama.LlamaRMSNorm)
-    elif model_type in [QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL]:
+    elif model_type in [QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
         pre_head_layernorm = model.model.norm
     elif model_type == OPT_MODEL:
         pre_head_layernorm = model.model.decoder.final_layer_norm
