@@ -1,6 +1,4 @@
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn

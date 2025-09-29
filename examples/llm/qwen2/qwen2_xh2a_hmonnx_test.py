@@ -1,7 +1,6 @@
 import argparse
 
-from xhquant.api import get_root_logger
-from xhquant.api import xhquant_init
+from xhquant.api import get_root_logger, xhquant_init
 
 from xh_model_zoo.xh_llm.models.qwen2 import Qwen2Inference
 

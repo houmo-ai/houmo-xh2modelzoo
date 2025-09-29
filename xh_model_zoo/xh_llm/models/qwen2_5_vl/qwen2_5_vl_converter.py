@@ -4,11 +4,7 @@ import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Callable
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import onnx
 import torch
@@ -16,13 +12,10 @@ import torch.nn as nn
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-from xhquant.api import convert_fx_model_to_quanted_model
-from xhquant.api import convert_onnx_to_hmonnx
-from xhquant.api import convert_quanted_model_to_hmonnx
+from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
 
-from ..base_converter import BaseConverter
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .data_preprocess import Qwen2_5_VLDataPreprocess
 from .modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
@@ -157,8 +150,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         assert hasattr(hf_model, "hf_quantizer")
         hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available
-        from transformers.utils import is_gptqmodel_available
+        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
 
         converter: Optional[Callable] = None
 

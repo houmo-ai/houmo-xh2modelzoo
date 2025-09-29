@@ -7,12 +7,11 @@ import torch
 import torch.nn as nn
 import transformers
 from loguru import logger
+from qwen_vl_utils import process_vision_info
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
-from transformers import AutoConfig, Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
-
+from transformers import AutoConfig, AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 
 def parse_arguments():
@@ -36,16 +35,27 @@ def msg_output_format(title):
 
 
 def demo(model, processor):
-    from xh_model_zoo.xh_llm.quarot import utils
     from accelerate import dispatch_model, infer_auto_device_map
     from accelerate.utils import get_balanced_memory
+
+    from xh_model_zoo.xh_llm.quarot import utils
+
     raw_device = next(model.parameters()).device
     # model.to(utils.DEV)
 
-    no_split_module_classes = ['LlamaDecoderLayer','QuantDecoderLayer',"RotateModule","SmoothModule","Qwen2DecoderLayer", "Qwen2_5_VLDecoderLayer"]
+    no_split_module_classes = [
+        "LlamaDecoderLayer",
+        "QuantDecoderLayer",
+        "RotateModule",
+        "SmoothModule",
+        "Qwen2DecoderLayer",
+        "Qwen2_5_VLDecoderLayer",
+    ]
     max_memory = get_balanced_memory(model, no_split_module_classes=no_split_module_classes)
     device_map = infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=no_split_module_classes)
-    dispatch_model(model, device_map=device_map, offload_buffers=True, offload_dir="offload", state_dict=model.state_dict())
+    dispatch_model(
+        model, device_map=device_map, offload_buffers=True, offload_dir="offload", state_dict=model.state_dict()
+    )
 
     messages = [
         {
@@ -61,9 +71,7 @@ def demo(model, processor):
     ]
 
     # Preparation for inference
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
         text=[text],
@@ -76,14 +84,13 @@ def demo(model, processor):
 
     # Inference: Generation of the output
     generated_ids = model.generate(**inputs, max_new_tokens=512)
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
+    generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
     output_text = processor.batch_decode(
         generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )
     print(output_text)
     from accelerate.hooks import remove_hook_from_module
+
     remove_hook_from_module(model)
     model.to(raw_device)
     utils.cleanup_memory()
@@ -157,7 +164,7 @@ def main():
             native_model.to(torch.float16)
             native_model.load_state_dict(state_dict)
             logger.info(msg_output_format(f"Load state_dict from {filename}"))
-    
+
     if args.validate:
         demo(native_model.to(torch.float32), processor)
     consumption = torch.cuda.max_memory_allocated()
@@ -239,6 +246,7 @@ def main():
         logger.info(msg_output_format(f"Saving checkpoint to: {filename}"))
         save_safetensors_file(state_dict, filename)
         logger.info(f"Save checkpoint to: {filename}")
+
 
 if __name__ == "__main__":
     main()

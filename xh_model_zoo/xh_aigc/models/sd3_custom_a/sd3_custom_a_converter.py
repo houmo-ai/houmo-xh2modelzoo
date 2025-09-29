@@ -10,18 +10,13 @@ import torch
 import transformers
 from bitsandbytes.nn.modules import Linear4bit
 from diffusers import StableDiffusion3Pipeline
-from transformers.models.clip.modeling_clip import CLIPSdpaAttention
-from transformers.models.clip.modeling_clip import CLIPTextTransformer
-from transformers.models.t5.modeling_t5 import T5Block
-from transformers.models.t5.modeling_t5 import T5Stack
+from transformers.models.clip.modeling_clip import CLIPSdpaAttention, CLIPTextTransformer
+from transformers.models.t5.modeling_t5 import T5Block, T5Stack
 from xhquant.api import get_root_logger
 from xhquant.utils import get_root_logger
 
-from ..sd3 import SD3ConvertConfig
-from ..sd3 import SD3Converter
-from ..sd3.sd3_converter import CLIPSdpaAttention_forward
-from ..sd3.sd3_converter import CLIPTextTransformer_forward
-from ..sd3.sd3_converter import linear4bit_forward
+from ..sd3 import SD3ConvertConfig, SD3Converter
+from ..sd3.sd3_converter import CLIPSdpaAttention_forward, CLIPTextTransformer_forward, linear4bit_forward
 from .sd3_custom_a_diffusion_pipe import SD3CustomADiffusion3Pipe
 
 

@@ -4,12 +4,10 @@ import typing
 import torch
 import tqdm
 
-from . import model_utils
-from . import utils
+from . import model_utils, utils
 
 # from quarot_quant import quant_utils
-from .hadamard_utils import is_pow2
-from .hadamard_utils import random_hadamard_matrix
+from .hadamard_utils import is_pow2, random_hadamard_matrix
 
 # from fast_hadamard_transform import hadamard_transform
 
@@ -47,9 +45,7 @@ def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
         linear.bias.data = linear.bias.data.to(linear_dtype)
 
 
-def fuse_merger_linear(
-    layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]
-) -> None:
+def fuse_merger_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]) -> None:
     """
     fuse the linear operations in Layernorm into the adjacent linear blocks.
     """
@@ -60,18 +56,11 @@ def fuse_merger_linear(
         W_ = linear.weight.data.double()
         w_o, w_i = W_.shape
         size = layernorm.weight.shape[0]
-        linear.weight.data = (
-            (W_.view(w_o, -1, size) * layernorm.weight.double())
-            .to(linear_dtype)
-            .view(w_o, w_i)
-        )
+        linear.weight.data = (W_.view(w_o, -1, size) * layernorm.weight.double()).to(linear_dtype).view(w_o, w_i)
 
         if hasattr(layernorm, "bias"):
             if linear.bias is None:
-                linear.bias = torch.nn.Parameter(
-                    torch.zeros(linear.out_features,
-                                dtype=torch.float64).to(W_)
-                )
+                linear.bias = torch.nn.Parameter(torch.zeros(linear.out_features, dtype=torch.float64).to(W_))
             linear.bias.data = linear.bias.data.double() + torch.matmul(
                 W_.view(w_o, -1, size), layernorm.bias.double()
             ).sum(dim=-1)
@@ -197,20 +186,15 @@ def rotate_conv(layer, Q_v, embed_dims):
     dtype = layer.weight.dtype
     weight_shape = layer.weight.data.shape
     layer.weight.data = (
-        torch.matmul(Q_v.T, layer.weight.data.double().view(embed_dims, -1))
-        .to(dtype)
-        .view(weight_shape)
+        torch.matmul(Q_v.T, layer.weight.data.double().view(embed_dims, -1)).to(dtype).view(weight_shape)
     )
     if layer.bias is not None:
         layer.bias.data = torch.matmul(layer.bias.data.double(), Q_v).to(dtype)
 
+
 def rotate_qwen2_5_vl_attention_inputs(layer, Q, is_visual=False) -> None:
     # Rotate the WQ, WK and WV matrices of the self-attention layer.
-    layer_list = (
-        [layer.self_attn.qkv]
-        if not is_visual
-        else [layer.attn.qkv]
-    )
+    layer_list = [layer.self_attn.qkv] if not is_visual else [layer.attn.qkv]
     for W in layer_list:
         dtype = W.weight.dtype
         W_ = W.weight.to(dtype=torch.float64)
@@ -259,41 +243,39 @@ def rotate_qwen2_5_vl_mlp_output(layer, Q, online_hadamard=False):
         b = out_layer.bias.data.to(dtype=torch.float64)
         out_layer.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
 
+
 def rotate_qwen2_5_vl_ov_proj(layer, head_num, head_dim, is_visual=False):
     if is_visual:
         qkv = layer.attn.qkv
         o_proj = layer.attn.proj
 
         qkv_weight = qkv.weight.data
-        split_qkv_weight = qkv_weight.split(qkv.out_features // 3, dim = 0)
+        split_qkv_weight = qkv_weight.split(qkv.out_features // 3, dim=0)
         v_weight = split_qkv_weight[2]
 
         Q = get_orthogonal_matrix(head_dim, mode="hadamard")
         dtype = v_weight.dtype
         W_ = v_weight.to(dtype=torch.float64).T.reshape(-1, head_num, head_dim)
 
-        v_weight = (
-            torch.matmul(W_, Q).reshape(-1, head_num * head_dim).T.to(dtype=dtype)
-        )
+        v_weight = torch.matmul(W_, Q).reshape(-1, head_num * head_dim).T.to(dtype=dtype)
 
-        qkv.weight.data = torch.cat([split_qkv_weight[0], split_qkv_weight[1], v_weight], dim = 0)
+        qkv.weight.data = torch.cat([split_qkv_weight[0], split_qkv_weight[1], v_weight], dim=0)
         if qkv.bias is not None:
             qkv_bias = qkv.bias.data
-            split_qkv_bias = qkv_bias.split(qkv.out_features // 3, dim = 0)
+            split_qkv_bias = qkv_bias.split(qkv.out_features // 3, dim=0)
             v_bias = split_qkv_bias[2]
             v_bias = v_bias.to(dtype=torch.float64).reshape(head_num, head_dim)
             v_bias = torch.matmul(v_bias, Q).to(dtype=dtype).reshape(-1)
-            qkv.bias.data = torch.cat([split_qkv_bias[0], split_qkv_bias[1], v_bias], dim = 0)
+            qkv.bias.data = torch.cat([split_qkv_bias[0], split_qkv_bias[1], v_bias], dim=0)
 
         W_ = o_proj.weight.data.to(dtype=torch.float64).reshape(-1, head_num, head_dim)
-        o_proj.weight.data = (
-            torch.matmul(W_, Q).reshape(-1, head_num * head_dim).to(dtype=dtype)
-        )
+        o_proj.weight.data = torch.matmul(W_, Q).reshape(-1, head_num * head_dim).to(dtype=dtype)
     else:
         v_proj = layer.self_attn.v_proj
         o_proj = layer.self_attn.o_proj
         apply_exact_had_to_linear(v_proj, had_dim=head_dim, output=True)
         apply_exact_had_to_linear(o_proj, had_dim=head_dim, output=False)
+
 
 def rotate_visual_merger(visual_model, Q: torch.Tensor) -> None:
     # Rotate the head.
@@ -302,14 +284,8 @@ def rotate_visual_merger(visual_model, Q: torch.Tensor) -> None:
     q_shape = Q.shape[0]
     o_shape, i_shape = visual_model.merger.mlp[0].weight.shape
 
-    W_ = (
-        visual_model.merger.mlp[0]
-        .weight.to(dtype=torch.float64)
-        .reshape(o_shape, -1, q_shape)
-    )
-    visual_model.merger.mlp[0].weight.data = (
-        torch.matmul(W_, Q).to(dtype=dtype).reshape(o_shape, i_shape).contiguous()
-    )
+    W_ = visual_model.merger.mlp[0].weight.to(dtype=torch.float64).reshape(o_shape, -1, q_shape)
+    visual_model.merger.mlp[0].weight.data = torch.matmul(W_, Q).to(dtype=dtype).reshape(o_shape, i_shape).contiguous()
 
 
 def get_orthogonal_matrix(size, mode, device=utils.DEV):
@@ -319,6 +295,7 @@ def get_orthogonal_matrix(size, mode, device=utils.DEV):
         return random_hadamard_matrix(size, device)
     else:
         raise ValueError(f"Unknown mode {mode}")
+
 
 def rotate_visual_model(visual_model):
     raw_device = next(visual_model.parameters()).device
@@ -356,6 +333,7 @@ def rotate_visual_model(visual_model):
     visual_model.to(raw_device)
     utils.cleanup_memory()
 
+
 def rotate_qwen2_5_vl_embeddings(model, Q) -> None:
     Q = Q.to(model.model.embed_tokens.weight.device)
     dtype = model.model.embed_tokens.weight.data.dtype
@@ -368,6 +346,7 @@ def rotate_qwen2_5_vl_embeddings(model, Q) -> None:
     if model.visual.merger.mlp[2].bias is not None:
         b = model.visual.merger.mlp[2].bias.data.to(dtype=torch.float64)
         model.visual.merger.mlp[2].bias.data = torch.matmul(b, Q).to(dtype=dtype)
+
 
 def rotate_embeddings(model, Q: torch.Tensor) -> None:
     # Rotate the embeddings.

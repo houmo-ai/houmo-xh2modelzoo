@@ -1,18 +1,18 @@
 import torch
 import torch.nn as nn
-from accelerate import dispatch_model
-from accelerate import infer_auto_device_map
-from accelerate import init_empty_weights
+from accelerate import dispatch_model, infer_auto_device_map, init_empty_weights
 from accelerate.hooks import add_hook_to_module
-from accelerate.utils import check_tied_parameters_on_same_device
-from accelerate.utils import extract_model_from_parallel
-from accelerate.utils import find_tied_parameters
-from accelerate.utils import get_balanced_memory
-from accelerate.utils import get_max_memory
-from accelerate.utils import load_offloaded_weights
-from accelerate.utils import offload_weight
-from accelerate.utils import save_offload_index
-from accelerate.utils import set_module_tensor_to_device
+from accelerate.utils import (
+    check_tied_parameters_on_same_device,
+    extract_model_from_parallel,
+    find_tied_parameters,
+    get_balanced_memory,
+    get_max_memory,
+    load_offloaded_weights,
+    offload_weight,
+    save_offload_index,
+    set_module_tensor_to_device,
+)
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 

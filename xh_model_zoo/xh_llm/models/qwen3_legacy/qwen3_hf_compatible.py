@@ -1,18 +1,10 @@
-from typing import Any
-from typing import Optional
-from typing import Type
-from typing import TypeVar
-from typing import Union
+from typing import Any, Optional, Type, TypeVar, Union
 
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
 from tqdm import tqdm
-from transformers import AutoConfig
-from transformers import AutoModelForCausalLM
-from transformers import DynamicCache
-from transformers import GenerationMixin
-from transformers import Qwen3ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, DynamicCache, GenerationMixin, Qwen3ForCausalLM
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import no_init_weights

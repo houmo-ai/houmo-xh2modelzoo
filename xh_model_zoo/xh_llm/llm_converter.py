@@ -1,5 +1,4 @@
-from typing import Any
-from typing import Optional
+from typing import Any, Optional
 
 from transformers import AutoConfig
 from xhquant.api import get_root_logger
@@ -54,6 +53,7 @@ class LLMConverter:
                 converter_cls = Qwen2ConverterXH2a
         elif architecture == "Qwen2_5_VLForConditionalGeneration":
             from .models.qwen2_5_vl import Qwen2_5_VLConverterXH2a
+
             converter_cls = Qwen2_5_VLConverterXH2a
         elif architecture == "LlamaForCausalLM":
             if hasattr(config, "quantization_config"):

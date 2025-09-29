@@ -135,12 +135,14 @@ def format_qwen2_vl_dataset(image, assistant):
         {"role": "assistant", "content": assistant},
     ]
 
-def get_laion_220k_GPT4Vision_captions_from_LIVIS(nsamples, seed, seqlen, model, hf_token, eval_mode=False, cache_dir=None):
+
+def get_laion_220k_GPT4Vision_captions_from_LIVIS(
+    nsamples, seed, seqlen, model, hf_token, eval_mode=False, cache_dir=None
+):
     if hf_token is None:
         tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False, use_auth_token=hf_token)
-
 
     if eval_mode:
         testdata = datasets.load_dataset(
@@ -177,4 +179,6 @@ def get_loaders(
     if "c4" in name:
         return get_c4_new(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
     if "laion/220k-GPT4Vision-captions-from-LIVIS" in name:
-        return get_laion_220k_GPT4Vision_captions_from_LIVIS(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
+        return get_laion_220k_GPT4Vision_captions_from_LIVIS(
+            nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir
+        )

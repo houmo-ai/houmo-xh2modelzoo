@@ -2,10 +2,8 @@ import argparse
 import os.path as osp
 from pathlib import Path
 
-
 from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.cogvlm2 import CogVLM2ConvertConfig
-from xh_model_zoo.xh_llm.models.cogvlm2 import VisionConfig
+from xh_model_zoo.xh_llm.models.cogvlm2 import CogVLM2ConvertConfig, VisionConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme  # isort:skip
 

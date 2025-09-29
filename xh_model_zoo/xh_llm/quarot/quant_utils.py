@@ -3,8 +3,7 @@ import math
 import torch
 import transformers
 
-from . import hadamard_utils
-from . import utils
+from . import hadamard_utils, utils
 
 # import fast_hadamard_transform
 

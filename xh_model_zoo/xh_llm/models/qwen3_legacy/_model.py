@@ -2,29 +2,23 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
-from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
-from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
-from transformers.models.qwen3.modeling_qwen3 import Qwen3Model
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3Attention,
+    Qwen3DecoderLayer,
+    Qwen3ForCausalLM,
+    Qwen3Model,
+    Qwen3RMSNorm,
+    Qwen3RotaryEmbedding,
+)
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
-from xhquant.nn import LLMCache
-from xhquant.nn import MaskedSoftmax
-from xhquant.nn import RMSNorm
-from xhquant.nn import Rope
+from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm, Rope
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES

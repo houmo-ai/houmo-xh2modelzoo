@@ -9,8 +9,7 @@ import yaml
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3MoeForCausalLM
 from xhquant.api import CacheTensor
 
-from xh_model_zoo.datasets.preprocess.mix_search_preprocess import ms_data_preprocess
-
+from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .qwen_moe_convert_config import Qwen3MoeConvertConfig

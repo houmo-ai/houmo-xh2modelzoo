@@ -4,8 +4,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 import transformers
-from diffusers import SD3Transformer2DModel
-from diffusers import StableDiffusion3Pipeline
+from diffusers import SD3Transformer2DModel, StableDiffusion3Pipeline
 from xhquant.api import get_root_logger
 
 

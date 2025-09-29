@@ -1,8 +1,6 @@
 import math
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -10,8 +8,7 @@ import tqdm
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as safetensors_save_file
 
-from . import quant_utils
-from . import utils
+from . import quant_utils, utils
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -98,7 +95,7 @@ class GPTQ:
                 break
             except Exception as e:
                 percdamp += self.damp_auto_increment
-        
+
         if not (0 < percdamp < 1):
             raise ValueError(f"Failed to find Hinv with percdamp {percdamp}")
 
@@ -189,9 +186,8 @@ def load_layer_cache(cache_file: str, layer: nn.Module) -> None:
 
 def process_qwen2_5_vl_batch(batch, device, processor):
     from qwen_vl_utils import process_vision_info
-    text = processor.apply_chat_template(
-        batch, tokenize=False, add_generation_prompt=True
-    )
+
+    text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(batch)
     inputs = processor(
         text=[text],
@@ -222,7 +218,7 @@ def gptq_fwrd(
     ddevice: Optional[torch.device] = None,
     layers_cache_dir: Optional[str] = None,
     is_qwen2_5_vl: bool = False,
-    processor = None,
+    processor=None,
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -234,7 +230,7 @@ def gptq_fwrd(
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.layers
-    
+
     if is_qwen2_5_vl:
         model.visual = model.visual.to(device)
 
@@ -269,7 +265,7 @@ def gptq_fwrd(
                 position_ids.append(kwargs["position_ids"])
                 position_embeddings.append(kwargs["position_embeddings"])
             else:
-                inps[cache["i"]] = inp.to(ddevice)                
+                inps[cache["i"]] = inp.to(ddevice)
                 cache["attention_mask"] = kwargs["attention_mask"]
                 cache["position_ids"] = kwargs["position_ids"]
                 if "position_embeddings" in kwargs:
@@ -384,19 +380,21 @@ def gptq_fwrd(
                 outs = list()
             for j in range(nsamples):
                 if is_qwen2_5_vl:
-                  outs.append(layer(
-                        inps[j].to(device=device, dtype=torch.float32),
-                        attention_mask=attention_mask[j],
-                        position_ids=position_ids[j],
-                        position_embeddings=position_embeddings[j],
-                    )[0].to(device=ddevice, dtype=dtype))
+                    outs.append(
+                        layer(
+                            inps[j].to(device=device, dtype=torch.float32),
+                            attention_mask=attention_mask[j],
+                            position_ids=position_ids[j],
+                            position_embeddings=position_embeddings[j],
+                        )[0].to(device=ddevice, dtype=dtype)
+                    )
                 else:
                     outs[j] = layer(
-                    inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    position_embeddings=position_embeddings,
-                )[0].to(device=ddevice, dtype=dtype)
+                        inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                    )[0].to(device=ddevice, dtype=dtype)
 
             for h in handles:
                 h.remove()
@@ -429,11 +427,11 @@ def gptq_fwrd(
                     )[0].to(device=ddevice, dtype=dtype)
                 else:
                     outs[j] = layer(
-                    inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    position_embeddings=position_embeddings,
-                )[0].to(device=ddevice, dtype=dtype)
+                        inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        position_embeddings=position_embeddings,
+                    )[0].to(device=ddevice, dtype=dtype)
 
         inps, outs = outs, inps
         if layer_cache_file is not None:

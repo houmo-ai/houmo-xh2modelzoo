@@ -2,28 +2,17 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import yaml
-from transformers import AutoConfig
-from transformers import AutoModelForCausalLM
-from transformers import AutoTokenizer
-from transformers import PreTrainedModel
-from transformers import Qwen3ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3ForCausalLM
 from xhquant.api import CacheTensor
 
 from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
-from ..base_converter import BaseConverter
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
-from .qwen3_convert_config import Qwen3ConvertConfig
-from .qwen3_convert_config import Qwen3LegacyConvertConfig
+from .qwen3_convert_config import Qwen3ConvertConfig, Qwen3LegacyConvertConfig
 
 from xhquant.api import (  # type: ignore # isort:skip
     Config,

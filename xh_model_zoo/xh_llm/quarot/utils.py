@@ -7,8 +7,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
-from accelerate import dispatch_model
-from accelerate import infer_auto_device_map
+from accelerate import dispatch_model, infer_auto_device_map
 from accelerate.utils import get_balanced_memory
 
 supported_models = [

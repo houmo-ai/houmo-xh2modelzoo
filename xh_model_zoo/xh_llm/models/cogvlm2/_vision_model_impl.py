@@ -5,8 +5,7 @@ import torch.nn.functional as F
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
 
-from ..builder import XHLLM_TRACEABLE_MODULES
-from ..builder import DynamicRegister
+from ..builder import XHLLM_TRACEABLE_MODULES, DynamicRegister
 
 DType = torch.dtype
 

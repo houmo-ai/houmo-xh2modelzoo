@@ -1,6 +1,5 @@
 import math
-from typing import Optional
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -13,11 +12,13 @@ from ..builder import XHLLM_TRACEABLE_MODULES
 from .modeling_qwen2_5_vl import (
     Qwen2_5_VisionPatchEmbed,  # apply_rotary_pos_emb_vision,; PatchEmbed,; VisionSdpaAttention,
 )
-from .modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
-from .modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
-from .modeling_qwen2_5_vl import Qwen2_5_VLVisionBlock
-from .modeling_qwen2_5_vl import Qwen2_5_VLVisionSdpaAttention
-from .modeling_qwen2_5_vl import rotate_half
+from .modeling_qwen2_5_vl import (
+    Qwen2_5_VisionTransformerPretrainedModel,
+    Qwen2_5_VLVisionAttention,
+    Qwen2_5_VLVisionBlock,
+    Qwen2_5_VLVisionSdpaAttention,
+    rotate_half,
+)
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(

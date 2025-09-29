@@ -1,6 +1,5 @@
 from datasets import load_dataset
-from transformers import WhisperForConditionalGeneration
-from transformers import WhisperProcessor
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 # load model and processor
 processor = WhisperProcessor.from_pretrained("/data02/datasets/whisper_medium")

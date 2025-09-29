@@ -8,20 +8,20 @@ import onnxsim
 import torch
 import torch.nn as nn
 from datasets import load_dataset
-from transformers import WhisperForConditionalGeneration
-from transformers import WhisperProcessor
-from xhquant.api import DeviceType
-from xhquant.api import HMONNXGoldenInference
-from xhquant.api import QuantScheme
-from xhquant.api import convert_onnx_to_hmonnx
-from xhquant.api import create_quant_config
-from xhquant.api import get_root_logger
-from xhquant.api import ptq_quantize
-from xhquant.api import to_frontend_graph
-from xhquant.api import to_quant_graph
-from xhquant.api import xhquant_init
-from xhquant.utils.config import Config
-from xhquant.utils.config import ConfigDict
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from xhquant.api import (
+    DeviceType,
+    HMONNXGoldenInference,
+    QuantScheme,
+    convert_onnx_to_hmonnx,
+    create_quant_config,
+    get_root_logger,
+    ptq_quantize,
+    to_frontend_graph,
+    to_quant_graph,
+    xhquant_init,
+)
+from xhquant.utils.config import Config, ConfigDict
 
 
 class Decoder(nn.Module):

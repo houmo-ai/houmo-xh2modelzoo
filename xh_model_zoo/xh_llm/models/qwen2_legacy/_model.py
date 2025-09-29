@@ -2,12 +2,7 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -16,12 +11,14 @@ import transformers.models
 import transformers.models.qwen2
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
-from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
-from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
-from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
-from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2Attention,
+    Qwen2DecoderLayer,
+    Qwen2ForCausalLM,
+    Qwen2Model,
+    Qwen2RMSNorm,
+    Qwen2RotaryEmbedding,
+)
 from xhquant.api import ConfigDict
 from xhquant.utils import digit_version
 
@@ -34,10 +31,7 @@ else:
 
 
 from xhquant import nn as xhnn
-from xhquant.nn import LLMCache
-from xhquant.nn import MaskedSoftmax
-from xhquant.nn import RMSNorm
-from xhquant.nn import Rope
+from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm, Rope
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES

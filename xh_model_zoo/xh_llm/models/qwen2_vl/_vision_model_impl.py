@@ -4,9 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen2_vl.modeling_qwen2_vl import PatchEmbed  # apply_rotary_pos_emb_vision,
-from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
-from transformers.models.qwen2_vl.modeling_qwen2_vl import VisionSdpaAttention
-from transformers.models.qwen2_vl.modeling_qwen2_vl import rotate_half
+from transformers.models.qwen2_vl.modeling_qwen2_vl import (
+    Qwen2VisionTransformerPretrainedModel,
+    VisionSdpaAttention,
+    rotate_half,
+)
 from xhquant.api import ConfigDict
 from xhquant.utils.registry import DynamicModule
 

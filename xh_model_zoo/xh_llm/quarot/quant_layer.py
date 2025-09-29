@@ -6,10 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import Cache
-from transformers.models.llama.modeling_llama import LlamaAttention
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.models.llama.modeling_llama import repeat_kv
+from transformers.models.llama.modeling_llama import Cache, LlamaAttention, LlamaDecoderLayer, repeat_kv
 
 from .quant_ops import *
 

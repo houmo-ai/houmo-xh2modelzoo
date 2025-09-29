@@ -8,6 +8,13 @@
 
 使用xhquanttool工程的python环境
 
+## 安装
+
+```bash
+pip install -e . 
+或者 uv pip install -e . --link-mode=copy
+```
+
 ## 代码提交  
 
 ```拉取代码

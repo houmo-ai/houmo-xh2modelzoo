@@ -5,8 +5,7 @@ import shutil
 import sys
 import warnings
 
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import find_packages, setup
 
 EXT_TYPE = ""
 try:
@@ -182,7 +181,7 @@ def get_version():
 if __name__ == "__main__":
     add_mim_extension()
     setup(
-        name="xh_model_zoo",
+        name="xhmodel_zoo",
         version=get_version(),
         # description=(
         #     ""

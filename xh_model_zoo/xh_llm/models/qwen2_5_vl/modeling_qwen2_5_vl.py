@@ -24,31 +24,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import math
 from dataclasses import dataclass
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file
 from torch.nn import CrossEntropyLoss
+from transformers import AutoConfig
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache
-from transformers.cache_utils import DynamicCache
-from transformers.cache_utils import SlidingWindowCache
-from transformers.cache_utils import StaticCache
+from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.modeling_outputs import ModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
 from transformers.utils import (
+    SAFE_WEIGHTS_INDEX_NAME,
+    SAFE_WEIGHTS_NAME,
+    WEIGHTS_NAME,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
@@ -56,13 +55,6 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-from safetensors.torch import load_file
-from transformers.utils import WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
-from transformers import AutoConfig
-import json
-from pathlib import Path
-import torch
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
@@ -1592,6 +1584,7 @@ def _remap_qwen2_5_vl_keys(state_dict: dict) -> dict:
         remapped[new_k] = v
     return remapped
 
+
 class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     config_class = Qwen2_5_VLConfig
@@ -1608,7 +1601,7 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
         # Initialize weights and apply final processing
         self.post_init()
 
-# 放到你的 Qwen2_5_VLForConditionalGeneration 定义内，作为 @classmethod 覆写
+    # 放到你的 Qwen2_5_VLForConditionalGeneration 定义内，作为 @classmethod 覆写
 
     @classmethod
     def from_pretrained(cls, pretrained_model_path: str, *args, **kwargs):
@@ -1633,8 +1626,8 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                     if key in shard_sd:
                         state_dict[key] = shard_sd[key]
         else:
-            st_safe = p / SAFE_WEIGHTS_NAME   # model.safetensors
-            st_pt = p / WEIGHTS_NAME          # pytorch_model.bin
+            st_safe = p / SAFE_WEIGHTS_NAME  # model.safetensors
+            st_pt = p / WEIGHTS_NAME  # pytorch_model.bin
             if st_safe.exists():
                 state_dict = load_file(str(st_safe), device="cpu")
             elif st_pt.exists():

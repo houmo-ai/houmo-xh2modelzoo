@@ -2,18 +2,12 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
-from transformers import AutoConfig
-from transformers import AutoModelForCausalLM
-from transformers import PreTrainedModel
-from transformers import Qwen3ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen3ForCausalLM
 
-from ..base_converter import BaseConverter
-from ..base_converter import HFTransfromersConverter
+from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .qwen3_convert_config import Qwen3ConvertConfig
 

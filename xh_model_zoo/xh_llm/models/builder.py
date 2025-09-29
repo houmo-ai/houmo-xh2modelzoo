@@ -1,12 +1,10 @@
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 import accelerate
 import torch.nn as nn
 from xhquant.api import ConfigDict
 from xhquant.utils.logger import get_root_logger
-from xhquant.utils.registry.dynamic_module import DynamicModule
-from xhquant.utils.registry.dynamic_module import _DMRegistryCls
+from xhquant.utils.registry.dynamic_module import DynamicModule, _DMRegistryCls
 
 XHLLM_TRACEABLE_MODULES = _DMRegistryCls("XHTrace")
 

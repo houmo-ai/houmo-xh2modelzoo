@@ -4,13 +4,10 @@ from typing import List
 
 import torch
 from PIL import ImageDraw
-from xhquant.api import get_root_logger
-from xhquant.api import set_random_seed
-from xhquant.api import xhquant_init
+from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
 from xh_model_zoo.utils.time_profiler import TimeProfiler
-from xh_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAHFCompatible
-from xh_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAInference
+from xh_model_zoo.xh_aigc.models.sd3_custom_a import SD3CustomAHFCompatible, SD3CustomAInference
 
 
 def main(args):

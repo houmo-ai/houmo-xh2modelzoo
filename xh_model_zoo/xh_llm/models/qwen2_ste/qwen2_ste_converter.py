@@ -3,9 +3,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import onnx
@@ -17,11 +15,8 @@ from sentence_transformers import SentenceTransformer
 from shapely import length
 from torch import Tensor
 from tqdm.autonotebook import trange
-from transformers import AutoModel
-from transformers import BertModel
-from xhquant.api import convert_onnx_to_hmonnx
-from xhquant.api import get_root_logger
-from xhquant.api import xhquant_init
+from transformers import AutoModel, BertModel
+from xhquant.api import convert_onnx_to_hmonnx, get_root_logger, xhquant_init
 
 from ..base_converter import HFTransfromersConverter
 from .qwen2_ste_convert_config import SteQwen2ConvertConfig

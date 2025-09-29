@@ -3,8 +3,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from awq.modules.linear.gemm import WQLinear_GEMM
-from awq.utils.packing_utils import reverse_awq_order
-from awq.utils.packing_utils import unpack_awq
+from awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
 from transformers.utils.quantization_config import QuantizationMethod
 
@@ -17,9 +16,7 @@ class Qwen3GPTQConverterXH2a(Qwen3ConverterXH2a):
         hf_model = super().load_hf_model(hf_model_dir, **kwargs)
         assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
 
-        from auto_gptq.nn_modules.qlinear import qlinear_cuda
-        from auto_gptq.nn_modules.qlinear import qlinear_cuda_old
-        from auto_gptq.nn_modules.qlinear import qlinear_triton
+        from auto_gptq.nn_modules.qlinear import qlinear_cuda, qlinear_cuda_old, qlinear_triton
 
         for name, module in hf_model.named_modules():
             if isinstance(module, qlinear_cuda_old.QuantLinear):

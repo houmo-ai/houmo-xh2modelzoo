@@ -8,15 +8,15 @@ from pathlib import Path
 import onnx
 import torch
 from PIL import Image
-from transformers import AutoConfig
-from transformers import AutoModelForCausalLM
-from transformers import AutoProcessor
+from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VisionTransformerPretrainedModel
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-from xhquant.api import convert_fx_model_to_hmonnx
-from xhquant.api import convert_fx_model_to_quanted_model
-from xhquant.api import convert_onnx_to_hmonnx
-from xhquant.api import convert_quanted_model_to_hmonnx
+from xhquant.api import (
+    convert_fx_model_to_hmonnx,
+    convert_fx_model_to_quanted_model,
+    convert_onnx_to_hmonnx,
+    convert_quanted_model_to_hmonnx,
+)
 
 from ..base_converter import HFTransfromersConverter
 from ..builder import wrap_llm_model

@@ -1,22 +1,16 @@
 import math
 import sys
 import types
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from xhquant import nn as xhnn
-from xhquant.nn import LLMCache
-from xhquant.nn import RMSNorm
+from xhquant.nn import LLMCache, RMSNorm
 
-from ..builder import XHLLM_TRACEABLE_MODULES
-from ..builder import DynamicRegister
+from ..builder import XHLLM_TRACEABLE_MODULES, DynamicRegister
 
 DType = torch.dtype
 

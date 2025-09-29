@@ -14,8 +14,7 @@ from loguru import logger
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
-from transformers import AutoConfig
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def parse_arguments():
