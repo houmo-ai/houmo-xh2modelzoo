@@ -12,19 +12,15 @@ from ..builder import XHLLM_TRACEABLE_MODULES
 from .modeling_qwen2_5_vl import (
     Qwen2_5_VisionPatchEmbed,  # apply_rotary_pos_emb_vision,; PatchEmbed,; VisionSdpaAttention,
 )
-from .modeling_qwen2_5_vl import (
-    Qwen2_5_VisionTransformerPretrainedModel,
-    Qwen2_5_VLVisionAttention,
-    Qwen2_5_VLVisionBlock,
-    Qwen2_5_VLVisionSdpaAttention,
-    rotate_half,
-)
+from .modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+from .modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
+from .modeling_qwen2_5_vl import Qwen2_5_VLVisionBlock
+from .modeling_qwen2_5_vl import rotate_half
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen2_5_VLVisionAttention: "Qwen2_5_VLVisionAttention",
-        Qwen2_5_VLVisionSdpaAttention: "Qwen2_5_VLVisionSdpaAttention",
     }
 )
 class _Qwen2_5_VLVisionAttention(DynamicModule):

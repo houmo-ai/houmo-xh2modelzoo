@@ -14,15 +14,12 @@ from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
-from .modeling_qwen2_5_vl import (
-    Qwen2_5_VLAttention,
-    Qwen2_5_VLDecoderLayer,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLModel,
-    Qwen2_5_VLRotaryEmbedding,
-    Qwen2_5_VLSdpaAttention,
-    Qwen2RMSNorm,
-)
+from .modeling_qwen2_5_vl import Qwen2_5_VLAttention
+from .modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
+from .modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from .modeling_qwen2_5_vl import Qwen2_5_VLModel
+from .modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding
+from .modeling_qwen2_5_vl import Qwen2RMSNorm
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen2RMSNorm: "Qwen2RMSNorm"})
@@ -97,12 +94,7 @@ class _Qwen2_5_VLRotaryEmbedding(DynamicModule):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {
-        Qwen2_5_VLAttention: "Qwen2_5_VLAttention",
-    }
-)
-@XHLLM_TRACEABLE_MODULES.register_module({Qwen2_5_VLSdpaAttention: "Qwen2_5_VLAttention"})
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen2_5_VLAttention: "Qwen2_5_VLAttention"})
 class _Qwen2_5_VLAttention(DynamicModule):
     def rotate_half(self, x: Tensor):
         """Rotates half the hidden dims of the input."""
@@ -377,6 +369,8 @@ class _Qwen2_5_VLModel(DynamicModule):
         self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
 
+        self.rotary_emb = self.language_model.rotary_emb
+
         if not hasattr(self.rotary_emb, "cos_cached"):
             self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
         else:
@@ -411,7 +405,7 @@ class _Qwen2_5_VLModel(DynamicModule):
         sin = torch.stack(sin_pos_embeddings, dim=0)
 
         # apply_multimodal_rotary_pos_emb的部分
-        mrope_section = self.layers[0].self_attn.rope_scaling["mrope_section"]
+        mrope_section = self.language_model.layers[0].self_attn.rope_scaling["mrope_section"]
 
         mrope_section = mrope_section * 2  # [16,24,24,16,24,24]
         cos_splits = cos.split(mrope_section, dim=-1)
@@ -431,7 +425,7 @@ class _Qwen2_5_VLModel(DynamicModule):
         sin = sin.unsqueeze(1)
         position_embeddings = (cos, sin)
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for idx, decoder_layer in enumerate(self.language_model.layers):
             if self.use_cache:
                 _past_k_cache = past_key_cache[idx]
                 _past_v_cache = past_value_cache[idx]
@@ -462,7 +456,7 @@ class _Qwen2_5_VLModel(DynamicModule):
         else:
             # 取最后一个token的输出
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.language_model.norm(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -477,7 +471,7 @@ class _Qwen2_5_VLModel(DynamicModule):
 class _Qwen2_5_VLForConditionalGeneration(DynamicModule):
     def _setup(self, cfg: ConfigDict):
         self.cfg = cfg
-        del self.visual
+        del self.model.visual
         # del self.visual
 
     def forward(

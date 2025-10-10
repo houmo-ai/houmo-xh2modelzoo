@@ -332,7 +332,6 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         hf_config_dir = Path(work_dir) / "hf_config"
         hf_config_dir.mkdir(exist_ok=True, parents=True)
         hf_config_files = [
-            "chat_template.json",
             "config.json",
             "generation_config.json",
             "preprocessor_config.json",
@@ -340,11 +339,25 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             "vocab.json",
             "tokenizer.json",
         ]
+        
+        # 处理chat_template文件，优先使用.jinja格式
+        chat_template_jinja_path = Path(hf_model_path) / "chat_template.jinja"
+        chat_template_json_path = Path(hf_model_path) / "chat_template.json"
+        
+        if chat_template_jinja_path.exists():
+            shutil.copyfile(chat_template_jinja_path, Path(hf_config_dir) / "chat_template.jinja")
+        elif chat_template_json_path.exists():
+            shutil.copyfile(chat_template_json_path, Path(hf_config_dir) / "chat_template.json")
+        else:
+            print(f"Warning: Neither chat_template.jinja nor chat_template.json found in {hf_model_path}")
+        
+        # 复制其他配置文件
         for cfg_file in hf_config_files:
-            shutil.copyfile(
-                Path(hf_model_path) / cfg_file,
-                Path(hf_config_dir) / cfg_file,
-            )
+            source_path = Path(hf_model_path) / cfg_file
+            if source_path.exists():
+                shutil.copyfile(source_path, Path(hf_config_dir) / cfg_file)
+            else:
+                print(f"Warning: {cfg_file} not found in {hf_model_path}")
         meta_info["hf_config"] = str(hf_config_dir.relative_to(work_dir))
 
         token_embedding = native_model.model.get_input_embeddings()

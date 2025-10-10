@@ -2,6 +2,8 @@ import argparse
 import os.path as osp
 from pathlib import Path
 
+import torch
+
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor
 
@@ -23,14 +25,7 @@ def demo(model, processor):
     raw_device = next(model.parameters()).device
     # model.to(utils.DEV)
 
-    no_split_module_classes = [
-        "LlamaDecoderLayer",
-        "QuantDecoderLayer",
-        "RotateModule",
-        "SmoothModule",
-        "Qwen2DecoderLayer",
-        "Qwen2_5_VLDecoderLayer",
-    ]
+    no_split_module_classes = ['LlamaDecoderLayer','QuantDecoderLayer',"RotateModule","SmoothModule","Qwen2DecoderLayer", "Qwen2_5_VLDecoderLayer", "Qwen2_5_VLVisionBlock"]
     max_memory = get_balanced_memory(model, no_split_module_classes=no_split_module_classes)
     device_map = infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=no_split_module_classes)
     dispatch_model(
@@ -75,10 +70,6 @@ def demo(model, processor):
     model.to(raw_device)
     utils.cleanup_memory()
 
-
-import torch
-
-
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -107,7 +98,7 @@ def main(args):
 
     processor = AutoProcessor.from_pretrained(hf_model_path)
 
-    demo(native_model, processor)
+    # demo(native_model, processor)
 
     # ops=dict(MatMul=dict(
     #             act_scheme=dict(
