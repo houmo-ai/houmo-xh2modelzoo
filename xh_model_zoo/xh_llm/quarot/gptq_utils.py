@@ -229,14 +229,24 @@ def gptq_fwrd(
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.layers
 
     if is_qwen2_5_vl:
-        model.visual = model.visual.to(device)
+        layers = model.model.language_model.layers
+    else:
+        layers = model.model.layers
 
-    model.model.embed_tokens = model.model.embed_tokens.to(device)
-    model.model.norm = model.model.norm.to(device)
-    model.model.rotary_emb = model.model.rotary_emb.to(device)
+    if is_qwen2_5_vl:
+        model.model.visual = model.model.visual.to(device)
+
+    if is_qwen2_5_vl:
+        model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.to(device)
+        model.model.language_model.norm = model.model.language_model.norm.to(device)
+        model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.to(device)
+    else:
+        model.model.embed_tokens = model.model.embed_tokens.to(device)
+        model.model.norm = model.model.norm.to(device)
+        model.model.rotary_emb = model.model.rotary_emb.to(device)
+
     layers[0] = layers[0].to(device)
     dtype = model.lm_head.weight.dtype
     # dtype = next(iter(model.parameters())).dtype
@@ -257,6 +267,8 @@ def gptq_fwrd(
         def __init__(self, module):
             super().__init__()
             self.module = module
+            if is_qwen2_5_vl:
+                self.attention_type = module.attention_type
 
         def forward(self, inp, **kwargs):
             if is_qwen2_5_vl:
@@ -288,9 +300,14 @@ def gptq_fwrd(
             pass
 
     layers[0] = layers[0].module.cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
-    model.model.rotary_emb = model.model.rotary_emb.cpu()
+    if is_qwen2_5_vl:
+        model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.cpu()
+        model.model.language_model.norm = model.model.language_model.norm.cpu()
+        model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.cpu()
+    else:
+        model.model.embed_tokens = model.model.embed_tokens.cpu()
+        model.model.norm = model.model.norm.cpu()
+        model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
 
     if is_qwen2_5_vl:

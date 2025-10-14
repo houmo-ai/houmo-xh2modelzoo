@@ -84,16 +84,16 @@ def fuse_layer_norms(model, device=None):
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
-        for layer in model.visual.blocks:
+        for layer in model.model.visual.blocks:
             fuse_ln_linear(layer.norm1, [layer.attn.qkv])
             layer.norm1.weight.fill_(1.0)
             fuse_ln_linear(layer.norm2, [layer.mlp.gate_proj, layer.mlp.up_proj])
             layer.norm2.weight.fill_(1.0)
         fuse_merger_linear(
-            model.visual.merger.ln_q,
-            [model.visual.merger.mlp[0]],
+            model.model.visual.merger.ln_q,
+            [model.model.visual.merger.mlp[0]],
         )
-        model.visual.merger.ln_q.weight.fill_(1.0)
+        model.model.visual.merger.ln_q.weight.fill_(1.0)
 
     layers = model_utils.get_transformer_layers(**kwargs)
     # Fuse the linear operations in Layernorm into the adjacent linear blocks.
@@ -157,9 +157,12 @@ def fuse_layer_norms(model, device=None):
         model_utils.get_pre_head_layernorm(**kwargs),
         [model_utils.get_lm_head(**kwargs)],
     )
-
-    model.model.norm.weight.fill_(1.0)
-    model.model.norm.fuse_weight = True
+    if model_type == model_utils.QWEN2_5_VL_MODEL:
+       model.model.language_model.norm.weight.fill_(1.0)
+       model.model.language_model.norm.fuse_weight = True
+    else:
+        model.model.norm.weight.fill_(1.0)
+        model.model.norm.fuse_weight = True
 
 
 def random_orthogonal_matrix(size, device):
@@ -335,10 +338,10 @@ def rotate_visual_model(visual_model):
 
 
 def rotate_qwen2_5_vl_embeddings(model, Q) -> None:
-    Q = Q.to(model.model.embed_tokens.weight.device)
-    dtype = model.model.embed_tokens.weight.data.dtype
-    W_ = model.model.embed_tokens.weight.data.to(dtype=torch.float64)
-    model.model.embed_tokens.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+    Q = Q.to(model.language_model.embed_tokens.weight.device)
+    dtype = model.language_model.embed_tokens.weight.data.dtype
+    W_ = model.language_model.embed_tokens.weight.data.to(dtype=torch.float64)
+    model.language_model.embed_tokens.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
 
     Q = Q.to(model.visual.merger.mlp[2].weight.device)
     W_ = model.visual.merger.mlp[2].weight.data.to(dtype=torch.float64)
@@ -584,10 +587,10 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None):
     model_type = model_utils.model_type_extractor(model)
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
-        rotate_visual_model(model.visual)
+        rotate_visual_model(model.model.visual)
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
-        rotate_qwen2_5_vl_embeddings(model, Q)
+        rotate_qwen2_5_vl_embeddings(model.model, Q)
     else:
         rotate_embeddings(model, Q)
     rotate_head(model, Q)

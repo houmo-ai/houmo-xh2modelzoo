@@ -142,8 +142,10 @@ def get_model_type(model):
 
 
 def get_embeddings(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         return [model.model.embed_tokens]
+    elif model_type == QWEN2_5_VL_MODEL:
+        return [model.model.language_model.embed_tokens]
     elif model_type == OPT_MODEL:
         return [model.model.decoder.embed_tokens, model.model.decoder.embed_positions]
     else:
@@ -151,8 +153,10 @@ def get_embeddings(model, model_type):
 
 
 def get_transformer_layers(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         return [layer for layer in model.model.layers]
+    elif model_type == QWEN2_5_VL_MODEL:
+        return [layer for layer in model.model.language_model.layers]
     elif model_type == OPT_MODEL:
         return [layer for layer in model.model.decoder.layers]
     else:
@@ -172,8 +176,10 @@ def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
         assert isinstance(pre_head_layernorm, transformers.models.llama.modeling_llama.LlamaRMSNorm)
-    elif model_type in [QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3MOE_MODEL]:
+    elif model_type in [QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
         pre_head_layernorm = model.model.norm
+    elif model_type == QWEN2_5_VL_MODEL:
+        pre_head_layernorm = model.model.language_model.norm
     elif model_type == OPT_MODEL:
         pre_head_layernorm = model.model.decoder.final_layer_norm
         assert pre_head_layernorm is not None

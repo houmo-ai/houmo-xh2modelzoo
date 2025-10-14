@@ -110,6 +110,10 @@ def main():
     if not args.skip_gptq:
         cfg_name += "_gptq"
 
+    # INSERT_YOUR_CODE
+    # 增加transformers版本信息到cfg_name
+    cfg_name += f"_transformers-{transformers.__version__}"
+
     work_dir = Path(out_dir) / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
     config = AutoConfig.from_pretrained(hf_model_dir)
