@@ -42,10 +42,10 @@ class _Qwen2RMSNorm(DynamicModule):
 class _Qwen2_5_VLRotaryEmbedding(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         assert "dynamic" not in self.rope_type, f"{self.rope_type} is not supported in dynamic mode"
-        max_sequence_length = cfg.max_sequence_length
+        max_pe_length = cfg.max_pe_length
         # self.max_position_embeddings = max_position_embeddings
         # Build here to make `torch.jit.trace` work.
-        self._setup_cos_sin_cache(seq_len=max_sequence_length, dtype=self.inv_freq.dtype)
+        self._setup_cos_sin_cache(seq_len=max_pe_length, dtype=self.inv_freq.dtype)
         if hasattr(self, "setup_after_callback"):
             self.setup_after_callback()
 
@@ -55,8 +55,17 @@ class _Qwen2_5_VLRotaryEmbedding(DynamicModule):
         """
         position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0)
         position_ids = position_ids.unsqueeze(0).repeat(3, 1, 1)
-        self.inv_freq = self.inv_freq.to(torch.float16)
+        # self.inv_freq = self.inv_freq.to(torch.float16)
+        # cos, sin = self.forward(self.inv_freq, position_ids)
+
+        inv_freq = self.inv_freq.to(torch.float32)
+        device = self.inv_freq.device
+        if torch.cuda.is_available() and inv_freq.device.type != "cuda":
+            inv_freq = self.inv_freq.cuda()
         cos, sin = self.forward(self.inv_freq, position_ids)
+        cos = cos.to(device)
+        sin = sin.to(device)
+
         sin = sin.squeeze(0)
         cos = cos.squeeze(0)
         self.register_buffer("sin_cached", sin.to(dtype=dtype), persistent=False)

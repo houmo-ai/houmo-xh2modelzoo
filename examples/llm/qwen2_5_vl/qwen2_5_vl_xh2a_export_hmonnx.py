@@ -8,7 +8,7 @@ from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor
 
 from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig
+from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig, VisualConfig
 from xh_model_zoo.xh_llm.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
@@ -115,6 +115,14 @@ def main(args):
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
         gptqmodel_cfg=args.use_gptqmodel,
+        max_pe_length=args.max_pe_length,
+        visual_config=VisualConfig(
+            image_max_size_h=args.image_max_size_h,
+            image_max_size_w=args.image_max_size_w,
+            image_max_size_t=args.image_max_size_t,
+            temporal_patch_size=args.temporal_patch_size,
+            patch_size=args.patch_size,
+        ),
     )
 
     prefix = f"{model_name}-{target_device}"
@@ -133,10 +141,13 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
+    parser.add_argument("--max_pe_length", type=int, default=32768, help="max pe length")
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
-    parser.add_argument("--image_max_size_h", type=int, default=364, help="image max size height")
-    parser.add_argument("--image_max_size_w", type=int, default=644, help="image max size width")
+    parser.add_argument("--image_max_size_h", type=int, default=448, help="image max size height")
+    parser.add_argument("--image_max_size_w", type=int, default=448, help="image max size width")
+    parser.add_argument("--image_max_size_t", type=int, default=2, help="if image, temporal max size is 2, if video, temporal max size is fps")
     parser.add_argument("--patch_size", type=int, default=14, help="patch size")
+    parser.add_argument("--temporal_patch_size", type=int, default=2, help="temporal patch size")
     parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
     parser.add_argument(
         "--quant_weight",

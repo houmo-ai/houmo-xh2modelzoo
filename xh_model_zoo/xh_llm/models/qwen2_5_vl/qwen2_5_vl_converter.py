@@ -208,7 +208,9 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         wrap_cfg = dict(
             max_size_w=self.config.visual_config.image_max_size_w,
             max_size_h=self.config.visual_config.image_max_size_h,
+            max_size_t=self.config.visual_config.image_max_size_t,
             patch_size=self.config.visual_config.patch_size,
+            temporal_patch_size=self.config.visual_config.temporal_patch_size,
         )
         vision_register_wrap_cls(hf_model)
         wraped_vision_model = wrap_llm_model(visual, wrap_cfg)
@@ -216,6 +218,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         wraped_vision_model.cpu()
 
         hm_pixel_values = inputs["hm_pixel_values"][0].type(wraped_vision_model.dtype).to(wraped_vision_model.device)
+        hm_pixel_values = hm_pixel_values.unsqueeze(2).repeat(1, 1, self.config.visual_config.image_max_size_t, 1, 1)
         window_index = wraped_vision_model.window_index
         attention_bias = wraped_vision_model.attention_bias
 
@@ -238,9 +241,15 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         logger.info(f"simplify onnx model............")
         onnx_model, check = simplify_large_onnx(onnx_model)
 
+        input_args = [hm_pixel_values.float().cpu(), window_index.cpu()]
+        if not (self.config.visual_config.image_max_size_w % 112 and self.config.visual_config.image_max_size_h % 112):
+            pass
+        else:
+            input_args.append(attention_bias.cpu())
+
         convert_onnx_to_hmonnx(
             onnx_model,
-            [hm_pixel_values.float().cpu(), window_index.cpu(), attention_bias.cpu()],
+            input_args,
             self.target_device,
             vision_hmonnx_file,
         )
@@ -257,12 +266,14 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         Path(golden_dir).mkdir(exist_ok=True, parents=True)
         vision_model.golden_dir = str(golden_dir)
 
+        input_args = [hm_pixel_values.to(torch.device("cuda:0")).half(), window_index.to(torch.device("cuda:0")).int()]
+        if not (self.config.visual_config.image_max_size_w % 112 and self.config.visual_config.image_max_size_h % 112):
+            pass
+        else:
+            input_args.append(attention_bias.to(torch.device("cuda:0")).half())
+
         with torch.no_grad():
-            vision_model.forward(
-                hm_pixel_values.to(torch.device("cuda:0")).half(),
-                window_index.to(torch.device("cuda:0")).int(),
-                attention_bias.to(torch.device("cuda:0")).half(),
-            )
+            vision_model.forward(*input_args)       
         logger.info(f"Export vision model golden to {golden_dir}")
 
     def _convert(self, hf_model_path: str, output_dir: str):
@@ -294,6 +305,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
         batch_size = config.batch_size
         context_length = config.context_length
         input_sequence_length = config.input_sequence_length
+        max_pe_length = config.max_pe_length
         assert target_device == DeviceType.XH2a, f"Only support convert to XH2a, but got {target_device}"
 
         quant_config = create_quant_config(config.quant_scheme)
@@ -307,6 +319,7 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
             dict(
                 batch_size=batch_size,
                 max_sequence_length=context_length,
+                max_pe_length=max_pe_length,
                 input_sequence_length=input_sequence_length,
                 use_cache=True,
                 num_logits_to_keep=1,
@@ -316,6 +329,8 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
                 visual=dict(
                     image_max_size_h=config.visual_config.image_max_size_h,
                     image_max_size_w=config.visual_config.image_max_size_w,
+                    image_max_size_t=config.visual_config.image_max_size_t,
+                    temporal_patch_size=config.visual_config.temporal_patch_size,
                     patch_size=config.visual_config.patch_size,
                 ),
             )
@@ -393,8 +408,11 @@ class Qwen2_5_VLConverterXH2a(HFTransfromersConverter):
 
         image_max_size_h = wrap_cfg.visual.image_max_size_h
         image_max_size_w = wrap_cfg.visual.image_max_size_w
+        image_max_size_t = wrap_cfg.visual.image_max_size_t
         patch_size = wrap_cfg.visual.patch_size
+        temporal_patch_size = wrap_cfg.visual.temporal_patch_size
         assert patch_size == 14, f"Only support patch size 14, but got {patch_size}"
+        assert temporal_patch_size == 2, f"Only support temporal patch size 2, but got {temporal_patch_size}"
 
         w, h = image_inputs[0].size
         scale = image_max_size_w / w, image_max_size_h / h

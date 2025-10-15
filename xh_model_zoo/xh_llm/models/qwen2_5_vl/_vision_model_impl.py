@@ -14,6 +14,7 @@ from .modeling_qwen2_5_vl import (
 )
 from .modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
 from .modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
+from .modeling_qwen2_5_vl import Qwen2_5_VLPatchMerger
 from .modeling_qwen2_5_vl import Qwen2_5_VLVisionBlock
 from .modeling_qwen2_5_vl import rotate_half
 
@@ -45,6 +46,13 @@ class _Qwen2_5_VLVisionAttention(DynamicModule):
         self.max_size_w = cfg.max_size_w
         self.max_size_h = cfg.max_size_h
         self.patch_size = cfg.patch_size
+
+        self.window_size = 112
+
+        self.window_nums = self.window_size // self.patch_size * self.window_size // self.patch_size
+        
+        self.window_optimizer = not (self.max_size_w % self.window_size and self.max_size_h % self.window_size)
+
         head_dim = self.qkv.out_features // 3 // self.num_heads
         # assert head_dim == 80  # 80
 
@@ -75,33 +83,49 @@ class _Qwen2_5_VLVisionAttention(DynamicModule):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        seq_length = hidden_states.shape[0]
+        batch, seq_length = hidden_states.shape[:2]
         # q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
-        q = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        k = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        v = self.v_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+        q = self.q_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        v = self.v_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
         cos, sin = position_embeddings
         q, k = self.apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
-        # for i in range(1, len(cu_seqlens)):
-        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
-        k = k.transpose(-2, -1)
-        q = q * self.kv_scale
-        dtype = q.dtype
-        attn_weights = torch.matmul(q, k).to(dtype)
-        if attention_mask is not None:
-            attn_weights += attention_mask
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
-        attn_output = torch.matmul(attn_weights, v)
+        if self.window_optimizer and attention_mask is not None:
+            q = q.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
+            k = k.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
+            v = v.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
 
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
-        attn_output = self.proj(attn_output)
-        return attn_output
+            k = k.transpose(-2, -1)
+            q = q * self.kv_scale
+            dtype = q.dtype
+            attn_weights = torch.matmul(q, k).to(dtype)
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+            attn_output = torch.matmul(attn_weights, v)
+
+            attn_output = attn_output.reshape(batch, self.num_heads, seq_length, -1)
+            attn_output = attn_output.transpose(1, 2)
+            attn_output = attn_output.reshape(batch, seq_length, -1)
+            attn_output = self.proj(attn_output)
+            return attn_output
+        else:
+            k = k.transpose(-2, -1)
+            q = q * self.kv_scale
+            dtype = q.dtype
+            attn_weights = torch.matmul(q, k).to(dtype)
+            if attention_mask is not None:
+                attn_weights += attention_mask
+                attn_weights += attention_mask
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+            attn_output = torch.matmul(attn_weights, v)
+            
+            attn_output = attn_output.transpose(1, 2)
+            attn_output = attn_output.reshape(batch, seq_length, -1)
+            attn_output = self.proj(attn_output)
+            return attn_output
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(
@@ -185,15 +209,35 @@ class _Qwen2_5_VisionPatchEmbed(DynamicModule):
         assert self.temporal_patch_size == 2, "temporal_patch_size must be 2"
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        y1 = self.proj1(hidden_states)
-        y2 = self.proj2(hidden_states)
+        # hidden_states: [b, c, t, h, w]
+        b, c, t, h, w = hidden_states.shape
+        t_new = t // self.temporal_patch_size
+        hidden_states = hidden_states.reshape(b, c, t_new, self.temporal_patch_size, h, w)
+        hidden_states = hidden_states.permute(0, 2, 1, 3, 4, 5).reshape(b * t_new, c, self.temporal_patch_size, h, w)
+        hidden_states0, hidden_states1 = hidden_states.unbind(2)
+        y1 = self.proj1(hidden_states0)
+        y2 = self.proj2(hidden_states1)
         hidden_states = y1 + y2
-
-        b, c, h, w = hidden_states.shape
-        hidden_states = hidden_states.reshape(b, c, h // 2, 2, w // 2, 2)
-        hidden_states = hidden_states.permute(0, 2, 4, 3, 5, 1)
-        hidden_states = hidden_states.reshape(-1, c)
+        
+        _, c, h, w = hidden_states.shape
+        hidden_states = hidden_states.reshape(b, t_new, c, h // 2, 2, w // 2, 2)
+        hidden_states = hidden_states.permute(0, 1, 3, 5, 4, 6, 2)
+        hidden_states = hidden_states.reshape(b, -1, c)
         return hidden_states
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VLPatchMerger: "Qwen2_5_VLPatchMerger",
+    }
+)
+class _Qwen2_5_VLPatchMerger(DynamicModule):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.shape[0]
+        return self.mlp(self.ln_q(x).view(batch, -1, self.hidden_size))
+
+    def _setup(self, cfg: ConfigDict):
+        pass
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(
@@ -209,9 +253,12 @@ class Qwen2_5_VisionTransformerPretrainedModel(DynamicModule):
         device = next(self.parameters()).device
         self.max_size_w = cfg.max_size_w
         self.max_size_h = cfg.max_size_h
+        self.max_size_t = cfg.max_size_t
+        self.temporal_patch_size = cfg.temporal_patch_size
         grid_size_w = self.max_size_w // self.patch_size
         grid_size_h = self.max_size_h // self.patch_size
-        seq_length = grid_size_w * grid_size_h
+        grid_size_t = self.max_size_t // self.temporal_patch_size
+        seq_length = grid_size_t * grid_size_h * grid_size_w
 
         assert self.max_size_w % self.patch_size == 0, "max_size_w must be divisible by patch_size"
         assert self.max_size_h % self.patch_size == 0, "max_size_h must be divisible by patch_size"
@@ -357,10 +404,10 @@ class Qwen2_5_VisionTransformerPretrainedModel(DynamicModule):
         cos = self.cos
         sin = self.sin
         position_embeddings = (cos, sin)
-        seq_len, dim = hidden_states.size()
-        hidden_states = hidden_states.reshape(-1, self.spatial_merge_unit, dim)
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+        batch, seq_len, dim = hidden_states.size()
+        hidden_states = hidden_states.reshape(batch, -1, self.spatial_merge_unit, dim)
+        hidden_states = hidden_states[:, window_index, :, :]
+        hidden_states = hidden_states.reshape(batch, seq_len, -1)
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -370,7 +417,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(DynamicModule):
 
         hidden_states = self.merger(hidden_states)
         reverse_indices = torch.argsort(window_index)
-        hidden_states = hidden_states[reverse_indices, :]
+        hidden_states = hidden_states[:, reverse_indices, :]
         return hidden_states
 
 
