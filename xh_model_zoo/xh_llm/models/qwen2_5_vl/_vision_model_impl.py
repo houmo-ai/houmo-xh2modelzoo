@@ -89,6 +89,8 @@ class _Qwen2_5_VLVisionAttention(DynamicModule):
         k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
         v = self.v_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
         cos, sin = position_embeddings
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
         q, k = self.apply_rotary_pos_emb(q, k, cos, sin)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
