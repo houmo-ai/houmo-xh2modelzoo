@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from platform import architecture
 from typing import Any, Optional
 
 from transformers import AutoConfig
@@ -6,15 +8,40 @@ from xhquant.api import get_root_logger
 from .llm_convert_config import BaseConvertConfig
 
 
+@dataclass
+class ModelArchitectureMeta:
+    architecture: str
+    doc_string: str
+
+
 class LLMConverter:
     """
     将transformers的模型转换为HMONNX格式
     """
 
     @staticmethod
+    def supported_models() -> list[ModelArchitectureMeta]:
+        return [
+            ModelArchitectureMeta("Qwen2VLForConditionalGeneration", ""),
+            ModelArchitectureMeta("Qwen2_5_VLForConditionalGeneration", ""),
+            ModelArchitectureMeta("Qwen2ForCausalLM", ""),
+            ModelArchitectureMeta("LlamaForCausalLM", ""),
+            ModelArchitectureMeta("CogVLMForCausalLM", ""),
+            ModelArchitectureMeta("Qwen3ForCausalLM_legacy", ""),
+            ModelArchitectureMeta("Qwen3ForCausalLM", ""),
+            ModelArchitectureMeta("Qwen3MoeForCausalLM", ""),
+            ModelArchitectureMeta("Qwen2ForCausalLM_legacy", ""),
+            ModelArchitectureMeta("BertModel_Reranker", ""),
+            ModelArchitectureMeta("gte_qwen2", ""),
+        ]
+
+    @staticmethod
     def from_pretrained(
         pretrained_model_path: str, architecture: Optional[str], convert_config: BaseConvertConfig, out_dir: str
     ):
+        supported_architectures = [model_info.architecture for model_info in LLMConverter.supported_models()]
+        if architecture not in supported_architectures:
+            raise ValueError(f"Unsupported architecture: {architecture}, supported models: {supported_architectures}")
         config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
         if architecture is None:
             architectures = config.architectures
@@ -51,10 +78,7 @@ class LLMConverter:
                 from .models.qwen2 import Qwen2ConverterXH2a
 
                 converter_cls = Qwen2ConverterXH2a
-        elif architecture == "Qwen2_5_VLForConditionalGeneration":
-            from .models.qwen2_5_vl import Qwen2_5_VLConverterXH2a
 
-            converter_cls = Qwen2_5_VLConverterXH2a
         elif architecture == "LlamaForCausalLM":
             if hasattr(config, "quantization_config"):
                 raise ValueError("LlamaForCausalLM does not support quantization")
