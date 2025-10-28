@@ -12,6 +12,8 @@ class VisualConfig:
     patch_size: int = 14
     temporal_patch_size: int = 2
 
+    sample_image_path: str = field(default_factory=str)
+
     def to_dict(self):
         return dataclasses.asdict(self)
 

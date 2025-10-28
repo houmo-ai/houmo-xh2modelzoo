@@ -122,6 +122,7 @@ def main(args):
             image_max_size_t=args.image_max_size_t,
             temporal_patch_size=args.temporal_patch_size,
             patch_size=args.patch_size,
+            sample_image_path=args.sample_image_path,
         ),
     )
 
@@ -148,6 +149,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_max_size_t", type=int, default=2, help="if image, temporal max size is 2, if video, temporal max size is fps")
     parser.add_argument("--patch_size", type=int, default=14, help="patch size")
     parser.add_argument("--temporal_patch_size", type=int, default=2, help="temporal patch size")
+    parser.add_argument("--sample_image_path", type=str, default="data/images/qwen2_vl_demo.jpeg", help="sample image path for generate golden")
     parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
     parser.add_argument(
         "--quant_weight",
