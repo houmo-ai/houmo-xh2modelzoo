@@ -232,7 +232,7 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
                         i_node = node.args[0]
                         matmul_module = quanted_model.get_submodule(i_node.target)
                         assert isinstance(matmul_module, xhnn.MatMul)
-                        matmul_module.w_cfg.qspec.man_bit = 16
+                        matmul_module.i_cfg_2.qspec.man_bit = 16
 
         # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
