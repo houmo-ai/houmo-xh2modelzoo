@@ -14,6 +14,8 @@
     ```
 #### 1.1.2.2 导出hmonnx
     ```shell
+        export PYTHONPATH=.
+        export CUDA_VISIBLE_DEVICES=0
         python examples/llm/qwen2_5_vl/qwen2_5_vl_xh2a_export_hmonnx.py --image_max_size_h 448 --image_max_size_w 448  --quant-type w4a8h0_ssfp --quant_weight work_dirs/Qwen2.5-VL-7B-Instruct_quarot_gptq_transformers-4.56.2/quarot_gptq-state-dict.safetensors
     ```
 

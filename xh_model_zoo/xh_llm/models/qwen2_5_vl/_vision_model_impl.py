@@ -77,6 +77,84 @@ class _Qwen2_5_VLVisionAttention(DynamicModule):
         self.v_proj.bias.data = bias[2]
         self.masked_softmax = xhnn.MaskedSoftmax(-1)
 
+        if head_dim % 64 != 0:
+            new_head_dim = math.ceil(head_dim / 64) * 64
+            padding_size = new_head_dim - head_dim
+            assert padding_size % 2 == 0, "padding_size must keep rotary halves aligned"
+            qk_padding_size = padding_size // 2
+            in_features = self.q_proj.in_features
+            device = self.q_proj.weight.device
+            weight_dtype = self.q_proj.weight.dtype
+            bias_dtype = self.q_proj.bias.dtype
+
+            def _expand_qk(linear: nn.Linear) -> nn.Linear:
+                weight = linear.weight.data.transpose(0,1).reshape(in_features, self.num_heads, 2, head_dim // 2)
+                padded_weight = torch.zeros(
+                    (in_features, self.num_heads, 2, head_dim // 2 + qk_padding_size),
+                    device=device,
+                    dtype=weight_dtype,
+                )
+                padded_weight[:, :, :, : head_dim // 2] = weight
+                padded_weight = padded_weight.reshape(in_features, self.num_heads * new_head_dim).transpose(0, 1)
+
+                bias = linear.bias.data.reshape(self.num_heads, 2, head_dim // 2)
+                padded_bias = torch.zeros(
+                    (self.num_heads, 2, head_dim // 2 + qk_padding_size),
+                    device=device,
+                    dtype=bias_dtype,
+                )
+                padded_bias[:, :, : head_dim // 2] = bias
+                padded_bias = padded_bias.reshape(self.num_heads * new_head_dim)
+
+                expanded = nn.Linear(in_features, self.num_heads * new_head_dim, bias=True)
+                expanded = expanded.to(device=device, dtype=weight_dtype)
+                expanded.weight.data.copy_(padded_weight)
+                expanded.bias.data.copy_(padded_bias.to(weight_dtype))
+                return expanded
+
+            self.q_proj = _expand_qk(self.q_proj)
+            self.k_proj = _expand_qk(self.k_proj)
+
+            v_weight = self.v_proj.weight.data.transpose(0, 1).reshape(in_features, self.num_heads, head_dim)
+            padded_v_weight = torch.zeros(
+                (in_features, self.num_heads, head_dim + padding_size),
+                device=device,
+                dtype=weight_dtype,
+            )
+            padded_v_weight[:, :, :head_dim] = v_weight
+            padded_v_weight = padded_v_weight.reshape(in_features, self.num_heads * new_head_dim).transpose(0, 1)
+
+            v_bias = self.v_proj.bias.data.reshape(self.num_heads, head_dim)
+            padded_v_bias = torch.zeros(
+                (self.num_heads, head_dim + padding_size),
+                device=device,
+                dtype=bias_dtype,
+            )
+            padded_v_bias[:, :head_dim] = v_bias
+            padded_v_bias = padded_v_bias.reshape(self.num_heads * new_head_dim)
+
+            expanded_v = nn.Linear(in_features, self.num_heads * new_head_dim, bias=True)
+            expanded_v = expanded_v.to(device=device, dtype=weight_dtype)
+            expanded_v.weight.data.copy_(padded_v_weight)
+            expanded_v.bias.data.copy_(padded_v_bias.to(weight_dtype))
+            self.v_proj = expanded_v
+            
+            padded_proj_weight = torch.zeros(
+                (self.proj.out_features, self.num_heads, new_head_dim),
+                device=device,
+                dtype=weight_dtype,
+            )
+            padded_proj_weight[:, :, :head_dim] = self.proj.weight.data.reshape(
+                self.proj.out_features, self.num_heads, head_dim
+            )
+            padded_proj_weight = padded_proj_weight.reshape(self.proj.out_features, self.num_heads * new_head_dim)
+            proj_bias = self.proj.bias.data.clone()
+            proj_out_features, proj_in_features = self.proj.weight.shape
+            expanded_proj = nn.Linear(self.num_heads * new_head_dim, proj_out_features, bias=True)
+            expanded_proj.weight.data.copy_(padded_proj_weight)
+            expanded_proj.bias.data.copy_(proj_bias)
+            self.proj = expanded_proj
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -288,6 +366,19 @@ class Qwen2_5_VisionTransformerPretrainedModel(DynamicModule):
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         cos = emb.cos().unsqueeze(-2)
         sin = emb.sin().unsqueeze(-2)
+
+        # update cos, sin last dim to 64的倍数
+        last_rope_dim = emb.shape[-1]
+        if last_rope_dim % 64 != 0:
+            padding_size = (64 - last_rope_dim % 64) // 2
+            cos_first, cos_second = cos.chunk(2, dim=-1)
+            sin_first, sin_second = sin.chunk(2, dim=-1)
+            cos_first = F.pad(cos_first, (0, padding_size))
+            cos_second = F.pad(cos_second, (0, padding_size))
+            sin_first = F.pad(sin_first, (0, padding_size))
+            sin_second = F.pad(sin_second, (0, padding_size))
+            cos = torch.cat((cos_first, cos_second), dim=-1)
+            sin = torch.cat((sin_first, sin_second), dim=-1)
 
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)

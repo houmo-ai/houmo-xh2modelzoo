@@ -75,7 +75,18 @@ def main(args):
     model_name = Path(hf_model_path).name
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+
+    ops=dict(MatMul=dict(
+                act_scheme=dict(
+                    bits=8,
+                    fp_mode="sefp",
+                ),
+                w_scheme=dict(
+                    bits=16,
+                    fp_mode="sefp",
+                ),))
+
+    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type, ops=ops)
 
     native_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         hf_model_path,
@@ -99,16 +110,6 @@ def main(args):
     processor = AutoProcessor.from_pretrained(hf_model_path)
 
     # demo(native_model, processor)
-
-    # ops=dict(MatMul=dict(
-    #             act_scheme=dict(
-    #                 bits=8,
-    #                 fp_mode="sefp",
-    #             ),
-    #             w_scheme=dict(
-    #                 bits=16,
-    #                 fp_mode="sefp",
-    #             ),))
     config = Qwen2_5_VLConvertConfig(
         batch_size=args.batch_size,
         context_length=args.context_length,
