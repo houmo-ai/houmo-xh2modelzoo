@@ -81,7 +81,7 @@ def main(args):
                     bits=8,
                     fp_mode="sefp",
                 ),
-                w_scheme=dict(
+                act_schema_2=dict(
                     bits=16,
                     fp_mode="sefp",
                 ),))
