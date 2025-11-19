@@ -1,0 +1,38 @@
+import onnx
+from onnx import TensorProto, helper
+
+# 加载 ONNX 模型
+model = onnx.load("/data01/home/xuchen/xh2/xh2_model_zoo/data/models/model-chenjunbo-shape.onnx")
+
+# 找到目标 Gather 节点（这里假设通过节点名称查找，你也可以根据其他特征定位）
+target_gather_node = None
+for node in model.graph.node:
+    if node.name == "/model/embedding_model/embedding/Gather":
+        target_gather_node = node
+        break
+
+if target_gather_node is None:
+    raise ValueError("未找到目标 Gather 节点")
+
+# 假设要将 indices 输入从固定值改为来自名为 new_indices_input 的输入
+# 首先，确保模型中有 new_indices_input 这个输入（如果没有，需要添加）
+new_input_exists = False
+for input in model.graph.input:
+    if input.name == "new_indices_input":
+        new_input_exists = True
+        break
+
+if not new_input_exists:
+    # 添加新的输入
+    new_indices_input = helper.make_tensor_value_info(
+        "new_indices_input", TensorProto.INT64, [422, 39]  # 根据实际形状设置
+    )
+    model.graph.input.append(new_indices_input)
+
+# 修改 Gather 节点的 indices 输入为 new_indices_input
+for i, input_name in enumerate(target_gather_node.input):
+    if input_name == "onnx::Gather_2416":  # 原来的固定 indices 输入名称
+        target_gather_node.input[i] = "new_indices_input"
+
+# 保存修改后的模型
+onnx.save(model, "/data01/home/xuchen/xh2/xh2_model_zoo/data/models/model-chenjunbo-shape-md.onnx")

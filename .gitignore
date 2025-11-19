@@ -11,6 +11,8 @@ __pycache__/
 *.tar
 *.pt
 *.png
+*.npy
+*.onnx
 
 # tests and logs
 tests/fixtures/cached_*_text.txt
@@ -177,5 +179,5 @@ report_dynamo_export.sarif
 /data/models/
 xhquant
 
-/xh_model_zoo.egg-info/
+/xh2_model_zoo.egg-info/
 mypy.ini
