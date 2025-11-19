@@ -79,6 +79,10 @@ class LLMConverter:
                     from .models.qwen3 import Qwen3GPTQConverterXH2a
 
                     converter_cls = Qwen3GPTQConverterXH2a
+                elif hasattr(config, "quantization_config") and config.quantization_config["quant_method"].lower() == "auto-round":
+                    from .models.qwen3 import Qwen3GPTQConverterXH2a
+                    
+                    converter_cls = Qwen3GPTQConverterXH2a
                 else:
                     raise ValueError(f"Unsupported quantization method: {config.quantization_config.quant_method}")
             else:

@@ -2,7 +2,7 @@
 # 配置文件，用于 YOLOv4 精度评估
 
 # 数据集根目录的绝对路径
-path: /data01/datasets/coco/coco2017
+path: /data02/datasets/coco/coco2017
 
 # 验证集图片目录 (相对于 'path')
 val: val2017

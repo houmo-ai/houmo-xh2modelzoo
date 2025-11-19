@@ -19,7 +19,7 @@ class Qwen3GPTQConverterXH2a(Qwen3ConverterXH2a):
         from auto_gptq.nn_modules.qlinear import qlinear_cuda, qlinear_cuda_old, qlinear_triton
 
         for name, module in hf_model.named_modules():
-            if isinstance(module, qlinear_cuda_old.QuantLinear):
+            if isinstance(module, qlinear_cuda_old.QuantLinear) or isinstance(module, qlinear_cuda.QuantLinear):
                 if hasattr(module, "weight"):
                     continue
 
@@ -84,6 +84,8 @@ class Qwen3GPTQConverterXH2a(Qwen3ConverterXH2a):
                 quant_weight = quant_weight.t().contiguous()
                 weight = weight.t().contiguous()
 
+                module.register_buffer("w_scales", scales)
+
                 iweight = None
                 izeros = None
                 scales = None
@@ -108,6 +110,9 @@ class Qwen3GPTQConverterXH2a(Qwen3ConverterXH2a):
                 weight = None
                 # module.forward = types.MethodType(linear_forward, module)
                 module.__class__ = nn.Linear
+            # elif isinstance(module, nn.Linear):
+                # module.register_buffer("w_scales", torch.zeros_like(module.weight) )
+                # module.register_buffer("quant_weight", module.weight )
 
         if hf_model.config.tie_word_embeddings:
             hf_model.config.torchscript = True

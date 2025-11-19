@@ -20,6 +20,7 @@ def main(args):
         batch_size=args.batch_size,
         context_length=args.context_length,
         quant_scheme=quant_scheme,
+        mode="reranker",
     )
 
     prefix = f"{model_name}-{target_device}"
@@ -34,9 +35,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="/data02/datasets/bge-reranker-v2_m3")
+    parser.add_argument("--model", type=str, default="/data02/datasets/bge_reranker_base")
     parser.add_argument("--batch-size", type=int, default=10, help="batch size")
     parser.add_argument("--context-length", type=int, default=512, help="max sequence length")
-    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8_sefp")
+    parser.add_argument("--quant-type", default="w4a8_ssfp", help="quant type, default is w8a8_sefp")
     args = parser.parse_args()
     main(args)

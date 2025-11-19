@@ -20,8 +20,9 @@ from xhquant.api import (  # type: ignore # isort:skip
     get_root_logger,
     create_quant_config,
     is_ssfp_quant_config,
+    HMONNXGoldenInference,
 )
-
+import os
 
 class Qwen3ConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
@@ -35,8 +36,14 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
     def load_hf_model(self, hf_model_dir: str, **kwargs):
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
         # assert not hasattr(config, "quantization_config")
-        native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        # assert not hasattr(native_model, "hf_quantizer")
+        if hasattr(config, "quantization_config") and config.quantization_config['quant_method'].lower() == 'auto-round':
+            # from auto_round import AutoRoundConfig ##must import for auto-round format
+            from modelscope import AutoModelForCausalLM,AutoTokenizer
+            native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, torch_dtype='auto', revision="14dbc8", **kwargs)
+        else:
+            # assert not hasattr(native_model, "hf_quantizer")
+            from transformers import AutoModelForCausalLM
+            native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
         assert isinstance(
             native_model, Qwen3ForCausalLM
         ), f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
@@ -210,18 +217,44 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
 
         logger.info(f"********************* start export prefill model *********************")
+        if not os.path.exists(prefill_onnx_file):
+            quanted_model = convert_fx_model_to_quanted_model(
+                wraped_qwen_model,
+                inputs,
+                target_device,
+                quant_config=quant_config,
+            )
+            # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
+            # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+            logger.info(f"Export Prefill model to {prefill_onnx_file}")
+        
 
-        quanted_model = convert_fx_model_to_quanted_model(
-            wraped_qwen_model,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
-        # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
-        # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
-        logger.info(f"Export Prefill model to {prefill_onnx_file}")
+        ## generate golden ==================================
+        inp = [ inputs[0], inputs[1], inputs[2],]
+        for i in range(len(inputs[3])):
+            inp.append(inputs[3][i])
+
+        for i in range(len(inputs[4])):
+            inp.append(inputs[4][i])
+
+        session = HMONNXGoldenInference(prefill_onnx_file)
+        session.to(device)
+        session.save_golden = True
+        session.golden_dir = "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/qwen3-0.6b-gptq_int4-XH2a-2k-w8a8h0_sefp/hmonnx/golden"
+        session.step = 0
+
+        # GPTQ ========================================
+        # session._set_session_env()
+        # from xhquant.api import PrecisionMode
+        # for name, node in session._session.named_modules():
+        #     if hasattr(node, "op_type"):
+        #         if node.op_type in ['Linear']:
+        #             # print(node.precision_mode)
+        #             node.precision_mode = PrecisionMode.GPTQ
+
+        session(*inp)
 
         logger.info(f"********************* start export decode model *********************")
         decode_inputs = (
