@@ -7,6 +7,7 @@ import torch.nn as nn
 import tqdm
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as safetensors_save_file
+from traitlets import HasTraits
 
 from . import quant_utils, utils
 
@@ -268,6 +269,8 @@ def gptq_fwrd(
             super().__init__()
             self.module = module
             if is_qwen2_5_vl:
+                self.attention_type = module.attention_type
+            if hasattr(self.module, "attention_type"):
                 self.attention_type = module.attention_type
 
         def forward(self, inp, **kwargs):
