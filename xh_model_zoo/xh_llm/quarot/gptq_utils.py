@@ -10,6 +10,7 @@ from safetensors.torch import save_file as safetensors_save_file
 from traitlets import HasTraits
 
 from . import quant_utils, utils
+import torch.nn.functional as F
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -220,6 +221,7 @@ def gptq_fwrd(
     layers_cache_dir: Optional[str] = None,
     is_qwen2_5_vl: bool = False,
     processor=None,
+    tokenizer=None
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -298,7 +300,14 @@ def gptq_fwrd(
                 inputs = process_qwen2_5_vl_batch(batch, device, processor)
                 model.generate(**inputs, max_new_tokens=seqlen)
             else:
-                model(batch[0].to(device))
+                if tokenizer is not None:
+                    texts = batch["text"]
+                    queries = [query for query in texts]
+                    inputs = tokenizer(queries, return_tensors="pt", truncation=True, max_length=seqlen,padding=True).to(device)
+                    inputs['input_ids'] =  F.pad(inputs['input_ids'],(0,seqlen-inputs['input_ids'].shape[1]))
+                    model(inputs['input_ids'])
+                else:
+                    model(batch[0].to(device))
         except ValueError:
             pass
 

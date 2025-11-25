@@ -6,7 +6,8 @@ from attr import has
 from xhquant.api import Config, get_root_logger
 
 from . import data_utils, gptq_utils, rotation_utils, utils
-
+import json
+from transformers import AutoTokenizer
 
 @torch.no_grad()
 def quarot(model, rotate_mode="hadamard", device=None, quarot_matrix_size=None):
@@ -101,15 +102,28 @@ def gptq(
     )
     logger.info(f"gptq config:\n{gptq_cfg.pretty_text}")
 
-    trainloader = data_utils.get_loaders(
-        calib_dataset,
-        nsamples=calib_samples,
-        seed=0,
-        model=model_name,
-        seqlen=seqlen,
-        eval_mode=False,
-        cache_dir=cache_dir,
-    )
+    if calib_dataset !='wikitext2':
+        print('use gen calib data!')
+        dataset = []
+        cnt = 0
+        with open(calib_dataset,encoding='utf-8') as file:
+            for line in file:
+                dataset.append(json.loads(line))
+                cnt = cnt + 1
+                if cnt==calib_samples:
+                    break
+        trainloader = torch.utils.data.DataLoader(dataset, batch_size=1,shuffle=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    else:
+        trainloader = data_utils.get_loaders(
+            calib_dataset,
+            nsamples=calib_samples,
+            seed=0,
+            model=model_name,
+            seqlen=seqlen,
+            eval_mode=False,
+            cache_dir=cache_dir,
+        )
     gptq_utils.gptq_fwrd(
         model,
         trainloader,
@@ -127,5 +141,6 @@ def gptq(
         layers_cache_dir=layers_cache_dir,
         is_qwen2_5_vl=is_qwen2_5_vl,
         processor=processor,
+        tokenizer = tokenizer,
     )
     return model

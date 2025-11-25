@@ -23,6 +23,7 @@ def parse_arguments():
     parser.add_argument("--model", type=str, default="data/models/Meta-Llama-3.1-8B-Instruct")
     parser.add_argument("--skip-quarot", action="store_true", help="skip_quarot")
     parser.add_argument("--skip-gptq", action="store_true", help="skip_quarot")
+    parser.add_argument("--calib_data", type=str,default="wikitext2", help="calibration dataset choose")
     parser.add_argument("--w-bits", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--resume", action="store_true", help="resume from the cache")
@@ -118,7 +119,7 @@ def main():
         from xh_model_zoo.xh_llm.quarot.quantizer_utils import gptq
 
         gptq_config = dict(
-            calib_dataset="wikitext2",
+            calib_dataset=args.calib_data,
             calib_samples=128,
             seqlen=2048,
             w_clip=True,
