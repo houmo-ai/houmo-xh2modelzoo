@@ -282,6 +282,16 @@ class ActQuantWrapper(torch.nn.Module):
         return x
 
 
+def cal_loss(x, q, h):
+    """
+    计算加权误差损失。
+    """
+    assert x.ndim == 2
+    assert q.ndim == 2
+    assert h.ndim == 2
+    err = torch.matmul(torch.matmul(q - x, h), (q - x).t()).diag()
+    return err
+
 class WeightQuantizer(torch.nn.Module):
     """From GPTQ Repo"""
 
@@ -313,7 +323,7 @@ class WeightQuantizer(torch.nn.Module):
         else:
             self.maxq = torch.tensor(2**bits - 1)
 
-    def find_params(self, x):
+    def find_params(self, x, H = None):
         if self.bits == 16:
             return
         dev = x.device
@@ -359,10 +369,14 @@ class WeightQuantizer(torch.nn.Module):
                     zero1 = torch.round(-xmin1 / scale1)
                     q = asym_quant_dequant(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
 
-                q -= x
-                q.abs_()
-                q.pow_(self.norm)
-                err = torch.sum(q, 1)
+                if H is not None:
+                    err = cal_loss(x, q, H)
+                else:
+                    q -= x
+                    q.abs_()
+                    q.pow_(self.norm)
+                    err = torch.sum(q, 1)
+                    
                 tmp = err < best
                 if torch.any(tmp):
                     best[tmp] = err[tmp]

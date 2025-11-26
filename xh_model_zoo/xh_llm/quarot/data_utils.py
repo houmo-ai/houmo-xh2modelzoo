@@ -161,6 +161,15 @@ def get_laion_220k_GPT4Vision_captions_from_LIVIS(
         trainloader = [format_qwen2_vl_dataset(sample["url"], sample["caption"]) for sample in traindata]
         return trainloader[:nsamples]
 
+def get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode=False, cache_dir=None):
+    from xh2_model_zoo.datasets import VLLMCustomDataset
+    import numpy as np
+    dataset = VLLMCustomDataset(data_files=data_files)
+    rng = np.random.default_rng(seed)
+    sample_size = min(nsamples, len(dataset))
+    sampled_indices = rng.choice(len(dataset), size=sample_size, replace=False)
+    return [dataset.data[idx] for idx in sampled_indices]
+
 
 def get_loaders(
     name,
@@ -171,6 +180,7 @@ def get_loaders(
     hf_token=None,
     eval_mode=False,
     cache_dir=None,
+    **kwargs,
 ):
     if "wikitext2" in name:
         return get_wikitext2(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
@@ -182,3 +192,9 @@ def get_loaders(
         return get_laion_220k_GPT4Vision_captions_from_LIVIS(
             nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir
         )
+    if "vllm_custom_data" in name:
+        data_files = kwargs.get("data_files", None)
+        if data_files is None:
+            raise ValueError("data_files is required for vllm_custom_data")
+        return get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode, cache_dir=cache_dir)
+

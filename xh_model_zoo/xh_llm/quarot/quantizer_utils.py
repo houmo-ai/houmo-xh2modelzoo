@@ -39,6 +39,7 @@ def gptq(
     seqlen=2048,
     w_clip=True,
     w_bits=4,
+    w_head_bits=8,
     w_asym=False,
     w_groupsize=64,
     percdamp=0.01,
@@ -50,6 +51,7 @@ def gptq(
     layers_cache_dir=None,
     is_qwen2_5_vl=False,
     processor=None,
+    data_files=None,
 ):
     yaml_dict = dict()
     if args is not None and hasattr(args, "gptq_config"):
@@ -79,6 +81,8 @@ def gptq(
             int8_down_proj = yaml_dict["int8_down_proj"]
         if "heading_gptq" in yaml_dict:
             heading_gptq = yaml_dict["heading_gptq"]
+        if "w_head_bits" in yaml_dict:
+            w_head_bits = yaml_dict["w_head_bits"]
 
     if model_name is None and args is not None and has(args, "model"):
         model_name = args.model
@@ -90,6 +94,7 @@ def gptq(
         dict(
             w_clip=w_clip,
             w_bits=w_bits,
+            w_head_bits=w_head_bits,
             w_asym=w_asym,
             w_groupsize=w_groupsize,
             percdamp=percdamp,
@@ -102,7 +107,7 @@ def gptq(
     )
     logger.info(f"gptq config:\n{gptq_cfg.pretty_text}")
 
-    if calib_dataset !='wikitext2':
+    if calib_dataset not in ['wikitext2','c4','ptb','laion/220k-GPT4Vision-captions-from-LIVIS','vllm_custom_data']:
         print('use gen calib data!')
         dataset = []
         cnt = 0
@@ -123,6 +128,7 @@ def gptq(
             seqlen=seqlen,
             eval_mode=False,
             cache_dir=cache_dir,
+            data_files=data_files,
         )
     gptq_utils.gptq_fwrd(
         model,
@@ -131,6 +137,7 @@ def gptq(
         seqlen=seqlen,
         w_clip=w_clip,
         w_bits=w_bits,
+        w_head_bits=w_head_bits,
         w_asym=w_asym,
         w_groupsize=w_groupsize,
         percdamp=percdamp,

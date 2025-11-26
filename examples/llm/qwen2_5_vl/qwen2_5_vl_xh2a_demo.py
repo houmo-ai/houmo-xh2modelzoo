@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 import torch
+import json
+import os
 import torch.nn as nn
 import xhquant.utils.suppress_printing
 
@@ -29,6 +31,10 @@ def parse_arguments():
     parser.add_argument("--prompt", type=str, default="请用简洁优美的语言描述这张图片。")
     parser.add_argument("--resume", action="store_true", help="resume export golden")
     parser.add_argument("--use_fast", action="store_true", help="fast mode")
+    parser.add_argument("--repetition_penalty", type=float, default=1.0, help="repetition penalty")
+    parser.add_argument("--not_resize_v1", action="store_false")
+    parser.add_argument("--chat_template", type=str, default=None, help="chat template")
+    parser.add_argument("--response_emotion_path", type=str, default=None)
     return parser
 
 
@@ -92,6 +98,9 @@ def main():
         image_size_w = image_size_w,
         image_size_h = image_size_h,
         max_size_t = max_size_t,
+        resize_v1 = args.not_resize_v1,
+        repetition_penalty = args.repetition_penalty,
+        chat_template = args.chat_template,
     )
 
     xhquant.utils.suppress_printing.disable_printing = True  # 屏蔽不必要的打印信息
@@ -109,7 +118,21 @@ def main():
     xh_model.set_input_embeddings(token_embedding)
     xh_model.set_exec_device(exec_device)
 
-    xh_model.chat(prompt, image, processor, logger, use_fast=use_fast)
+    if args.response_emotion_path is not None:
+        output_path = Path("output.txt")
+        with output_path.open("w", encoding="utf-8") as output_file:
+            for file_name in os.listdir(args.response_emotion_path):
+                file_path = os.path.join(args.response_emotion_path, file_name)
+                with open(file_path, "r", encoding="utf-8") as input_file:
+                    data = json.load(input_file)
+                for item in data:
+                    output_text = xh_model.chat(item["user_text"], image, processor, logger, use_fast=use_fast)
+                    output_file.write(f'{item["user_text"]}, XH2a Model Output: {output_text}\n')
+
+    else:
+        xh_model.chat(prompt, image, processor, logger, use_fast=use_fast)
+
 
 if __name__ == "__main__":
     main()
+

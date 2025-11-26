@@ -20,11 +20,13 @@ def parse_arguments():
     parser.add_argument("--skip-quarot", action="store_true", help="skip_quarot")
     parser.add_argument("--skip-gptq", action="store_true", help="skip_quarot")
     parser.add_argument("--w-bits", type=int, default=4)
+    parser.add_argument("--w-head-bits", type=int, default=8)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--resume", action="store_true", help="resume from the cache")
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     parser.add_argument("--validate", action="store_true", help="validate")
     parser.add_argument("--calib-samples", type=int, default=8)
+    parser.add_argument("--data_files", nargs="+", type=str, help="List of dataset files")
     return parser
 
 
@@ -119,7 +121,7 @@ def main():
     config = AutoConfig.from_pretrained(hf_model_dir)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float32
+    dtype = torch.float16
 
     native_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         hf_model_dir,
@@ -127,7 +129,7 @@ def main():
         device_map="cpu",
         # config=config,
         trust_remote_code=True,
-        attn_implementation="eager",
+        attn_implementation="flash_attention_2",
     )
 
     if native_model.config.tie_word_embeddings:
@@ -186,7 +188,7 @@ def main():
         from xh_model_zoo.xh_llm.quarot.quantizer_utils import gptq
 
         gptq_config = dict(
-            calib_dataset="laion/220k-GPT4Vision-captions-from-LIVIS",
+            calib_dataset="vllm_custom_data",
             calib_samples=args.calib_samples,
             seqlen=2048,
             w_clip=True,
@@ -197,6 +199,7 @@ def main():
             act_order=False,
             int8_down_proj=False,
             heading_gptq=True,
+            w_head_bits=args.w_head_bits
         )
 
         torch.cuda.reset_peak_memory_stats()
@@ -211,9 +214,9 @@ def main():
             model_name=hf_model_dir,
             **gptq_config,
             device=device,
-            layers_cache_dir=str(layers_cache_dir),
             is_qwen2_5_vl=True,
             processor=processor,
+            data_files=args.data_files,
         )
         logger.info(msg_output_format("End gptq quantization"))
 

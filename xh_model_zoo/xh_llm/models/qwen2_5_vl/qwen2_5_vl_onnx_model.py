@@ -4,11 +4,34 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch import nn
 from xhquant.api import HMONNXGoldenInference, HMONNXInference
 
 from .llm_onnx_model import LLMONNXModel
-from xh_model_zoo.xh_llm.utils import decode_next_token
 
+class RepetitionPenaltyLogitsProcessor:
+    def __init__(self, penalty: float):
+        if not isinstance(penalty, float) or not (penalty > 0):
+            raise ValueError(f"`penalty` has to be a strictly positive float, but is {penalty}")
+        self.penalty = penalty
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        score = torch.gather(scores, 1, input_ids)
+        score = torch.where(score < 0, score * self.penalty, score / self.penalty)
+        scores_processed = scores.scatter(1, input_ids, score)
+        return scores_processed
+
+
+def decode_next_token(tokenizer, logits: torch.Tensor, do_sample = False):
+    if do_sample:
+        probs = nn.functional.softmax(logits[:, -1, :].float(), dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+        next_tokens = next_tokens.unsqueeze(0)
+    else:
+        next_tokens = torch.argmax(logits, dim=-1)
+    # logits: (batch_size, 1, vocab_size)
+    next_token_str = tokenizer.batch_decode(next_tokens, skip_special_tokens=True)
+    return next_tokens, next_token_str
 
 class Qwen2_5_VLONNXModel(LLMONNXModel):
     def __init__(
@@ -21,6 +44,9 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
         image_size_w=1204,
         image_size_h=1204,
         max_size_t=2,
+        resize_v1 = True,
+        repetition_penalty = 1.0,
+        chat_template = None,
     ):
         super().__init__(prefill, decode, kv_cache)
         self.pad_token_id = 0
@@ -44,6 +70,9 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
         self.image_size_h = image_size_h
         self.batch_size = 1
         self.window_optimizer = not (self.image_size_w % self.window_size and self.image_size_h % self.window_size)
+        self.resize_v1 = resize_v1
+        self.repetition_penalty_logits_processor = RepetitionPenaltyLogitsProcessor(repetition_penalty)
+        self.chat_template = chat_template
 
     def get_window_index(self, grid_thw):
         window_index: list = []
@@ -440,19 +469,29 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
         )
         return output
 
-    def create_template(self, prompt, image_dir):
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": image_dir,
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+    def create_template(self, prompt, image_dir = None):
+        if image_dir is None:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+        else:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": image_dir,
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
         return messages
 
     def preprocess(self, prompt, image_dir, processor):
@@ -462,7 +501,12 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        image_inputs, video_inputs = process_vision_info(messages)
+        if self.chat_template is not None:
+            text = text.replace("You are a helpful assistant.", self.chat_template)
+        if image_dir is not None:
+            image_inputs, video_inputs = process_vision_info(messages)
+        else:
+            image_inputs, video_inputs = None, None
         inputs = processor(
             text=[text],    
             images=image_inputs,
@@ -498,31 +542,57 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
             image = ImageOps.expand(image, border=(left, top, right, bottom), fill=(114, 114, 114))
         return image
 
+    def load_and_process_image_v2(self, image_path):
+        """
+        Loads an image from the given path, converts to RGB, resizes proportionally if needed,
+        and pads to (self.image_size_w, self.image_size_h) with (114,114,114) background.
+        Returns the processed PIL image.
+        """
+        from PIL import Image, ImageOps
+        target_w, target_h = self.image_size_w, self.image_size_h
+        image = Image.open(image_path).convert("RGB")
+        orig_w, orig_h = image.size
+        if (orig_w, orig_h) != (target_w, target_h):
+            image = image.resize((target_w, target_h), Image.BICUBIC)
+        return image
+
     @torch.no_grad()
-    def chat(self, prompt, image_path, processor, logger, use_fast=False):
+    def chat(self, prompt, image_path, processor, logger, use_fast=False, do_sample=False):
         from tqdm import tqdm
-        pil_image = self.load_and_process_image(image_path)
+
+        if image_path is not None:
+            if self.resize_v1:
+                pil_image = self.load_and_process_image(image_path)
+            else:
+                pil_image = self.load_and_process_image_v2(image_path)
+        else:
+            pil_image = None
         inputs = self.preprocess(prompt, pil_image, processor)
         inputs = inputs.to(self.device)
 
-        self.init_image_feature()
-        self.to(self.device)
-        self.set_exec_device(self._exec_device)
-        if use_fast:
-            self.image_feature_session.initialize()
-            self.image_feature_session._session.to_fast_mode()
-        visual_inputs = self.preprocess_visual(inputs)
-        image_features = self.extract_image_features(visual_inputs)
-        self.release_image_feature()
+        if image_path is not None:
+            self.init_image_feature()
+            self.to(self.device)
+            self.set_exec_device(self._exec_device)
+            if use_fast:
+                self.image_feature_session.initialize()
+                self.image_feature_session._session.to_fast_mode()
+            visual_inputs = self.preprocess_visual(inputs)
+            image_features = self.extract_image_features(visual_inputs)
+            self.release_image_feature()
+        else:
+            image_features = None
 
         decoder_ids = list()
-    
+        
         data_prefill = {
             "input_ids": inputs["input_ids"],
             "image_embeds": image_features,
             "past_seq_length": 0,
-            "image_grid_thw": inputs["image_grid_thw"],
+            "image_grid_thw": inputs.get("image_grid_thw", None),
         }
+        
+        input_ids = data_prefill["input_ids"].cuda()
 
         self.init_prefill()
         self.to(self.device)
@@ -531,7 +601,11 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
             self.prefill_session.initialize()
             self.prefill_session._session.to_fast_mode()
         prefill_logits = self.prefill(data_prefill, save_golden=False)
-        next_token_id, next_token_text = decode_next_token(processor.tokenizer, prefill_logits)
+        
+        prefill_logits = self.repetition_penalty_logits_processor(input_ids, prefill_logits[:, -1, :].float()).unsqueeze(1)
+        
+        next_token_id, next_token_text = decode_next_token(processor.tokenizer, prefill_logits, do_sample=do_sample)
+        input_ids = torch.cat([input_ids, next_token_id], dim=-1)
         decoder_ids.append(next_token_id)
         logger.info(f"Prefill next token: {next_token_id} {next_token_text}")
         self.release_prefill_session()
@@ -550,7 +624,9 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
             }
 
             decode_logits = self.decode(data_decode)
-            next_token_id, next_token_text = decode_next_token(processor.tokenizer, decode_logits)
+            decode_logits = self.repetition_penalty_logits_processor(input_ids, decode_logits[:, -1, :].float()).unsqueeze(1)
+            next_token_id, next_token_text = decode_next_token(processor.tokenizer, decode_logits, do_sample=do_sample)
+            input_ids = torch.cat([input_ids, next_token_id], dim=-1)
             decoder_ids.append(next_token_id)
             logger.info(f"Decode Quanted Model next token: {next_token_id} {next_token_text}")
             if next_token_id.cpu().item() in self.eos_token_id:
@@ -562,11 +638,9 @@ class Qwen2_5_VLONNXModel(LLMONNXModel):
         out = processor.decode(decoder_ids).strip()
         logger.info(f"Output: {out}")
         self.release_decode_session()
-        breakpoint()
-            
 
-        
-
+        return out
+        # breakpoint()
 
 
 

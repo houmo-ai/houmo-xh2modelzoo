@@ -12,6 +12,7 @@ from .sdxl_vae_calib_dataset import SDXLVAECalibDataset
 from .stereo import Stereo
 from .utils import default_collate
 from .yolo import YOLODataset
+from .vllm_custom_dataset import VLLMCustomDataset
 
 __all__ = [
     "NoxMNIST",
@@ -28,4 +29,5 @@ __all__ = [
     "SDXLUNetCalibDataset",
     "SDXLVAECalibDataset",
     "COCOCaption",
+    "VLLMCustomDataset",
 ]

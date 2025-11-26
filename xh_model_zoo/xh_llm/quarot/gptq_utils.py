@@ -51,12 +51,16 @@ class GPTQ:
         groupsize=-1,
         actorder=False,
         static_groups=False,
+        use_hession_mse=True,
     ):
         W = self.layer.weight.data.clone()
         W = W.float()
 
         if not self.quantizer.ready():
-            self.quantizer.find_params(W)
+            if use_hession_mse:
+                self.quantizer.find_params(W, self.H)
+            else:
+                self.quantizer.find_params(W)
 
         H = self.H
         del self.H
@@ -210,6 +214,7 @@ def gptq_fwrd(
     seqlen: int = 2048,
     w_clip: bool = True,
     w_bits: int = 4,
+    w_head_bits: int = 8,
     w_asym: bool = False,
     w_groupsize: int = 64,
     percdamp: float = 0.01,
@@ -310,7 +315,7 @@ def gptq_fwrd(
                     model(batch[0].to(device))
         except ValueError:
             pass
-
+    
     layers[0] = layers[0].module.cpu()
     if is_qwen2_5_vl:
         model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.cpu()
@@ -370,8 +375,12 @@ def gptq_fwrd(
             except Exception:
                 pass
             continue
+        
+        if is_qwen2_5_vl:
+            layer = layers[i].to(device=device, dtype=torch.float16) # use flash attention 2
+        else:
+            layer = layers[i].to(device=device, dtype=torch.float32)
 
-        layer = layers[i].to(device=device, dtype=torch.float32)
         full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
 
         for names in sequential:
@@ -411,7 +420,7 @@ def gptq_fwrd(
                 if is_qwen2_5_vl:
                     outs.append(
                         layer(
-                            inps[j].to(device=device, dtype=torch.float32),
+                            inps[j].to(device=device),
                             attention_mask=attention_mask[j],
                             position_ids=position_ids[j],
                             position_embeddings=position_embeddings[j],
@@ -449,7 +458,7 @@ def gptq_fwrd(
             for j in range(nsamples):
                 if is_qwen2_5_vl:
                     outs[j] = layer(
-                        inps[j].to(device=device, dtype=torch.float32),
+                        inps[j].to(device=device, dtype=torch.float16),
                         attention_mask=attention_mask[j],
                         position_ids=position_ids[j],
                         position_embeddings=position_embeddings[j],
@@ -487,7 +496,10 @@ def gptq_fwrd(
             print(f"from cache: {head_layer_cache_file}")
         else:
             # Convert to module and move to CUDA
-            model.lm_head = model.lm_head.to(device=device, dtype=torch.float32)
+            if is_qwen2_5_vl:
+                model.lm_head = model.lm_head.to(device=device, dtype=torch.float16)
+            else:
+                model.lm_head = model.lm_head.to(device=device, dtype=torch.float32)
             gptq = {}
             name = "lm_head"
             layer_weight_bits = w_bits
@@ -506,7 +518,7 @@ def gptq_fwrd(
             handles.append(model.lm_head.register_forward_hook(add_batch("lm_head")))
             for j in range(nsamples):
                 if is_qwen2_5_vl:
-                    model.lm_head(inps[j].to(device=device, dtype=torch.float32))
+                    model.lm_head(inps[j].to(device=device, dtype=torch.float16))
                 else:
                     model.lm_head(inps[j].unsqueeze(0).to(device=device, dtype=torch.float32))
                 if torch.cuda.is_available():
@@ -521,6 +533,7 @@ def gptq_fwrd(
                 groupsize=layer_w_groupsize,
                 actorder=act_order,
                 static_groups=False,
+                use_hession_mse=False,
             )
 
             quant_value = gptq[name].W_int
