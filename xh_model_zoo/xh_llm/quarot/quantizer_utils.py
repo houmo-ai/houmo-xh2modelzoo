@@ -119,6 +119,26 @@ def gptq(
                     break
         trainloader = torch.utils.data.DataLoader(dataset, batch_size=1,shuffle=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        gptq_utils.gptq_fwrd(
+            model,
+            trainloader,
+            nsamples=calib_samples,
+            seqlen=seqlen,
+            w_clip=w_clip,
+            w_bits=w_bits,
+            w_head_bits=w_head_bits,
+            w_asym=w_asym,
+            w_groupsize=w_groupsize,
+            percdamp=percdamp,
+            act_order=act_order,
+            int8_down_proj=int8_down_proj,
+            heading_gptq=heading_gptq,
+            device=device,
+            layers_cache_dir=layers_cache_dir,
+            is_qwen2_5_vl=is_qwen2_5_vl,
+            processor=processor,
+            tokenizer = tokenizer,
+        )
     else:
         trainloader = data_utils.get_loaders(
             calib_dataset,
@@ -130,24 +150,23 @@ def gptq(
             cache_dir=cache_dir,
             data_files=data_files,
         )
-    gptq_utils.gptq_fwrd(
-        model,
-        trainloader,
-        nsamples=calib_samples,
-        seqlen=seqlen,
-        w_clip=w_clip,
-        w_bits=w_bits,
-        w_head_bits=w_head_bits,
-        w_asym=w_asym,
-        w_groupsize=w_groupsize,
-        percdamp=percdamp,
-        act_order=act_order,
-        int8_down_proj=int8_down_proj,
-        heading_gptq=heading_gptq,
-        device=device,
-        layers_cache_dir=layers_cache_dir,
-        is_qwen2_5_vl=is_qwen2_5_vl,
-        processor=processor,
-        tokenizer = tokenizer,
-    )
+        gptq_utils.gptq_fwrd(
+            model,
+            trainloader,
+            nsamples=calib_samples,
+            seqlen=seqlen,
+            w_clip=w_clip,
+            w_bits=w_bits,
+            w_head_bits=w_head_bits,
+            w_asym=w_asym,
+            w_groupsize=w_groupsize,
+            percdamp=percdamp,
+            act_order=act_order,
+            int8_down_proj=int8_down_proj,
+            heading_gptq=heading_gptq,
+            device=device,
+            layers_cache_dir=layers_cache_dir,
+            is_qwen2_5_vl=is_qwen2_5_vl,
+            processor=processor,
+        )
     return model

@@ -57,13 +57,10 @@ class GPTQ:
         W = W.float()
 
         if not self.quantizer.ready():
-            if use_hession_mse:
-                self.quantizer.find_params(W, self.H)
-            else:
-                self.quantizer.find_params(W)
+            self.quantizer.find_params(W)
 
         H = self.H
-        del self.H
+        # del self.H
         # torch.nan_to_num_(H, nan=0.)
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -97,7 +94,7 @@ class GPTQ:
                 H2 = torch.linalg.cholesky(H2)
                 H2 = torch.cholesky_inverse(H2)
                 Hinv = torch.linalg.cholesky(H2, upper=True)
-                del H, H2
+                # del H, H2
                 break
             except Exception as e:
                 percdamp += self.damp_auto_increment
@@ -124,7 +121,10 @@ class GPTQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)])
+                            if use_hession_mse:
+                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)], H = self.H[(i1 + i) : (i1 + i + groupsize), (i1 + i) : (i1 + i + groupsize)])
+                            else:
+                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)])
                     else:
                         idx = i1 + i
                         if actorder:
