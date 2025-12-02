@@ -22,9 +22,9 @@ def main(args):
     meta_info = ConfigDict(meta_info)
 
     # hmonnx files
-    prefill_onnx_file = model_dir / meta_info["prefill_onnx"]
-    decode_onnx_file = model_dir / meta_info["decode_onnx"]
-    vision_onnx_file = model_dir / meta_info["vision_onnx"]
+    prefill_onnx_file = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/hmonnx/mineru2.5-XH2a-w8a8h1_sefp-llm-prefill.onnx"
+    decode_onnx_file = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/hmonnx/mineru2.5-XH2a-w8a8h1_sefp-llm-decode.onnx"
+    vision_onnx_file = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/hmonnx/mineru2.5-XH2a-w8a8h1_sefp_vision.onnx"
 
     # tokenizer
     hf_model_config_dir = str(model_dir / meta_info["hf_config"])
@@ -47,33 +47,35 @@ def main(args):
                 {
                     "type": "image",
                     # "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-                    "image": "data/images/qwen2_vl_demo.jpeg",
+                    "image": "data/images/test_mineru2.5.png",
                 },
-                {"type": "text", "text": "Layout Detection:"},
+                {"type": "text", "text": "\nLayout Detection:"},  # Text Recognition:
             ],
         }
     ]
-    processor: Qwen2VLProcessor = AutoProcessor.from_pretrained(hf_model_config_dir)
+    processor: Qwen2VLProcessor = AutoProcessor.from_pretrained(hf_model_config_dir, use_fast=True)
     # Preparation for inference
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
 
-    # resize long side to 1204
-    max_size = meta_info["wrap_cfg"]["visual"].image_max_size
-    patch_size = meta_info["wrap_cfg"]["visual"].patch_size
-    w, h = image_inputs[0].size
-    scale = 1204 / max(w, h)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-    resized_img = image_inputs[0].resize((new_w, new_h), Image.Resampling.BICUBIC)
-    pad_img = Image.new("RGB", (max_size, max_size), (122, 116, 104))
-    pad_img.paste(resized_img, (0, 0))
-    image_inputs[0] = pad_img
-    processor.image_processor.max_pixels = max(max_size * max_size + 1, processor.image_processor.max_pixels)
+    # resize long side to 1036
+    # max_size = meta_info["wrap_cfg"]["visual"].image_max_size
+    # patch_size = meta_info["wrap_cfg"]["visual"].patch_size
+    # w, h = image_inputs[0].size
+    # scale = 1036 / max(w, h)
+    # new_w = int(w * scale)
+    # new_h = int(h * scale)
+
+    resized_img = image_inputs[0].resize((1036, 1036), Image.Resampling.BICUBIC)
+
+    # pad_img = Image.new("RGB", (max_size, max_size), (122, 116, 104))
+    # pad_img.paste(resized_img, (0, 0))
+    image_inputs[0] = resized_img
+    # processor.image_processor.max_pixels = processor.image_processor.max_pixels
     inputs = processor(
         text=[text],
         images=image_inputs,
-        videos=video_inputs,
+        # videos=video_inputs,
         padding=True,
         return_tensors="pt",
     )
@@ -84,12 +86,12 @@ def main(args):
 
     # 处理图像特征编码
     pixel_values = inputs["pixel_values"].view(-1, 3, 2, 14, 14)[:, :, 0, :, :].contiguous()
-    pixel_values = pixel_values.to(torch.float16)
+    pixel_values = pixel_values.to(torch.float16) # 4956423
 
     image_feature_session = HMONNXInference(str(vision_onnx_file))
     image_feature_session.to(device)
     image_feature_session.exec_device = execution_device
-    image_embeds = image_feature_session(pixel_values)
+    image_embeds = image_feature_session(pixel_values) # -25568
     image_feature_session = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -107,7 +109,7 @@ def main(args):
 
     # prefill
     data_prefill = {
-        "input_ids": inputs["input_ids"],
+        "input_ids": inputs["input_ids"], 
         "image_embeds": image_embeds,
         "past_seq_length": [0],
         "image_grid_thw": inputs["image_grid_thw"],
@@ -121,7 +123,7 @@ def main(args):
     data_preprocess.to(execution_device)
 
     data_inputs = data_preprocess(data_prefill)
-    prefill_inputs = list(data_inputs) + [past_key_caches, past_value_caches]
+    prefill_inputs = list(data_inputs) + [past_key_caches, past_value_caches] # # -25616  0  1394
 
     prefill_session = HMONNXInference(str(prefill_onnx_file))
     prefill_session.to(device)
@@ -179,7 +181,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/Qwen2-VL-2B-Instruct-XH2a-batch_1-2k-w8a8h1_sefp/meta.json",
+        default="work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/meta.json",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--execution_device", type=str, default="cuda:0", help="execution device, default is cuda:0")

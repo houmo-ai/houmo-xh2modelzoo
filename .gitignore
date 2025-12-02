@@ -148,7 +148,7 @@ runs
 /examples/rag/sweep
 
 # data
-/data
+# /data
 serialization_dir
 
 # emacs

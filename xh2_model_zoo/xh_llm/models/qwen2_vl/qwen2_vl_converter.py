@@ -19,7 +19,7 @@ from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .data_preprocess import Qwen2VLDataPreprocess
 from .qwen2_vl_convert_config import Qwen2VLConvertConfig
-
+from qwen_vl_utils import process_vision_info
 from xhquant.api import (  # isort:skip
     Config,
     DeviceType,
@@ -80,32 +80,9 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
         # onnx_file = Path(vision_hmonnx_file).parent / "visual.onnx"
         # onnx_file.parent.mkdir(exist_ok=True, parents=True)
 
-        logger.info(f"start export vision model to onnx format............")
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_onnx_file = str(Path(tmp_dir) / "visual.onnx")
-            torch.onnx.export(
-                wraped_vision_model,
-                (pixel_values.cpu(), image_grid_thw.cpu()),
-                tmp_onnx_file,
-                export_params=True,
-                opset_version=18,
-                do_constant_folding=True,
-                input_names=["pixel_values", "grid_thw"],
-                output_names=["image_embeds"],
-                verbose=False,
-            )
-            onnx_model = onnx.load(tmp_onnx_file, load_external_data=True)
-        logger.info(f"simplify onnx model............")
-        onnx_model, check = simplify_large_onnx(onnx_model)
-        # onnx.save(
-        #     onnx_model,
-        #     onnx_file,
-        #     save_as_external_data=True,
-        #     all_tensors_to_one_file=True,
-        #     location="visual_external_data",
-        #     convert_attribute=True,
-        # )
-        out_hmonnx_file = vision_hmonnx_file
+        warp_output = wraped_vision_model(pixel_values)
+
+        prefill_inputs = (pixel_values,)
         target_device = self.config.quant_scheme.target_device
 
         quant_config = dict(
@@ -119,21 +96,81 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
         )
         quant_config = ConfigDict(quant_config)
 
-        convert_onnx_to_hmonnx(
-            onnx_model,
-            [pixel_values],
-            target_device,
-            out_hmonnx_file,
-            quant_config,
-            input_names=[
-                "pixel_values",
-            ],
-            output_names=[
-                "image_embeds",
-            ],
-        )
+        if True:
+            quant_graph_model = convert_fx_model_to_quanted_model(
+                wraped_vision_model, prefill_inputs, target_device, quant_config
+            )
+            # input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(
+                quant_graph_model, prefill_inputs, vision_hmonnx_file, 
+                ["pixel_values"], ["image_embeds"]
+            )
 
-        logger.info(f"Export vision model to {vision_hmonnx_file}")
+        else:
+            logger.info(f"start export vision model to onnx format............")
+            # with tempfile.TemporaryDirectory() as tmp_dir:
+            #     tmp_onnx_file = str(Path(tmp_dir) / "visual.onnx")
+            #     torch.onnx.export(
+            #         wraped_vision_model,
+            #         (pixel_values.cpu(), image_grid_thw.cpu()),
+            #         tmp_onnx_file,
+            #         export_params=False,
+            #         opset_version=18,
+            #         do_constant_folding=True,
+            #         input_names=["pixel_values", "grid_thw"],
+            #         output_names=["image_embeds"],
+            #         verbose=False,
+            #     )
+            #     onnx_model = onnx.load(tmp_onnx_file, load_external_data=True)
+            # onnx_model = onnx.load(
+            #     "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/onnx_pp/visual.onnx",
+            #     load_external_data=True
+            # )
+            # # logger.info(f"simplify onnx model............")
+            # onnx_model, check = simplify_large_onnx(onnx_model)
+
+            # onnx.save(
+            #     onnx_model,
+            #     onnx_file,
+            #     save_as_external_data=True,
+            #     all_tensors_to_one_file=True,
+            #     location="visual_external_data",
+            #     convert_attribute=True,
+            # )
+            onnx_model = onnx.load(
+                "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/onnx/visual.sim.onnx",
+                load_external_data=True
+            )        
+
+            out_hmonnx_file = vision_hmonnx_file
+            target_device = self.config.quant_scheme.target_device
+
+            quant_config = dict(
+                inputs=dict(
+                    pixel_values=dict(
+                        quantizer=dict(
+                            qspec=dict(fake_dtype="float16"),
+                        )
+                    ),
+                )
+            )
+            quant_config = ConfigDict(quant_config)
+
+            convert_onnx_to_hmonnx(
+                onnx_model,
+                [pixel_values],
+                target_device,
+                out_hmonnx_file,
+                quant_config,
+                input_names=[
+                    "pixel_values",
+                ],
+                output_names=[
+                    "image_embeds",
+                ],
+            )
+
+            logger.info(f"Export vision model to {vision_hmonnx_file}")
 
     def _convert(self, hf_model_path: str, output_dir: str):
         logger = get_root_logger()
@@ -217,16 +254,16 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
                     {
                         "type": "image",
                         # "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
-                        "image": "data/images/qwen2_vl_demo.jpeg",
+                        "image": "data/images/test_mineru2.5.png",
                     },
-                    {"type": "text", "text": "Describe this image."},
+                    {"type": "text", "text": "\nLayout Detection:"},
                 ],
             }
         ]
 
         # Preparation for inference
 
-        processor: Qwen2VLProcessor = AutoProcessor.from_pretrained(hf_model_path)
+        processor: Qwen2VLProcessor = AutoProcessor.from_pretrained(hf_model_path, use_fast=True )
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         Path(work_dir / "hmonnx").mkdir(exist_ok=True, parents=True)
 
@@ -234,16 +271,19 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
         prefix = f"{model_name}-{target_device}-{quant_type}"
         vision_onnx_file = str(work_dir / "hmonnx" / f"{prefix}_vision.onnx")
 
-        image_max_size = wrap_cfg.visual.image_max_size
-        processor.image_processor.max_pixels = max(
-            image_max_size * image_max_size + 1, processor.image_processor.max_pixels
-        )
-        image_inputs = [Image.new("RGB", (image_max_size, image_max_size), (122, 116, 104))]
-        video_inputs = None
+        # image_max_size = wrap_cfg.visual.image_max_size
+        # processor.image_processor.max_pixels = max(
+        #     image_max_size * image_max_size + 1, processor.image_processor.max_pixels
+        # )
+        # image_inputs = [Image.new("RGB", (image_max_size, image_max_size), (122, 116, 104))]
+        # video_inputs = None
+        image_inputs, video_inputs = process_vision_info(messages)
+        resized_img = image_inputs[0].resize((1036, 1036), Image.Resampling.BICUBIC)
+
         inputs = processor(
             text=[text],
-            images=image_inputs,
-            videos=video_inputs,
+            images=resized_img,
+            # videos=video_inputs,
             padding=True,
             return_tensors="pt",
         )
@@ -355,7 +395,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
             quant_graph_model = convert_fx_model_to_quanted_model(
                 wraped_llm_model, prefill_inputs, target_device, quant_config
             )
-            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            # input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(
                 quant_graph_model, prefill_inputs, prefill_onnx_file, onnx_input_names, onnx_output_names
             )

@@ -219,7 +219,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
                         # "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
                         "image": "data/images/qwen2_vl_demo.jpeg",
                     },
-                    {"type": "text", "text": "Describe this image."},
+                    {"type": "text", "text": "Layout Detection:"},
                 ],
             }
         ]
@@ -243,7 +243,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
         inputs = processor(
             text=[text],
             images=image_inputs,
-            videos=video_inputs,
+            # videos=video_inputs,
             padding=True,
             return_tensors="pt",
         )
