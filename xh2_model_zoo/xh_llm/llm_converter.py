@@ -98,6 +98,12 @@ class LLMConverter:
             from .models.qwen2_legacy import Qwen2LegacyConverterXH2a
 
             converter_cls = Qwen2LegacyConverterXH2a
+        elif architecture == "GptOssForCausalLM":
+            convert_config.num_experts_per_tok = config.num_experts_per_tok
+            convert_config.sliding_window = config.sliding_window
+            from .models.gpt_oss_with_mask import GptOssWithMaskConverterXH2a
+
+            converter_cls = GptOssWithMaskConverterXH2a
         elif architecture == "BertModel_Reranker":
             from .models.bge_reranker import BGERerankerConverterXH2a
 

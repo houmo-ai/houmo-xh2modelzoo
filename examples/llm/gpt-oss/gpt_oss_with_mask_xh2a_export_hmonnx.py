@@ -1,0 +1,60 @@
+import argparse
+import os.path as osp
+from pathlib import Path
+
+from xh2_model_zoo.xh_llm import LLMConverter
+from xh2_model_zoo.xh_llm.models.gpt_oss_with_mask import GptOssWithMaskConvertConfig
+
+from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
+from xh2_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
+from xh2_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+
+
+def main(args):
+    hf_model_path = osp.normpath(osp.abspath(args.model))
+    model_name = Path(hf_model_path).name
+    target_device = DeviceType.XH2a
+    quant_type = args.quant_type
+    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+    # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
+    config = GptOssWithMaskConvertConfig(
+        batch_size=1,
+        context_length=args.context_length,
+        input_sequence_length=args.input_sequence_length,
+        quant_scheme=quant_scheme,
+        quant_weight=args.quant_weight,
+        sliding_window=args.sliding_window,
+    )
+
+    prefix = f"{model_name}-{target_device}-{args.context_length//1024}k-{quant_type}"
+    work_dir = Path("work_dirs") / prefix
+    work_dir.mkdir(exist_ok=True, parents=True)
+    log_file = work_dir / "convert.log"
+    xhquant_init(log_file, debug=args.debug)
+    logger = get_root_logger()
+    with TimeProfiler("convert", logger), MemoryTracker("cuda:0", "convert", logger):
+        LLMConverter.from_pretrained(hf_model_path, "GptOssForCausalLM", config, str(work_dir))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument("--model", default="data/datasets/gpt-oss-20b", type=str, help="HuggingFace model path")
+    parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
+    parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
+    parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quant type, default is w8a8")
+    parser.add_argument(
+        "--quant-weight",
+        type=str,
+        default=None,
+        help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
+    )
+    parser.add_argument(
+        "--sliding-window",
+        type=int,
+        default=None,
+        help="sliding window size for attention, if None, use global attention",
+    )
+    args = parser.parse_args()
+    main(args)
+

@@ -4,9 +4,11 @@ import accelerate
 import torch.nn as nn
 from xhquant.api import ConfigDict
 from xhquant.utils.logger import get_root_logger
+from xhquant.utils.registry import Registry
 from xhquant.utils.registry.dynamic_module import DynamicModule, _DMRegistryCls
 
 XHLLM_TRACEABLE_MODULES = _DMRegistryCls("XHTrace")
+MODELS = Registry("xh_llm_models")
 
 
 class DynamicRegister(DynamicModule):

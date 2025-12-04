@@ -31,6 +31,7 @@ class LLMConverter:
             ModelArchitectureMeta("Qwen3ForCausalLM", ""),
             ModelArchitectureMeta("Qwen3MoeForCausalLM", ""),
             ModelArchitectureMeta("Qwen2ForCausalLM_legacy", ""),
+            ModelArchitectureMeta("GptOssForCausalLM", ""),
             ModelArchitectureMeta("BertModel_Reranker", ""),
             ModelArchitectureMeta("gte_qwen2", ""),
         ]
@@ -122,6 +123,10 @@ class LLMConverter:
             from .models.qwen2_legacy import Qwen2LegacyConverterXH2a
 
             converter_cls = Qwen2LegacyConverterXH2a
+        elif architecture == "GptOssForCausalLM":
+            from .models.gpt_oss_with_mask import GptOssWithMaskConverterXH2a
+
+            converter_cls = GptOssWithMaskConverterXH2a
         elif architecture == "BertModel_Reranker":
             from .models.bge_reranker import BGERerankerConverterXH2a
 
