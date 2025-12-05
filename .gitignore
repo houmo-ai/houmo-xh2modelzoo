@@ -181,3 +181,4 @@ xhquant
 
 /xh2_model_zoo.egg-info/
 mypy.ini
+./data/datasets
