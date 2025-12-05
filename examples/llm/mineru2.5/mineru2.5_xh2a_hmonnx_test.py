@@ -9,7 +9,7 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, AutoTokenizer
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-from xhquant.api import ConfigDict, HMONNXInference, get_root_logger
+from xhquant.api import ConfigDict, HMONNXInference, get_root_logger, HMONNXGoldenInference
 from xhquant.core import CacheTensor
 
 from xh_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLDataPreprocess
@@ -17,6 +17,8 @@ from xh_model_zoo.xh_llm.utils import decode_next_token
 
 
 def main(args):
+    export_golden = True
+
     model_dir = Path(args.config).parent
     meta_info = json.load(open(args.config, "r"))
     meta_info = ConfigDict(meta_info)
@@ -88,9 +90,12 @@ def main(args):
     pixel_values = inputs["pixel_values"].view(-1, 3, 2, 14, 14)[:, :, 0, :, :].contiguous()
     pixel_values = pixel_values.to(torch.float16) # 4956423
 
-    image_feature_session = HMONNXInference(str(vision_onnx_file))
+    image_feature_session = HMONNXGoldenInference(str(vision_onnx_file))
     image_feature_session.to(device)
     image_feature_session.exec_device = execution_device
+    image_feature_session.step = 0
+    image_feature_session.save_golden = export_golden
+    image_feature_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/vision/"
     image_embeds = image_feature_session(pixel_values) # -25568
     image_feature_session = None
     if torch.cuda.is_available():
@@ -125,9 +130,12 @@ def main(args):
     data_inputs = data_preprocess(data_prefill)
     prefill_inputs = list(data_inputs) + [past_key_caches, past_value_caches] # # -25616  0  1394
 
-    prefill_session = HMONNXInference(str(prefill_onnx_file))
+    prefill_session = HMONNXGoldenInference(str(prefill_onnx_file))
     prefill_session.to(device)
     prefill_session.exec_device = execution_device
+    prefill_session.step = 0
+    prefill_session.save_golden = export_golden
+    prefill_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/prefill/"
 
     inputs_embeds, past_seq_length, _, position_ids, past_key_caches, past_value_caches = prefill_inputs
     print(position_ids.shape)
@@ -144,6 +152,7 @@ def main(args):
             *past_value_caches,
         )
         past_seq_length += current_input_length
+        break
     prefill_next_token_id, prefill_next_token_text = decode_next_token(tokenizer, prefill_logits)
     logger = get_root_logger()
     logger.info(f"Prefill next token: {prefill_next_token_id} {prefill_next_token_text}")
@@ -160,9 +169,12 @@ def main(args):
     data_inputs = data_preprocess(data_decode)
     decode_inputs = list(data_inputs) + [past_key_caches, past_value_caches]
 
-    decode_session = HMONNXInference(str(decode_onnx_file))
+    decode_session = HMONNXGoldenInference(str(decode_onnx_file))
     decode_session.to(device)
     decode_session.exec_device = execution_device
+    decode_session.step = 0
+    decode_session.save_golden = export_golden
+    decode_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/decode/"
 
     inputs_embeds, past_seq_length, current_seq_length, position_ids, past_key_caches, past_value_caches = decode_inputs
     decode_logits = decode_session(

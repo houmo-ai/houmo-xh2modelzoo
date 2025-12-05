@@ -27,7 +27,7 @@ from xhquant.api import (
     HMONNXInference
 )
 from xhquant.utils.config import Config, ConfigDict
-from xh2_model_zoo.xh_llm.models.whisper._model_opt import *
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *
 from xhquant.patch.core import RewriterContext
 import numpy as np
 import onnxruntime

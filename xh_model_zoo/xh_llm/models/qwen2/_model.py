@@ -445,6 +445,12 @@ class _Qwen2Model(DynamicModule):
         causal_mask = None  # 在Qwen2Attention中处理
         hidden_states = inputs_embeds
 
+        if position_ids is not None:
+            position_ids = torch.arange(
+                0, 0 + inputs_embeds.shape[1], device=inputs_embeds.device
+            ).unsqueeze(0)
+
+
         cos = self.cos_embeding(position_ids)
         sin = self.sin_embeding(position_ids)
 

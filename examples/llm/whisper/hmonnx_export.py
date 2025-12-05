@@ -30,9 +30,9 @@ from xhquant.api import (
 from xhquant.frontend.convert import to_frontend_graph
 
 from xhquant.utils.config import Config, ConfigDict
-from xh2_model_zoo.xh_llm.models.whisper._model_opt import *
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *
 from xhquant.patch.core import RewriterContext
-from xh2_model_zoo.xh_llm.models.builder import wrap_llm_model
+from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
 from xhquant.api.ptq_export_hmonnx import _convert_model_to_quanted_model, convert_quanted_model_to_hmonnx, FrontendType
 from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE

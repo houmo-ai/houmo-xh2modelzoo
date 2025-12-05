@@ -39,11 +39,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")  # /data02/datasets/qwen3-8B-AWQ
     parser.add_argument(
-        "--model", type=str, default="/data02/datasets/qwen3-0.6b-gptq"
+        "--model", type=str, default="/data02/datasets/qwen3-0.6b-gptq" # /data02/datasets/Qwen2.5-1.5B-Instruct-int4-sym-inc
     )  # /data02/datasets/qwen3-0.6b-gptq
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w8a8h0_ssfp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant-weight",
         type=str,

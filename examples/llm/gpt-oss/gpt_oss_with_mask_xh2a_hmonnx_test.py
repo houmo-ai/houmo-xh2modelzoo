@@ -6,8 +6,8 @@ from transformers import TextStreamer
 from xhquant.api import get_root_logger, xhquant_init
 from xhquant.xhonnxruntime import config as xhonnxruntime_config
 
-from xh2_model_zoo.xh_llm.models.gpt_oss_with_mask import GptOssWithMask_HFCompatible, GptOssWithMaskInference
-from xh2_model_zoo.xh_llm.utils import auto_offload
+from xh_model_zoo.xh_llm.models.gpt_oss_with_mask import GptOssWithMask_HFCompatible, GptOssWithMaskInference
+from xh_model_zoo.xh_llm.utils import auto_offload
 
 
 def main(args):

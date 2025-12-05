@@ -9,7 +9,7 @@ from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
-from xh2_model_zoo.xh_llm.models.gte_paddle import GteConverterXH2a
+from xh_model_zoo.xh_llm.models.gte_paddle import GteConverterXH2a
 
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))

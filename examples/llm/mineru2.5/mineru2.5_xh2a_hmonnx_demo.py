@@ -19,6 +19,8 @@ from xh_model_zoo.xh_llm.models.qwen2_vl.qwen2_vl_hf_compatible import Qwen2VL_H
 from mineru_vl_utils import MinerUClient
 
 def main(args):
+    export_golden = True
+
     model_dir = Path(args.config).parent
     meta_info = json.load(open(args.config, "r"))
     meta_info = ConfigDict(meta_info)
@@ -100,6 +102,9 @@ def main(args):
     image_feature_session = HMONNXInference(str(vision_onnx_file))
     image_feature_session.to(device)
     image_feature_session.exec_device = execution_device
+    image_feature_session.step = 0
+    image_feature_session.save_golden = export_golden
+    image_feature_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/vision/"
     image_embeds = image_feature_session(pixel_values) # -25568
 
     # image_embeds = torch.rand(1369, 896).cuda()
@@ -152,9 +157,17 @@ def main(args):
     prefill_session.to(device)
     prefill_session.exec_device = execution_device
 
+    prefill_session.step = 0
+    prefill_session.save_golden = export_golden
+    prefill_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/prefill/"
+
     decode_session = HMONNXInference(str(decode_onnx_file))
     decode_session.to(device)
     decode_session.exec_device = execution_device
+
+    decode_session.step = 0
+    decode_session.save_golden = export_golden
+    decode_session.golden_dir = "work_dirs/mineru2.5-XH2a-batch_1-4k-w8a8h1_sefp/golden/decode/"
 
     
     xh_hf_model = Qwen2VL_HFCompatible.to_hf_compatible(model, prefill_session, decode_session)

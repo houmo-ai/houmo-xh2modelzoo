@@ -155,6 +155,11 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
             past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
             past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
 
+        if hasattr(config, "eval_ppl"):
+            from xh2_model_zoo.utils.eval_ppl import evaluate  # isort:skip
+            wraped_qwen_model.seqlen = input_sequence_length
+            evaluate(wraped_qwen_model, model_path=hf_model_path, output_dir=output_dir)
+
         # 导出Prefill模型
         input_ids = []
         current_input_length = []
