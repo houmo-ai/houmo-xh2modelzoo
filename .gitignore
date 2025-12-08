@@ -182,3 +182,7 @@ xhquant
 /xh2_model_zoo.egg-info/
 mypy.ini
 ./data/datasets
+data/量化示例数据_
+data/output
+data/output_456
+data/output_bfp16
