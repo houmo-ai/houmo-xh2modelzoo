@@ -226,7 +226,10 @@ def gptq_fwrd(
     layers_cache_dir: Optional[str] = None,
     is_qwen2_5_vl: bool = False,
     processor=None,
-    tokenizer=None
+    tokenizer=None,
+    is_qwen3_vl=False,
+    is_moe=False,
+    use_hession_mse=False,
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -235,18 +238,19 @@ def gptq_fwrd(
     if device is None:
         device = utils.DEV
 
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
+        use_cache = model.config.text_config.use_cache
+        model.config.text_config.use_cache = False
         layers = model.model.language_model.layers
     else:
+        use_cache = model.config.use_cache
+        model.config.use_cache = False
         layers = model.model.layers
 
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
         model.model.visual = model.model.visual.to(device)
 
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
         model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.to(device)
         model.model.language_model.norm = model.model.language_model.norm.to(device)
         model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.to(device)
@@ -262,7 +266,7 @@ def gptq_fwrd(
     if ddevice is None:
         ddevice = torch.device("cpu")
     nsamples = len(dataloader)
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
         inps = list()
         attention_mask = list()
         position_ids = list()
@@ -281,7 +285,7 @@ def gptq_fwrd(
                 self.attention_type = module.attention_type
 
         def forward(self, inp, **kwargs):
-            if is_qwen2_5_vl:
+            if is_qwen2_5_vl or is_qwen3_vl:
                 inps.append(inp.to(ddevice))
                 attention_mask.append(kwargs["attention_mask"])
                 position_ids.append(kwargs["position_ids"])
@@ -301,9 +305,9 @@ def gptq_fwrd(
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            if is_qwen2_5_vl:
+            if is_qwen2_5_vl or is_qwen3_vl:
                 inputs = process_qwen2_5_vl_batch(batch, device, processor)
-                model.generate(**inputs, max_new_tokens=seqlen)
+                model.generate(**inputs, max_new_tokens=1)
             else:
                 if tokenizer is not None:
                     texts = batch["text"]
@@ -317,17 +321,18 @@ def gptq_fwrd(
             pass
     
     layers[0] = layers[0].module.cpu()
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
         model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.cpu()
         model.model.language_model.norm = model.model.language_model.norm.cpu()
         model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.cpu()
+        model.model.visual.cpu()
     else:
         model.model.embed_tokens = model.model.embed_tokens.cpu()
         model.model.norm = model.model.norm.cpu()
         model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
 
-    if is_qwen2_5_vl:
+    if is_qwen2_5_vl or is_qwen3_vl:
         outs = list()
     else:
         outs = torch.zeros_like(inps)
@@ -376,7 +381,7 @@ def gptq_fwrd(
                 pass
             continue
         
-        if is_qwen2_5_vl:
+        if is_qwen2_5_vl or is_qwen3_vl:
             layer = layers[i].to(device=device, dtype=torch.float16) # use flash attention 2
         else:
             layer = layers[i].to(device=device, dtype=torch.float32)
@@ -414,7 +419,7 @@ def gptq_fwrd(
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
 
-            if is_qwen2_5_vl:
+            if is_qwen2_5_vl or is_qwen3_vl:
                 outs = list()
             for j in range(nsamples):
                 if is_qwen2_5_vl:
@@ -425,6 +430,15 @@ def gptq_fwrd(
                             position_ids=position_ids[j],
                             position_embeddings=position_embeddings[j],
                         )[0].to(device=ddevice, dtype=dtype)
+                    )
+                elif is_qwen3_vl:
+                    outs.append(
+                        layer(
+                            inps[j].to(device=device),
+                            attention_mask=attention_mask[j],
+                            position_ids=position_ids[j],
+                            position_embeddings=position_embeddings[j],
+                        ).to(device=ddevice, dtype=dtype)
                     )
                 else:
                     outs[j] = layer(
@@ -444,6 +458,7 @@ def gptq_fwrd(
                     groupsize=layer_w_groupsize,
                     actorder=act_order,
                     static_groups=False,
+                    use_hession_mse=use_hession_mse,
                 )
 
                 quant_value = gptq[name].W_int
@@ -463,6 +478,13 @@ def gptq_fwrd(
                         position_ids=position_ids[j],
                         position_embeddings=position_embeddings[j],
                     )[0].to(device=ddevice, dtype=dtype)
+                elif is_qwen3_vl:
+                    outs[j] = layer(
+                        inps[j].to(device=device, dtype=torch.float16),
+                        attention_mask=attention_mask[j],
+                        position_ids=position_ids[j],
+                        position_embeddings=position_embeddings[j],
+                    ).to(device=ddevice, dtype=dtype)
                 else:
                     outs[j] = layer(
                         inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
@@ -496,13 +518,13 @@ def gptq_fwrd(
             print(f"from cache: {head_layer_cache_file}")
         else:
             # Convert to module and move to CUDA
-            if is_qwen2_5_vl:
+            if is_qwen2_5_vl or is_qwen3_vl:
                 model.lm_head = model.lm_head.to(device=device, dtype=torch.float16)
             else:
                 model.lm_head = model.lm_head.to(device=device, dtype=torch.float32)
             gptq = {}
             name = "lm_head"
-            layer_weight_bits = w_bits
+            layer_weight_bits = w_head_bits
             layer_weight_sym = not (w_asym)
             gptq[name] = GPTQ(model.lm_head)
             gptq[name].quantizer = quant_utils.WeightQuantizer()
@@ -517,7 +539,7 @@ def gptq_fwrd(
             handles = []
             handles.append(model.lm_head.register_forward_hook(add_batch("lm_head")))
             for j in range(nsamples):
-                if is_qwen2_5_vl:
+                if is_qwen2_5_vl or is_qwen3_vl:
                     model.lm_head(inps[j].to(device=device, dtype=torch.float16))
                 else:
                     model.lm_head(inps[j].unsqueeze(0).to(device=device, dtype=torch.float32))

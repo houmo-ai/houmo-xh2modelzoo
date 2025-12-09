@@ -162,7 +162,7 @@ def get_laion_220k_GPT4Vision_captions_from_LIVIS(
         return trainloader[:nsamples]
 
 def get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode=False, cache_dir=None):
-    from xh2_model_zoo.datasets import VLLMCustomDataset
+    from xh_model_zoo.datasets import VLLMCustomDataset
     import numpy as np
     dataset = VLLMCustomDataset(data_files=data_files)
     rng = np.random.default_rng(seed)

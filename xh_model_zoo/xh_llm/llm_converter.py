@@ -39,6 +39,10 @@ class LLMConverter:
             from .models.qwen2_5_vl import Qwen2_5_VLConverterXH2a
 
             converter_cls = Qwen2_5_VLConverterXH2a
+        elif architecture == "Qwen3VLForConditionalGeneration":
+            from .models.qwen3_vl import Qwen3_VLConverterXH2a
+            
+            converter_cls = Qwen3_VLConverterXH2a
         elif architecture == "Qwen2ForCausalLM":
             if hasattr(config, "quantization_config"):
                 if config.quantization_config["quant_method"].lower() == "gptq":
