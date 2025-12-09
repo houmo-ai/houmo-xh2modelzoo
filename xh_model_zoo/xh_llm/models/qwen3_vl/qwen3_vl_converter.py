@@ -193,6 +193,10 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
 
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
+        
+        from xh_model_zoo.xh_llm.quarot import rotation_utils
+        rotation_utils.fuse_layer_norms(hf_model, llm_rotate=False)
+        rotation_utils.rotate_model(hf_model, "hadamard", device="cpu", llm_rotate=False)
         return hf_model
     
     def _export_vision(
@@ -279,6 +283,8 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
             native_model = self.load_hf_model(
                 hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
             )
+            from xh_model_zoo.xh_llm.quarot import rotation_utils
+            rotation_utils.fuse_layer_norms(native_model)
             
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
