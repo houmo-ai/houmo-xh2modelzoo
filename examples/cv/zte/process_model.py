@@ -2,7 +2,7 @@ import onnx
 from onnx import TensorProto, helper
 
 # 加载 ONNX 模型
-model = onnx.load("/data01/home/xuchen/xh2/xh2_model_zoo/data/models/model-chenjunbo-shape.onnx")
+model = onnx.load("data/models/model-chenjunbo-shape.onnx")
 
 # 找到目标 Gather 节点（这里假设通过节点名称查找，你也可以根据其他特征定位）
 target_gather_node = None
@@ -35,4 +35,4 @@ for i, input_name in enumerate(target_gather_node.input):
         target_gather_node.input[i] = "new_indices_input"
 
 # 保存修改后的模型
-onnx.save(model, "/data01/home/xuchen/xh2/xh2_model_zoo/data/models/model-chenjunbo-shape-md.onnx")
+onnx.save(model, "data/models/model-chenjunbo-shape-md.onnx")

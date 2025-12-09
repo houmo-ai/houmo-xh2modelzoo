@@ -52,22 +52,11 @@ def main():
     # ).input_features
     # [1,80,3000]
 
-    input_features = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/input.pt")
+    input_features = torch.load("work_dirs/whisper/input.pt") 
 
-
-    # encoder_session = onnxruntime.InferenceSession(
-    #     "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/encoder/whisper_meduim.onnx", 
-    #     providers=["CUDAExecutionProvider", "CPUExecutionProvider"] )
-    # prefill_session = onnxruntime.InferenceSession(
-    #     "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/prefill/whisper_meduim_prefill.onnx", 
-    #     providers=["CUDAExecutionProvider", "CPUExecutionProvider"] )
-    # decoder_session = onnxruntime.InferenceSession(
-    #     "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/decoder/whisper_meduim_decoder.onnx", 
-    #     providers=["CUDAExecutionProvider", "CPUExecutionProvider"] )    
-
-    encoder = HMONNXInference(str("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/encoder/hmonnx/whisper_meduim_xh2a_w8a8_sefp.onnx"))
-    prefill = HMONNXInference(str("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"))
-    decoder = HMONNXInference(str("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"))
+    encoder = HMONNXInference(str("work_dirs/whisper/encoder/hmonnx/whisper_meduim_xh2a_w8a8_sefp.onnx"))
+    prefill = HMONNXInference(str("work_dirs/whisper/prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"))
+    decoder = HMONNXInference(str("work_dirs/whisper/decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"))
     encoder.to(device)
     prefill.to(device)
     decoder.to(device)

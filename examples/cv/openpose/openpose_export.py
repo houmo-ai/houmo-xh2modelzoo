@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--onnx",
         type=str,
-        default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/openpose_body.onnx",
+        default="data/models/openpose_body.onnx",
         help="Path to the static OpenPose ONNX model file. It will be converted to Opset 13 in place.",
     )
 

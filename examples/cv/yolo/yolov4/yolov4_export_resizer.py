@@ -145,7 +145,7 @@ def main(args):
     logger.info("开始将 ONNX 转换为 hmonnx...")
     convert_onnx_to_hmonnx(
         onnx_file,
-        [torch.randint(0, 255, (1, 3, 416, 416), dtype=torch.uint8)],
+        [torch.randint(0, 255, (1, 3, 416, 416), dtype=torch.float16)],
         DeviceType.XH2a,
         out_hmonnx_file,
         quant_config=quant_config,

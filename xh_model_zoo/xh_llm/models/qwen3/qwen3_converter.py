@@ -242,7 +242,7 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
         session = HMONNXGoldenInference(prefill_onnx_file)
         session.to(device)
         session.save_golden = True
-        session.golden_dir = "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/qwen3-0.6b-gptq_int4-XH2a-2k-w8a8h0_sefp/hmonnx/golden"
+        session.golden_dir = "work_dirs/qwen3-0.6b-gptq_int4-XH2a-2k-w8a8h0_sefp/hmonnx/golden"
         session.step = 0
 
         # GPTQ ========================================

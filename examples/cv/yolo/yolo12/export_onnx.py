@@ -40,15 +40,15 @@ coco_cfg_file = str(Path(__file__).parent / "coco8.yaml")
 classes = yaml_load(coco_cfg_file)["names"]
 
 mode = "onnx"
-results = model("/data01/home/xuchen/xh2/xh2_model_zoo/data/images/ILSVRC2012_val_00002031.JPEG")
+results = model("data/images/ILSVRC2012_val_00002031.JPEG")
 if mode == "torch":
     # Run inference with the YOLO12n model on the 'bus.jpg' image
-    results = model("/data01/home/xuchen/xh2/xh2_model_zoo/data/images/ILSVRC2012_val_00002031.JPEG")
+    results = model("data/images/ILSVRC2012_val_00002031.JPEG")
 
     # im_dummy = torch.randn(1, 3, 640, 640, requires_grad=True)
 else:
 
-    image_to_draw = cv2.imread("/data01/home/xuchen/xh2/xh2_model_zoo/data/images/ILSVRC2012_val_00002031.JPEG")
+    image_to_draw = cv2.imread("data/images/ILSVRC2012_val_00002031.JPEG")
     image_to_draw_re = cv2.resize(image_to_draw, (640, 640))  # Resize to match model input size
     img_inp = model.predictor.preprocess([image_to_draw_re])
     sess_ori = ort.InferenceSession(
@@ -60,7 +60,6 @@ else:
     results = sess_ori.run(None, input_feed)
     results = model.predictor.postprocess(torch.from_numpy(results[0]), img_inp, [image_to_draw_re])
 
-# image_to_draw_re = cv2.imread("/data01/home/xuchen/xh2/xh2_model_zoo/data/images/ILSVRC2012_val_00002031.JPEG")
 det_boxes = results[0].boxes  # batch 0
 for box, score, label in zip(det_boxes.xyxy, det_boxes.conf, det_boxes.cls):
     if score < 0.1:  # Use the same confidence threshold
@@ -85,7 +84,7 @@ for box, score, label in zip(det_boxes.xyxy, det_boxes.conf, det_boxes.cls):
         image_to_draw_re, label_text, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA
     )
 
-out_file = f"/data01/home/xuchen/xh2/xh2_model_zoo/examples/cv/yolo/yolo12/ILSVRC2012_val_00002031_det_vis.jpg"
+out_file = f"examples/cv/yolo/yolo12/ILSVRC2012_val_00002031_det_vis.jpg"
 cv2.imwrite(str(out_file), image_to_draw_re)
 # logger.info(f"Detect result is saved to {out_file}")
 

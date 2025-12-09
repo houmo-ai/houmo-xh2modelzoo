@@ -89,7 +89,7 @@ def main(args):
     golden_path = work_dirs / "hmonnx/golden"
 
     # input_features = torch.randn(1, 80, 3000)
-    input_features = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/input.pt")
+    input_features = torch.load("work_dirs/whisper/input.pt")
 
     # encoder ============================================
     if not Path(onnx_file).exists():
@@ -161,7 +161,7 @@ def main(args):
     cache_position = torch.tensor([[0, 1, 2, 3]])
     past_len = torch.tensor([0])
 
-    k_cache_past, v_cache_past = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/kv_cache.pt", weights_only=False)
+    k_cache_past, v_cache_past = torch.load("work_dirs/whisper/kv_cache.pt", weights_only=False)
     k_cache = [ torch.ones([1, 16, 1024, 64], dtype=torch.float16)*(-65504) for i in range(24) ]
     v_cache = [ torch.ones([1, 16, 1024, 64], dtype=torch.float16)*(-65504) for i in range(24) ]
     # for i in range(24):
@@ -172,7 +172,7 @@ def main(args):
     v_list = []
     # for i in range(24):
     #     kv_list.append((encoder_outputs_kv, encoder_outputs_kv))
-    kv = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/whisper/kv_data.pt", weights_only=False)
+    kv = torch.load("work_dirs/whisper/kv_data.pt", weights_only=False)
     for i in range(24):
         k_list.append( torch.tensor(kv[i*2]).half()   )
         v_list.append( torch.tensor(kv[i*2+1]).half() )

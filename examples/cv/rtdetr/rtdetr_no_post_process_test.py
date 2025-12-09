@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hmonnx",
         type=str,
-        default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/rtdetr/rtdetr_hgnetv2_l_6x_coco-sim.onnx",
+        default="data/models/rtdetr/rtdetr_hgnetv2_l_6x_coco-sim.onnx",
         help="hmonnx file",
     )
     parser.add_argument("--image", type=str, default="data/images/dog.jpg", help="image file")

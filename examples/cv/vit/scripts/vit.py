@@ -46,7 +46,7 @@ np.random.seed(42)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--onnx_path", default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/vit_new.onnx", type=str
+        "--onnx_path", default="data/models/vit_new.onnx", type=str
     )
     parser.add_argument(
         "--input_shape", default=[1, 3, 224, 224], type=int, nargs="+", help="[h,w] use custom onnx should apply"

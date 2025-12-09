@@ -35,7 +35,6 @@ def eager_attention_forward_cus(
     return attn_output, attn_weights
 
 
-# /data01/home/xuchen/miniconda3/envs/xhquant/lib/python3.10/site-packages/transformers/models/whisper/modeling_whisper.py
 @FUNCTION_REWRITER.register_rewriter("transformers.models.whisper.modeling_whisper.WhisperEncoder.forward")
 def whisper_encoder_forward_v2(
     self, 

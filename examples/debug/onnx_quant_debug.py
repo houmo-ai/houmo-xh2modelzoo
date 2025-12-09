@@ -548,7 +548,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--onnx", type=str, default="/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/resnet50.onnx", help="onnx file"
+        "--onnx", type=str, default="work_dirs/resnet50.onnx", help="onnx file"
     )
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--config", default="./configs/xh2a/base_xh2a.py", help="config file")

@@ -56,7 +56,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--onnx",
         type=str,
-        default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/fcos_r50_caffe_fpn_gn-head_1x_coco.onnx",
+        default="data/models/fcos_r50_caffe_fpn_gn-head_1x_coco.onnx",
     )
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--image", type=str, default="data/images/000000001490.jpg")

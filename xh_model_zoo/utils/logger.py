@@ -13,8 +13,8 @@ def get_root_logger():
     return _root_logger
 
 
-def xh2modelzoo_init_logger(
-    log_file=None, log_level: Union[int, str] = "INFO", name="xh2modelzoo", file_mode="w", **kwargs
+def xhquant_llm_init_logger(
+    log_file=None, log_level: Union[int, str] = "INFO", name="xhquant_llm", file_mode="w", **kwargs
 ):
     global _root_logger
     log_cfg = dict(log_level=log_level, log_file=log_file, **kwargs)

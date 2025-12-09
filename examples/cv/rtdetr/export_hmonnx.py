@@ -76,7 +76,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--onnx",
         type=str,
-        default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/rtdetr/rtdetr_hgnetv2_l_6x_coco_d.onnx",
+        default="data/models/rtdetr/rtdetr_hgnetv2_l_6x_coco_d.onnx",
     )
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
     parser.add_argument("--debug", action="store_true", help="debug mode")

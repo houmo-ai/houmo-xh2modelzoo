@@ -11,17 +11,14 @@ from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
 import sys
 import importlib
-sys.path.append("/data01/home/xuchen/.cache/huggingface/modules/transformers_modules/gte_qwen2_1.5b_inst/") # modeling_qwen.py
-# from modeling_qwen import (  # Qwen2SdpaAttention,
-#     Qwen2Attention,
-#     Qwen2DecoderLayer,
-#     Qwen2ForCausalLM,
-#     Qwen2RMSNorm,
-#     Qwen2RotaryEmbedding,
-#     Qwen2SdpaAttention,
-#     Qwen2Model,
+import os
+user_home = os.path.expanduser("~")
+target_path = os.path.join(
+    user_home,
+    ".cache/huggingface/modules/transformers_modules/gte_qwen2_1.5b_inst/"
+)
+sys.path.append(target_path) # modeling_qwen.py
 
-# )
 
 full_module_name = "transformers_modules.gte_qwen2_1.5b_inst.modeling_qwen"
 modeling_qwen = importlib.import_module(full_module_name)

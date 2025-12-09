@@ -52,7 +52,7 @@ def main(args):
     # )
 
     model = YOLO("data/model_zoo2/houmo/yolo12m/yolo12m.pt")
-    results = model("/data01/home/xuchen/xh2/xh2_model_zoo/data/images/ILSVRC2012_val_00002031.JPEG")
+    results = model("data/images/ILSVRC2012_val_00002031.JPEG")
 
     onnx_name = Path(onnx_file).stem
     # 修改工作目录以匹配yolov6m

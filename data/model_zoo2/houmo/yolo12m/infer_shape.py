@@ -26,6 +26,6 @@ def remove_all_shape_info(onnx_model_path, output_path):
 
 # 使用示例
 if __name__ == "__main__":
-    input_model = "/data01/home/xuchen/xh2/xh2_model_zoo/data/model_zoo2/houmo/yolo12m/yolo12m_batch8.onnx"   # 输入模型路径
-    output_model = "/data01/home/xuchen/xh2/xh2_model_zoo/data/model_zoo2/houmo/yolo12m/yolo12m_batch8.onnx" # 输出模型路径
+    input_model = "data/model_zoo2/houmo/yolo12m/yolo12m_batch8.onnx"   # 输入模型路径
+    output_model = "data/model_zoo2/houmo/yolo12m/yolo12m_batch8.onnx" # 输出模型路径
     remove_all_shape_info(input_model, output_model)

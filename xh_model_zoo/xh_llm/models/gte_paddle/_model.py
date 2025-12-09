@@ -11,8 +11,13 @@ import transformers
 from torch import Tensor
 import sys
 import importlib
-# /data01/home/xuchen/.cache/huggingface/modules/transformers_modules/kimi/modeling_deepseek.py
-sys.path.append("/data01/home/xuchen/.cache/huggingface/modules/transformers_modules/paddle_gte/") # modeling.py
+import os
+user_home = os.path.expanduser("~")
+target_path = os.path.join(
+    user_home,
+    ".cache/huggingface/modules/transformers_modules/paddle_gte/"
+)
+sys.path.append(target_path) # modeling.py
 
 full_module_name = "transformers_modules.paddle_gte.modeling"
 modeling_gte = importlib.import_module(full_module_name)

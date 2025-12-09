@@ -64,7 +64,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--onnx", type=str, default="/data01/home/xuchen/xh2/xhquant_examples/data/models/resnet50_224x224.onnx"
+        "--onnx", type=str, default="data/models/resnet50_224x224.onnx"
     )
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
