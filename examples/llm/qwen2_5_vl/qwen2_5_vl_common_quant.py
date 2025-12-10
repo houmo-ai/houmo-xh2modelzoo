@@ -26,7 +26,7 @@ def parse_arguments():
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     parser.add_argument("--validate", action="store_true", help="validate")
     parser.add_argument("--calib-samples", type=int, default=8)
-    parser.add_argument("--data_files", nargs="+", type=str, help="List of dataset files")
+    parser.add_argument("--data_files", nargs="+", type=str, default=[], help="List of dataset files")
     return parser
 
 

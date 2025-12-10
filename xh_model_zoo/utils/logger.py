@@ -13,7 +13,7 @@ def get_root_logger():
     return _root_logger
 
 
-def xhquant_llm_init_logger(
+def xh2modelzoo_init_logger(
     log_file=None, log_level: Union[int, str] = "INFO", name="xhquant_llm", file_mode="w", **kwargs
 ):
     global _root_logger
