@@ -2,12 +2,9 @@ import argparse
 import os
 import tempfile
 from pathlib import Path
-from tkinter import NO
-
-from librosa import cache
+from copy import deepcopy
 import onnx
 import onnxsim
-from sympy import N, false
 import torch
 import torch.nn as nn
 from datasets import load_dataset
@@ -18,25 +15,22 @@ from xhquant.api import (
     QuantScheme,
     convert_onnx_to_hmonnx,
     create_quant_config,
-    get_root_logger,
     ptq_quantize,
     to_frontend_graph,
     to_quant_graph,
-    xhquant_init,
-    convert_fx_model_to_quanted_model,
-    convert_dynamo_model_to_hmonnx
-
 )
-from xhquant.frontend.convert import to_frontend_graph
-
-from xhquant.utils.config import Config, ConfigDict
-from xh_model_zoo.xh_llm.models.whisper._model_opt import *
-from xhquant.patch.core import RewriterContext
-from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
-
-from xhquant.api.ptq_export_hmonnx import _convert_model_to_quanted_model, convert_quanted_model_to_hmonnx, FrontendType
-from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE
+from xhquant.api.ptq_export_hmonnx import (
+    convert_quanted_model_to_hmonnx,
+)
 from xhquant.common.types import PrecisionMode
+from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE
+from xhquant.frontend.convert import to_frontend_graph
+from xhquant.patch.core import RewriterContext
+from xhquant.utils.config import ConfigDict
+
+from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *
+
 
 class Decoder(nn.Module):
     def __init__(self, model, proj_out, config=None):
@@ -45,8 +39,19 @@ class Decoder(nn.Module):
         self.model = model
         self.proj_out = proj_out
 
-    def forward(self, decoder_input_ids, cache_position, past_len, current_len, mask_atten=None, k_cache_list=None, v_cache_list=None, k_list=None, v_list=None):  # , cache_position
-        hidden_state, k_cache_list, v_cache_list = self.model.decoder( # [1,1,1024]
+    def forward(
+        self,
+        decoder_input_ids,
+        cache_position,
+        past_len,
+        current_len,
+        mask_atten=None,
+        k_cache_list=None,
+        v_cache_list=None,
+        k_list=None,
+        v_list=None,
+    ):  # , cache_position
+        hidden_state, k_cache_list, v_cache_list = self.model.decoder(  # [1,1,1024]
             input_ids=decoder_input_ids,
             k_list=k_list,
             v_list=v_list,
@@ -59,20 +64,20 @@ class Decoder(nn.Module):
             # past_key_values_length=past_key_len,
         )
         output = self.proj_out(hidden_state)
-        return output, k_cache_list, v_cache_list 
+        return output, k_cache_list, v_cache_list
 
 
 def main(args):
     # load model and processor
-    processor = WhisperProcessor.from_pretrained("/data02/datasets/whisper_medium")
-    model = WhisperForConditionalGeneration.from_pretrained("/data02/datasets/whisper_medium")
+    # processor = WhisperProcessor.from_pretrained("data/models/whisper-medium")
+    model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper-medium")
     model.config.forced_decoder_ids = None
-
+    model.config._attn_implementation = "eager"
     model.model.encoder.decoder_m = model.model.decoder
 
     # load dummy dataset and read audio files
-    ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-    sample = ds[1]["audio"]
+    # ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+    # sample = ds[1]["audio"]
     # input_features = processor(
     #     sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
     # ).input_features # -142334.8125
@@ -88,13 +93,13 @@ def main(args):
     hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_xh2a_{quant_type}.onnx"
     golden_path = work_dirs / "hmonnx/golden"
 
-    # input_features = torch.randn(1, 80, 3000)
-    input_features = torch.load("work_dirs/whisper/input.pt")
+    input_features = torch.randn(1, 80, 3000)
+    # input_features = torch.load("work_dirs/whisper/input.pt")
 
     # encoder ============================================
     if not Path(onnx_file).exists():
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with RewriterContext(None, backend='onnxruntime'):
+            with RewriterContext(None, backend="onnxruntime"):
                 temp_onnx_file = str(Path(tmp_dir) / Path(onnx_file).name)
                 torch.onnx.export(
                     model.model.encoder,
@@ -126,7 +131,7 @@ def main(args):
         output_names.append(f"key_state_{i}")
     for i in range(24):
         output_names.append(f"value_state_{i}")
-        
+
     if not Path(hmonnx_file).exists():
         convert_onnx_to_hmonnx(
             str(onnx_file),
@@ -146,7 +151,6 @@ def main(args):
         session.step = 0
         session(input_features.half().to("cuda"))
 
-
     # decoder ===========================================
     name = "decoder"
 
@@ -164,23 +168,29 @@ def main(args):
     past_ket_length = torch.tensor([0])
     past_len = torch.tensor([4])
 
-    k_cache_past, v_cache_past = torch.load("work_dirs/whisper/kv_cache.pt", weights_only=False)
-    k_cache = [ torch.ones([1, 16, 1024, 64], dtype=torch.float16)*(-65504) for i in range(24) ]
-    v_cache = [ torch.ones([1, 16, 1024, 64], dtype=torch.float16)*(-65504) for i in range(24) ]
-    for i in range(24):
-        k_cache[i][:, :, :4, :] = k_cache_past[i].half()
-        v_cache[i][:, :, :4, :] = v_cache_past[i].half()
+    # k_cache_past, v_cache_past = torch.load("work_dirs/whisper/kv_cache.pt", weights_only=False)
+    k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    # for i in range(24):
+    #     k_cache[i][:, :, :4, :] = k_cache_past[i].half()
+    #     v_cache[i][:, :, :4, :] = v_cache_past[i].half()
 
-    k_list = []
-    v_list = []
+    k_list = deepcopy(k_cache)
+    v_list = deepcopy(v_cache)
     # for i in range(24):
     #     kv_list.append((encoder_outputs_kv, encoder_outputs_kv))
-    kv = torch.load("work_dirs/whisper/kv_data.pt", weights_only=False)
-    for i in range(24):
-        k_list.append( torch.tensor(kv[i*2]).half()   )
-        v_list.append( torch.tensor(kv[i*2+1]).half() )
-    
-    inputs_names = ["decoder_input_ids", "cache_position", "past_len", "current_len", "mask_atten"] # , "past_key_length"
+    # kv = torch.load("work_dirs/whisper/kv_data.pt", weights_only=False)
+    # for i in range(24):
+    #     k_list.append(torch.tensor(kv[i * 2]).half())
+    #     v_list.append(torch.tensor(kv[i * 2 + 1]).half())
+
+    inputs_names = [
+        "decoder_input_ids",
+        "cache_position",
+        "past_len",
+        "current_len",
+        "mask_atten",
+    ]  # , "past_key_length"
 
     for i in range(24):
         inputs_names.append(f"k_cache_{i}")
@@ -189,8 +199,7 @@ def main(args):
 
     inputs_names += output_names
 
-    model_cus = Decoder(model.model,  model.proj_out, config=model.config)
-
+    model_cus = Decoder(model.model, model.proj_out, config=model.config)
 
     output_names = ["logits"]
     for i in range(24):
@@ -201,30 +210,30 @@ def main(args):
     # encoder ============================================
 
     cache_len = decoder_input_ids.shape[0]
-    mask_atten = torch.ones( ([1, 16, cache_len, 1024]) ).half()
-    mask_atten[:,:,:,  past_len+cache_len: ] *= -65504
+    mask_atten = torch.ones(([1, 16, cache_len, 1024])).half()
+    mask_atten[:, :, :, past_len + cache_len :] *= -65504
     current_len = torch.tensor([cache_len])
-    
+
     # warp
-    warp_inp = (
-        decoder_input_ids, cache_position, past_len, current_len, mask_atten, k_cache, v_cache, k_list, v_list
-    ) 
+    warp_inp = (decoder_input_ids, cache_position, past_len, current_len, mask_atten, k_cache, v_cache, k_list, v_list)
 
-    trace_inp = (decoder_input_ids, cache_position, past_len, current_len, mask_atten) + \
-        tuple(k_cache) + tuple(v_cache) + tuple(k_list) + tuple(v_list)
+    trace_inp = (
+        (decoder_input_ids, cache_position, past_len, current_len, mask_atten)
+        + tuple(k_cache)
+        + tuple(v_cache)
+        + tuple(k_list)
+        + tuple(v_list)
+    )
 
-
-    with RewriterContext(None, backend='onnxruntime'):
-        warp_model_cus =  wrap_llm_model(model_cus)
+    with RewriterContext(None, backend="onnxruntime"):
+        warp_model_cus = wrap_llm_model(model_cus)
         warp_model_cus = warp_model_cus.half()
         # output, k_cache_list, v_cache_list = warp_model_cus(*warp_inp)
-        fronted_graph_module = to_frontend_graph(
-            warp_model_cus, 'DynamoFX', warp_inp
-        )
+        fronted_graph_module = to_frontend_graph(warp_model_cus, "DynamoFX", warp_inp)
 
         # output, k_cache_list, v_cache_list = frontend_model(*warp_inp)
 
-    '''
+    """
     if not Path(onnx_file).exists():
         with tempfile.TemporaryDirectory() as tmp_dir:
             with RewriterContext(None, backend='onnxruntime'):
@@ -251,21 +260,27 @@ def main(args):
             all_tensors_to_one_file=True,
             location=f"{Path(onnx_file).stem}_external_data",
         )
-    '''
+    """
 
-    hm_inputs = [decoder_input_ids.to(torch.int32), cache_position.to(torch.int32), past_len.to(torch.int32), current_len.to(torch.int32), mask_atten,] 
+    hm_inputs = [
+        decoder_input_ids.to(torch.int32),
+        cache_position.to(torch.int32),
+        past_len.to(torch.int32),
+        current_len.to(torch.int32),
+        mask_atten,
+    ]
     for i in range(24):
-        hm_inputs.append( k_cache[i] )     
+        hm_inputs.append(k_cache[i])
 
     for i in range(24):
-        hm_inputs.append( v_cache[i] )   
+        hm_inputs.append(v_cache[i])
 
     for i in range(24):
-        hm_inputs.append( k_list[i] )
-        hm_inputs.append( v_list[i] )
+        hm_inputs.append(k_list[i])
+        hm_inputs.append(v_list[i])
 
     if not Path(hmonnx_file).exists():
-         
+
         # quanted_graph_module = _convert_model_to_quanted_model(
         #     model, FrontendType.DynamoFX, warp_inp, DeviceType.XH2a, quant_config
         # )
@@ -275,7 +290,7 @@ def main(args):
             quant_config = ConfigDict()
         if isinstance(quant_config, dict):
             quant_config = ConfigDict(quant_config)
-        
+
         if "inputs" not in quant_config:
             quant_config.inputs = ConfigDict()
 
@@ -316,7 +331,6 @@ def main(args):
             output_names,
         )
 
-
         # convert_dynamo_model_to_hmonnx(
         #     warp_model_cus,
         #     hm_inputs,
@@ -326,7 +340,6 @@ def main(args):
         #     input_names=inputs_names,  # , "cache_position"
         #     output_names=output_names,
         # )
-
 
         # convert_onnx_to_hmonnx(
         #     str(onnx_file),

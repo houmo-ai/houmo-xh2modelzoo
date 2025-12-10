@@ -2,8 +2,8 @@ from datasets import load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 # load model and processor
-processor = WhisperProcessor.from_pretrained("/data02/datasets/whisper_medium")
-model = WhisperForConditionalGeneration.from_pretrained("/data02/datasets/whisper_medium")
+processor = WhisperProcessor.from_pretrained("data/models/whisper-medium")
+model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper-medium")
 model.config.forced_decoder_ids = None
 
 # load dummy dataset and read audio files
