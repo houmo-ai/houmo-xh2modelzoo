@@ -51,6 +51,10 @@ def convert_module(module: nn.Module, config: ConfigDict) -> DynamicModule:
     这里不会创建新的module, 而是直接修改原module的__class__属性,
     module的__class__将被替换成新的类型, 因此, 原module的权重、属性等不会丢失.
     """
+    # already converted
+    if isinstance(module, DynamicModule):
+        return module
+
     nn_cls = type(module)
 
     dm_cls = XHLLM_TRACEABLE_MODULES.get(nn_cls)

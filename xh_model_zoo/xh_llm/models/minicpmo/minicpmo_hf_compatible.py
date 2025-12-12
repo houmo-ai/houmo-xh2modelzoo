@@ -3,13 +3,12 @@ from typing import Optional, Tuple, Union, List
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
-from transformers import AutoModel, DynamicCache, Qwen2PreTrainedModel
+from transformers import AutoModel, DynamicCache
 from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPooling, CausalLMOutputWithPast
 from dataclasses import dataclass
 from transformers.modeling_outputs import ModelOutput
 from ..base_llm_model import BaseModel
-
 
 def create_llm_wraped_cls(cls):
     class _Qwen2ForCausalLM(cls):
@@ -932,7 +931,7 @@ class MiniCPMO_HFCompatible:
     @classmethod
     def to_hf_compatible(
         cls,
-        hf_model: "transformers_modules.MiniCPM-o-2_6.modeling_minicpo.MiniCPMO",
+        hf_model,
         vision_model: Optional[BaseModel] = None,
         llm_model: Optional[BaseModel] = None,
         audio_model: Optional[BaseModel] = None,

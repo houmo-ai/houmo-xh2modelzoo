@@ -97,7 +97,6 @@ class LLMConverter:
             from .models.qwen3moe import Qwen3MoeConverterXH2a
 
             converter_cls = Qwen3MoeConverterXH2a
-
         elif architecture == "Qwen2ForCausalLM_legacy":
             from .models.qwen2_legacy import Qwen2LegacyConverterXH2a
 
@@ -114,6 +113,30 @@ class LLMConverter:
             from .models.qwen2_ste import SteQwen2ConverterXH2a
 
             converter_cls = SteQwen2ConverterXH2a
+        elif architecture == "MiniCPMWhisperEncoder":
+            from .models.minicpmo.minicpmo_audio_convert import MinicpmoAudioConverterXH2a
+
+            converter_cls = MinicpmoAudioConverterXH2a
+        elif architecture == "MiniCPMOVisionEncoder":
+            from .models.minicpmo.minicpmo_vision_convert import MinicpmoVisionConverterXH2a
+
+            converter_cls = MinicpmoVisionConverterXH2a
+        elif architecture == "MiniCPMOLLMEncoder":
+            from .models.minicpmo.minicpmo_llm_convert import MinicpmoLLMConverterXH2a
+
+            converter_cls = MinicpmoLLMConverterXH2a
+        elif architecture == "MiniCPMOTTS":
+            from .models.minicpmo.minicpmo_tts_convert import MinicpmoTTSConverterXH2a
+
+            converter_cls = MinicpmoTTSConverterXH2a
+        elif architecture == "MiniCPMOTTSDVAEEncoder":
+            from .models.minicpmo.minicpmo_tts_dvae_convert import MinicpmoTTSDVAEConverterXH2a
+
+            converter_cls = MinicpmoTTSDVAEConverterXH2a
+        elif architecture == "MiniCPMOTTSVOCOS":
+            from .models.minicpmo.minicpmo_tts_vocos_convert import MinicpmoTTSVocosConverterXH2a
+
+            converter_cls = MinicpmoTTSVocosConverterXH2a
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
 

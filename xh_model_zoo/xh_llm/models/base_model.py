@@ -37,7 +37,8 @@ from xhquant.api import (
 )
 from xhquant.core import CacheTensor
 
-from ..utils import Config, DynamicModule, get_root_logger
+from xhquant.api import Config, get_root_logger
+from xhquant.utils.registry.dynamic_module import DynamicModule
 from .builder import XHLLM_TRACEABLE_MODULES, wrap_llm_model
 from .eval_model_type import EvalModelType
 from .generation_mixin import BaseGenerationMixin
