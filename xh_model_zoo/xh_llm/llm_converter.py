@@ -46,13 +46,13 @@ class LLMConverter:
         elif architecture == "Qwen2ForCausalLM":
             if hasattr(config, "quantization_config"):
                 if config.quantization_config["quant_method"].lower() == "gptq":
-                    from .models.qwen2.qwen2_hf_gptq_convert import Qwen2GPTQConverterXH2a
+                    from .models._qwen2.qwen2_hf_gptq_convert import Qwen2GPTQConverterXH2a
 
                     converter_cls = Qwen2GPTQConverterXH2a
                 else:
                     raise ValueError(f"Unsupported quantization method: {config.quantization_config.quant_method}")
             else:
-                from .models.qwen2 import Qwen2ConverterXH2a
+                from .models._qwen2 import Qwen2ConverterXH2a
 
                 converter_cls = Qwen2ConverterXH2a
         elif architecture == "LlamaForCausalLM":
@@ -76,21 +76,21 @@ class LLMConverter:
         elif architecture == "Qwen3ForCausalLM":
             if hasattr(config, "quantization_config"):
                 if config.quantization_config["quant_method"].lower() == "awq":
-                    from .models.qwen3 import Qwen3AWQConverterXH2a
+                    from .models._qwen3 import Qwen3AWQConverterXH2a
 
                     converter_cls = Qwen3AWQConverterXH2a
                 elif config.quantization_config["quant_method"].lower() == "gptq":
-                    from .models.qwen3 import Qwen3GPTQConverterXH2a
+                    from .models._qwen3 import Qwen3GPTQConverterXH2a
 
                     converter_cls = Qwen3GPTQConverterXH2a
                 elif hasattr(config, "quantization_config") and config.quantization_config["quant_method"].lower() == "auto-round":
-                    from .models.qwen3 import Qwen3GPTQConverterXH2a
+                    from .models._qwen3 import Qwen3GPTQConverterXH2a
                     
                     converter_cls = Qwen3GPTQConverterXH2a
                 else:
                     raise ValueError(f"Unsupported quantization method: {config.quantization_config.quant_method}")
             else:
-                from .models.qwen3 import Qwen3ConverterXH2a
+                from .models._qwen3 import Qwen3ConverterXH2a
 
                 converter_cls = Qwen3ConverterXH2a
         elif architecture == "Qwen3MoeForCausalLM":

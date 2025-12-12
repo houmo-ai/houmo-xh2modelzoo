@@ -2,7 +2,7 @@ import argparse
 
 from xhquant.api import get_root_logger, xhquant_init
 
-from xh_model_zoo.xh_llm.models.qwen2 import Qwen2Inference
+from xh_model_zoo.xh_llm.models._qwen2 import Qwen2Inference
 
 
 def main(args):

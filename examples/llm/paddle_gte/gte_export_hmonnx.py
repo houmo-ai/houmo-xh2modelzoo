@@ -3,7 +3,7 @@ import os.path as osp
 from pathlib import Path
 
 from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen2 import Qwen2ConvertConfig
+from xh_model_zoo.xh_llm.models._qwen2 import Qwen2ConvertConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
