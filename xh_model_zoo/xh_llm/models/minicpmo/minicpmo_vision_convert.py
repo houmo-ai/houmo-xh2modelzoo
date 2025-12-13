@@ -279,7 +279,7 @@ class MinicpmoVisionConverterXH2a(HFTransfromersConverter):
         xh_model.to(dtype)
 
         onnx_dir = out_model_dir
-        onnx_file = onnx_dir / f"{cfg_name}.onnx"
+        onnx_file = onnx_dir / f"{cfg_name}_vision.onnx"
 
         convert_fx_model_to_hmonnx(
             xh_model._wrap_model,
@@ -301,18 +301,18 @@ class MinicpmoVisionConverterXH2a(HFTransfromersConverter):
         meta_info.vision_hmonnx = str(Path(onnx_file).relative_to(onnx_dir))
         json.dump(meta_info, open(onnx_dir / "meta_info.json", "w"), indent=4)
 
-        from xhquant.api import HMONNXGoldenInference
+        # from xhquant.api import HMONNXGoldenInference
 
-        hm_model = HMONNXGoldenInference(onnx_file)
-        hm_model.save_golden = True
-        hm_model.exec_device = device
+        # hm_model = HMONNXGoldenInference(onnx_file)
+        # hm_model.save_golden = True
+        # hm_model.exec_device = device
 
-        golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(onnx_file).stem}"
-        golden_dir.mkdir(exist_ok=True, parents=True)
-        hm_model.golden_dir = str(golden_dir)
+        # golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(onnx_file).stem}"
+        # golden_dir.mkdir(exist_ok=True, parents=True)
+        # hm_model.golden_dir = str(golden_dir)
 
-        with torch.no_grad():
-            hm_model.forward(*net_inputs)  # type: ignore[arg-type]
+        # with torch.no_grad():
+        #     hm_model.forward(*net_inputs)  # type: ignore[arg-type]
 
     @classmethod
     def convert(cls, hf_model_path: str, config: MinicpmoVisionConvertConfig, output_dir: str):

@@ -312,8 +312,8 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
 
         print("a")
         
-        prefill_onnx_dir = Path(cfg.work_dir) / "prefill_onnx"
-        decode_onnx_dir = Path(cfg.work_dir) / "decode_onnx"
+        prefill_onnx_dir = Path(out_model_dir) / "prefill_onnx"
+        decode_onnx_dir = Path(out_model_dir) / "decode_onnx"
         prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
         decode_onnx_dir.mkdir(exist_ok=True, parents=True)
         
@@ -324,7 +324,7 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
                 xh_model,
                 data_prefill,
                 str(prefill_onnx_dir),
-                f"{cfg_name}_prefill",
+                f"{cfg_name}_tts_prefill",
                 device,
                 dtype,
                 logger,
@@ -337,20 +337,20 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
             logger.info("*************** Finished export prefill model ***************")
             cleanup_memory()
 
-            from xhquant.api import HMONNXGoldenInference
-            hm_model = HMONNXGoldenInference(prefill_onnx_file)
-            hm_model.save_golden = True
-            hm_model.exec_device = device
+            # from xhquant.api import HMONNXGoldenInference
+            # hm_model = HMONNXGoldenInference(prefill_onnx_file)
+            # hm_model.save_golden = True
+            # hm_model.exec_device = device
 
-            golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(prefill_onnx_file).stem}"
-            golden_dir.mkdir(exist_ok=True, parents=True)
-            hm_model.golden_dir = str(golden_dir)
+            # golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(prefill_onnx_file).stem}"
+            # golden_dir.mkdir(exist_ok=True, parents=True)
+            # hm_model.golden_dir = str(golden_dir)
 
-            with torch.no_grad():
-                calib_data[1] = calib_data[1].to(torch.int32)
-                calib_data[2] = calib_data[2].to(torch.int32)
-                calib_data = [p_data.to("cpu") for p_data in calib_data]
-                hm_model.forward(*calib_data)
+            # with torch.no_grad():
+            #     calib_data[1] = calib_data[1].to(torch.int32)
+            #     calib_data[2] = calib_data[2].to(torch.int32)
+            #     calib_data = [p_data.to("cpu") for p_data in calib_data]
+            #     hm_model.forward(*calib_data)
         
         if True:
             logger.info("*************** Start exporting decode model ***************")
@@ -359,7 +359,7 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
                 xh_model,
                 data_decode,
                 str(decode_onnx_dir),
-                f"{cfg_name}_decode",
+                f"{cfg_name}_tts_decode",
                 device,
                 dtype,
                 logger,
@@ -371,31 +371,31 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
             logger.info(f"save decode onnx model to {decode_onnx_file}")
             logger.info("*************** Finished export decode model ***************")
 
-            from xhquant.api import HMONNXGoldenInference
-            hm_model = HMONNXGoldenInference(decode_onnx_file)
-            hm_model.save_golden = True
-            hm_model.exec_device = device
+            # from xhquant.api import HMONNXGoldenInference
+            # hm_model = HMONNXGoldenInference(decode_onnx_file)
+            # hm_model.save_golden = True
+            # hm_model.exec_device = device
 
-            golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(decode_onnx_file).stem}"
-            golden_dir.mkdir(exist_ok=True, parents=True)
-            hm_model.golden_dir = str(golden_dir)
+            # golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(decode_onnx_file).stem}"
+            # golden_dir.mkdir(exist_ok=True, parents=True)
+            # hm_model.golden_dir = str(golden_dir)
 
-            with torch.no_grad():
-                data_decode = list(xh_model.prepare_inputs_for_graph(data_decode))
+            # with torch.no_grad():
+            #     data_decode = list(xh_model.prepare_inputs_for_graph(data_decode))
 
-                new_args = []
-                for arg in data_decode:
-                    if isinstance(arg, (List, Tuple)):
-                        new_args.extend(arg)
-                    else:
-                        new_args.append(arg)
-                data_decode = new_args
+            #     new_args = []
+            #     for arg in data_decode:
+            #         if isinstance(arg, (List, Tuple)):
+            #             new_args.extend(arg)
+            #         else:
+            #             new_args.append(arg)
+            #     data_decode = new_args
                 
-                data_decode[1] = data_decode[1].to(torch.int32)
-                data_decode[2] = data_decode[2].to(torch.int32)
+            #     data_decode[1] = data_decode[1].to(torch.int32)
+            #     data_decode[2] = data_decode[2].to(torch.int32)
                 
-                data_decode = [p_data.to("cpu") for p_data in data_decode]
-                hm_model.forward(*data_decode)
+            #     data_decode = [p_data.to("cpu") for p_data in data_decode]
+            #     hm_model.forward(*data_decode)
         
         meta_file = str(Path(cfg.work_dir) / "export_meta_info.json")
         json.dump(meta_info, open(meta_file, "w"), indent=4)

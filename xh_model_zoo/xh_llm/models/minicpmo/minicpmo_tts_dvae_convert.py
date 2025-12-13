@@ -201,8 +201,8 @@ class MinicpmoTTSDVAEConverterXH2a(HFTransfromersConverter):
         # convert onnx to hmonnx
         out_hmonnx_dir = Path(cfg.work_dir) / "hmonnx" / "tts_dvae"
         out_hmonnx_dir.mkdir(exist_ok=True, parents=True)
-        out_hmonnx_part1 = out_hmonnx_dir / "dvae_part1.onnx"
-        out_hmonnx_part2 = out_hmonnx_dir / "dvae_part2.onnx"
+        out_hmonnx_part1 = out_hmonnx_dir / f"{cfg_name}_tts_dvae_part1.onnx"
+        out_hmonnx_part2 = out_hmonnx_dir / f"{cfg_name}_tts_dvae_part2.onnx"
 
         convert_onnx_to_hmonnx(
             str(dvae_part1_onnx),

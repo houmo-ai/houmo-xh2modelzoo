@@ -158,7 +158,7 @@ class MinicpmoTTSVocosConverterXH2a(HFTransfromersConverter):
 
         vocos_dir = Path(cfg.work_dir) / "vocos_tmp"
         vocos_dir.mkdir(exist_ok=True, parents=True)
-        vocos_onnx = vocos_dir / "vocos.onnx"
+        vocos_onnx = vocos_dir / f"{cfg_name}_tts_vocos.onnx"
 
         original_forward = xh_model._wrap_model.forward
         xh_model._wrap_model.forward = xh_model._wrap_model.decode_mask
@@ -175,7 +175,7 @@ class MinicpmoTTSVocosConverterXH2a(HFTransfromersConverter):
 
         out_hmonnx_dir = Path(cfg.work_dir) / "hmonnx" / "tts_vocos"
         out_hmonnx_dir.mkdir(exist_ok=True, parents=True)
-        out_hmonnx = out_hmonnx_dir / "vocos.onnx"
+        out_hmonnx = out_hmonnx_dir / f"{cfg_name}_tts_vocos.onnx"
 
         convert_onnx_to_hmonnx(
             str(vocos_onnx),

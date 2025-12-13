@@ -270,7 +270,7 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         xh_model.to(dtype)
 
         onnx_dir = out_model_dir
-        onnx_file = onnx_dir / f"{cfg_name}.onnx"
+        onnx_file = onnx_dir / f"{cfg_name}_audio.onnx"
 
         from xhquant.api import convert_fx_model_to_hmonnx
         convert_fx_model_to_hmonnx(
@@ -287,25 +287,25 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         meta_info.vision_hmonnx = str(Path(onnx_file).relative_to(onnx_dir))
         json.dump(meta_info, open(onnx_dir / f"meta_info.json", "w"), indent=4)
 
-        from xhquant.api import HMONNXGoldenInference
-        hm_model = HMONNXGoldenInference(onnx_file)
-        hm_model.save_golden = True
-        hm_model.exec_device = device
+        # from xhquant.api import HMONNXGoldenInference
+        # hm_model = HMONNXGoldenInference(onnx_file)
+        # hm_model.save_golden = True
+        # hm_model.exec_device = device
 
-        golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(onnx_file).stem}"
-        golden_dir.mkdir(exist_ok=True, parents=True)
-        hm_model.golden_dir = str(golden_dir)
+        # golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(onnx_file).stem}"
+        # golden_dir.mkdir(exist_ok=True, parents=True)
+        # hm_model.golden_dir = str(golden_dir)
 
-        with torch.no_grad():
-            # 将 net_inputs[1] 中的 -inf 替换为 float16 的最小值
-            mask = torch.isneginf(net_inputs[1])
-            if mask.any():
-                min_fp16 = torch.finfo(torch.float16).min
-                net_inputs[1] = net_inputs[1].clone()
-                net_inputs[1][mask] = min_fp16
-                logger.info(f"已将 net_inputs[1] 中的 -inf 替换为 float16 最小值: {min_fp16}")
-            net_inputs[1] 
-            hm_model.forward(*net_inputs)
+        # with torch.no_grad():
+        #     # 将 net_inputs[1] 中的 -inf 替换为 float16 的最小值
+        #     mask = torch.isneginf(net_inputs[1])
+        #     if mask.any():
+        #         min_fp16 = torch.finfo(torch.float16).min
+        #         net_inputs[1] = net_inputs[1].clone()
+        #         net_inputs[1][mask] = min_fp16
+        #         logger.info(f"已将 net_inputs[1] 中的 -inf 替换为 float16 最小值: {min_fp16}")
+        #     net_inputs[1] 
+        #     hm_model.forward(*net_inputs)
 
         
 
