@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
 import torch
@@ -18,7 +18,9 @@ from .minicpmo_llm_convert_config import MinicpmoLLMConvertConfig
 
 from xhquant.api import (  # type: ignore # isort:skip
     ConfigDict,
+    PrecisionMode,
     DeviceType,
+    ptq_quantize,
     convert_fx_model_to_hmonnx,
     create_quant_config,
     get_root_logger,
@@ -28,6 +30,38 @@ import torch.nn as nn
 from xhquant.utils import set_random_seed
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.minicpmo.minicpmo_hf_compatible import MiniCPMO_HFCompatible
+from xh_model_zoo.utils.time_profiler import TimeProfiler
+from ..llm_base_model import LLMBaseModel
+from xh_model_zoo.xh_llm.utils import decode_next_token
+
+
+def cleanup_memory(verbos=True) -> None:
+    """Run GC and clear GPU memory."""
+    import gc
+    import inspect
+    caller_name = ''
+    try:
+        caller_name = f' (from {inspect.stack()[1].function})'
+    except (ValueError, KeyError):
+        pass
+
+    def total_reserved_mem() -> int:
+        return sum(torch.cuda.memory_reserved(device=i) for i in range(torch.cuda.device_count()))
+
+    memory_before = total_reserved_mem()
+
+    # gc.collect and empty cache are necessary to clean up GPU memory if the model was distributed
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        memory_after = total_reserved_mem()
+        if verbos:
+            print(
+                f"GPU memory{caller_name}: {memory_before / (1024 ** 3):.2f} -> {memory_after / (1024 ** 3):.2f} GB"
+                f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
+            )
+
 
 
 def get_video_chunk_content(video_path, flatten=True):
@@ -53,6 +87,51 @@ def get_video_chunk_content(video_path, flatten=True):
     return contents
 
 
+
+def xhmodel_export_onnx(
+    xh_model: LLMBaseModel,
+    tokenizer,
+    data_batch,
+    onnx_output_dir: str,
+    cfg_name,
+    execution_device,
+    dtype,
+    logger,
+    valid: bool = True,
+):
+    logger = get_root_logger()
+
+    xh_model.to("cpu")  # 切换到cpu上进行模型导出
+    torch.cuda.empty_cache()
+
+    logger.info("Start exporting graph.............")
+    with TimeProfiler("export graph"):
+        xh_model.convert_to_export_graph(data_batch)
+    logger.info("Finish exported graph.")
+
+    torch.cuda.empty_cache()
+    xh_model.change_eval_type(EvalModelType.EXPORTED)
+
+    if valid:
+        xh_model.to(execution_device)
+        xh_model.to(dtype)
+        xh_model.set_exec_device(execution_device)
+        with torch.no_grad():
+            logits, hidden_states = xh_model.test_step(data_batch)
+            next_tokens, next_token_str = decode_next_token(tokenizer, logits)
+        logger.info(f"Exported model next token: {next_tokens} {next_token_str}")
+
+        xh_model.to("cpu")  # 切换到cpu上进行模型导出
+        torch.cuda.empty_cache()
+
+    # memory_tracker.log_memory("before exporting onnx", logger)
+    logger.info("*************** Start exporting onnx ***************")
+    with TimeProfiler("export onnx"):
+        onnx_file = xh_model.to_export_onnx(data_batch, onnx_output_dir, cfg_name)[0]
+    # memory_tracker.log_memory("after exporting onnx", logger)
+    return onnx_file
+
+
 class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
@@ -64,6 +143,7 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
 
     def _convert(self, hf_model_path: str, output_dir: str):
         cfg = self.config
+        is_valid = cfg.valid
         cfg.target_device = "XH2a"
         cfg.hf_model_dir = hf_model_path
         cfg_name = Path(hf_model_path).name
@@ -84,11 +164,10 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
         out_model_dir = Path(cfg.work_dir) / "hmonnx" / "llm"
         out_model_dir.mkdir(exist_ok=True, parents=True)
         config_file = str(out_model_dir / "llm_config.json")
+        # cfg.dump(config_file)
 
         dtype = getattr(torch, cfg.dtype)
         device = torch.device(cfg.device)
-
-        tokenizer = AutoTokenizer.from_pretrained(cfg.hf_model_dir, trust_remote_code=True)
 
         from .minicpmo_llm_model import XHMiniCPMOLLMModel
 
@@ -118,6 +197,25 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
         )
         native_model = xh_model.get_hf_model()
 
+        token_embedding = native_model.llm.get_input_embeddings()
+        token_embedding_file = Path(cfg.work_dir) / "token_embedding.pt"
+        torch.save(token_embedding, str(token_embedding_file))
+    
+        xh_model.init_wrap_model()
+        xh_model.wrap_processor(native_model)
+        meta_info = ConfigDict(
+            dict(
+                create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                config=str(Path(config_file).relative_to(out_model_dir)),
+            )
+        )
+        meta_info["hf_model"] = xh_model.hf_model_dir
+        meta_info["wrap_cfg"] = xh_model.wrap_cfg.to_dict()
+        meta_info["patch_size"] = xh_model.patch_size
+        meta_info["num_patches_per_side"] = xh_model.num_patches_per_side
+
+        tokenizer = AutoTokenizer.from_pretrained(cfg.hf_model_dir, trust_remote_code=True)
+
         video_path = cfg.video
         ref_audio_path = cfg.audio
         ref_audio, _ = librosa.load(ref_audio_path, sr=16000, mono=True)
@@ -127,74 +225,10 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
         msg = {"role": "user", "content": contents}
         msgs = [sys_msg, msg]
 
-        llm_hf_args: List[Any] = []
-        llm_hf_kwargs: Dict[str, Any] = {}
+        # please set generate_audio=True and output_audio_path to save the tts result
+        generate_audio = True
+        output_audio_path = "output.wav"
 
-        def _get_hf_llm_inputs(module, args, kwargs):
-            for arg in args:
-                if isinstance(arg, torch.Tensor):
-                    llm_hf_args.append(torch.empty_like(arg))
-                else:
-                    llm_hf_args.append(arg)
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    llm_hf_kwargs[k] = torch.empty_like(v)
-                else:
-                    llm_hf_kwargs[k] = v
-            assert False
-
-        native_model.to(device)
-        native_model.to(dtype)
-
-        handle = None
-        try:
-            handle = native_model.llm.register_forward_pre_hook(_get_hf_llm_inputs, with_kwargs=True)
-            with torch.no_grad():
-                native_model.chat(
-                    msgs=msgs,
-                    tokenizer=tokenizer,
-                    sampling=True,
-                    temperature=0.5,
-                    max_new_tokens=256,
-                    omni_input=True,
-                    use_tts_template=True,
-                    generate_audio=False,
-                    output_audio_path=None,
-                    max_slice_nums=1,
-                    use_image_id=False,
-                    return_dict=True,
-                )
-        except Exception:
-            pass
-        finally:
-            if handle is not None:
-                del native_model.llm._forward_pre_hooks[handle.id]
-                del native_model.llm._forward_pre_hooks_with_kwargs[handle.id]
-
-        input_shapes = [list(x.shape) for x in llm_hf_args if isinstance(x, torch.Tensor)]
-        kwarg_shapes = {k: list(v.shape) for k, v in llm_hf_kwargs.items() if isinstance(v, torch.Tensor)}
-        logger.info("************************ native model profile ************************")
-        logger.info(f"input_shapes: {input_shapes}")
-        logger.info(f"kwarg_shapes: {kwarg_shapes}")
-
-        meta_info = ConfigDict(
-            dict(
-                create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                config=str(Path(config_file).relative_to(out_model_dir)),
-            )
-        )
-        meta_info["hf_model"] = xh_model.hf_model_dir
-        meta_info["wrap_cfg"] = xh_model.wrap_cfg.to_dict()
-
-        json.dump(meta_info, open(out_model_dir / "meta_info.json", "w"), indent=4)
-
-        xh_model.init_wrap_model()
-        xh_model.wrap_processor(native_model)
-        # ensure export_cfg (with kv cache inputs) is ready
-        export_input_names = list(xh_model.export_cfg.get("input_names", []))
-        export_output_names = list(xh_model.export_cfg.get("output_names", ["logits", "hidden_state"]))
-
-        # ensure kv caches are ready
         xh_model.change_eval_type(eval_type=EvalModelType.WRAPED)
         xh_model.to(dtype)
         xh_model.to(device)
@@ -206,7 +240,22 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
 
         MiniCPMO_HFCompatible.to_hf_compatible(native_model, llm_model=xh_model)
 
-        if cfg.valid:
+        # 添加 pre hook 仅捕获 inputs_embeds 并存到 input_data
+        original_generate = native_model.llm.generate
+
+        input_data = dict()
+
+
+        def generate_with_hook(*args, **kwargs):
+            # 每次调用只记录 inputs_embeds（保持原始张量，不做拷贝/迁移）
+            if "inputs_embeds" in kwargs:
+                input_data.clear()
+                input_data["inputs_embeds"] = kwargs["inputs_embeds"]
+            return original_generate(*args, **kwargs)
+
+        native_model.llm.generate = generate_with_hook
+
+        if is_valid:
             logger.info("************************ valid wraped model ************************")
             with torch.no_grad():
                 res = native_model.chat(
@@ -214,179 +263,191 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
                     tokenizer=tokenizer,
                     sampling=True,
                     temperature=0.5,
-                    max_new_tokens=256,
-                    omni_input=True,
+                    max_new_tokens=4096,
+                    omni_input=True,  # please set omni_input=True when omni inference
                     use_tts_template=True,
-                    generate_audio=False,
-                    output_audio_path=None,
+                    generate_audio=generate_audio,
+                    output_audio_path=output_audio_path,
                     max_slice_nums=1,
                     use_image_id=False,
                     return_dict=True,
                 )
             logger.info(res)
 
-        net_inputs: List[Optional[torch.Tensor]] = [None] * 3
-        past_key_caches: List[torch.Tensor] = []
-        past_value_caches: List[torch.Tensor] = []
+        with torch.no_grad():
+            res = native_model.chat(
+                msgs=msgs,
+                tokenizer=tokenizer,
+                sampling=True,
+                temperature=0.5,
+                max_new_tokens=4096,
+                omni_input=True,  # please set omni_input=True when omni inference
+                use_tts_template=True,
+                generate_audio=generate_audio,
+                output_audio_path=output_audio_path,
+                max_slice_nums=1,
+                use_image_id=False,
+                return_dict=True,
+            )
+            logger.info(res)
 
-        def get_llm_inputs(module, args, kwargs):
-            if len(args) >= 3:
-                net_inputs[0] = args[0]
-                net_inputs[1] = args[1]
-                net_inputs[2] = args[2]
-            if "inputs_embeds" in kwargs:
-                net_inputs[0] = kwargs["inputs_embeds"]
-            if "past_seq_length" in kwargs:
-                net_inputs[1] = kwargs["past_seq_length"]
-            if "current_input_length" in kwargs:
-                net_inputs[2] = kwargs["current_input_length"]
-            if len(args) >= 4:
-                past_key_caches.extend(args[3])
-            if len(args) >= 5:
-                past_value_caches.extend(args[4])
-            if "past_key_caches" in kwargs:
-                past_key_caches.extend(kwargs["past_key_caches"])
-            if "past_value_caches" in kwargs:
-                past_value_caches.extend(kwargs["past_value_caches"])
-            assert False
 
-        handle = None
-        try:
-            handle = xh_model.register_forward_pre_hook(get_llm_inputs, with_kwargs=True)
-            with torch.no_grad():
-                native_model.chat(
-                    msgs=msgs,
-                    tokenizer=tokenizer,
-                    sampling=True,
-                    temperature=0.5,
-                    max_new_tokens=256,
-                    omni_input=True,
-                    use_tts_template=True,
-                    generate_audio=False,
-                    output_audio_path=None,
-                    max_slice_nums=1,
-                    use_image_id=False,
-                    return_dict=True,
-                )
-        except Exception:
-            pass
-        finally:
-            if handle is not None:
-                del xh_model._forward_pre_hooks[handle.id]
-                del xh_model._forward_pre_hooks_with_kwargs[handle.id]
+        native_model.to("cpu")
+        cleanup_memory()
 
-        flat_inputs: List[torch.Tensor] = []
-        # prepare tensors and cast
-        for idx, value in enumerate(net_inputs):
-            if value is None:
-                continue
-            if value.dtype in (torch.int64, torch.int32):
-                value = value.to(device).to(torch.int32)
+        xh_model.change_eval_type(eval_type=EvalModelType.WRAPED)
+        xh_model.to(dtype)
+        xh_model.to(device)
+
+        data_batch = {
+            "inputs_embeds": input_data["inputs_embeds"].cpu(),
+            "past_seq_length": 0,
+        }
+
+        data_prefill = xh_model.prepare_inputs_for_graph(data_batch)
+
+        if is_valid:
+            xh_model.reset_kvcache()
+            logist, hidden_states = xh_model.test_step(data_batch)
+            prefill_next_token_id, prefill_next_token_text = decode_next_token(tokenizer, logist)
+            logger.info(f"Prefill Wraped Model next token: {prefill_next_token_id} {prefill_next_token_text}")
+
+        logger.info("************* convert to frontend graph *************")
+        xh_model._wrap_model.export_projector = True
+        xh_model.convert_to_fronted_graph(data_batch)
+        logger.info("************* convert to quanted graph *************")
+        xh_model.convert_to_quant_graph(cfg.target_device)
+
+        ## 进行PTQ量化
+        logger.info("*************** Start PTQ Quantize ***************")
+        calib_data = data_prefill
+        new_args = []
+        for arg in calib_data:
+            if isinstance(arg, (List, Tuple)):
+                new_args.extend(arg)
             else:
-                value = value.to(device).to(dtype)
-            net_inputs[idx] = value
-        flat_inputs.extend([t for t in net_inputs if t is not None])
+                new_args.append(arg)
+        calib_data = new_args
+        ptq_quantize(xh_model.quanted_model, [calib_data], PrecisionMode.ALIGNED, [device])
+        logger.info("*************** Finished PTQ Quantize ***************")
 
-        # caches
-        kv_tensors: List[torch.Tensor] = []
-        for cache_list in (past_key_caches, past_value_caches):
-            for cache in cache_list:
-                cache_tensor = cache.data if hasattr(cache, "data") else cache
-                if cache_tensor.dtype in (torch.int64, torch.int32):
-                    cache_tensor = cache_tensor.to(device).to(torch.int32)
-                else:
-                    cache_tensor = cache_tensor.to(device).to(dtype)
-                kv_tensors.append(cache_tensor)
-        flat_inputs.extend(kv_tensors)
-
-        logger.info(f"inputs_embeds shape: {net_inputs[0].shape if net_inputs[0] is not None else None}")
-        logger.info(f"past_seq_length shape: {net_inputs[1].shape if net_inputs[1] is not None else None}")
-        logger.info(
-            f"current_input_length shape: {net_inputs[2].shape if net_inputs[2] is not None else None}"
-        )
-        logger.info(f"past_key_caches: {len(past_key_caches)} past_value_caches: {len(past_value_caches)}")
-
+        xh_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
         xh_model.to(dtype)
 
-        onnx_dir = out_model_dir
-        onnx_file = onnx_dir / f"{cfg_name}.onnx"
+        if is_valid:
+            xh_model.to(device)
+            with torch.no_grad():
+                with TimeProfiler("QUANTED_ALIGNED", logger):
+                    outs = xh_model.test_step(data_batch)
+                quanted_aligned_logits = outs[0].detach()
+            prefill_next_token_id, prefill_next_token_text = decode_next_token(tokenizer, quanted_aligned_logits)
+            logger.info(f"Prefill Quanted Aligned Model next token: {prefill_next_token_id} {prefill_next_token_text}")
 
-        # build a thin wrapper so the frontend sees a flat signature matching input_names
-        num_layers = len(past_key_caches)
-
-        def _build_wrapper(model: nn.Module, num_layers: int) -> nn.Module:
-            # Dynamically build a wrapper with explicit kv args so TorchFX sees all placeholders.
-            kv_args = [f"kv{i}" for i in range(num_layers * 2)]
-            arg_list = ["self", "inputs_embeds", "past_seq_length", "current_input_length"] + kv_args
-            arg_str = ", ".join(arg_list)
-
-            body_lines = []
-            body_lines.append("    past_keys = [")
-            for i in range(num_layers):
-                body_lines.append(f"        kv{i},")
-            body_lines.append("    ]")
-            body_lines.append("    past_values = [")
-            for i in range(num_layers, num_layers * 2):
-                body_lines.append(f"        kv{i},")
-            body_lines.append("    ]")
-            body_lines.append(
-                "    return self.model(inputs_embeds, past_seq_length, current_input_length, past_keys, past_values)"
+        prefill_onnx_dir = out_model_dir / "prefill_onnx"
+        prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
+        decode_onnx_dir = out_model_dir / f"decode_onnx"
+        decode_onnx_dir.mkdir(exist_ok=True, parents=True)
+        
+        if True:
+            logger.info("*************** Start exporting decode model ***************")
+            prefill_onnx_file = xhmodel_export_onnx(
+                xh_model,
+                tokenizer,
+                data_batch,
+                str(prefill_onnx_dir),
+                f"{cfg_name}_prefill",
+                device,
+                dtype,
+                logger,
+                is_valid,
             )
+            xh_model.release_exported_model()
+            xh_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
+            meta_info.prefill_onnx_file = str(Path(prefill_onnx_file).relative_to(cfg.work_dir))
+            logger.info(f"save prefill onnx model to {prefill_onnx_file}")
+            logger.info("*************** Finished export prefill model ***************")
+            cleanup_memory()
 
-            src = [f"def forward({arg_str}):"]
-            src.extend(body_lines)
-            src_code = "\n".join(src)
+            from xhquant.api import HMONNXGoldenInference
+            hm_model = HMONNXGoldenInference(prefill_onnx_file)
+            hm_model.save_golden = True
+            hm_model.exec_device = device
 
-            local_vars: Dict[str, Any] = {}
-            exec(src_code, globals(), local_vars)
-            forward_fn = local_vars["forward"]
+            golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(prefill_onnx_file).stem}"
+            golden_dir.mkdir(exist_ok=True, parents=True)
+            hm_model.golden_dir = str(golden_dir)
 
-            class _LLMWrapper(nn.Module):
-                def __init__(self, model: nn.Module):
-                    super().__init__()
-                    self.model = model
+            with torch.no_grad():
+                calib_data[1] = calib_data[1].to(torch.int32)
+                calib_data[2] = calib_data[2].to(torch.int32)
+                calib_data = [p_data.to("cpu") for p_data in calib_data]
+                hm_model.forward(*calib_data)
+            del hm_model
+            cleanup_memory()
 
-                forward = forward_fn
+        if True:
+            xh_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
+            xh_model.set_input_sequence_length(1)
+            if is_valid:
+                data_decode = {
+                    "inputs_embeds": token_embedding(prefill_next_token_id.cpu()).detach(),
+                    "past_seq_length": data_batch["inputs_embeds"].shape[-2],
+                }
+            else:
+                data_decode = {
+                "inputs_embeds": token_embedding(torch.randint(0, 1000, (1, 1))).detach(),
+                "past_seq_length": 256,
+            }
+            torch.cuda.empty_cache()
+            logger.info("*************** Start exporting decode model ***************")
+            with TimeProfiler("export decode onnx", logger):
+                decode_onnx_file = xhmodel_export_onnx(
+                    xh_model,
+                    tokenizer,
+                    data_decode,
+                    str(decode_onnx_dir),
+                    f"{cfg_name}_decode",
+                    device,
+                    dtype,
+                    logger,
+                    is_valid,
+                )
+            xh_model.release_exported_model()
+            meta_info.decode_onnx_file = str(Path(decode_onnx_file).relative_to(cfg.work_dir))
+            logger.info(f"save decode onnx model to {decode_onnx_file}")
+            logger.info("*************** Finished exporting decode model ***************")
 
-            return _LLMWrapper(model)
+            cleanup_memory()
 
-        wrapper = _build_wrapper(xh_model._wrap_model, num_layers)
+            from xhquant.api import HMONNXGoldenInference
+            hm_model = HMONNXGoldenInference(decode_onnx_file)
+            hm_model.save_golden = True
+            hm_model.exec_device = device
 
-        # prefer export_cfg input/output names if present, else fallback
-        if export_input_names:
-            input_names = export_input_names
-        else:
-            input_names = ["inputs_embeds", "past_seq_length", "current_input_length"]
-            input_names.extend([f"past_key_cache_{i}" for i in range(num_layers)])
-            input_names.extend([f"past_value_cache_{i}" for i in range(num_layers)])
-        output_names = export_output_names if export_output_names else ["logits", "hidden_state"]
+            golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(decode_onnx_file).stem}"
+            golden_dir.mkdir(exist_ok=True, parents=True)
+            hm_model.golden_dir = str(golden_dir)
 
-        convert_fx_model_to_hmonnx(
-            wrapper,
-            flat_inputs,
-            cfg.target_device,
-            onnx_file,
-            quant_config=cfg.quant_config,
-            input_names=input_names,
-            output_names=output_names,
-        )
-        logger.info(f"Export onnx to {onnx_file}")
+            calib_data = xh_model.prepare_inputs_for_graph(data_decode)
+            new_args = []
+            for arg in calib_data:
+                if isinstance(arg, (List, Tuple)):
+                    new_args.extend(arg)
+                else:
+                    new_args.append(arg)
+            calib_data = new_args
+            with torch.no_grad():
+                calib_data[1] = calib_data[1].to(torch.int32)
+                calib_data[2] = calib_data[2].to(torch.int32)
+                calib_data = [p_data.to("cpu") for p_data in calib_data]
+                hm_model.forward(*calib_data)
+            del hm_model
+            cleanup_memory()
 
-        meta_info.llm_hmonnx = str(Path(onnx_file).relative_to(onnx_dir))
-        json.dump(meta_info, open(onnx_dir / "meta_info.json", "w"), indent=4)
+        meta_file = str(Path(cfg.work_dir) / "export_meta_info.json")
+        json.dump(meta_info, open(meta_file, "w"), indent=4)
+        logger.info(f"Save meta info to {meta_file}")
 
-        from xhquant.api import HMONNXGoldenInference
-
-        hm_model = HMONNXGoldenInference(onnx_file)
-        hm_model.save_golden = True
-        hm_model.exec_device = device
-
-        golden_dir = Path(cfg.work_dir) / "golden" / f"{Path(onnx_file).stem}"
-        golden_dir.mkdir(exist_ok=True, parents=True)
-        hm_model.golden_dir = str(golden_dir)
-
-        with torch.no_grad():
-            hm_model.forward(*flat_inputs)
 
     @classmethod
     def convert(cls, hf_model_path: str, config: MinicpmoLLMConvertConfig, output_dir: str):
