@@ -199,6 +199,14 @@ class MinicpmoTTSConverterXH2a(HFTransfromersConverter):
         )
         native_model = xh_model.get_hf_model()
 
+        emb_text_weight = native_model.tts.emb_text.weight
+        quant_embedding_tts_file = Path(cfg.work_dir) / "quant_embedding_tts.pt"
+        torch.save(emb_text_weight, str(quant_embedding_tts_file))
+        for i,emb_code in enumerate(native_model.tts.emb_code):
+            emb_code_weight = emb_code.weight
+            quant_embedding_code_file = Path(cfg.work_dir) / f"quant_embedding_tts_code_{i}.pt"
+            torch.save(emb_code_weight, str(quant_embedding_code_file))
+
         xh_model.init_wrap_model()
         xh_model.wrap_processor(native_model)
         meta_info = ConfigDict(
