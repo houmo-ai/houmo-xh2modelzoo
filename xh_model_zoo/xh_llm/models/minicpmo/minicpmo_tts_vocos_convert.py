@@ -163,8 +163,8 @@ class MinicpmoTTSVocosConverterXH2a(HFTransfromersConverter):
         original_forward = xh_model._wrap_model.forward
         xh_model._wrap_model.forward = xh_model._wrap_model.decode_mask
         torch.onnx.export(
-            xh_model._wrap_model,
-            (features, mask),
+            xh_model._wrap_model.cpu(),
+            (features.cpu(), mask.cpu()),
             vocos_onnx,
             input_names=["features", "mask"],
             output_names=["x", "y", "mag"],
