@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import transformers
 from mpmath import isint
-from ..models import Qwen3VLForConditionalGeneration
+from ..models.qwen3_vl import Qwen3VLForConditionalGeneration
 from . import utils
 
 OPT_MODEL = transformers.models.opt.modeling_opt.OPTForCausalLM
