@@ -187,5 +187,7 @@ data/output
 data/output_456
 data/output_bfp16
 data/calib_data/LMUData
+!data/calib_data/sampledata/
+!data/calib_data/sampledata/*.png
 data/datasets
 work_dirs

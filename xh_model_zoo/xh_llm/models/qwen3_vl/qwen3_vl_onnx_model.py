@@ -6,7 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch import Tensor
 from xhquant.api import HMONNXGoldenInference, HMONNXInference
-
+from .postprocess import VLLMPresencePenaltyLogitsProcessor
 from .llm_onnx_model import LLMONNXModel
 
 
@@ -34,6 +34,7 @@ class Qwen3VLONNXModel(LLMONNXModel):
         image_size_h=1204,
         max_size_t=2,
         resize_v1 = True,
+        presence_penalty = 0,
     ):
         super().__init__(prefill, decode, kv_cache)
         self.pad_token_id = 0
@@ -56,6 +57,8 @@ class Qwen3VLONNXModel(LLMONNXModel):
         self.image_size_h = image_size_h
         self.batch_size = 1
         self.resize_v1 = resize_v1
+        self.presence_penalty = presence_penalty
+        self.logits_processor = VLLMPresencePenaltyLogitsProcessor(presence_penalty, 0)
 
 
     def preprocess_visual(self, inputs):
@@ -550,8 +553,10 @@ class Qwen3VLONNXModel(LLMONNXModel):
             self.prefill_session._session.to_fast_mode()
         prefill_logits = self.prefill(data_prefill, save_golden=False)
         
+        self.logits_processor.prompt_length = input_ids.shape[1]
+
         # prefill_logits = self.repetition_penalty_logits_processor(input_ids, prefill_logits[:, -1, :].float()).unsqueeze(1)
-        
+        prefill_logits = self.logits_processor(input_ids, prefill_logits[:, -1, :].float()).unsqueeze(1)
         next_token_id, next_token_text = decode_next_token(processor.tokenizer, prefill_logits, do_sample=do_sample)
         input_ids = torch.cat([input_ids, next_token_id], dim=-1)
         decoder_ids.append(next_token_id)
@@ -572,6 +577,7 @@ class Qwen3VLONNXModel(LLMONNXModel):
             }
 
             decode_logits = self.decode(data_decode)
+            decode_logits = self.logits_processor(input_ids, decode_logits[:, -1, :].float()).unsqueeze(1)
             # decode_logits = self.repetition_penalty_logits_processor(input_ids, decode_logits[:, -1, :].float()).unsqueeze(1)
             next_token_id, next_token_text = decode_next_token(processor.tokenizer, decode_logits, do_sample=do_sample)
             input_ids = torch.cat([input_ids, next_token_id], dim=-1)

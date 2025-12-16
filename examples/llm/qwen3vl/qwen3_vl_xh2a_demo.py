@@ -39,6 +39,7 @@ def parse_arguments():
     parser.add_argument("--repetition_penalty", type=float, default=1.0, help="repetition penalty")
     parser.add_argument("--not_resize_v1", action="store_false")
     parser.add_argument("--chat_template", type=str, default=None, help="chat template")
+    parser.add_argument("--presence_penalty", type=float, default=0.0)
     return parser
 
 
@@ -103,6 +104,7 @@ def main():
         image_size_h = image_size_h,
         max_size_t = max_size_t,
         resize_v1 = args.not_resize_v1,
+        presence_penalty = args.presence_penalty
         # repetition_penalty = args.repetition_penalty,
         # chat_template = args.chat_template,
     )
