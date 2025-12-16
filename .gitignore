@@ -190,4 +190,4 @@ data/calib_data/LMUData
 !data/calib_data/sampledata/
 !data/calib_data/sampledata/*.png
 data/datasets
-# work_dirs
+work_dirs
