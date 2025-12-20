@@ -264,12 +264,14 @@ class SteQwen2ConverterXH2a(HFTransfromersConverter):
         )
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         if not Path(decoder_onnx_file).exists():
-            quanted_model = convert_fx_model_to_quanted_model(
-                wraped_model,
-                decoder_inputs,
-                target_device,
-                quant_config=quant_config,
-            )
+            wrap_cfg.input_sequence_length = 1
+            quanted_model.update_cfg(wrap_cfg)
+            # quanted_model = convert_fx_model_to_quanted_model(
+            #     wraped_model,
+            #     decoder_inputs,
+            #     target_device,
+            #     quant_config=quant_config,
+            # )
             convert_quanted_model_to_hmonnx(
                 quanted_model, decoder_inputs, str(decoder_onnx_file), input_names, output_names
             )       
