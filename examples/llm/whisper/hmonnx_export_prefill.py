@@ -176,8 +176,8 @@ def main(args):
     # for i in range(24):
     #     k_cache[i][:, :, :past_len, :] = k_cache_past[i].half()
     #     v_cache[i][:, :, :past_len, :] = v_cache_past[i].half()
-    k_list = deepcopy(k_cache)
-    v_list = deepcopy(v_cache)
+    k_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    v_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
     # k_list = []
     # v_list = []
     # # for i in range(24):

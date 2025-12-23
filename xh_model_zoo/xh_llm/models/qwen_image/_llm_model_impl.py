@@ -8,20 +8,18 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-    Qwen2RMSNorm,
-    Qwen2VLDecoderLayer,
-    Qwen2VLForConditionalGeneration,
-    Qwen2VLModel,
-    Qwen2VLRotaryEmbedding,
-    Qwen2VLSdpaAttention, # pip install transformers==4.49.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
-)
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
 from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRotaryEmbedding
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2RMSNorm
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen2RMSNorm: "Qwen2RMSNorm"})
@@ -38,16 +36,16 @@ class _Qwen2RMSNorm(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
-        Qwen2VLRotaryEmbedding: "Qwen2VLRotaryEmbedding",
+        Qwen2_5_VLRotaryEmbedding: "Qwen2_5_VLRotaryEmbedding",
     }
 )
-class _Qwen2VLRotaryEmbedding(DynamicModule):
+class _Qwen2_5_VLRotaryEmbedding(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         assert "dynamic" not in self.rope_type, f"{self.rope_type} is not supported in dynamic mode"
-        max_sequence_length = cfg.max_sequence_length
+        max_pe_length = cfg.max_pe_length
         # self.max_position_embeddings = max_position_embeddings
         # Build here to make `torch.jit.trace` work.
-        self._setup_cos_sin_cache(seq_len=max_sequence_length, dtype=self.inv_freq.dtype)
+        self._setup_cos_sin_cache(seq_len=max_pe_length, dtype=self.inv_freq.dtype)
         if hasattr(self, "setup_after_callback"):
             self.setup_after_callback()
 
@@ -57,13 +55,14 @@ class _Qwen2VLRotaryEmbedding(DynamicModule):
         """
         position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0)
         position_ids = position_ids.unsqueeze(0).repeat(3, 1, 1)
+        # self.inv_freq = self.inv_freq.to(torch.float16)
+        # cos, sin = self.forward(self.inv_freq, position_ids)
 
         inv_freq = self.inv_freq.to(torch.float32)
         device = self.inv_freq.device
         if torch.cuda.is_available() and inv_freq.device.type != "cuda":
             inv_freq = self.inv_freq.cuda()
-
-        cos, sin = self.forward(inv_freq, position_ids)
+        cos, sin = self.forward(self.inv_freq, position_ids)
         cos = cos.to(device)
         sin = sin.to(device)
 
@@ -104,12 +103,8 @@ class _Qwen2VLRotaryEmbedding(DynamicModule):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {
-        Qwen2VLSdpaAttention: "Qwen2VLSdpaAttention",
-    }
-)
-class _Qwen2VLSdpaAttention(DynamicModule):
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen2_5_VLAttention: "Qwen2_5_VLAttention"})
+class _Qwen2_5_VLAttention(DynamicModule):
     def rotate_half(self, x: Tensor):
         """Rotates half the hidden dims of the input."""
         # x1 = x[..., : x.shape[-1] // 2]
@@ -264,10 +259,10 @@ class _Qwen2VLSdpaAttention(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
-        Qwen2VLDecoderLayer: "Qwen2VLDecoderLayer",
+        Qwen2_5_VLDecoderLayer: "Qwen2_5_VLDecoderLayer",
     }
 )
-class _Qwen2VLDecoderLayer(DynamicModule):
+class _Qwen2_5_VLDecoderLayer(DynamicModule):
     def _setup(self, cfg: ConfigDict):
         pass
 
@@ -331,10 +326,10 @@ class _Qwen2VLDecoderLayer(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
-        Qwen2VLModel: "Qwen2VLModel",
+        Qwen2_5_VLModel: "Qwen2_5_VLModel",
     }
 )
-class _Qwen2VLModel(DynamicModule):
+class _Qwen2_5_VLModel(DynamicModule):
     def _setup_cos_sin_embeding(self):
         cos = self.rotary_emb.cos_cached.squeeze(1)
         sin = self.rotary_emb.sin_cached.squeeze(1)
@@ -342,13 +337,13 @@ class _Qwen2VLModel(DynamicModule):
         assert t == 3
         self.cos_embedings = nn.Sequential()
         self.sin_embedings = nn.Sequential()
-
+        device = next(self.parameters()).device
         for i in range(t):
-            cos_embeding = nn.Embedding(num_embeddings, embedding_dim)
+            cos_embeding = nn.Embedding(num_embeddings, embedding_dim, device=device)
             cos_embeding.weight.data = cos[i]
             self.cos_embedings.append(cos_embeding)
 
-            sin_embeding = nn.Embedding(num_embeddings, embedding_dim)
+            sin_embeding = nn.Embedding(num_embeddings, embedding_dim, device=device)
             sin_embeding.weight.data = sin[i]
             self.sin_embedings.append(sin_embeding)
 
@@ -383,6 +378,8 @@ class _Qwen2VLModel(DynamicModule):
         self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
 
+        self.rotary_emb = self.language_model.rotary_emb
+
         if not hasattr(self.rotary_emb, "cos_cached"):
             self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
         else:
@@ -393,7 +390,9 @@ class _Qwen2VLModel(DynamicModule):
         inputs_embeds: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None,
+        time_position_ids: Optional[Tensor] = None,
+        hight_position_ids: Optional[Tensor] = None,
+        width_position_ids: Optional[Tensor] = None,
         past_key_cache: Optional[List[Tensor]] = None,
         past_value_cache: Optional[List[Tensor]] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -403,10 +402,11 @@ class _Qwen2VLModel(DynamicModule):
 
         cos_pos_embeddings = []
         sin_pos_embeddings = []
+        position_ids = [time_position_ids, hight_position_ids, width_position_ids]
         for i in range(3):
             pos = position_ids[i]
-            cos = self.cos_embedings[i](pos)  # [3, 1, 1874, 128]
-            sin = self.sin_embedings[i](pos)  # [3, 1, 1874, 128]
+            cos = self.cos_embedings[i](pos.unsqueeze(0))  # [3, 1, 1874, 128]
+            sin = self.sin_embedings[i](pos.unsqueeze(0))  # [3, 1, 1874, 128]
             cos_pos_embeddings.append(cos)
             sin_pos_embeddings.append(sin)
 
@@ -414,7 +414,7 @@ class _Qwen2VLModel(DynamicModule):
         sin = torch.stack(sin_pos_embeddings, dim=0)
 
         # apply_multimodal_rotary_pos_emb的部分
-        mrope_section = self.layers[0].self_attn.rope_scaling["mrope_section"]
+        mrope_section = self.language_model.layers[0].self_attn.rope_scaling["mrope_section"]
 
         mrope_section = mrope_section * 2  # [16,24,24,16,24,24]
         cos_splits = cos.split(mrope_section, dim=-1)
@@ -434,7 +434,7 @@ class _Qwen2VLModel(DynamicModule):
         sin = sin.unsqueeze(1)
         position_embeddings = (cos, sin)
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for idx, decoder_layer in enumerate(self.language_model.layers):
             if self.use_cache:
                 _past_k_cache = past_key_cache[idx]
                 _past_v_cache = past_value_cache[idx]
@@ -457,15 +457,16 @@ class _Qwen2VLModel(DynamicModule):
             if self.only_first_block:
                 break
 
-        if self.num_logits_to_keep == 0:
-            # hidden_states = torch_ops_xh2a_slice(hidden_states, [0], [current_input_length], [1], [1])
-            hidden_states = self.slice(
-                hidden_states
-            )  # 此时返回的结果，含有padding,调用者需要根据current_input_length切片
-        else:
-            # 取最后一个token的输出
-            hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
-        hidden_states = self.norm(hidden_states)
+        # if self.num_logits_to_keep == 0:
+        #     # hidden_states = torch_ops_xh2a_slice(hidden_states, [0], [current_input_length], [1], [1])
+        #     hidden_states = self.slice(
+        #         hidden_states
+        #     )  # 此时返回的结果，含有padding,调用者需要根据current_input_length切片
+        # else:
+        #     # 取最后一个token的输出
+        #     hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
+        
+        hidden_states = self.language_model.norm(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -474,20 +475,23 @@ class _Qwen2VLModel(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
-        Qwen2VLForConditionalGeneration: "Qwen2VLForConditionalGeneration",
+        Qwen2_5_VLForConditionalGeneration: "Qwen2_5_VLForConditionalGeneration",
     }
 )
-class _Qwen2VLForConditionalGeneration(DynamicModule):
+class _Qwen2_5_VLForConditionalGeneration(DynamicModule):
     def _setup(self, cfg: ConfigDict):
         self.cfg = cfg
-        del self.visual
+        del self.model.visual
+        # del self.visual
 
     def forward(
         self,
         inputs_embeds: Optional[Tensor] = None,
+        time_position_ids: Optional[Tensor] = None,
+        hight_position_ids: Optional[Tensor] = None,
+        width_position_ids: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None,
         past_key_cache: Optional[List[Tensor]] = None,
         past_value_cache: Optional[List[Tensor]] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -495,14 +499,17 @@ class _Qwen2VLForConditionalGeneration(DynamicModule):
             inputs_embeds=inputs_embeds,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
-            position_ids=position_ids,
+            time_position_ids=time_position_ids,
+            hight_position_ids=hight_position_ids,
+            width_position_ids=width_position_ids,
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        return logits
+        # logits = self.lm_head(hidden_states)
+        # return logits
+        return hidden_states
 
 
 def register_wrap_cls(hf_model):

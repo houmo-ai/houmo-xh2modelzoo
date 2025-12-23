@@ -84,7 +84,7 @@ class _VisionSdpaAttention(DynamicModule):
         #     self.v_proj.bias.data = self.qkv.bias.data[2 * self.qkv.out_features // 3 :]
 
     def forward(
-        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor = None
+        self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor = None, position_embeddings: torch.Tensor = None
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         # q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)

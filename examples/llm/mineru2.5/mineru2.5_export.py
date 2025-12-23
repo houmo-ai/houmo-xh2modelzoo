@@ -4,7 +4,7 @@ from pathlib import Path
 from modelscope import AutoProcessor, Qwen2VLForConditionalGeneration
 from PIL import Image
 from mineru_vl_utils import MinerUClient
-from xh2_model_zoo.xh_llm.models.qwen2_vl.qwen2_vl_converter import Qwen2VLConverterXH2a
+from xh_model_zoo.xh_llm.models.qwen2_vl.qwen2_vl_converter import Qwen2VLConverterXH2a
 from xh_model_zoo.xh_llm.models.qwen2_vl import Qwen2VLConvertConfig, VisualConfig
 from xhquant.api import DeviceType, get_root_logger, xhquant_init, QuantScheme 
 

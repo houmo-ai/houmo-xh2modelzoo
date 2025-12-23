@@ -355,7 +355,7 @@ class Qwen2VLConverterXH2a(HFTransfromersConverter):
             quant_graph_model = convert_fx_model_to_quanted_model(
                 wraped_llm_model, prefill_inputs, target_device, quant_config
             )
-            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            # input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(
                 quant_graph_model, prefill_inputs, prefill_onnx_file, onnx_input_names, onnx_output_names
             )

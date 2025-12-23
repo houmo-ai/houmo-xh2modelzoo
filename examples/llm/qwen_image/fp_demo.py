@@ -11,8 +11,8 @@ else:
     torch_dtype = torch.float32
     device = "cpu"
 
-pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=torch_dtype)
-pipe = pipe.to(device)
+pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=torch_dtype, device_map="cuda")
+# pipe = pipe.to(device)
 
 positive_magic = {
     "en": ", Ultra HD, 4K, cinematic composition.", # for english prompt
