@@ -10,7 +10,7 @@ import onnx
 import torch
 import torch.nn as nn
 from PIL import Image
-from .vision_process import process_vision_info
+from qwen_vl_utils  import process_vision_info
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
