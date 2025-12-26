@@ -5,7 +5,7 @@ from pathlib import Path
 from transformers import AutoConfig
 
 from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models._qwen2 import Qwen2ConvertConfig
+from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyConvertConfig
 
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
@@ -19,7 +19,7 @@ def main(args):
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
-    config = Qwen2ConvertConfig(
+    config = Qwen2LegacyConvertConfig(
         batch_size=1,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
