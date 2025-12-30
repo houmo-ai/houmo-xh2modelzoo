@@ -1,3 +1,9 @@
 {
     "typeCheckingMode": "off",
+    "ignore":[
+      "data/**",
+      "work_dirs/**",
+      "dev/**"
+    ]
+    
   }

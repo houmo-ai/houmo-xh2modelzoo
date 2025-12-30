@@ -176,8 +176,10 @@ report_dynamo_export.sarif
 
 # users
 /work_dirs/
+/work_dirs
 /data/models/
 xhquant
+/dev
 
 /xh2_model_zoo.egg-info/
 mypy.ini

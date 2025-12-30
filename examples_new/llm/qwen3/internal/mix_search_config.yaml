@@ -1,0 +1,10 @@
+topk: 0.20
+weight_bits:
+  - 8
+act_bits:
+  - 8
+  - 16
+policy: topk
+task: llm
+metric: l1
+key_name: loss
