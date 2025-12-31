@@ -43,11 +43,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="/data01/datasets/Qwen3-8B",  # /data02/datasets/Qwen2.5-1.5B-Instruct-int4-sym-inc
+        default="work_dirs/Qwen3-0.6B-gptqmodel-4-bit-64g",  # /data02/datasets/Qwen2.5-1.5B-Instruct-int4-sym-inc
     )
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w8a8h0_ssfp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w4a8h0_ssfp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant-weight",
         type=str,

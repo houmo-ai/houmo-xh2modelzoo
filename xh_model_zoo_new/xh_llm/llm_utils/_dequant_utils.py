@@ -80,7 +80,7 @@ def qlinear_cuda_old_converter(self: nn.Module):
     self.out_features = self.outfeatures
     self.in_features = self.infeatures
 
-def _dequantize_awq_hf_model(self, native_hf_model: nn.Module):
+def _dequantize_awq_hf_model(native_hf_model: nn.Module):
     from awq.modules.linear.gemm import WQLinear_GEMM
     from awq.utils.packing_utils import reverse_awq_order, unpack_awq
     from transformers.utils.quantization_config import QuantizationMethod
@@ -142,7 +142,7 @@ def _dequantize_awq_hf_model(self, native_hf_model: nn.Module):
     return hf_model
 
 
-def _dequantize_gptq_hf_model(self, native_hf_model: nn.Module):
+def _dequantize_gptq_hf_model(native_hf_model: nn.Module):
     hf_model = native_hf_model
     from transformers.utils.quantization_config import QuantizationMethod
     from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
@@ -173,13 +173,18 @@ def _dequantize_gptq_hf_model(self, native_hf_model: nn.Module):
             converter = None
 
     if is_gptqmodel_available():
-        from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-        from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-
-        if QuantLinear is TorchQuantLinear:
+        if hasattr(QuantLinear,"dequantize_weight"):
             converter = gptqmodel_torch_qlinear_converter
-        elif QuantLinear is MarlinQuantLinear:
-            converter = None
+        else:
+            raise NotImplementedError(f"Not implemented for {QuantLinear} yet")
+        if False:
+            from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+            from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
+            if QuantLinear is TorchQuantLinear:
+                converter = gptqmodel_torch_qlinear_converter
+            elif QuantLinear is MarlinQuantLinear:
+                converter = None
 
     assert converter is not None, f"Not implemented for {QuantLinear} yet"
 
