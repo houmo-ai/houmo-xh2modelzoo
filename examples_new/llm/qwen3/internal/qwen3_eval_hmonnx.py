@@ -2,7 +2,7 @@ import argparse
 import json
 import os.path as osp
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import torch, torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -15,7 +15,7 @@ from xh_model_zoo_new.xh_llm.base_llm_infer_adapter import BaseLLMHFCompatible
 torch.set_grad_enabled(False)
 
 
-def lm_eval_engine(hf_model: Any, tokenizer: Any, meta_info: Optional[dict] = None, cfg: Optional[ConfigDict] = None):
+def lm_eval_engine(hf_model: Any, tokenizer: Any, tasks: List[str], export_dir:str):
     import lm_eval
     from lm_eval.models.huggingface import HFLM
     from lm_eval.tasks import TaskManager
@@ -35,7 +35,7 @@ def lm_eval_engine(hf_model: Any, tokenizer: Any, meta_info: Optional[dict] = No
     results = lm_eval.simple_evaluate(model=lm, tasks=tasks, task_manager=task_manager, batch_size=1, device="cuda")
     if results is not None:
         dumped = json.dumps(results, indent=2, default=handle_non_serializable, ensure_ascii=False)
-        result_json_file = Path(cfg.work_dir) / "eval_results_hmonnx.json"
+        result_json_file = Path(export_dir) / "eval_results_hmonnx.json"
         with open(result_json_file, "w", encoding="utf-8") as f:
             f.write(dumped)
 
@@ -45,34 +45,34 @@ def lm_eval_engine(hf_model: Any, tokenizer: Any, meta_info: Optional[dict] = No
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--work-dir", type=str, required=True, help="work directory containing exported onnx files")
+    parser.add_argument("--export-dir", type=str, required=True, help="work directory containing exported onnx files")
+    parser.add_argument("--demo_prompt", type=str, default="你多大了？用中文回答。", help="demo prompt")
+    parser.add_argument("--tasks", nargs='+', type=str, default=None, help="List of tasks for evaluation")
     parser.add_argument("--offload", action="store_true", help="offload mode")
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--demo_prompt", type=str, default="你多大了？用中文回答。", help="demo prompt")
     return parser.parse_args()
 
 
 @torch.no_grad()
 def main(args):
     xhquant_init(None, args.debug)
-
-    work_dir = Path(args.work_dir)
+    export_dir = Path(args.export_dir)
 
     # Load meta_info from work_dir/meta.json
-    meta_info_path = work_dir / "meta.json"
+    meta_info_path = export_dir / "meta.json"
     if not meta_info_path.exists():
-        raise FileNotFoundError(f"meta.json not found in {work_dir}")
+        raise FileNotFoundError(f"meta.json not found in {export_dir}")
 
     with open(meta_info_path, "r", encoding="utf-8") as f:
         meta_info = json.load(f)
 
     # Get onnx paths from meta_info
-    prefill_path = osp.join(work_dir, meta_info["prefill_onnx"])
-    decoder_path = osp.join(work_dir, meta_info["decode_onnx"])
-    tokenizer = AutoTokenizer.from_pretrained(osp.join(work_dir, meta_info["hf_config"]))
-    hf_config = AutoConfig.from_pretrained(osp.join(work_dir, meta_info["hf_config"]))
+    prefill_path = osp.join(export_dir, meta_info["prefill_onnx"])
+    decoder_path = osp.join(export_dir, meta_info["decode_onnx"])
+    tokenizer = AutoTokenizer.from_pretrained(osp.join(export_dir, meta_info["hf_config"]))
+    hf_config = AutoConfig.from_pretrained(osp.join(export_dir, meta_info["hf_config"]))
     wrap_cfg = meta_info["wrap_cfg"]
-    token_embedding_state_dict = torch.load(osp.join(work_dir, meta_info["token_embedding_file"]))
+    token_embedding_state_dict = torch.load(osp.join(export_dir, meta_info["token_embedding_file"]))
     token_embedding = nn.Embedding(
         token_embedding_state_dict["weight"].shape[0], token_embedding_state_dict["weight"].shape[1]
     )
@@ -97,7 +97,8 @@ def main(args):
         print(model.demo(args.demo_prompt))
 
     # Run lm_eval
-    lm_eval_engine(model, tokenizer)
+    if args.tasks is not None:
+        lm_eval_engine(model, tokenizer, args.tasks, export_dir)
 
 
 if __name__ == "__main__":

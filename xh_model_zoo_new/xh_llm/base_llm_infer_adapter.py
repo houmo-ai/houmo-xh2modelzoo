@@ -283,11 +283,14 @@ class BaseLLMHFCompatible(InferAdapter, DynamicModule):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        past_seq_length = torch.tensor([self.past_seq_length if self.is_generating else 0], dtype=torch.int32).to(
+        # Create past_seq_length 和 Current_input_length
+        # TODO Not Used
+        # past_seq_length = torch.tensor([self.past_seq_length if self.is_generating else 0], dtype=torch.int32).to(
+        #     inputs_embeds.device
+        # )
+        past_seq_length = torch.tensor([position_ids[...,0] if cache_position is not None else 0], dtype=torch.int32).to(
             inputs_embeds.device
         )
-        # TODO: 需要根据attention mask计算seq_length
-        seq_length = input_ids.shape[-1]
         current_input_length = torch.tensor([seq_length], dtype=torch.int32).to(inputs_embeds.device)
 
         past_key_caches = self.past_key_caches
@@ -299,30 +302,33 @@ class BaseLLMHFCompatible(InferAdapter, DynamicModule):
         outputs = self.llm_model(
             inputs_embeds, past_seq_length, current_input_length, past_key_caches, past_value_caches
         )
+
         if isinstance(outputs, torch.Tensor):
             logits = outputs
         else:
             logits = outputs.logits
-
         num_logits_to_keep = self.llm_model.get_num_logits_to_keep()
         if num_logits_to_keep != 0:
             logits = logits[:, :seq_length, :]
         else:
             logits = logits
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
-        if self.is_generating:
-            self.past_seq_length += seq_length
+        # if self.is_generating: # TODO not used
+        #     self.past_seq_length += seq_length
+
         return CausalLMOutputWithPast(
             logits=logits,
             past_key_values=past_key_values,
         )
 
-    def generate(self, *args, **kwargs):
-        self.prefill = True
-        self.past_seq_length = 0
-        return super().generate(*args, **kwargs)
+    # not used
+    # def generate(self, *args, **kwargs):
+    #     self.prefill = True
+    #     self.past_seq_length = 0
+    #     self.is_generating = True
+    #     out = super().generate(*args, **kwargs)
+    #     self.is_generating = False
+    #     return out
 
     @classmethod
     def from_qmodel(
@@ -411,7 +417,7 @@ class BaseLLMHFCompatible(InferAdapter, DynamicModule):
             tokenizer=tokenizer,
         )
 
-    def demo(self, prompt: str, max_generation_length: int = 32):
+    def demo(self, prompt: str, max_generation_length: int = 128):
         """
         Demo the model with a given prompt.
         Args:

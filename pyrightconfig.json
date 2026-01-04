@@ -1,9 +1,19 @@
 {
-    "typeCheckingMode": "off",
-    "ignore":[
-      "data/**",
-      "work_dirs/**",
-      "dev/**"
-    ]
-    
-  }
+  "typeCheckingMode": "off",
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.git",
+    "**/checkpoints",
+    "**/data/**",
+    "**/logs/**",
+    "**/output",
+    "**/work_dirs/**",
+    "**/dev/**"
+  ],
+  "venvPath": "/data01/home/huxing/miniconda3/envs",
+  "venv": "xh2"
+}
