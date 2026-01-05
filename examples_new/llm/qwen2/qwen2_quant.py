@@ -23,7 +23,7 @@ def build_calib_dataset(tokenizer, nsamples: int = 128, seqlen: int = 2048):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-8B", help="HF 模型 ID 或本地路径，例如 mistralai/GptOss-8x7B-v0.1")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen2-7B", help="HF 模型 ID 或本地路径，例如 mistralai/GptOss-8x7B-v0.1")
     parser.add_argument("--out-dir", type=str, default=None)
     parser.add_argument("--bits", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=64)

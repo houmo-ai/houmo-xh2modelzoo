@@ -7,7 +7,6 @@ from typing import Any, Optional, List
 import torch, torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from xhquant.api import ConfigDict, get_root_logger, xhquant_init
-from xh_model_zoo_new.xh_llm.models.qwen3.qwen3_converter import Qwen3Converter, Qwen3ConverterConfig
 from xh_model_zoo_new.xh_llm.base_llm_infer_adapter import BaseLLMHFCompatible
 
 torch.set_grad_enabled(False)

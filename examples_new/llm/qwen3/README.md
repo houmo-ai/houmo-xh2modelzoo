@@ -35,8 +35,7 @@ python examples_new/llm/qwen3/internal/qwen3_eval_hmonnx.py --export-dir work_di
 lm_head 层一般不使用4bit int 量化，使用w8a8h1_sefp量化。
 
 ```bash
-python examples_new/llm/qwen3/qwen3_quant.py --model /data01/datasets/Qwen3-0.6B --out-dir work_dirs/Qwen3-0.6B-gptqmodel-4bit-g64 --bits 4 --batch-size=4 --hessian-mse
-默认做Quarot+GPTQ量化，weight bit = 4
+python examples_new/llm/qwen3/qwen3_quant.py --model /data01/datasets/Qwen3-0.6B --out-dir work_dirs/Qwen3-0.6B-gptqmodel-4bit-g64 --bits 4 --batch-size=4 --hessian-mse --rotation=hadamard
 ```
 
 #### 2. 导出

@@ -5,7 +5,7 @@ from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, 
 
 from xh_model_zoo_new.utils import MemoryTracker, TimeProfiler
 from xh_model_zoo_new.xh_llm.models.qwen2 import Qwen2ConverterConfig, Qwen2Converter
-from transformers import Qwen25ForCausalLM
+
 
 def main(args):
     # 1. Parse Config

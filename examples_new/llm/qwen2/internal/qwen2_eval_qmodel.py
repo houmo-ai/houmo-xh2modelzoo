@@ -4,7 +4,7 @@ from pathlib import Path
 
 from xhquant.api import ConfigDict, get_root_logger, xhquant_init
 
-from xh_model_zoo_new.xh_llm.models.qwen3.qwen3_converter import Qwen3Converter, Qwen3ConverterConfig
+from xh_model_zoo_new.xh_llm.models.qwen2.qwen2_converter import Qwen2Converter, Qwen2ConverterConfig
 from xh_model_zoo_new.xh_llm.base_llm_infer_adapter import BaseLLMHFCompatible
 from xh_model_zoo_new.utils import auto_offload, xh_infer_auto_device_map
 torch.set_grad_enabled(False)
@@ -51,8 +51,8 @@ def main(args):
     from xhquant.api import QuantScheme
 
     quant_scheme = QuantScheme(target_device="XH2A", quant_type="w8a8h1_sefp")
-    config = Qwen3ConverterConfig(num_logits_to_keep=0, quant_scheme=quant_scheme)
-    C = Qwen3Converter(args.model, config)
+    config = Qwen2ConverterConfig(num_logits_to_keep=0, quant_scheme=quant_scheme)
+    C = Qwen2Converter(args.model, config)
 
     qmodel = C.quanted_model
     if args.fast:

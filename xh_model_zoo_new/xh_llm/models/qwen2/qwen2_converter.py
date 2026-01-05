@@ -13,11 +13,11 @@ class Qwen2Converter(BaseLLMConverter):
     MODEL_KEYS: List[str] = ["Qwen2ForCausalLM", "Qwen2", "qwen2"]
     config: Qwen2ConverterConfig
 
-    @classmethod
-    def convert_and_export(cls, hf_model_path: str, config: Qwen2ConverterConfig, output_dir: str):
+    def _register_wrap_module(self, *args, **kwargs):
         from ._model import register_wrap_modules as qwen2_register_wrap_modules  # noqa: F403, F401
-
         qwen2_register_wrap_modules()
 
+    @classmethod
+    def convert_and_export(cls, hf_model_path: str, config: Qwen2ConverterConfig, output_dir: str):
         config = BaseLLMConverterConfig.from_dict_or_other(config)
         return cls(hf_model_path, config).export(output_dir)
