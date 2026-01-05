@@ -181,6 +181,8 @@ report_dynamo_export.sarif
 /xhquant
 /dev
 /gptqmodel
+/gptqmodel_offload
+/output
 
 /xh2_model_zoo.egg-info/
 mypy.ini
