@@ -12,16 +12,20 @@ quant-weight : GPTQ、Quarot量化后的权重文件
 
 ## 导出HMONNX
 
+transformers库需要升级到4.51.0以上版本，否则会报错。  
+
 ### w8a8
 
+#### 1. 导出
+
 ```bash
-python examples/llm/llama/llama_xh2a_export_hmonnx.py --model data/models/Meta-Llama-3.1-8B-Instruct --batch-size 1 --context-length 2048 --input-sequence-length 256 --quant-type w8a8h1_sefp
+python examples_new/llm/llama/llama_export.py --model /data01/datasets/llama3-8b-hf --context-length 2048 --input-sequence-length 256 --quant-type w8a8h1_sefp
 ```
 
-### GPU仿真
+#### 2. GPU仿真
 
 ```bash
-python examples/llm/llama/llama_xh2a_hmonnx_test.py --config work_dirs/Meta-Llama-3.1-8B-Instruct-XH2a-batch_1-2k-w8a8h1_sefp/meta.json
+python examples_new/llm/llama/internal/llama_eval_hmonnx.py --export-dir work_dirs/llama3-8b-hf-xh2a-2k-w8a8h1_sefp
 ```
 
 ### w4a8
@@ -29,20 +33,20 @@ python examples/llm/llama/llama_xh2a_hmonnx_test.py --config work_dirs/Meta-Llam
 #### 1. Quarot、GPTQ量化  
 
 lm_head 层一般不使用4bit int 量化，使用w8a8h1_sefp量化。
-默认做Quarot+GPTQ量化，weight bit = 4
 
 ```bash
-python examples/llm/llama/llama_xh2a_common_quant.py --model data/models/Meta-Llama-3.1-8B-Instruct --out-dir work_dirs/
+python examples_new/llm/llama/internal/_llama_common_quant.py --model /data01/datasets/llama3-8b-hf --w-bits 4 --out-dir work_dirs/
+默认做Quarot+GPTQ量化，weight bit = 4
 ```
 
 #### 2. 导出
 
 ```bash
-python examples/llm/llama/llama_xh2a_export_hmonnx.py --model data/models/Meta-Llama-3.1-8B-Instruct --batch-size 1 --context-length 2048 --input-sequence-length 256 --quant-type w4a8h0_ssfp --quant-weight /data01/nfs_shared/xhquant_quarot_gptq/llama3.1_8b_instruct_xh2a_2k_gptq_4bit/gptq-state-dict.safetensors
+python examples_new/llm/llama/llama_export.py --model work_dirs/llama3-8b-hf_quarot_gptq --context-length 2048 --input-sequence-length 256 --quant-type w4a8h0_ssfp
 ```
 
-## GPU仿真
+#### 3. GPU仿真
 
 ```bash
-python examples/llm/llama/llama_xh2a_hmonnx_test.py --config work_dirs/Meta-Llama-3.1-8B-Instruct-XH2a-batch_1-2k-w4a8h0_ssfp/meta.json
+python examples_new/llm/llama/internal/llama_eval_hmonnx.py --export-dir work_dirs/llama3-8b-hf_quarot_gptq-xh2a-2k-w4a8h0_ssfp
 ```
