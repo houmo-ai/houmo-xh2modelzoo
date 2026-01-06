@@ -123,12 +123,11 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--max_pe_length", type=int, default=32768, help="max pe length")
-    parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w4a8h1_sefp", help="quant type, default is w8a8")
     parser.add_argument("--image_max_size_h", type=int, default=448, help="image max size height")
     parser.add_argument("--image_max_size_w", type=int, default=448, help="image max size width")
     parser.add_argument(
@@ -153,5 +152,6 @@ if __name__ == "__main__":
         default=None,
         help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
     )
+    parser.add_argument("--debug", action="store_true", help="debug mode")
     args = parser.parse_args()
     main(args)

@@ -91,7 +91,9 @@ class BaseLLMConverter(Converter):
 
     def load_hf_model(self, hf_model_dir: str, **kwargs) -> nn.Module:
         hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+
         # assert not hasattr(config, "quantization_config")
+        # Load AutoRoundModel
         if (
             hasattr(hf_config, "quantization_config")
             and hf_config.quantization_config["quant_method"].lower() == "auto-round"
@@ -102,6 +104,17 @@ class BaseLLMConverter(Converter):
             native_model = AutoModelForCausalLM.from_pretrained(
                 hf_model_dir, torch_dtype="auto", revision="14dbc8", **kwargs
             )
+        # Load GPTQModel
+        elif (
+            hasattr(hf_config, "quantization_config")
+            and hf_config.quantization_config["quant_method"].lower() == "gptq"
+            and hasattr(hf_config.quantization_config, "meta")
+            and ("gptqmodel" in str(config.quantization_config.meta.get("quantizer", None)))
+        ):
+            from gptqmodel import GPTQModel
+
+            native_model = GPTQModel.from_pretrained(hf_model_dir, **kwargs)
+        # Native Load
         else:
             # assert not hasattr(native_model, "hf_quantizer")
             from transformers import AutoModelForCausalLM
@@ -246,6 +259,7 @@ class BaseLLMConverter(Converter):
             quanted_model = quanted_model.cuda()
             quanted_model.enable_fast_precision_mode()
             from xhquant.mix_precision.mix_precision import MixPrecisionSearch
+
             with open(self.config.mix_search, "r") as f:
                 ms_cfg = yaml.safe_load(f)
             ms = MixPrecisionSearch(quanted_model, ms_cfg)

@@ -434,8 +434,11 @@ class Qwen25VLConverter(BaseLLMConverter):
     @cached_property
     def quanted_vision_model(self) -> QuantGraph:
         wraped_vision_model = self.wraped_vision_model
+        qwen2_5_vl_inputs  = self.qwen25_vl_inputs
         with TimeProfiler("Quant Vision Model", self.logger) as tp:
-            quant_vision_model = self.vision_convert_to_quant_module(wraped_vision_model)
+            quant_vision_model = self.vision_convert_to_quant_module(
+                wraped_vision_model, qwen2_5_vl_inputs.vision.hm_pixel_values
+            )
         return quant_vision_model
 
     @cached_property
