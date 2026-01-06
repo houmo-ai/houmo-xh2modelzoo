@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Callable
 
+
 def qlinear_cuda_old_converter(self: nn.Module):
     from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
 
@@ -80,6 +81,7 @@ def qlinear_cuda_old_converter(self: nn.Module):
     self.out_features = self.outfeatures
     self.in_features = self.infeatures
 
+
 def _dequantize_awq_hf_model(native_hf_model: nn.Module):
     from awq.modules.linear.gemm import WQLinear_GEMM
     from awq.utils.packing_utils import reverse_awq_order, unpack_awq
@@ -142,11 +144,25 @@ def _dequantize_awq_hf_model(native_hf_model: nn.Module):
     return hf_model
 
 
+def _dequantize_gptqmodel_hf_model(native_hf_model):
+    from transformers.utils import is_gptqmodel_available
+
+    assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
+    converter = gptqmodel_torch_qlinear_converter
+    from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
+    for name, module in native_hf_model.named_modules():  # type: ignore
+        if isinstance(module, PackableQuantLinear):
+            converter(module)
+    return native_hf_model
+
+
 def _dequantize_gptq_hf_model(native_hf_model: nn.Module):
     hf_model = native_hf_model
     from transformers.utils.quantization_config import QuantizationMethod
     from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-    assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
+
+    # assert hf_model.config.quantization_config["quant_method"] == QuantizationMethod.GPTQ
     hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
     from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
@@ -173,7 +189,7 @@ def _dequantize_gptq_hf_model(native_hf_model: nn.Module):
             converter = None
 
     if is_gptqmodel_available():
-        if hasattr(QuantLinear,"dequantize_weight"):
+        if hasattr(QuantLinear, "dequantize_weight"):
             converter = gptqmodel_torch_qlinear_converter
         else:
             raise NotImplementedError(f"Not implemented for {QuantLinear} yet")
@@ -198,6 +214,7 @@ def _dequantize_gptq_hf_model(native_hf_model: nn.Module):
     hf_model.quantization_method = None  # type: ignore
     hf_model._is_hf_initialized = False  # type: ignore
     return hf_model
+
 
 def general_qlinear_converter(self: nn.Module):
     if self.bits in [2, 4, 8]:
@@ -267,6 +284,9 @@ def general_qlinear_converter(self: nn.Module):
 
 def gptqmodel_torch_qlinear_converter(self: nn.Module):
     import torch as t  # conflict with torch.py
+    ori_device = self.g_idx.device
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    self.to(device)
 
     if self.bits in [2, 4, 8]:
         zeros = t.bitwise_right_shift(
@@ -323,3 +343,4 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     self.register_parameter("weight", nn.Parameter(weight))
     self.register_buffer("quant_weight", quant_weight)
     self.__class__ = nn.Linear
+    self.to(ori_device)

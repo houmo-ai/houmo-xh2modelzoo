@@ -3,6 +3,7 @@ import os.path as osp
 import torch
 from pathlib import Path
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, Config  # isort:skip
+from xhquant.api import release_quanted_model_unused_parameters
 from xh_model_zoo_new.utils import MemoryTracker, TimeProfiler
 
 from xh_model_zoo_new.xh_llm.base_llm_infer_adapter import BaseLLMHFCompatible
@@ -36,6 +37,7 @@ def main(args):
     with TimeProfiler("convert", logger), MemoryTracker("cuda:0", "convert", logger):
         C = Qwen3MoeConverter(hf_model_path,config)
         if args.demo:
+            release_quanted_model_unused_parameters(C.quanted_model)
             hf_compitable_model = BaseLLMHFCompatible.from_qmodel(C.quanted_model,C.hf_config,C.wrap_cfg,C.token_embedding,C.native_model,C.tokenizer)
             if torch.cuda.is_available():
                 hf_compitable_model.cuda().half()

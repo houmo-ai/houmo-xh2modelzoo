@@ -1,9 +1,9 @@
-import argparse
-import os.path as osp
+import argparse,os.path as osp,torch
 from pathlib import Path
-from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, Config  # isort:skip
+from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, Config, release_quanted_model_unused_parameters  # isort:skip
 from xh_model_zoo_new.utils import MemoryTracker, TimeProfiler
 from xh_model_zoo_new.xh_llm.models.qwen3.qwen3_converter import Qwen3ConverterConfig, Qwen3Converter
+from xh_model_zoo_new.xh_llm.base_llm_infer_adapter import BaseLLMHFCompatible
 
 def main(args):
     # 1. Parse Config
@@ -36,6 +36,14 @@ def main(args):
         # converter.export(work_dir, generate_golden=args.generate_golden)
         Qwen3Converter.convert_and_export(hf_model_path, config, str(work_dir))
 
+        C = Qwen3Converter(hf_model_path, config)
+        if args.demo:
+            release_quanted_model_unused_parameters(C.quanted_model)
+            hf_compitable_model = BaseLLMHFCompatible.from_qmodel(C.quanted_model,C.hf_config,C.wrap_cfg,C.token_embedding,C.native_model,C.tokenizer)
+            if torch.cuda.is_available():
+                hf_compitable_model.cuda().half()
+                print(hf_compitable_model.demo(args.demo_prompt))
+        C.export(work_dir,generate_golden=args.generate_golden)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -58,5 +66,6 @@ if __name__ == "__main__":
     parser.add_argument("--generate-golden", action="store_true", help="generate golden")
     parser.add_argument("--extra_config_file", type=str, default=None, help="extra config file")
     parser.add_argument("--demo", action="store_true", help="demo mode")
+    parser.add_argument("--demo-prompt", type=str, default="你多大了？用中文回答。", help="demo prompt")
     args = parser.parse_args()
     main(args)

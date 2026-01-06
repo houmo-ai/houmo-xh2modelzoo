@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import yaml
 from torch import Tensor
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer, PretrainedConfig,AutoModelForCausalLM
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhquant.api import (
@@ -32,7 +32,7 @@ from xhquant.utils import TimeProfiler
 
 from xh_model_zoo_new.datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from xh_model_zoo_new.xh_llm.models.builder import wrap_llm_model
-from xh_model_zoo_new.xh_llm.llm_utils._dequant_utils import _dequantize_awq_hf_model, _dequantize_gptq_hf_model
+from xh_model_zoo_new.xh_llm.llm_utils._dequant_utils import _dequantize_awq_hf_model, _dequantize_gptq_hf_model,_dequantize_gptqmodel_hf_model
 from .base_llm_converter_config import BaseLLMConverterConfig
 from xh_model_zoo_new.core.converter import Converter, ConverterConfig
 
@@ -92,7 +92,6 @@ class BaseLLMConverter(Converter):
     def load_hf_model(self, hf_model_dir: str, **kwargs) -> nn.Module:
         hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
 
-        # assert not hasattr(config, "quantization_config")
         # Load AutoRoundModel
         if (
             hasattr(hf_config, "quantization_config")
@@ -108,12 +107,14 @@ class BaseLLMConverter(Converter):
         elif (
             hasattr(hf_config, "quantization_config")
             and hf_config.quantization_config["quant_method"].lower() == "gptq"
-            and hasattr(hf_config.quantization_config, "meta")
-            and ("gptqmodel" in str(config.quantization_config.meta.get("quantizer", None)))
+            and hf_config.quantization_config.get("meta", None) is not None
+            and ("gptqmodel" in str(hf_config.quantization_config["meta"].get("quantizer", None)))
         ):
             from gptqmodel import GPTQModel
+            from gptqmodel.models.auto import check_and_get_model_definition
 
-            native_model = GPTQModel.from_pretrained(hf_model_dir, **kwargs)
+            kwargs["device"] = kwargs.pop("device_map", "cpu")
+            native_model = GPTQModel.from_quantized(hf_model_dir, **kwargs)
         # Native Load
         else:
             # assert not hasattr(native_model, "hf_quantizer")
@@ -133,6 +134,51 @@ class BaseLLMConverter(Converter):
         if self.config.quant_weight is not None:
             self.load_quant_weight(self.config.quant_weight, native_model)
         self.token_embedding = native_model.get_input_embeddings()
+        return native_model
+
+    def load_hf_model(self, hf_model_dir: str, **kwargs) -> nn.Module:
+        hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+
+        if hasattr(hf_config, "quantization_config"):
+            # 1. Load model quantized by gptqmodel
+            if (
+                hf_config.quantization_config["quant_method"].lower() == "gptq"
+                and hf_config.quantization_config.get("meta", None) is not None
+                and ("gptqmodel" in str(hf_config.quantization_config["meta"].get("quantizer", None)))
+            ):
+                from gptqmodel import GPTQModel
+                kwargs["device"] = kwargs.pop("device_map", "cpu")
+                native_model = GPTQModel.from_quantized(hf_model_dir, **kwargs).model
+                native_model = _dequantize_gptqmodel_hf_model(native_model)
+
+            # 2. Load model quantized by auto-round
+            elif hf_config.quantization_config["quant_method"].lower() == "auto-round":
+                from modelscope import AutoModelForCausalLM, AutoTokenizer
+
+                native_model = AutoModelForCausalLM.from_pretrained(
+                    hf_model_dir, torch_dtype="auto", revision="14dbc8", **kwargs
+                )
+            # 3. Load model quantized by other methods, like autogptq,autoawq,etc.
+            else:
+                native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+                native_model = self.dequantize_hf_model(native_model)
+                
+        else:
+            assert not hasattr(native_model, "hf_quantizer")
+            native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+
+        if hasattr(native_model.config, "tie_word_embeddings") and native_model.config.tie_word_embeddings:  # type: ignore
+            old_torchscript = native_model.config.torchscript  # type: ignore
+            native_model.config.torchscript = True  # type: ignore
+            native_model.tie_weights()  # type: ignore
+            native_model.config.tie_word_embeddings = False  # type: ignore
+            native_model.config.torchscript = old_torchscript  # type: ignore
+        native_model.eval()
+
+        if self.config.quant_weight is not None:
+            self.load_quant_weight(self.config.quant_weight, native_model)
+
+        self.token_embedding = native_model.get_input_embeddings()        
         return native_model
 
     def load_quant_weight(self, quant_weight_path: str, native_hf_model: nn.Module) -> bool:

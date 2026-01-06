@@ -346,7 +346,8 @@ class BaseLLMHFCompatible(InferAdapter, DynamicModule):
 
         # 2. Create HFCompatible Model
         if native_model_or_path is None:
-            with no_init_weights(), init_empty_weights():
+            from transformers.modeling_utils import init_empty_weights
+            with no_init_weights():
                 native_model = AutoModelForCausalLM.from_config(hf_config)
         elif isinstance(native_model_or_path, str):
             native_model = AutoModelForCausalLM.from_pretrained(native_model_or_path, trust_remote_code=True)
