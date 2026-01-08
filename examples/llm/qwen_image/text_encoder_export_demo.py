@@ -7,6 +7,7 @@ from pathlib import Path
 from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig, VisualConfig
 import argparse
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, HMONNXGoldenInference
+from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
 def main(args):
     model_name = "/data02/datasets/qwen-image"
@@ -46,7 +47,7 @@ def main(args):
 
     # Load the pipeline
     if torch.cuda.is_available():
-        torch_dtype = torch.bfloat16
+        torch_dtype = torch.float16
         device = "cuda"
     else:
         torch_dtype = torch.float32
@@ -54,6 +55,12 @@ def main(args):
 
     pipe = DiffusionPipeline.from_pretrained(model_name, torch_dtype=torch_dtype, device_map="cuda")
     # pipe = pipe.to(device)
+
+    from xh_model_zoo.xh_llm.models.qwen_image._mmdit_model_impl import register_wrap_cls as llm_register_wrap_cls 
+    llm_register_wrap_cls(pipe.transformer)
+    wraped_llm_model = wrap_llm_model(pipe.transformer, {})
+    wraped_llm_model.cuda()
+    wraped_llm_model.to(torch.float16)
 
     positive_magic = {
         "en": ", Ultra HD, 4K, cinematic composition.", # for english prompt
@@ -85,10 +92,20 @@ def main(args):
     text_encoder_prefill = "work_dirs/qwen-image/hmonnx/qwen_image_text_encoder-XH2a-w8a8h1_sefp-llm-prefill.onnx"
 
     text_encoder = HMONNXGoldenInference(text_encoder_prefill)
-    # decoder_model.save_golden = True
     text_encoder.exec_device = torch.device("cuda:0")
 
-    xhmodel = cus_QwenImagePipeline.to_hf_compatible(pipe, text_encoder=text_encoder)
+    vae_hmonnx_path = "work_dirs/qwen-image/hmonnx/qwen_image_vae-XH2a-w8a8h1_sefp.onnx"
+    vae = HMONNXGoldenInference(vae_hmonnx_path)
+    vae.exec_device = torch.device("cuda:1")
+
+    pipe.text_encoder = None
+    pipe.vae = None
+    del pipe.text_encoder
+    del pipe.vae
+    torch.cuda.empty_cache()
+    
+    xhmodel = cus_QwenImagePipeline.to_hf_compatible(pipe, text_encoder=text_encoder, vae=vae, transformers=wraped_llm_model)
+
 
     image = xhmodel(
         prompt=prompt + positive_magic["en"],

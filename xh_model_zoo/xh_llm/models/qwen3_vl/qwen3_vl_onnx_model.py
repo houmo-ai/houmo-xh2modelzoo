@@ -442,9 +442,12 @@ class Qwen3VLONNXModel(LLMONNXModel):
             ]
         return messages
 
-    def preprocess(self, prompt, image_dir, processor):
+    def preprocess(self, prompt, image_dir, processor, cus_temp=False):
         from qwen_vl_utils import process_vision_info
-        messages = self.create_template(prompt, image_dir)
+        if not cus_temp:    
+            messages = self.create_template(prompt, image_dir)
+        else:
+            messages = prompt
         print(messages)
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -503,7 +506,7 @@ class Qwen3VLONNXModel(LLMONNXModel):
         return image
 
     @torch.no_grad()
-    def chat(self, prompt, image_path, processor, logger, use_fast=False, do_sample=False):
+    def chat(self, prompt, image_path, processor, logger, use_fast=False, do_sample=False, cus_temp=False):
         from tqdm import tqdm
 
         if image_path is not None:
@@ -513,7 +516,7 @@ class Qwen3VLONNXModel(LLMONNXModel):
                 pil_image = self.load_and_process_image_v2(image_path)
         else:
             pil_image = None
-        inputs = self.preprocess(prompt, pil_image, processor)
+        inputs = self.preprocess(prompt, pil_image, processor, cus_temp=cus_temp)
         inputs = inputs.to(self.device)
 
         if image_path is not None:

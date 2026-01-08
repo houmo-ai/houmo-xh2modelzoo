@@ -23,6 +23,7 @@ def main(args):
         input_sequence_length=args.input_sequence_length,
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
+        num_logits_to_keep=args.num_logits_to_keep,
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length//1024}k-{quant_type}"
@@ -42,6 +43,7 @@ if __name__ == "__main__":
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
     parser.add_argument("--quant-type", default="w4a8h0_ssfp", help="quant type, default is w8a8")
+    parser.add_argument("--num_logits_to_keep", type=int, default=1, help="not for test ppl")
     parser.add_argument(
         "--quant-weight",
         type=str,

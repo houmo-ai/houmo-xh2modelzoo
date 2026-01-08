@@ -55,6 +55,7 @@ if __name__ == "__main__":
         default=None,
         help="sliding window size for attention, if None, use global attention",
     )
+    parser.add_argument("--num_logits_to_keep", type=int, default=1, help="not for test ppl")    
     args = parser.parse_args()
     main(args)
 

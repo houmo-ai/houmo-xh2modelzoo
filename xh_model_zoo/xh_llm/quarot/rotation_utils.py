@@ -720,7 +720,7 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
 
 
 @torch.inference_mode()
-def rotate_model(model, rotate_mode, device, quarot_matrix_size=None):
+def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate=False):
     model_type = model_utils.model_type_extractor(model)
 
     llm_hidden_size = model.config.hidden_size if (model_type != model_utils.QWEN3_VL_MODEL) else model.config.text_config.hidden_size
@@ -751,13 +751,18 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None):
             head_dim = model_dim // num_heads
         else:
             head_dim = model.config.text_config.head_dim
-
+    
 
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
         rotate_qwen2_5_vl_visual_model(model.model.visual)
     elif model_type == model_utils.QWEN3_VL_MODEL:
         rotate_qwen3_vl_visual_model(model.model, model_type)
+
+    if not llm_rotate:
+        print("Not rotate for llm part")
+        return
+
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
         rotate_qwen2_5_vl_embeddings(model.model, Q)

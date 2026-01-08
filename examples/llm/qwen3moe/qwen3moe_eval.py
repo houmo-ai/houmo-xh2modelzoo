@@ -5,7 +5,6 @@ from typing import Any, List, Optional, Tuple, Union
 
 import lm_eval
 import torch
-from lm_eval.models.huggingface import HFLM
 from lm_eval.tasks import TaskManager
 from lm_eval.utils import handle_non_serializable, make_table, simple_parse_args_string
 from xhquant.api import ConfigDict, get_root_logger, xhquant_init
@@ -14,16 +13,19 @@ from xhquant.xhonnxruntime import config as xh_xhonnxruntime_config
 from xh_model_zoo.xh_llm.models.qwen3moe import Qwen3MoeHFCompatible, Qwen3MoeInference
 from xh_model_zoo.xh_llm.utils import auto_offload, decode_next_token
 
+try:
+    from lm_eval.models.huggingface import HFLM
+    class XH2LLM(HFLM):
+        def _model_call(self, inps, attn_mask=None, labels=None):
+            # self.model.use_cache = False
+            self.model.prefill = True
+            return super()._model_call(inps, attn_mask=attn_mask, labels=labels)
 
-class XH2LLM(HFLM):
-    def _model_call(self, inps, attn_mask=None, labels=None):
-        # self.model.use_cache = False
-        self.model.prefill = True
-        return super()._model_call(inps, attn_mask=attn_mask, labels=labels)
-
-    def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        # self.model.use_cache = True
-        return super()._model_generate(context, max_length, stop, **generation_kwargs)
+        def _model_generate(self, context, max_length, stop, **generation_kwargs):
+            # self.model.use_cache = True
+            return super()._model_generate(context, max_length, stop, **generation_kwargs)
+except:
+    pass
 
 
 def lm_eval_engine(hf_model: Any, tokenizer: Any, meta_info: Optional[dict] = None, cfg: Optional[ConfigDict] = None):
@@ -111,8 +113,15 @@ def main(args: argparse.Namespace):
     # wraped_hf_model.to(device)
     auto_offload(wraped_hf_model, "XH2aQuantQMoeBlock")
     xh_xhonnxruntime_config.disable_progress = True
-    with torch.no_grad():
-        lm_eval_engine(wraped_hf_model, tokenizer)
+    if args.eval_ppl:
+        from xh_model_zoo_new.evaluation.wikippl_eval import evaluate_wikitext
+        wiki_ppl = evaluate_wikitext(wraped_hf_model, tokenizer, seqlen=256)
+        with open(f"{args.eval_ppl}", "w", encoding="utf-8") as f:
+            f.write(str(wiki_ppl))
+
+    else:
+        with torch.no_grad():
+            lm_eval_engine(wraped_hf_model, tokenizer)
 
 
 if __name__ == "__main__":
@@ -126,5 +135,6 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--execution_device", type=str, default="cuda:0", help="execution device, default is cuda:0")
     parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument("--eval_ppl", type=str, help="only eval ppl and save path")
     args = parser.parse_args()
     main(args)

@@ -5,7 +5,7 @@ model_name = "/data02/datasets/qwen-image"
 
 # Load the pipeline
 if torch.cuda.is_available():
-    torch_dtype = torch.bfloat16
+    torch_dtype = torch.float16
     device = "cuda"
 else:
     torch_dtype = torch.float32
@@ -38,6 +38,31 @@ aspect_ratios = {
 
 width, height = aspect_ratios["16:9"]
 
+
+def auto_clip_hook(clip_value=65504):
+    """生成自动裁剪的钩子函数"""
+    def hook(module, input, output):
+        # 处理单个张量或元组（部分层输出是元组，如RNN）
+        if isinstance(output, torch.Tensor):
+            clipped_output = torch.clamp(output, -clip_value, clip_value)
+            return clipped_output
+        elif isinstance(output, (tuple, list)):
+            clipped_output = []
+            for item in output:
+                if item.dtype == torch.complex64:
+                    continue
+                if isinstance(item, torch.Tensor):
+                    clipped_output.append(torch.clamp(item, -clip_value, clip_value))
+                else:
+                    clipped_output.append(item)
+            return tuple(clipped_output)
+        return output
+    return hook
+
+clip_threshold = 65504
+for module in pipe.transformer.modules():
+    module.register_forward_hook(auto_clip_hook(clip_threshold))
+
 image = pipe(
     prompt=prompt + positive_magic["en"],
     negative_prompt=negative_prompt,
@@ -48,4 +73,4 @@ image = pipe(
     generator=torch.Generator(device="cuda").manual_seed(42)
 ).images[0]
 
-image.save("example.png")
+image.save("example_fp16.png")

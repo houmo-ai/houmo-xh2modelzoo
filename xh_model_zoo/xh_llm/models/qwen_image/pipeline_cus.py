@@ -123,8 +123,8 @@ class cus_QwenImagePipeline(QwenImagePipeline):
         #     attention_mask=txt_tokens.attention_mask,
         #     output_hidden_states=True,
         # )
-
-        hidden_states = encoder_hidden_states.hidden_states[-1]
+        # hidden_states = encoder_hidden_states.hidden_states[-1]
+        hidden_states = encoder_hidden_states[ :, :txt_tokens.input_ids.shape[1], : ]
         split_hidden_states = self._extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
         attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
@@ -146,15 +146,17 @@ class cus_QwenImagePipeline(QwenImagePipeline):
         hf_model,
         text_encoder = None,
         meta_info = None,
+        vae = None,
+        transformers = None,
     ):
         """
         将改写后的模型转换为兼容 Hugging Face 的模型
         """
         if text_encoder is not None:
             hf_model.__class__ = cls
-            hf_model.__setup__(text_encoder)
+            hf_model.__setup__(text_encoder, transformers,  vae)
             # hf_model.embed_tokens = hf_model.model.embed_tokens
-            del hf_model.text_encoder
+            # del hf_model.text_encoder
             # del hf_model.lm_head
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -245,6 +247,11 @@ class cus_QwenImagePipeline(QwenImagePipeline):
                 max_sequence_length=max_sequence_length,
             )
 
+        prompt_embeds = prompt_embeds.to(torch.bfloat16)
+
+        if do_true_cfg:
+            negative_prompt_embeds = negative_prompt_embeds.to(torch.float16)
+
         # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4 # 16
         latents = self.prepare_latents(
@@ -309,7 +316,7 @@ class cus_QwenImagePipeline(QwenImagePipeline):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):
-                    noise_pred = self.transformer(
+                    noise_pred = self.transformer( # self._transformer
                         hidden_states=latents,
                         timestep=timestep / 1000,
                         guidance=guidance,
@@ -323,7 +330,7 @@ class cus_QwenImagePipeline(QwenImagePipeline):
 
                 if do_true_cfg:
                     with self.transformer.cache_context("uncond"):
-                        neg_noise_pred = self.transformer(
+                        neg_noise_pred = self.transformer( # self._transformer
                             hidden_states=latents,
                             timestep=timestep / 1000,
                             guidance=guidance,
@@ -333,7 +340,7 @@ class cus_QwenImagePipeline(QwenImagePipeline):
                             txt_seq_lens=negative_txt_seq_lens,
                             attention_kwargs=self.attention_kwargs,
                             return_dict=False,
-                        )[0]
+                        )
                     comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                     cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
@@ -368,21 +375,27 @@ class cus_QwenImagePipeline(QwenImagePipeline):
             image = latents
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-            latents = latents.to(self.vae.dtype)
+            latents = latents.to(torch.float16)
             latents_mean = (
-                torch.tensor(self.vae.config.latents_mean)
-                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                torch.tensor(
+                    [-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921]
+                )
+                .view(1, 16, 1, 1, 1)
                 .to(latents.device, latents.dtype)
             )
-            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
+            latents_std = 1.0 / torch.tensor(
+                [2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916]
+                ).view(1, 16, 1, 1, 1).to(
                 latents.device, latents.dtype
             )
             latents = latents / latents_std + latents_mean
-            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+
+            latents = latents.to(torch.float16).to("cuda:1")
+            image = self._vae(latents)[:, :, 0]
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         # Offload all models
-        self.maybe_free_model_hooks()
+        # self.maybe_free_model_hooks()
 
         if not return_dict:
             return (image,)

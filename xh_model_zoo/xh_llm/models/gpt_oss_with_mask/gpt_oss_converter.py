@@ -153,7 +153,7 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
                 max_sequence_length=context_length,  # 最大上下文长度
                 input_sequence_length=input_sequence_length,  # prefill时输入的序列长度
                 use_cache=True,
-                num_logits_to_keep=1,
+                num_logits_to_keep=config.num_logits_to_keep,
                 sliding_window=config.sliding_window,
                 kv_cache=dict(
                     cache_axis=2,

@@ -198,3 +198,4 @@ data/datasets
 work_dirs
 
 data/
+benchmark_test/allure-results

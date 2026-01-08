@@ -1,8 +1,9 @@
 import argparse
 import os
 import tempfile
-from pathlib import Path
 from copy import deepcopy
+from pathlib import Path
+
 import onnx
 import onnxsim
 import torch
@@ -70,7 +71,7 @@ class Decoder(nn.Module):
 def main(args):
     # load model and processor
     # processor = WhisperProcessor.from_pretrained("data/models/whisper-medium")
-    model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper-medium")
+    model = WhisperForConditionalGeneration.from_pretrained(args.model)
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
     model.model.encoder.decoder_m = model.model.decoder
@@ -98,6 +99,9 @@ def main(args):
 
     # encoder ============================================
     if not Path(onnx_file).exists():
+        # print(type(model.model.encoder))
+        # from transformers.models.whisper.modeling_whisper import WhisperEncoder
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             with RewriterContext(None, backend="onnxruntime"):
                 temp_onnx_file = str(Path(tmp_dir) / Path(onnx_file).name)
@@ -109,6 +113,7 @@ def main(args):
                     output_names=[
                         "hidden_state",
                     ],
+                    # dynamo=True,
                 )
                 onnx_model = onnx.load(temp_onnx_file)
                 onnx_model_sim, checked = onnxsim.simplify(onnx_model)
@@ -151,9 +156,8 @@ def main(args):
         session.step = 0
         session(input_features.half().to("cuda"))
 
-    # decoder ===========================================
-    name = "decoder"
-
+    # prefill ===========================================
+    name = "prefill"
     work_dirs = Path("work_dirs") / "whisper" / name
     quant_config = create_quant_config(quant_scheme)
     onnx_file = work_dirs / f"whisper_meduim_{name}.onnx"
@@ -161,24 +165,23 @@ def main(args):
     golden_path = work_dirs / "hmonnx / golden"
 
     # decoder_input_ids = torch.randint(0, 10, (1, 1)) # (1,1)  (1,4)
-    decoder_input_ids = torch.tensor([[2221]])
-    cache_position = torch.tensor([[4]])
-    # cache_position = torch.tensor([[0, 1, 2, 3]])
-    encoder_outputs_kv = torch.randn([1, 1500, 16, 64]).transpose(1, 2).contiguous()
-    past_ket_length = torch.tensor([0])
-    past_len = torch.tensor([4])
+    decoder_input_ids = torch.tensor([[50258, 50259, 50359, 50363]])
+    # cache_position = torch.tensor([[4]])
+    cache_position = torch.tensor([[0, 1, 2, 3]])
+    past_len = torch.tensor([0])
 
     # k_cache_past, v_cache_past = torch.load("work_dirs/whisper/kv_cache.pt", weights_only=False)
     k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
     v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
     # for i in range(24):
-    #     k_cache[i][:, :, :4, :] = k_cache_past[i].half()
-    #     v_cache[i][:, :, :4, :] = v_cache_past[i].half()
-
-    k_list = deepcopy(k_cache)
-    v_list = deepcopy(v_cache)
-    # for i in range(24):
-    #     kv_list.append((encoder_outputs_kv, encoder_outputs_kv))
+    #     k_cache[i][:, :, :past_len, :] = k_cache_past[i].half()
+    #     v_cache[i][:, :, :past_len, :] = v_cache_past[i].half()
+    k_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    v_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    # k_list = []
+    # v_list = []
+    # # for i in range(24):
+    # #     kv_list.append((encoder_outputs_kv, encoder_outputs_kv))
     # kv = torch.load("work_dirs/whisper/kv_data.pt", weights_only=False)
     # for i in range(24):
     #     k_list.append(torch.tensor(kv[i * 2]).half())
@@ -363,6 +366,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # parser.add_argument("--onnx", type=str, default="data/model_zoo2/houmo/yolo12m/yolo12m.onnx")
+    parser.add_argument("--model", type=str, default="/data02/datasets/whisper_medium")
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
     parser.add_argument("--gen_golden", action="store_true", help="generate golden data")

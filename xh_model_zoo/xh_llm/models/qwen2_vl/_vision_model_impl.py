@@ -236,12 +236,7 @@ class _Qwen2VisionTransformerPretrainedModel(DynamicModule):
         cu_seqlens = self.cu_seqlens
 
         for blk in self.blocks:
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    blk.__call__, hidden_states, cu_seqlens, rotary_pos_emb
-                )
-            else:
-                hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+            hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
         return self.merger(hidden_states)
 
