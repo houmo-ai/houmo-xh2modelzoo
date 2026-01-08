@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import yaml
 from torch import Tensor
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig,AutoModelForCausalLM
+from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, AutoModelForCausalLM
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhquant.api import (
@@ -32,7 +32,11 @@ from xhquant.utils import TimeProfiler
 
 from xh_model_zoo_new.datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from xh_model_zoo_new.xh_llm.models.builder import wrap_llm_model
-from xh_model_zoo_new.xh_llm.llm_utils._dequant_utils import _dequantize_awq_hf_model, _dequantize_gptq_hf_model,_dequantize_gptqmodel_hf_model
+from xh_model_zoo_new.xh_llm.llm_utils._dequant_utils import (
+    _dequantize_awq_hf_model,
+    _dequantize_gptq_hf_model,
+    _dequantize_gptqmodel_hf_model,
+)
 from .base_llm_converter_config import BaseLLMConverterConfig
 from xh_model_zoo_new.core.converter import Converter, ConverterConfig
 
@@ -147,6 +151,7 @@ class BaseLLMConverter(Converter):
                 and ("gptqmodel" in str(hf_config.quantization_config["meta"].get("quantizer", None)))
             ):
                 from gptqmodel import GPTQModel
+
                 kwargs["device"] = kwargs.pop("device_map", "cpu")
                 native_model = GPTQModel.from_quantized(hf_model_dir, **kwargs).model
                 native_model = _dequantize_gptqmodel_hf_model(native_model)
@@ -162,8 +167,10 @@ class BaseLLMConverter(Converter):
             else:
                 native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
                 native_model = self.dequantize_hf_model(native_model)
-                
+
         else:
+            from transformers import AutoModelForCausalLM
+
             native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
             assert not hasattr(native_model, "hf_quantizer")
 
@@ -178,7 +185,7 @@ class BaseLLMConverter(Converter):
         if self.config.quant_weight is not None:
             self.load_quant_weight(self.config.quant_weight, native_model)
 
-        self.token_embedding = native_model.get_input_embeddings()        
+        self.token_embedding = native_model.get_input_embeddings()
         return native_model
 
     def load_quant_weight(self, quant_weight_path: str, native_hf_model: nn.Module) -> bool:
