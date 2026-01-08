@@ -164,8 +164,8 @@ class BaseLLMConverter(Converter):
                 native_model = self.dequantize_hf_model(native_model)
                 
         else:
-            assert not hasattr(native_model, "hf_quantizer")
             native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+            assert not hasattr(native_model, "hf_quantizer")
 
         if hasattr(native_model.config, "tie_word_embeddings") and native_model.config.tie_word_embeddings:  # type: ignore
             old_torchscript = native_model.config.torchscript  # type: ignore

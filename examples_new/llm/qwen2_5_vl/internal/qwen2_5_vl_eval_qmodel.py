@@ -269,6 +269,8 @@ def main(args):
 
     # from transformers import Qwen2_5_VLProcessor
     # processor = Qwen2_5_VLProcessor.from_pretrained(hf_model_path)
+    if not args.align:
+        quanted_llm_model.enable_fast_precision_mode()
     hf_compatible_model = Qwen2_5_VLHFCompatible.from_qmodel(
         quanted_llm_model,
         C.native_model.visual,
@@ -320,6 +322,7 @@ def parse_args():
     )
     # for eval
     parser.add_argument("--dataset-name", type=str, default="CMMMU_VAL", help="dataset name")
+    parser.add_argument("--align",type=bool,default=False,help="align mode")
     return parser.parse_args()
 
 
