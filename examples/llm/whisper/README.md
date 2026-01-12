@@ -13,7 +13,7 @@ pip install torchcodec
 
 ### 导出方法
 
-encoder编码器:包含encoder + decoder的encoder注意力部分
+encoder编码器:包含encoder + decoder的交叉注意kv cache
 prefill:decoder模型的prefill阶段
 decode：decoder模型的decode阶段
 
