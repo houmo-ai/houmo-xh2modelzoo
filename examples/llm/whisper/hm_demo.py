@@ -13,8 +13,8 @@ def main():
 
     device = torch.device("cuda")
     # load model and processor
-    processor = WhisperProcessor.from_pretrained("data/models/whisper-medium")
-    model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper-medium")
+    processor = WhisperProcessor.from_pretrained("data/models/whisper_medium")
+    model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper_medium")
     model.config.forced_decoder_ids = None
 
     model.model.encoder.decoder_m = model.model.decoder
@@ -22,14 +22,14 @@ def main():
     # load dummy dataset and read audio files
     ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
     sample = ds[1]["audio"]
-    # input_features = processor(
-    #     sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
-    # ).input_features
+    input_features = processor(
+        sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
+    ).input_features
     # [1,80,3000]
 
-    input_features = torch.load("work_dirs/whisper/input.pt")
+    # input_features = torch.load("work_dirs/whisper/input.pt")
 
-    encoder = HMONNXInference(str("work_dirs/whisper/encoder/hmonnx/whisper_meduim_xh2a_w8a8_sefp.onnx"))
+    encoder = HMONNXInference(str("work_dirs/whisper/encoder/hmonnx/whisper_meduim_encoder_xh2a_w8a8_sefp.onnx"))
     prefill = HMONNXInference(str("work_dirs/whisper/prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"))
     decoder = HMONNXInference(str("work_dirs/whisper/decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"))
     encoder.to(device)

@@ -69,39 +69,28 @@ class Decoder(nn.Module):
 
 
 def main(args):
-    # load model and processor
-    # processor = WhisperProcessor.from_pretrained("data/models/whisper-medium")
     model = WhisperForConditionalGeneration.from_pretrained(args.model)
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
     model.model.encoder.decoder_m = model.model.decoder
 
-    # load dummy dataset and read audio files
-    # ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-    # sample = ds[1]["audio"]
-    # input_features = processor(
-    #     sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
-    # ).input_features # -142334.8125
-    # [1,80,3000]
-
     work_dirs = Path("work_dirs") / "whisper" / "encoder"
     work_dirs.mkdir(exist_ok=True, parents=True)
     onnx_file = work_dirs / "whisper_meduim.onnx"
 
+    # encoder ============================================
+    name = "encoder"
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     quant_config = create_quant_config(quant_scheme)
-    hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_xh2a_{quant_type}.onnx"
+    hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
     golden_path = work_dirs / "hmonnx/golden"
 
     input_features = torch.randn(1, 80, 3000)
-    # input_features = torch.load("work_dirs/whisper/input.pt")
 
-    # encoder ============================================
+    # 通过 替换onnx 先导出onnx 再转hmonnx 将decoder部分的qk linear转移到了encoder中，避免重复多次操作
+    # 1. 导出onnx
     if not Path(onnx_file).exists():
-        # print(type(model.model.encoder))
-        # from transformers.models.whisper.modeling_whisper import WhisperEncoder
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             with RewriterContext(None, backend="onnxruntime"):
                 temp_onnx_file = str(Path(tmp_dir) / Path(onnx_file).name)
@@ -131,12 +120,14 @@ def main(args):
             location=f"{Path(onnx_file).stem}_external_data",
         )
 
+    # 2. 构造输入
     output_names = []
     for i in range(24):
         output_names.append(f"key_state_{i}")
     for i in range(24):
         output_names.append(f"value_state_{i}")
 
+    # 3. 转换
     if not Path(hmonnx_file).exists():
         convert_onnx_to_hmonnx(
             str(onnx_file),
@@ -147,7 +138,7 @@ def main(args):
             input_names=["input_features"],
             output_names=output_names,
         )
-
+    # 生成golden
     if args.gen_golden and not Path(golden_path).exists():
         session = HMONNXGoldenInference(hmonnx_file)
         session.to("cuda")
@@ -156,36 +147,28 @@ def main(args):
         session.step = 0
         session(input_features.half().to("cuda"))
 
-    # prefill ===========================================
-    name = "prefill"
+
+    # decoder ===========================================
+    name = "decoder"
+
     work_dirs = Path("work_dirs") / "whisper" / name
     quant_config = create_quant_config(quant_scheme)
     onnx_file = work_dirs / f"whisper_meduim_{name}.onnx"
     hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
     golden_path = work_dirs / "hmonnx / golden"
 
-    # decoder_input_ids = torch.randint(0, 10, (1, 1)) # (1,1)  (1,4)
-    decoder_input_ids = torch.tensor([[50258, 50259, 50359, 50363]])
-    # cache_position = torch.tensor([[4]])
-    cache_position = torch.tensor([[0, 1, 2, 3]])
+    decoder_input_ids = torch.tensor([[2221]])
+    cache_position = torch.tensor([[4]])
+    encoder_outputs_kv = torch.randn([1, 1500, 16, 64]).transpose(1, 2).contiguous()
+    past_ket_length = torch.tensor([0])
     past_len = torch.tensor([0])
 
-    # k_cache_past, v_cache_past = torch.load("work_dirs/whisper/kv_cache.pt", weights_only=False)
+
     k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
     v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    # for i in range(24):
-    #     k_cache[i][:, :, :past_len, :] = k_cache_past[i].half()
-    #     v_cache[i][:, :, :past_len, :] = v_cache_past[i].half()
+
     k_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
     v_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    # k_list = []
-    # v_list = []
-    # # for i in range(24):
-    # #     kv_list.append((encoder_outputs_kv, encoder_outputs_kv))
-    # kv = torch.load("work_dirs/whisper/kv_data.pt", weights_only=False)
-    # for i in range(24):
-    #     k_list.append(torch.tensor(kv[i * 2]).half())
-    #     v_list.append(torch.tensor(kv[i * 2 + 1]).half())
 
     inputs_names = [
         "decoder_input_ids",
@@ -209,8 +192,6 @@ def main(args):
         output_names.append(f"newk_cache_{i}")
     for i in range(24):
         output_names.append(f"newv_cache_{i}")
-
-    # encoder ============================================
 
     cache_len = decoder_input_ids.shape[0]
     mask_atten = torch.ones(([1, 16, cache_len, 1024])).half()
@@ -236,35 +217,6 @@ def main(args):
 
         # output, k_cache_list, v_cache_list = frontend_model(*warp_inp)
 
-    """
-    if not Path(onnx_file).exists():
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with RewriterContext(None, backend='onnxruntime'):
-                temp_onnx_file = str(Path(tmp_dir) / Path(onnx_file).name)
-                torch.onnx.export(
-                    model_cus,
-                    (decoder_input_ids, cache_position, current_len, k_cache, v_cache, kv_list),  # , cache_position
-                    temp_onnx_file,
-                    input_names=inputs_names,  # , "cache_position"
-                    output_names=output_names,
-                )
-                onnx_model = onnx.load(temp_onnx_file)
-                onnx_model_sim, checked = onnxsim.simplify(onnx_model)
-                if checked:
-                    onnx_model = onnx_model_sim
-    else:
-        onnx_model = onnx.load(onnx_file)
-
-    if not os.path.exists(onnx_file):
-        onnx.save(
-            onnx_model,
-            onnx_file,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=f"{Path(onnx_file).stem}_external_data",
-        )
-    """
-
     hm_inputs = [
         decoder_input_ids.to(torch.int32),
         cache_position.to(torch.int32),
@@ -283,11 +235,6 @@ def main(args):
         hm_inputs.append(v_list[i])
 
     if not Path(hmonnx_file).exists():
-
-        # quanted_graph_module = _convert_model_to_quanted_model(
-        #     model, FrontendType.DynamoFX, warp_inp, DeviceType.XH2a, quant_config
-        # )
-
         _input_names = fronted_graph_module.get_input_names()
         if quant_config is None:
             quant_config = ConfigDict()
@@ -334,26 +281,6 @@ def main(args):
             output_names,
         )
 
-        # convert_dynamo_model_to_hmonnx(
-        #     warp_model_cus,
-        #     hm_inputs,
-        #     DeviceType.XH2a,
-        #     hmonnx_file,
-        #     quant_config=quant_config,
-        #     input_names=inputs_names,  # , "cache_position"
-        #     output_names=output_names,
-        # )
-
-        # convert_onnx_to_hmonnx(
-        #     str(onnx_file),
-        #     hm_inputs,
-        #     DeviceType.XH2a,
-        #     hmonnx_file,
-        #     quant_config=quant_config,
-        #     input_names=inputs_names,  # , "cache_position"
-        #     output_names=output_names,
-        # )
-
     if args.gen_golden and not Path(golden_path).exists():
         session = HMONNXGoldenInference(hmonnx_file)
         session.to("cuda")
@@ -365,7 +292,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # parser.add_argument("--onnx", type=str, default="data/model_zoo2/houmo/yolo12m/yolo12m.onnx")
     parser.add_argument("--model", type=str, default="/data02/datasets/whisper_medium")
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")

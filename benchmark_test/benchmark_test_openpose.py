@@ -94,7 +94,9 @@ def test_openpose(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit:
     allure.attach(str(w_bit), "Wbit", attachment_type=allure.attachment_type.TEXT)
     allure.attach(str(a_bit), "Abit", attachment_type=allure.attachment_type.TEXT)
     allure.attach(str(f"Cosim_{cos_sim}"), "ACC/Cosim_/PPL", attachment_type=allure.attachment_type.TEXT)
-
+    golden_path = os.path.join(current_dir, session.golden_dir)
+    allure.attach(str(f"{golden_path}"), 
+                  "Golden 地址", attachment_type=allure.attachment_type.TEXT)
 
 if __name__ == "__main__":
     test_openpose("ONNX", w_bit=8, a_bit=16)

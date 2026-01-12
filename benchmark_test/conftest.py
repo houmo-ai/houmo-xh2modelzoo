@@ -28,6 +28,8 @@ ABS_PATH = os.path.dirname(__file__)
 # 全局变量用于存储插件实例
 _allure_plugin = None
 
+EMAIL_HTML_REPORT_PATH = os.path.join(ABS_PATH, "email_report.html")
+
 
 class TestResultManager:
     yag: yagmail.SMTP
@@ -186,11 +188,11 @@ class TestResultManager:
         html_parts.append(f'<p style="margin: 0 0 5px 0; font-weight: bold;">测试说明：</p>')
         html_parts.append(f'<ul style="margin: 0; padding-left: 20px; line-height: 1.6;">')
         html_parts.append(f"<li>此邮件每周五定期发送</li>")
-        html_parts.append(f"<li>可主动发送标题或内容包含<code>test</code>邮件至该邮箱进行标准测试</li>")
+        html_parts.append(f"<li>可主动发送内容包含<code>test</code>邮件至该邮箱进行测试</li>")
         html_parts.append(
-            f"<li>标题或内容单独包含 <code>int8</code>/<code>mix</code>/<code>int16</code> 可进行单一模式测试</li>"
+            f"<li>内容单独包含 <code>private</code> 可进行私密测试，测试结果将发送给你个人</li>"
         )
-        html_parts.append(f"<li>包含 <code>fast</code> 使用10张子图数据测试模型 e.g.(test int8 fast)</li>")
+        # html_parts.append(f"<li>包含 <code>fast</code> 使用10张子图数据测试模型 e.g.(test int8 fast)</li>")
         html_parts.append(f"</ul>")
         html_parts.append(f"</div>")
 
@@ -388,6 +390,17 @@ class TestResultManager:
         self.change_id = Change_id
         html_path, markdown_path, email_content = self.generate_report(current_results)
 
+        try:
+            # 创建目录（如果不存在）
+            os.makedirs(os.path.dirname(EMAIL_HTML_REPORT_PATH), exist_ok=True)
+            
+            # 写入HTML文件
+            with open(EMAIL_HTML_REPORT_PATH, "w", encoding="utf-8") as f:
+                f.write(email_content)
+            print(f"\n邮件HTML内容已保存至: {EMAIL_HTML_REPORT_PATH}")
+        except Exception as e:
+            print(f"\n保存邮件HTML文件失败: {str(e)}")
+
         # 确保recipient_email是列表格式
         if isinstance(recipient_email, str):
             recipient_email = [recipient_email]
@@ -430,7 +443,7 @@ class AllureResultPlugin(AllureDeveloperHooks):
         uuid = result.uuid
         self.allure_results[uuid] = {
             "title": result.name,
-            "description": result.description,
+            # "description": result.description,
             "status": result.status,
             "timestamp": datetime.fromtimestamp(result.stop / 1000).strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -478,6 +491,9 @@ class AllureResultPlugin(AllureDeveloperHooks):
         # 发送邮件
         if self.config.getoption("--send-email"):
             recipient_email = [email.strip() for email in os.getenv("RECIPIENT_EMAIL", "xing.hu@houmo.ai").split(",")]
+            if self.config.getoption("--send-email-dress") is not None:
+                recipient_email = [self.config.getoption("--send-email-dress")]
+                
             if recipient_email:
                 # 只使用当前结果生成邮件内容
                 self.result_manager.send_email_report(
@@ -498,6 +514,7 @@ def pytest_addoption(parser):
     )
     parser.addoption("--send-email", action="store_true", default=False, help="是否发送邮件报告")
     parser.addoption("--Change-ID", default="without provide Change-ID", help="是否发送邮件报告")
+    parser.addoption("--send-email-dress", default=None, help="发送至特定邮箱")
 
 
 def pytest_configure(config):
