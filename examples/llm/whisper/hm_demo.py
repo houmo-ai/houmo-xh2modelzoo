@@ -47,9 +47,9 @@ def main(args):
     # ).input_features
     # # [1,80,3000]
 
-    audo_file = str(Path(__file__).parent / "audio.mp3")
+    audio_file = args.audio
     sampling_rate = 16000
-    with open(audo_file, "rb") as f:
+    with open(audio_file, "rb") as f:
         inputs = f.read()
     if isinstance(inputs, bytes):
         inputs = ffmpeg_read(inputs, sampling_rate)
@@ -73,8 +73,29 @@ def main(args):
     prefill.exec_device = device
     decoder.exec_device = device
 
-    detect_ids = torch.tensor([[50258]])  # [1,1]
-    default_decoder_ids = torch.tensor([[50258, 0, 50359, 50363]])  # [1,1]
+    generation_config = model.generation_config
+    config = model.config
+    init_tokens = [generation_config.decoder_start_token_id]
+    forced_decoder_ids = getattr(generation_config, "forced_decoder_ids", None)
+
+    if (
+        forced_decoder_ids is None
+        and getattr(config, "forced_decoder_ids", None) is not None
+    ):
+        forced_decoder_ids = config.forced_decoder_ids
+
+    if forced_decoder_ids is not None and forced_decoder_ids[0][0] == 1:
+        i = 1
+        while len(forced_decoder_ids) > 0 and forced_decoder_ids[0][0] == i:
+            init_tokens += [forced_decoder_ids[0][1]]
+            forced_decoder_ids = forced_decoder_ids[1:]
+            i += 1
+    init_tokens.append(generation_config.no_timestamps_token_id)
+    init_tokens = [t if t is not None else 0 for t in init_tokens]
+    # detect_ids = torch.tensor([[50258]])  # [1,1]
+    # default_decoder_ids = torch.tensor([[50258, 0, 50359, 50363]])  # [1,1]
+    detect_ids = torch.tensor([[init_tokens[0]]])  # [1,1]
+    default_decoder_ids = torch.tensor([init_tokens])
     cache_position = torch.tensor([[0]])
     cache_position_prefill = torch.tensor([[0, 1, 2, 3]])
 
@@ -148,108 +169,109 @@ def main(args):
         output[1 + num_decode_layers : 1 + num_decode_layers * 2],
     )
 
+    lang_to_id = list(generation_config.lang_to_id.values())
     # postprocess  50259
-    lang_to_id = [
-        50327,
-        50334,
-        50272,
-        50350,
-        50304,
-        50355,
-        50330,
-        50292,
-        50302,
-        50347,
-        50309,
-        50315,
-        50270,
-        50283,
-        50297,
-        50285,
-        50261,
-        50281,
-        50259,
-        50262,
-        50307,
-        50310,
-        50300,
-        50277,
-        50338,
-        50265,
-        50319,
-        50333,
-        50352,
-        50354,
-        50279,
-        50276,
-        50291,
-        50339,
-        50286,
-        50312,
-        50275,
-        50311,
-        50274,
-        50266,
-        50356,
-        50329,
-        50316,
-        50323,
-        50306,
-        50264,
-        50294,
-        50345,
-        50353,
-        50336,
-        50293,
-        50301,
-        50349,
-        50295,
-        50308,
-        50296,
-        50314,
-        50320,
-        50282,
-        50343,
-        50346,
-        50313,
-        50271,
-        50342,
-        50288,
-        50328,
-        50321,
-        50269,
-        50340,
-        50267,
-        50284,
-        50263,
-        50344,
-        50332,
-        50322,
-        50298,
-        50305,
-        50324,
-        50326,
-        50317,
-        50303,
-        50357,
-        50273,
-        50318,
-        50287,
-        50299,
-        50331,
-        50289,
-        50341,
-        50348,
-        50268,
-        50351,
-        50280,
-        50290,
-        50337,
-        50278,
-        50335,
-        50325,
-        50260,
-    ]
+    # lang_to_id = [
+    #     50327,
+    #     50334,
+    #     50272,
+    #     50350,
+    #     50304,
+    #     50355,
+    #     50330,
+    #     50292,
+    #     50302,
+    #     50347,
+    #     50309,
+    #     50315,
+    #     50270,
+    #     50283,
+    #     50297,
+    #     50285,
+    #     50261,
+    #     50281,
+    #     50259,
+    #     50262,
+    #     50307,
+    #     50310,
+    #     50300,
+    #     50277,
+    #     50338,
+    #     50265,
+    #     50319,
+    #     50333,
+    #     50352,
+    #     50354,
+    #     50279,
+    #     50276,
+    #     50291,
+    #     50339,
+    #     50286,
+    #     50312,
+    #     50275,
+    #     50311,
+    #     50274,
+    #     50266,
+    #     50356,
+    #     50329,
+    #     50316,
+    #     50323,
+    #     50306,
+    #     50264,
+    #     50294,
+    #     50345,
+    #     50353,
+    #     50336,
+    #     50293,
+    #     50301,
+    #     50349,
+    #     50295,
+    #     50308,
+    #     50296,
+    #     50314,
+    #     50320,
+    #     50282,
+    #     50343,
+    #     50346,
+    #     50313,
+    #     50271,
+    #     50342,
+    #     50288,
+    #     50328,
+    #     50321,
+    #     50269,
+    #     50340,
+    #     50267,
+    #     50284,
+    #     50263,
+    #     50344,
+    #     50332,
+    #     50322,
+    #     50298,
+    #     50305,
+    #     50324,
+    #     50326,
+    #     50317,
+    #     50303,
+    #     50357,
+    #     50273,
+    #     50318,
+    #     50287,
+    #     50299,
+    #     50331,
+    #     50289,
+    #     50341,
+    #     50348,
+    #     50268,
+    #     50351,
+    #     50280,
+    #     50290,
+    #     50337,
+    #     50278,
+    #     50335,
+    #     50325,
+    #     50260,
+    # ]
 
     non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
     non_lang_mask[0, list(lang_to_id)] = False
@@ -488,9 +510,21 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hf-model", type=str, default="./data/models/whisper-medium")
     parser.add_argument(
-        "--hmonnx-model", type=str, default="./work_dirs/whisper-medium_XH2a"
+        "--hf-model",
+        type=str,
+        # default="./data/models/whisper-medium",
+        default="data/models/whisper-large-v3-turbo",
+    )
+    parser.add_argument(
+        "--hmonnx-model",
+        type=str,
+        default="./work_dirs/whisper-large-v3-turbo_XH2a",
+    )
+    parser.add_argument(
+        "--audio",
+        type=str,
+        default="./examples/llm/whisper/audio.mp3",
     )
     args = parser.parse_args()
     main(args)

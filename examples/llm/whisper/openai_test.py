@@ -8,7 +8,15 @@ from transformers.pipelines.audio_utils import ffmpeg_read
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="./data/models/whisper-medium")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="./data/models/whisper-large-v3-turbo",
+        # default="./data/models/whisper-medium",
+        # "--model",
+        # type=str,
+        # default="./data/models/whisper-medium",
+    )
     parser.add_argument("--audio", type=str, default="./examples/llm/whisper/audio.mp3")
     args = parser.parse_args()
 

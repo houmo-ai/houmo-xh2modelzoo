@@ -27,5 +27,5 @@ python examples/llm/whisper/hmonnx_export_decoder.py --model data/models/whisper
 ### demo
 
 ```bash
-python examples/llm/whisper/hm_demo.py --hf-model data/models/whisper-medium/ --hmonnx-model works/whisper-medium_XH2a/
+python examples/llm/whisper/hm_demo.py --hf-model data/models/whisper-medium/ --hmonnx-model works/whisper-medium_XH2a/ --audio ./examples/llm/whisper/audio.mp3
 ```
