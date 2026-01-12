@@ -41,8 +41,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="data/datasets/MiniCPM-o-2_6", type=str, help="HuggingFace model path")
-    parser.add_argument("--video", type=str, default="data/datasets/MiniCPM-o-2_6/assets/Skiing.mp4")
-    parser.add_argument("--audio", type=str, default="data/datasets/MiniCPM-o-2_6/assets/demo.wav")
+    parser.add_argument("--video", type=str, default="examples/llm/minicpmo/assets/Skiing.mp4")
+    parser.add_argument("--audio", type=str, default="examples/llm/minicpmo/assets/demo.wav")
     parser.add_argument("--context-length", type=int, default=4096, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="prefill input seq length")
     parser.add_argument("--debug", type=bool, default=False, help="debug mode")

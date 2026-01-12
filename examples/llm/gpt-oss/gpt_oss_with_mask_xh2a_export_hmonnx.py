@@ -24,6 +24,7 @@ def main(args):
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
         sliding_window=args.sliding_window,
+        num_logits_to_keep=args.num_logits_to_keep,
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length//1024}k-{quant_type}"
@@ -52,7 +53,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sliding-window",
         type=int,
-        default=None,
+        default=128,
         help="sliding window size for attention, if None, use global attention",
     )
     parser.add_argument("--num_logits_to_keep", type=int, default=1, help="not for test ppl")    

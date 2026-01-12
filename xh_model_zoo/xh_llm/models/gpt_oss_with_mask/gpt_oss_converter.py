@@ -88,6 +88,7 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
         native_model = self.load_hf_model(
             hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
         )
+        config.num_experts_per_tok = native_model.config.num_experts_per_tok
 
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
