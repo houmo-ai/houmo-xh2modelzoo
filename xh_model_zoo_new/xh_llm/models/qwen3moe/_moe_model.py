@@ -3,7 +3,7 @@ import sys
 import types
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple, Union
-
+from xhquant.api import ConfigDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,311 +20,12 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock,
 )
 from xhquant import nn as xhnn
-from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm
+from xhquant.nn import LLMCacheV2, MaskedSoftmax, RMSNorm, LLMCache
 from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils import digit_version
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
-
-# 省的多次建表
-silu_lut_cut_points = torch.tensor(
-    [
-        -41760.0,
-        -11.75,
-        -8.7578125,
-        -5.5859375,
-        -1.970703125,
-        -0.281982421875,
-        0.073486328125,
-        1.2568359375,
-        7.68359375,
-        41696.0,
-        65504.0,
-    ]
-)
-silu_lut_values = torch.tensor(
-    [
-        -0.0,
-        -9.268522262573242e-05,
-        -0.00010097026824951172,
-        -0.0001099705696105957,
-        -0.00011980533599853516,
-        -0.0001304149627685547,
-        -0.00014209747314453125,
-        -0.00015473365783691406,
-        -0.0001684427261352539,
-        -0.00018334388732910156,
-        -0.0001996755599975586,
-        -0.00021731853485107422,
-        -0.00023663043975830078,
-        -0.0002574920654296875,
-        -0.00028014183044433594,
-        -0.00030493736267089844,
-        -0.000331878662109375,
-        -0.0003612041473388672,
-        -0.000392913818359375,
-        -0.00042748451232910156,
-        -0.0004649162292480469,
-        -0.0005059242248535156,
-        -0.0005502700805664062,
-        -0.0005984306335449219,
-        -0.0006504058837890625,
-        -0.0007071495056152344,
-        -0.0007691383361816406,
-        -0.0008358955383300781,
-        -0.0009088516235351562,
-        -0.000988006591796875,
-        -0.0010728836059570312,
-        -0.0011663436889648438,
-        -0.0012674331665039062,
-        -0.001377105712890625,
-        -0.00150299072265625,
-        -0.00164031982421875,
-        -0.0017900466918945312,
-        -0.001953125,
-        -0.002132415771484375,
-        -0.0023250579833984375,
-        -0.002536773681640625,
-        -0.002765655517578125,
-        -0.003017425537109375,
-        -0.00328826904296875,
-        -0.0035858154296875,
-        -0.00390625,
-        -0.0042572021484375,
-        -0.004638671875,
-        -0.005054473876953125,
-        -0.005504608154296875,
-        -0.005992889404296875,
-        -0.00652313232421875,
-        -0.007099151611328125,
-        -0.007724761962890625,
-        -0.0084075927734375,
-        -0.0091400146484375,
-        -0.00994110107421875,
-        -0.01080322265625,
-        -0.01174163818359375,
-        -0.01276397705078125,
-        -0.01386260986328125,
-        -0.01505279541015625,
-        -0.0163421630859375,
-        -0.017730712890625,
-        -0.0192413330078125,
-        -0.0208740234375,
-        -0.02288818359375,
-        -0.02508544921875,
-        -0.0274658203125,
-        -0.0300750732421875,
-        -0.03289794921875,
-        -0.035980224609375,
-        -0.039337158203125,
-        -0.04296875,
-        -0.046875,
-        -0.051116943359375,
-        -0.05572509765625,
-        -0.0606689453125,
-        -0.06597900390625,
-        -0.07171630859375,
-        -0.077880859375,
-        -0.08447265625,
-        -0.09149169921875,
-        -0.09893798828125,
-        -0.10693359375,
-        -0.1153564453125,
-        -0.124267578125,
-        -0.133544921875,
-        -0.1434326171875,
-        -0.153564453125,
-        -0.1641845703125,
-        -0.175048828125,
-        -0.1861572265625,
-        -0.1973876953125,
-        -0.2086181640625,
-        -0.2197265625,
-        -0.2305908203125,
-        -0.2410888671875,
-        -0.2457275390625,
-        -0.250244140625,
-        -0.25439453125,
-        -0.25830078125,
-        -0.26220703125,
-        -0.265625,
-        -0.268798828125,
-        -0.271484375,
-        -0.27392578125,
-        -0.275634765625,
-        -0.277099609375,
-        -0.278076171875,
-        -0.278564453125,
-        -0.2783203125,
-        -0.27734375,
-        -0.27587890625,
-        -0.2734375,
-        -0.270263671875,
-        -0.266357421875,
-        -0.26171875,
-        -0.256103515625,
-        -0.2493896484375,
-        -0.24169921875,
-        -0.2330322265625,
-        -0.2232666015625,
-        -0.2122802734375,
-        -0.2001953125,
-        -0.18701171875,
-        -0.1724853515625,
-        -0.15673828125,
-        -0.1396484375,
-        -0.1212158203125,
-        -0.1171875,
-        -0.11309814453125,
-        -0.10894775390625,
-        -0.104736328125,
-        -0.1004638671875,
-        -0.09613037109375,
-        -0.09173583984375,
-        -0.0872802734375,
-        -0.082763671875,
-        -0.07818603515625,
-        -0.07354736328125,
-        -0.06884765625,
-        -0.0640869140625,
-        -0.059234619140625,
-        -0.054351806640625,
-        -0.049407958984375,
-        -0.044403076171875,
-        -0.039337158203125,
-        -0.034210205078125,
-        -0.0290069580078125,
-        -0.0237579345703125,
-        -0.0184478759765625,
-        -0.01306915283203125,
-        -0.00762939453125,
-        -0.002132415771484375,
-        0.003429412841796875,
-        0.00905609130859375,
-        0.014739990234375,
-        0.020477294921875,
-        0.0262908935546875,
-        0.03216552734375,
-        0.0380859375,
-        0.05828857421875,
-        0.07916259765625,
-        0.1007080078125,
-        0.1229248046875,
-        0.145751953125,
-        0.1693115234375,
-        0.1934814453125,
-        0.2183837890625,
-        0.243896484375,
-        0.27001953125,
-        0.296630859375,
-        0.323974609375,
-        0.35205078125,
-        0.380615234375,
-        0.40966796875,
-        0.439208984375,
-        0.469482421875,
-        0.5,
-        0.53173828125,
-        0.5634765625,
-        0.595703125,
-        0.62841796875,
-        0.66162109375,
-        0.6953125,
-        0.72900390625,
-        0.763671875,
-        0.79833984375,
-        0.833984375,
-        0.86962890625,
-        0.9052734375,
-        0.94189453125,
-        0.978515625,
-        1.1826171875,
-        1.3935546875,
-        1.6083984375,
-        1.8271484375,
-        2.046875,
-        2.267578125,
-        2.48828125,
-        2.708984375,
-        2.927734375,
-        3.14453125,
-        3.361328125,
-        3.576171875,
-        3.7890625,
-        4.0,
-        4.2109375,
-        4.41796875,
-        4.62890625,
-        4.8359375,
-        5.04296875,
-        5.24609375,
-        5.453125,
-        5.65625,
-        5.859375,
-        6.0625,
-        6.265625,
-        6.46875,
-        6.671875,
-        6.875,
-        7.07421875,
-        7.27734375,
-        7.48046875,
-        7.6796875,
-        1310.0,
-        2614.0,
-        3916.0,
-        5220.0,
-        6520.0,
-        7824.0,
-        9128.0,
-        10432.0,
-        11736.0,
-        13032.0,
-        14336.0,
-        15640.0,
-        16944.0,
-        18240.0,
-        19552.0,
-        20848.0,
-        22160.0,
-        23456.0,
-        24768.0,
-        26064.0,
-        27360.0,
-        28672.0,
-        29968.0,
-        31280.0,
-        32576.0,
-        33888.0,
-        35168.0,
-        36480.0,
-        37792.0,
-        39104.0,
-        40384.0,
-        41696.0,
-        65504.0,
-    ]
-)
-silu_lut_scale = torch.tensor(
-    [
-        2.396106719970703e-05,
-        10.6953125,
-        10.0859375,
-        8.8515625,
-        18.953125,
-        90.0,
-        27.046875,
-        4.98046875,
-        0.0007677078247070312,
-        4.202127456665039e-05,
-    ]
-)
-
-
-def create_silu_lut_tensors():
-    """创建独立的SiLU查表张量，避免多个MoeBlock共享同一个参数"""
-    return (silu_lut_cut_points.clone(), silu_lut_values.clone(), silu_lut_scale.clone())
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(
@@ -339,14 +40,15 @@ class _Qwen3MoeRotaryEmbedding(DynamicModule):
         # self.max_position_embeddings = max_position_embeddings
         # Build here to make `torch.jit.trace` work.
         self._setup_cos_sin_cache(seq_len=self.max_seq_len_cached, dtype=self.inv_freq.dtype)
+        if hasattr(self, "setup_after_callback"):
+            self.setup_after_callback()
 
     def _setup_cos_sin_cache(self, seq_len, dtype):
         """
         4.45 版本实现
         """
         position_ids = torch.arange(0, seq_len, dtype=torch.long, device=self.inv_freq.device).unsqueeze(0)
-
-        # use fp32 for cos and sin calculation
+        # self.inv_freq = self.inv_freq.to(torch.float16)
         inv_freq = self.inv_freq.to(torch.float32)
         device = self.inv_freq.device
         if torch.cuda.is_available() and inv_freq.device.type != "cuda":
@@ -355,7 +57,6 @@ class _Qwen3MoeRotaryEmbedding(DynamicModule):
         cos, sin = self.forward(inv_freq, position_ids)
         cos = cos.to(device)
         sin = sin.to(device)
-
         sin = sin.squeeze(0)
         cos = cos.squeeze(0)
 
@@ -425,8 +126,8 @@ class _Qwen3MoeAttention(DynamicModule):
         # x2 = x[..., x.shape[-1] // 2 :]
         # x1 = torch_ops_xh2a_slice(x, [0], [self.head_dim // 2], [3], [1])
         # x2 = torch_ops_xh2a_slice(x, [self.head_dim // 2], [sys.maxsize], [3], [1])
-        x1 = self.rotate_half_slice_1(x)
-        x2 = self.rotate_half_slice_2(x)
+        x1 = self.slice_1(x)
+        x2 = self.slice_2(x)
         return torch.cat((-x2, x1), dim=-1)
 
     def apply_rotary_pos_emb(self, q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, unsqueeze_dim: int = 1):
@@ -434,10 +135,12 @@ class _Qwen3MoeAttention(DynamicModule):
         # sin = sin.unsqueeze(unsqueeze_dim)
         # cos = self.cos_unsqueeze(cos)
         # sin = self.sin_unsqueeze(sin)
-        q_embed = (q * cos) + (self.rotate_half(q) * sin)
-        k_embed = (k * cos) + (self.rotate_half(k) * sin)
-        # q_embed = self.rope(q, cos, sin)
-        # k_embed = self.rope(k, cos, sin)
+        if self.enable_rope:
+            q_embed = self.rope(q, cos, sin)
+            k_embed = self.rope(k, cos, sin)
+        else:
+            q_embed = (q * cos) + (self.rotate_half(q) * sin)
+            k_embed = (k * cos) + (self.rotate_half(k) * sin)
         return q_embed, k_embed
 
     def forward(
@@ -523,7 +226,7 @@ class _Qwen3MoeAttention(DynamicModule):
         # )
 
         attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(bsz, q_len, self.attn_hidden_dim)
+        attn_output = attn_output.reshape(bsz, q_len, self.config.num_attention_heads * self.head_dim)
 
         attn_output = self.o_proj(attn_output)
 
@@ -531,43 +234,46 @@ class _Qwen3MoeAttention(DynamicModule):
         return attn_output, None, None
 
     def _setup(self, cfg: Optional[Dict] = None):
+        if isinstance(cfg, dict):
+            cfg = ConfigDict(cfg)
         if not hasattr(self, "num_key_value_heads"):
             self.num_key_value_heads = self.config.num_key_value_heads
         if not hasattr(self, "num_heads"):
             self.num_heads = self.config.num_attention_heads  # 28
+        if not hasattr(self, "hidden_size"):
+            self.hidden_size = self.config.hidden_size  # 3584
 
-        self.attn_hidden_dim = self.head_dim * self.num_heads
+        self.enable_rope = cfg.get("enable_rope", True)
+        if self.enable_rope:
+            self.rope = xhnn.Rope()
 
-        self.rotate_half_slice_1 = xhnn.Slice([0], [self.head_dim // 2], [3], [1])
-        self.rotate_half_slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])
+        self.slice_1 = xhnn.Slice([0], [self.head_dim // 2], [3], [1])
+        self.slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])
+
         self.masked_softmax = MaskedSoftmax(dim=-1)
         use_cache = cfg.use_cache
         self.use_cache = use_cache
-        max_sequence_length = cfg.max_sequence_length
-        self.max_sequence_length = max_sequence_length
-        input_seq_len = cfg.input_sequence_length
+        self.key_extra_scale = 1.0 if "key_extra_scale" not in cfg else cfg.key_extra_scale
+        self.query_extra_scale = 1.0 if "query_extra_scale" not in cfg else cfg.query_extra_scale
+
         self.cos_gather = xhnn.Gather(0)
         self.sin_gather = xhnn.Gather(0)
 
-        # self.rope = Rope()
-
         if use_cache:
             cache_axis = cfg.kv_cache.cache_axis
-            self.k_cache = LLMCacheV2(
+            self.k_cache = LLMCache(
                 axis=cache_axis,
+                attention_max_length=-1,
             )
-            self.v_cache = LLMCacheV2(
+            self.v_cache = LLMCache(
                 axis=cache_axis,
+                attention_max_length=-1,
             )
         else:
             self.k_cache = None
             self.v_cache = None
         _kv_scale = 1 / math.sqrt(self.head_dim)
         self.kv_scale = _kv_scale
-        # self.register_buffer("kv_scale", torch.tensor(_kv_scale, dtype=torch.float16), persistent=False)
-        # self.register_parameter(
-        #     "kv_scale", nn.Parameter(torch.tensor([_kv_scale], dtype=torch.float16), requires_grad=False)
-        # )
         return self
 
 
@@ -652,11 +358,11 @@ class _Qwen3MoeSparseMoeBlock(DynamicModule):
     def forward(self, hidden_states):
         ori_hidden_states = hidden_states
         batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
+        # hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1)
+        routing_weights = F.softmax(router_logits, dim=-1)
         return self.moeblock(
             ori_hidden_states,
             routing_weights,
@@ -702,16 +408,7 @@ class _Qwen3MoeSparseMoeBlock(DynamicModule):
         self.batch_size = cfg.batch_size
         self.device = self.gate.weight.device
 
-        # 为每个MoeBlock创建独立的查表参数，避免trace时参数共享问题
-        act_lut_cut_points, act_lut_values, act_lut_scale = create_silu_lut_tensors()
-        self.moeblock = MoeBlock(
-            self.experts[0].act_fn._get_name().lower(),
-            self.top_k,
-            self.norm_topk_prob,
-            # act_lut_cut_points=act_lut_cut_points,
-            # act_lut_values=act_lut_values,
-            # act_lut_scale=act_lut_scale,
-        )
+        self.moeblock = MoeBlock(self.experts[0].act_fn._get_name().lower(), self.top_k, self.norm_topk_prob)
 
         self.moeblock.expert_gate_proj_weight = torch.nn.Parameter(
             torch.zeros(
@@ -898,6 +595,7 @@ class _Qwen3MoeModel(DynamicModule):
 
         cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
         sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
+
         # cos = self.cos_embeding(position_ids)
         # sin = self.sin_embeding(position_ids)
         # cos = cos.unsqueeze(1)
@@ -906,7 +604,7 @@ class _Qwen3MoeModel(DynamicModule):
         position_embeddings = (cos, sin)
 
         for idx, decoder_layer in enumerate(self.layers):
-            print("processing: ", idx)
+            # print("processing: ", idx)
             if self.use_cache:
                 _past_k_cache = past_key_cache[idx]
                 _past_v_cache = past_value_cache[idx]
@@ -951,7 +649,12 @@ class _Qwen3MoeModel(DynamicModule):
             last_hidden_state=hidden_states,
         )
 
+    def _setup_cos_sin_embeding(self):
+        self.rotary_emb.cos_cached
+        self.rotary_emb.sin_cached
+
     def _setup(self, cfg: Optional[Dict] = None):
+        self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
         # max_seq_len = cfg.max_sequence_length
         # self.rotary_matrix_cache = RotaryMatrixCache(self.rotary_emb, max_seq_len)
@@ -963,7 +666,7 @@ class _Qwen3MoeModel(DynamicModule):
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
 
         self.llm_gather = xhnn.BatchGather(1)
-        self.llm_gather.update_offset_indices(1, input_seq_len)
+        self.llm_gather.update_offset_indices(self.batch_size, input_seq_len)
 
         def _llm_gather_update_cfg(self: xhnn.BatchGather, cfg: Optional[Dict] = None):
             self.num_logits_to_keep = cfg.num_logits_to_keep
@@ -973,11 +676,11 @@ class _Qwen3MoeModel(DynamicModule):
 
         self.llm_gather._update_cfg = types.MethodType(_llm_gather_update_cfg, self.llm_gather)
 
-        def _update_cfg(self, cfg: Optional[Dict] = None):
+        def _slice_update_cfg(self, cfg: Optional[Dict] = None):
             input_seq_len = cfg.input_sequence_length
             self.ends = [input_seq_len]
 
-        self.slice._update_cfg = types.MethodType(_update_cfg, self.slice)
+        self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
 
         self.sin_slice = xhnn.DynamicSlice([input_seq_len], [2], [1])
@@ -993,11 +696,10 @@ class _Qwen3MoeModel(DynamicModule):
         self.cos_unsqueeze = xhnn.Unsqueeze(0)
         self.sin_unsqueeze = xhnn.Unsqueeze(0)
 
-        # def _gather_update_cfg(self, cfg: Optional[Dict] = None):
-        #     num_logits_to_keep = cfg.num_logits_to_keep
-        #     self.num_logits_to_keep = num_logits_to_keep
-
-        # self.llm_gather._update_cfg = types.MethodType(_gather_update_cfg, self.llm_gather)
+        if not hasattr(self.rotary_emb, "cos_cached"):
+            self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
+        else:
+            self._setup_cos_sin_embeding()
 
         return self
 
@@ -1036,5 +738,5 @@ class _Qwen3MoeForCausalLM(DynamicModule):
         return self
 
 
-def register_wrap_modules(hf_model: Optional[Qwen3MoeForCausalLM] = None):
+def register_wrap_modules():
     pass

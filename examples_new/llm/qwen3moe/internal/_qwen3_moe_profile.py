@@ -14,42 +14,29 @@ torch.set_grad_enabled(False)
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-8B")
-    parser.add_argument("--tasks", nargs="+", type=str, default=["arc_challenge"])
-    parser.add_argument("--offload", action="store_true", help="offload mode")
-    parser.add_argument("--demo_prompt", type=str, default="你多大了？用中文回答。", help="demo prompt")
-    parser.add_argument("--eval_ppl", type=bool, default=True, help="eval ppl")
-    parser.add_argument("--fast", action="store_true", help="fast mode")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-30B-A3B")
     return parser.parse_args()
 
 
 def main(args):
     from xhquant.api import QuantScheme
 
-    quant_scheme = QuantScheme(target_device="XH2A", quant_type="w8a8h1_sefp")
-    config = Qwen3MoeConverterConfig(num_logits_to_keep=0, quant_scheme=quant_scheme)
+    quant_scheme = QuantScheme(target_device="XH2A", quant_type="w8a8h1_sefp",)
+    config = Qwen3MoeConverterConfig(num_logits_to_keep=0, quant_scheme=quant_scheme,only_first_block=True)
     C = Qwen3MoeConverter(args.model, config)
 
     qmodel = C.quanted_model
-    if args.fast:
-        qmodel.enable_fast_precision_mode()
-        # qmodel.enable_aligned_precision_mode()
 
     model = BaseLLMHFCompatible.from_qmodel(
-        qmodel, C.hf_config, C.wrap_cfg, C.token_embedding, C.hf_model_path, C.tokenizer
+        qmodel, C.hf_config, C.wrap_cfg, C.token_embedding, C.native_model, C.tokenizer
     )
-
-    if args.offload:
-        device_map = xh_infer_auto_device_map(C.wraped_model, "XHTrace_Qwen3DecoderLayer")
-        auto_offload(qmodel, device_map=device_map)
-    else:
-        model.cuda().half()
+    model.cuda().half()
 
     if True:
         quanted_model = qmodel
 
         calib_data = [
-            torch.randn(1, 2048, 4096, dtype=torch.float16, device="cuda"),
+            torch.randn(1, 2048, 2048, dtype=torch.float16, device="cuda"),
             torch.tensor([0], dtype=torch.int32, device="cuda"),
             torch.tensor([2048], dtype=torch.int32, device="cuda"),*model.past_key_caches,*model.past_value_caches
         ]
@@ -86,7 +73,7 @@ def main(args):
         
         decode_profiler = GraphModuleProfiler(qmodel, profile_precision=False)
         decode_calib_data = calib_data.copy()
-        decode_calib_data[0] = torch.randn(1, 1, 4096, dtype=torch.float16, device="cuda")
+        decode_calib_data[0] = torch.randn(1, 1, 2048, dtype=torch.float16, device="cuda")
         decode_calib_data[1] = torch.tensor([1024], dtype=torch.int32, device="cuda")
         decode_calib_data[2] = torch.tensor([1], dtype=torch.int32, device="cuda")
         with torch.inference_mode():
@@ -114,16 +101,7 @@ def main(args):
             gc.collect()
         decode_profiler.print_format_results()
 
-
-    if args.eval_ppl:
-        from xh_model_zoo_new.evaluation.wikippl_eval import evaluate_wikitext
-
-        evaluate_wikitext(model, C.tokenizer)
-
-    if args.demo_prompt is not None:
-        print(model.demo(args.demo_prompt))
-
-    # lm_eval_engine(model, C.tokenizer,tasks=args.tasks,export_dir=args.export_dir)
+        print()
 
 
 if __name__ == "__main__":
