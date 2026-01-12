@@ -39,7 +39,9 @@ def eager_attention_forward_cus(
     return attn_output, attn_weights
 
 
-@FUNCTION_REWRITER.register_rewriter("transformers.models.whisper.modeling_whisper.WhisperEncoder.forward")
+@FUNCTION_REWRITER.register_rewriter(
+    "transformers.models.whisper.modeling_whisper.WhisperEncoder.forward"
+)
 def whisper_encoder_forward_v2(
     self,
     input_features,
@@ -49,35 +51,48 @@ def whisper_encoder_forward_v2(
     output_hidden_states=None,
     return_dict=None,
 ):
-
-    expected_seq_length = self.config.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
+    expected_seq_length = (
+        self.config.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
+    )
     if input_features.shape[-1] != expected_seq_length:
         raise ValueError(
             f"Whisper expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
         )
 
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-    output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
     )
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    output_hidden_states = (
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
+    )
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
     inputs_embeds = nn.functional.gelu(self.conv1(input_features))
     inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
 
     inputs_embeds = inputs_embeds.permute(0, 2, 1)
-    all_positions = torch.arange(self.embed_positions.num_embeddings, device=inputs_embeds.device)
+    all_positions = torch.arange(
+        self.embed_positions.num_embeddings, device=inputs_embeds.device
+    )
 
     hidden_states = inputs_embeds + self.embed_positions(all_positions)
-    hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+    hidden_states = nn.functional.dropout(
+        hidden_states, p=self.dropout, training=self.training
+    )
 
     encoder_states = () if output_hidden_states else None
     all_attentions = () if output_attentions else None
 
     # check if head_mask has a correct number of layers specified if desired
     if head_mask is not None:
-        assert head_mask.size()[0] == (
-            len(self.layers)
-        ), f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
+        assert head_mask.size()[0] == (len(self.layers)), (
+            f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
+        )
 
     for idx, encoder_layer in enumerate(self.layers):
         if output_hidden_states:
@@ -110,16 +125,30 @@ def whisper_encoder_forward_v2(
 
     output_kv_output = []
     # print(hidden_states.sum())
-
+    bsz, tgt_len = hidden_states.shape[:-1]
     for layer in self.decoder_m.layers:
-        k_state = layer.encoder_attn.k_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
-        v_state = layer.encoder_attn.v_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
+        # k_state = layer.encoder_attn.k_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
+        # v_state = layer.encoder_attn.v_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
+        k_state = (
+            layer.encoder_attn.k_proj(hidden_states)
+            .view(bsz, -1, layer.encoder_attn.num_heads, layer.encoder_attn.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        v_state = (
+            layer.encoder_attn.v_proj(hidden_states)
+            .view(bsz, -1, layer.encoder_attn.num_heads, layer.encoder_attn.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
         output_kv_output.append((k_state, v_state))
 
     return output_kv_output
 
 
-@FUNCTION_REWRITER.register_rewriter("transformers.models.whisper.modeling_whisper.WhisperDecoder.forward")
+@FUNCTION_REWRITER.register_rewriter(
+    "transformers.models.whisper.modeling_whisper.WhisperDecoder.forward"
+)
 def whisper_decoder_forward_v2(
     self,
     input_ids=None,
@@ -144,23 +173,35 @@ def whisper_decoder_forward_v2(
     v_list=None,
     mask_atten=None,
 ):
-    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_attentions = (
+        output_attentions
+        if output_attentions is not None
+        else self.config.output_attentions
+    )
     output_hidden_states = (
-        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_hidden_states
+        if output_hidden_states is not None
+        else self.config.output_hidden_states
     )
     use_cache = use_cache if use_cache is not None else self.config.use_cache
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
 
     # retrieve input_ids and inputs_embeds
     if input_ids is not None and inputs_embeds is not None:
-        raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+        raise ValueError(
+            "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
+        )
     elif input_ids is not None:
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
     elif inputs_embeds is not None:
         input_shape = inputs_embeds.size()[:-1]
     else:
-        raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+        raise ValueError(
+            "You have to specify either decoder_input_ids or decoder_inputs_embeds"
+        )
 
     if inputs_embeds is None:
         inputs_embeds = self.embed_tokens(input_ids)
@@ -190,15 +231,21 @@ def whisper_decoder_forward_v2(
     # embed positions
     if input_ids is not None:
         positions = self.embed_positions(
-            input_ids, past_key_values_length=past_key_values_length, position_ids=position_ids
+            input_ids,
+            past_key_values_length=past_key_values_length,
+            position_ids=position_ids,
         )
     else:
         positions = self.embed_positions(
-            inputs_embeds, past_key_values_length=past_key_values_length, position_ids=position_ids
+            inputs_embeds,
+            past_key_values_length=past_key_values_length,
+            position_ids=position_ids,
         )
 
     hidden_states = inputs_embeds + positions  # .to(inputs_embeds.device)
-    hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+    hidden_states = nn.functional.dropout(
+        hidden_states, p=self.dropout, training=self.training
+    )
 
     # causal_mask = create_causal_mask(
     #     config=self.config,
@@ -213,10 +260,14 @@ def whisper_decoder_forward_v2(
     # decoder layers
     all_hidden_states = () if output_hidden_states else None
     all_self_attns = () if output_attentions else None
-    all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
+    all_cross_attentions = (
+        () if (output_attentions and encoder_hidden_states is not None) else None
+    )
 
     # check if head_mask/cross_attn_head_mask has a correct number of layers specified if desired
-    for attn_mask, mask_name in zip([head_mask, cross_attn_head_mask], ["head_mask", "cross_attn_head_mask"]):
+    for attn_mask, mask_name in zip(
+        [head_mask, cross_attn_head_mask], ["head_mask", "cross_attn_head_mask"]
+    ):
         if attn_mask is not None:
             assert attn_mask.size()[0] == (len(self.layers)), (
                 f"The `{mask_name}` should be specified for {len(self.layers)} layers, but it is for"
@@ -242,7 +293,9 @@ def whisper_decoder_forward_v2(
             k_list=k_list[idx],
             v_list=v_list[idx],
             layer_head_mask=(head_mask[idx] if head_mask is not None else None),
-            cross_attn_layer_head_mask=(cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None),
+            cross_attn_layer_head_mask=(
+                cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None
+            ),
             past_key_values=past_key_values if use_cache else None,
             output_attentions=output_attentions,
             use_cache=use_cache,
@@ -263,7 +316,9 @@ def whisper_decoder_forward_v2(
     return hidden_states, k_cache_list, v_cache_list
 
 
-@FUNCTION_REWRITER.register_rewriter("transformers.models.whisper.modeling_whisper.WhisperDecoderLayer.forward")
+@FUNCTION_REWRITER.register_rewriter(
+    "transformers.models.whisper.modeling_whisper.WhisperDecoderLayer.forward"
+)
 def whisper_decoder_layer_forward_v2(
     self,
     hidden_states,
@@ -304,7 +359,9 @@ def whisper_decoder_layer_forward_v2(
     # self.key_cache_data = k_cache
     # self.value_cache_data = v_cache
 
-    hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+    hidden_states = nn.functional.dropout(
+        hidden_states, p=self.dropout, training=self.training
+    )
     hidden_states = residual + hidden_states
 
     # Cross-Attention Block
@@ -324,16 +381,22 @@ def whisper_decoder_layer_forward_v2(
             past_len=past_len,
             current_len=current_len,
         )
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = nn.functional.dropout(
+            hidden_states, p=self.dropout, training=self.training
+        )
         hidden_states = residual + hidden_states
 
     # Fully Connected
     residual = hidden_states
     hidden_states = self.final_layer_norm(hidden_states)
     hidden_states = self.activation_fn(self.fc1(hidden_states))
-    hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
+    hidden_states = nn.functional.dropout(
+        hidden_states, p=self.activation_dropout, training=self.training
+    )
     hidden_states = self.fc2(hidden_states)
-    hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+    hidden_states = nn.functional.dropout(
+        hidden_states, p=self.dropout, training=self.training
+    )
     hidden_states = residual + hidden_states
 
     outputs = (hidden_states,)  # 1.9854
@@ -394,7 +457,9 @@ class _Whisper_attention(DynamicRegister):
         query_states = query_states.transpose(1, 2).contiguous()
 
         # Check is encoder-decoder model is being used. Otherwise we'll get `DynamicCache`
-        if past_key_values is not None and isinstance(past_key_values, EncoderDecoderCache):
+        if past_key_values is not None and isinstance(
+            past_key_values, EncoderDecoderCache
+        ):
             is_updated = past_key_values.is_updated.get(self.layer_idx)
             if is_cross_attention:
                 key_states = k_list
@@ -405,26 +470,39 @@ class _Whisper_attention(DynamicRegister):
                 past_key_values = past_key_values.self_attention_cache
 
         # use key_value_states if cross attention
-        current_states = key_value_states if key_value_states is not None else hidden_states  # -3.8923
+        current_states = (
+            key_value_states if key_value_states is not None else hidden_states
+        )  # -3.8923
         if is_cross_attention:
             key_states = k_list
             value_states = v_list
         else:
-            key_states = self.k_proj(current_states).view(bsz, -1, self.num_heads, self.head_dim)  # 60.5748
-            value_states = self.v_proj(current_states).view(bsz, -1, self.num_heads, self.head_dim)  # 11.0236
+            key_states = self.k_proj(current_states).view(
+                bsz, -1, self.num_heads, self.head_dim
+            )  # 60.5748
+            value_states = self.v_proj(current_states).view(
+                bsz, -1, self.num_heads, self.head_dim
+            )  # 11.0236
             key_states = key_states.transpose(1, 2).contiguous()
             value_states = value_states.transpose(1, 2).contiguous()
 
             # cache_len = torch.tensor(key_states.shape[2], device=key_states.device)
 
-            key_states = self.k_cache(key_states, past_len, current_len, k_cache)  # 62.2250
-            value_states = self.v_cache(value_states, past_len, current_len, v_cache)  # 10.9369
+            key_states = self.k_cache(
+                key_states, past_len, current_len, k_cache
+            )  # 62.2250
+            value_states = self.v_cache(
+                value_states, past_len, current_len, v_cache
+            )  # 10.9369
 
             if past_key_values is not None:
                 # save all key/value_states to cache to be re-used for fast auto-regressive generation
                 cache_position = cache_position if not is_cross_attention else None
                 key_states, value_states = past_key_values.update(
-                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    {"cache_position": cache_position},
                 )
 
         # attention_interface: Callable = eager_attention_forward

@@ -1,66 +1,71 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from transformers.pipelines.audio_utils import ffmpeg_read
 from xhquant.api import (
     HMONNXInference,
 )
 
-from xh_model_zoo.xh_llm.models.whisper._model_opt import *
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *  # noqa: F403
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--hf-model", type=str, default="./data/models/whisper-medium")
-    parser.add_argument(
-        "--hmonnx-model", type=str, default="./work_dirs/whisper-medium_XH2a"
-    )
-    args = parser.parse_args()
-    main(args)
-
+def main(args):
     device = torch.device("cuda")
     # load model and processor
     hmonnx_dir = args.hmonnx_model
     hf_model = args.hf_model
+    work_dir = Path(hmonnx_dir)
+    meta_info_file = work_dir / "meta_info.json"
+    meta_info = json.load(meta_info_file.open("r", encoding="utf-8"))
+    encoder_hmonnx_file = str(work_dir / meta_info["encoder"])
+    prefill_hmonnx_file = str(work_dir / meta_info["prefill"])
+    decoder_hmonnx_file = str(work_dir / meta_info["decoder"])
+
+    num_heads = meta_info["model_cfg"]["num_heads"]
+    head_dim = meta_info["model_cfg"]["head_dim"]
+    embed_dim = meta_info["model_cfg"]["embed_dim"]
+    max_source_positions = meta_info["model_cfg"]["max_source_positions"]
+    num_decode_layers = meta_info["model_cfg"]["num_decode_layers"]
+
     processor = WhisperProcessor.from_pretrained(hf_model)
     model = WhisperForConditionalGeneration.from_pretrained(hf_model)
     model.config.forced_decoder_ids = None
 
     model.model.encoder.decoder_m = model.model.decoder
 
-    # load dummy dataset and read audio files
-    ds = load_dataset(
-        "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
-    )
-    sample = ds[1]["audio"]
+    # # load dummy dataset and read audio files
+    # ds = load_dataset(
+    #     "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
+    # )
+    # sample = ds[1]["audio"]
+    # input_features = processor(
+    #     sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
+    # ).input_features
+    # # [1,80,3000]
+
+    audo_file = str(Path(__file__).parent / "audio.mp3")
+    sampling_rate = 16000
+    with open(audo_file, "rb") as f:
+        inputs = f.read()
+    if isinstance(inputs, bytes):
+        inputs = ffmpeg_read(inputs, sampling_rate)
+    sample = {
+        "array": inputs,
+        "sampling_rate": sampling_rate,
+    }
     input_features = processor(
         sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
     ).input_features
-    # [1,80,3000]
 
     # input_features = torch.load("work_dirs/whisper/input.pt")
 
-    encoder = HMONNXInference(
-        str(
-            Path(hmonnx_dir)
-            / "encoder/hmonnx/whisper_meduim_encoder_xh2a_w8a8_sefp.onnx"
-        )
-    )
-    prefill = HMONNXInference(
-        str(
-            Path(hmonnx_dir)
-            / "prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"
-        )
-    )
-    decoder = HMONNXInference(
-        str(
-            Path(hmonnx_dir)
-            / "decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"
-        )
-    )
+    encoder = HMONNXInference(encoder_hmonnx_file)
+    prefill = HMONNXInference(prefill_hmonnx_file)
+    decoder = HMONNXInference(decoder_hmonnx_file)
     encoder.to(device)
     prefill.to(device)
     decoder.to(device)
@@ -76,7 +81,7 @@ def main():
     # detect language  input_features  detect_ids => [1,51865]
     detect_encoder_out = encoder(input_features.to(device).half())
 
-    mask_atten = torch.ones(([1, 16, 1, 1024])).half()
+    mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
     mask_atten[:, :, :, 0 + 1 :] *= -65504
 
     decoder_input_names = decoder.get_input_names()
@@ -89,37 +94,59 @@ def main():
     }
 
     k_cache = [
-        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
+        for i in range(num_decode_layers)
     ]
     v_cache = [
-        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
+        for i in range(num_decode_layers)
     ]
-
-    for data_detect, k_data_cache in zip(decoder_input_names[5:29], k_cache):
+    # for data_detect, k_data_cache in zip(decoder_input_names[5:29], k_cache):
+    for data_detect, k_data_cache in zip(
+        decoder_input_names[5 : 5 + num_decode_layers], k_cache
+    ):
         decoder_detext_inputs[data_detect] = k_data_cache
 
     # logits = decoder.run(decoder_detext_inputs)
 
-    for data_detect, v_data_cache in zip(decoder_input_names[29:53], v_cache):
+    # for data_detect, v_data_cache in zip(decoder_input_names[29:53], v_cache):
+    for data_detect, v_data_cache in zip(
+        decoder_input_names[5 + num_decode_layers : 5 + num_decode_layers * 2],
+        v_cache,
+    ):
         decoder_detext_inputs[data_detect] = v_data_cache
 
     k_list = []
-    for i in range(24):
+    for i in range(num_decode_layers):
         k_list.append(detect_encoder_out[2 * i])
 
     v_list = []
-    for i in range(24):
+    for i in range(num_decode_layers):
         v_list.append(detect_encoder_out[2 * i + 1])
 
-    for data_detect, k_data in zip(decoder_input_names[53:77], k_list):
+    # for data_detect, k_data in zip(decoder_input_names[53:77], k_list):
+    for data_detect, k_data in zip(
+        decoder_input_names[5 + num_decode_layers * 2 : 5 + num_decode_layers * 3],
+        k_list,
+    ):
         decoder_detext_inputs[data_detect] = k_data
 
-    for data_detect, v_data in zip(decoder_input_names[77:101], v_list):
+    # for data_detect, v_data in zip(decoder_input_names[77:101], v_list):
+    for data_detect, v_data in zip(
+        decoder_input_names[5 + num_decode_layers * 3 : 5 + num_decode_layers * 4],
+        v_list,
+    ):
         decoder_detext_inputs[data_detect] = v_data
 
     output = decoder.run(decoder_detext_inputs)
 
-    logits, _, _ = output[0], output[1:25], output[25:49]
+    # logits, _, _ = output[0], output[1:25], output[25:49]
+
+    logits, _, _ = (
+        output[0],
+        output[1 : 1 + num_decode_layers],
+        output[1 + num_decode_layers : 1 + num_decode_layers * 2],
+    )
 
     # postprocess  50259
     lang_to_id = [
@@ -237,7 +264,7 @@ def main():
     # prefill 2221
     default_decoder_ids[0, 1] = lang_ids  # [[50258, 50259, 50359, 50363]] # 34.5197
 
-    mask_atten = torch.ones(([1, 16, 1, 1024])).half()
+    mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
     mask_atten[:, :, :, 0 + 4 :] *= -65504
 
     prefill_input_names = prefill.get_input_names()
@@ -249,20 +276,42 @@ def main():
         prefill_input_names[4]: mask_atten,
     }
 
-    for data_detect, k_data_cache in zip(prefill_input_names[5:29], k_cache):
+    # for data_detect, k_data_cache in zip(prefill_input_names[5:29], k_cache):
+    for data_detect, k_data_cache in zip(
+        prefill_input_names[5 : 5 + num_decode_layers], k_cache
+    ):
         prefill_inputs[data_detect] = k_data_cache
 
-    for data_detect, v_data_cache in zip(prefill_input_names[29:53], v_cache):
+    # for data_detect, v_data_cache in zip(prefill_input_names[29:53], v_cache):
+    for data_detect, v_data_cache in zip(
+        prefill_input_names[
+            5 + num_decode_layers : 5 + num_decode_layers + num_decode_layers
+        ],
+        v_cache,
+    ):
         prefill_inputs[data_detect] = v_data_cache
 
-    for data_detect, k_data in zip(prefill_input_names[53:77], k_list):
+    # for data_detect, k_data in zip(prefill_input_names[53:77], k_list):
+    for data_detect, k_data in zip(
+        prefill_input_names[5 + num_decode_layers * 2 : 5 + num_decode_layers * 3],
+        k_list,
+    ):
         prefill_inputs[data_detect] = k_data
-
-    for data_detect, v_data in zip(prefill_input_names[77:101], v_list):
+    # for data_detect, v_data in zip(prefill_input_names[77:101], v_list):
+    for data_detect, v_data in zip(
+        prefill_input_names[5 + num_decode_layers * 3 : 5 + num_decode_layers * 4],
+        v_list,
+    ):
         prefill_inputs[data_detect] = v_data
 
     output = prefill.run(prefill_inputs)
-    logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
+
+    # logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
+    logits, new_k_cache, new_v_cache = (
+        output[0],
+        output[1 : 1 + num_decode_layers],
+        output[1 + num_decode_layers : 1 + num_decode_layers + num_decode_layers],
+    )
     next_token_logits = logits[:, -1, :].to(
         copy=True, dtype=torch.float32, device=device
     )
@@ -276,7 +325,7 @@ def main():
     while default_decoder_ids.shape[1] < 448 and next_tokens.item() != 50257:
         cnt += 1
 
-        mask_atten = torch.ones(([1, 16, 1, 1024])).half()
+        mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
         mask_atten[:, :, :, cnt + 1 :] *= -65504
 
         prefill_inputs[prefill_input_names[0]] = next_tokens.unsqueeze(0).to(
@@ -293,14 +342,26 @@ def main():
         )
         prefill_inputs[prefill_input_names[4]] = mask_atten
 
-        for data_detect, k_data_cache in zip(prefill_input_names[5:29], new_k_cache):
+        # for data_detect, k_data_cache in zip(prefill_input_names[5:29], new_k_cache):
+        for data_detect, k_data_cache in zip(
+            prefill_input_names[5 : 5 + num_decode_layers], new_k_cache
+        ):
             prefill_inputs[data_detect] = k_data_cache
 
-        for data_detect, v_data_cache in zip(prefill_input_names[29:53], new_v_cache):
+        # for data_detect, v_data_cache in zip(prefill_input_names[29:53], new_v_cache):
+        for data_detect, v_data_cache in zip(
+            prefill_input_names[5 + num_decode_layers : 5 + num_decode_layers * 2],
+            new_v_cache,
+        ):
             prefill_inputs[data_detect] = v_data_cache
 
         output = decoder.run(prefill_inputs)
-        logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
+        # logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
+        logits, new_k_cache, new_v_cache = (
+            output[0],
+            output[1 : 1 + num_decode_layers],
+            output[1 + num_decode_layers : 1 + num_decode_layers * 2],
+        )
         next_token_logits = logits[:, -1, :].to(
             copy=True, dtype=torch.float32, device=device
         )
@@ -308,6 +369,11 @@ def main():
         default_decoder_ids = torch.cat(
             [default_decoder_ids.to(device), next_tokens[:, None]], dim=-1
         )
+
+        transcription = processor.batch_decode(
+            default_decoder_ids, skip_special_tokens=True
+        )
+        print(transcription)
 
     # [50257] 448
 
@@ -421,4 +487,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hf-model", type=str, default="./data/models/whisper-medium")
+    parser.add_argument(
+        "--hmonnx-model", type=str, default="./work_dirs/whisper-medium_XH2a"
+    )
+    args = parser.parse_args()
+    main(args)

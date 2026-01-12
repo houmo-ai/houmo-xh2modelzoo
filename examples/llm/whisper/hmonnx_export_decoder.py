@@ -1,15 +1,15 @@
 import argparse
+import json
 import os
 import tempfile
-from copy import deepcopy
 from pathlib import Path
 
 import onnx
 import onnxsim
 import torch
 import torch.nn as nn
-from datasets import load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from transformers.pipelines.audio_utils import ffmpeg_read
 from xhquant.api import (
     DeviceType,
     HMONNXGoldenInference,
@@ -25,12 +25,14 @@ from xhquant.api.ptq_export_hmonnx import (
 )
 from xhquant.common.types import PrecisionMode
 from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE
-from xhquant.frontend.convert import to_frontend_graph
 from xhquant.patch.core import RewriterContext
 from xhquant.utils.config import ConfigDict
 
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
-from xh_model_zoo.xh_llm.models.whisper._model_opt import *
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *  # noqa: F403
+
+GB = int(2**30)
+_LARGE_MODEL_SIZE_THRESHOLD = int(2**30 * 1.8)
 
 
 class Decoder(nn.Module):
@@ -71,24 +73,69 @@ class Decoder(nn.Module):
 def main(args):
     target_device = "XH2a"
     model_dir = os.path.normpath(args.model)
+    processor = WhisperProcessor.from_pretrained(model_dir)
     model = WhisperForConditionalGeneration.from_pretrained(args.model)
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
     model.model.encoder.decoder_m = model.model.decoder
     cfg_name = Path(model_dir).stem + f"_{target_device}"
-    work_dirs = Path("work_dirs") / cfg_name / "encoder"
-    work_dirs.mkdir(exist_ok=True, parents=True)
-    onnx_file = work_dirs / "whisper_meduim.onnx"
+
+    model_name = Path(model_dir).stem
+    cfg_name = f"{model_name}_{target_device}"
+    work_dir = Path("work_dirs") / cfg_name
+    work_dir.mkdir(exist_ok=True, parents=True)
+
+    head_dim = model.model.decoder.layers[0].self_attn.head_dim
+    num_heads = model.model.decoder.layers[0].self_attn.num_heads
+    embed_dim = model.model.decoder.layers[0].self_attn.embed_dim
+    max_source_positions = model.config.max_source_positions
+    num_decode_layers = model.config.decoder_layers
+
+    meta_info = {}
+    meta_info_file = work_dir / "meta_info.json"
+    if meta_info_file.exists():
+        with open(meta_info_file, "r", encoding="utf-8") as f:
+            meta_info = json.load(f)
+
+    meta_info["hf_model"] = model_dir
+
+    meta_info["model_cfg"] = {
+        "head_dim": head_dim,
+        "num_heads": num_heads,
+        "embed_dim": embed_dim,
+        "max_source_positions": max_source_positions,
+        "num_decode_layers": num_decode_layers,
+    }
 
     # encoder ============================================
     name = "encoder"
+    encoder_work_dir = work_dir / name
+    encoder_work_dir.mkdir(exist_ok=True, parents=True)
+    onnx_file = encoder_work_dir / f"{model_name}_{name}.onnx"
+
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     quant_config = create_quant_config(quant_scheme)
-    hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
-    golden_path = work_dirs / "hmonnx/golden"
+    hmonnx_file = (
+        encoder_work_dir / "hmonnx" / f"{model_name}_{name}_xh2a_{quant_type}.onnx"
+    )
+    golden_path = encoder_work_dir / "hmonnx/golden"
 
-    input_features = torch.randn(1, 80, 3000)
+    meta_info["encoder"] = str(hmonnx_file.relative_to(work_dir))
+    # input_features = torch.randn(1, 80, 3000)
+    audo_file = str(Path(__file__).parent / "audio.mp3")
+    sampling_rate = 16000
+    with open(audo_file, "rb") as f:
+        inputs = f.read()
+    if isinstance(inputs, bytes):
+        inputs = ffmpeg_read(inputs, sampling_rate)
+    sample = {
+        "array": inputs,
+        "sampling_rate": sampling_rate,
+    }
+    input_features = processor(
+        sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
+    ).input_features
 
     # 通过 替换onnx 先导出onnx 再转hmonnx 将decoder部分的qk linear转移到了encoder中，避免重复多次操作
     # 1. 导出onnx
@@ -107,7 +154,29 @@ def main(args):
                     # dynamo=True,
                 )
                 onnx_model = onnx.load(temp_onnx_file)
-                onnx_model_sim, checked = onnxsim.simplify(onnx_model)
+                model_byte_size = onnx_model.ByteSize()
+                if model_byte_size <= _LARGE_MODEL_SIZE_THRESHOLD:
+                    onnx_model_sim, checked = onnxsim.simplify(
+                        onnx_model,
+                        skipped_optimizers=[
+                            "fuse_pad_into_conv",
+                            "fuse_consecutive_slices",
+                            "eliminate_common_subexpression",
+                            "fuse_qkv",
+                        ],
+                    )
+                else:
+                    from xhquant.utils.onnxsim_large_model import simplify_large_onnx
+
+                    onnx_model_sim, checked = simplify_large_onnx(
+                        onnx_model,
+                        skipped_optimizers=[
+                            "fuse_pad_into_conv",
+                            "fuse_consecutive_slices",
+                            "eliminate_common_subexpression",
+                            "fuse_qkv",
+                        ],
+                    )
                 if checked:
                     onnx_model = onnx_model_sim
     else:
@@ -124,9 +193,9 @@ def main(args):
 
     # 2. 构造输入
     output_names = []
-    for i in range(24):
+    for i in range(num_decode_layers):
         output_names.append(f"key_state_{i}")
-    for i in range(24):
+    for i in range(num_decode_layers):
         output_names.append(f"value_state_{i}")
 
     # 3. 转换
@@ -145,37 +214,46 @@ def main(args):
         session = HMONNXGoldenInference(hmonnx_file)
         session.to("cuda")
         session.save_golden = True
-        session.golden_dir = work_dirs / "hmonnx/golden"
+        session.golden_dir = str(encoder_work_dir / "hmonnx/golden")
         session.step = 0
         session(input_features.half().to("cuda"))
 
     # decoder ===========================================
     name = "decoder"
 
-    work_dirs = Path("work_dirs") / cfg_name / name
+    decoder_work_dir = work_dir / name
     quant_config = create_quant_config(quant_scheme)
-    onnx_file = work_dirs / f"whisper_meduim_{name}.onnx"
-    hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
-    golden_path = work_dirs / "hmonnx / golden"
+    onnx_file = decoder_work_dir / f"{model_name}_{name}.onnx"
+    hmonnx_file = (
+        decoder_work_dir / "hmonnx" / f"{model_name}_{name}_xh2a_{quant_type}.onnx"
+    )
+    golden_path = decoder_work_dir / "hmonnx / golden"
+    meta_info["decoder"] = str(hmonnx_file.relative_to(work_dir))
 
     decoder_input_ids = torch.tensor([[2221]])
     cache_position = torch.tensor([[4]])
-    encoder_outputs_kv = torch.randn([1, 1500, 16, 64]).transpose(1, 2).contiguous()
-    past_ket_length = torch.tensor([0])
+    # encoder_outputs_kv = torch.randn([1, 1500, 16, 64]).transpose(1, 2).contiguous()
+    # past_ket_length = torch.tensor([0])
     past_len = torch.tensor([0])
 
     k_cache = [
-        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
+        for i in range(num_decode_layers)
     ]
     v_cache = [
-        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
+        for i in range(num_decode_layers)
     ]
 
     k_list = [
-        torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, max_source_positions, head_dim], dtype=torch.float16)
+        * (-65504)
+        for i in range(num_decode_layers)
     ]
     v_list = [
-        torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)
+        torch.ones([1, num_heads, max_source_positions, head_dim], dtype=torch.float16)
+        * (-65504)
+        for i in range(num_decode_layers)
     ]
 
     inputs_names = [
@@ -186,9 +264,9 @@ def main(args):
         "mask_atten",
     ]  # , "past_key_length"
 
-    for i in range(24):
+    for i in range(num_decode_layers):
         inputs_names.append(f"k_cache_{i}")
-    for i in range(24):
+    for i in range(num_decode_layers):
         inputs_names.append(f"v_cache_{i}")
 
     inputs_names += output_names
@@ -196,13 +274,13 @@ def main(args):
     model_cus = Decoder(model.model, model.proj_out, config=model.config)
 
     output_names = ["logits"]
-    for i in range(24):
+    for i in range(num_decode_layers):
         output_names.append(f"newk_cache_{i}")
-    for i in range(24):
+    for i in range(num_decode_layers):
         output_names.append(f"newv_cache_{i}")
 
     cache_len = decoder_input_ids.shape[0]
-    mask_atten = torch.ones(([1, 16, cache_len, 1024])).half()
+    mask_atten = torch.ones(([1, num_heads, cache_len, embed_dim])).half()
     mask_atten[:, :, :, past_len + cache_len :] *= -65504
     current_len = torch.tensor([cache_len])
 
@@ -219,13 +297,13 @@ def main(args):
         v_list,
     )
 
-    trace_inp = (
-        (decoder_input_ids, cache_position, past_len, current_len, mask_atten)
-        + tuple(k_cache)
-        + tuple(v_cache)
-        + tuple(k_list)
-        + tuple(v_list)
-    )
+    # trace_inp = (
+    #     (decoder_input_ids, cache_position, past_len, current_len, mask_atten)
+    #     + tuple(k_cache)
+    #     + tuple(v_cache)
+    #     + tuple(k_list)
+    #     + tuple(v_list)
+    # )
 
     with RewriterContext(None, backend="onnxruntime"):
         warp_model_cus = wrap_llm_model(model_cus)
@@ -242,13 +320,13 @@ def main(args):
         current_len.to(torch.int32),
         mask_atten,
     ]
-    for i in range(24):
+    for i in range(num_decode_layers):
         hm_inputs.append(k_cache[i])
 
-    for i in range(24):
+    for i in range(num_decode_layers):
         hm_inputs.append(v_cache[i])
 
-    for i in range(24):
+    for i in range(num_decode_layers):
         hm_inputs.append(k_list[i])
         hm_inputs.append(v_list[i])
 
@@ -308,12 +386,14 @@ def main(args):
             inputs_names,
             output_names,
         )
+    with open(meta_info_file, "w", encoding="utf-8") as f:
+        json.dump(meta_info, f, ensure_ascii=False, indent=4)
 
     if args.gen_golden and not Path(golden_path).exists():
         session = HMONNXGoldenInference(hmonnx_file)
         session.to("cuda")
         session.save_golden = True
-        session.golden_dir = work_dirs / "hmonnx/golden"
+        session.golden_dir = decoder_work_dir / "hmonnx/golden"
         session.step = 0
         session(*hm_inputs)
 
