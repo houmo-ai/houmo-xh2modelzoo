@@ -1,3 +1,6 @@
+import argparse
+from pathlib import Path
+
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -10,17 +13,28 @@ from xh_model_zoo.xh_llm.models.whisper._model_opt import *
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hf-model", type=str, default="./data/models/whisper-medium")
+    parser.add_argument(
+        "--hmonnx-model", type=str, default="./work_dirs/whisper-medium_XH2a"
+    )
+    args = parser.parse_args()
+    main(args)
 
     device = torch.device("cuda")
     # load model and processor
-    processor = WhisperProcessor.from_pretrained("data/models/whisper_medium")
-    model = WhisperForConditionalGeneration.from_pretrained("data/models/whisper_medium")
+    hmonnx_dir = args.hmonnx_model
+    hf_model = args.hf_model
+    processor = WhisperProcessor.from_pretrained(hf_model)
+    model = WhisperForConditionalGeneration.from_pretrained(hf_model)
     model.config.forced_decoder_ids = None
 
     model.model.encoder.decoder_m = model.model.decoder
 
     # load dummy dataset and read audio files
-    ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+    ds = load_dataset(
+        "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
+    )
     sample = ds[1]["audio"]
     input_features = processor(
         sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
@@ -29,9 +43,24 @@ def main():
 
     # input_features = torch.load("work_dirs/whisper/input.pt")
 
-    encoder = HMONNXInference(str("work_dirs/whisper/encoder/hmonnx/whisper_meduim_encoder_xh2a_w8a8_sefp.onnx"))
-    prefill = HMONNXInference(str("work_dirs/whisper/prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"))
-    decoder = HMONNXInference(str("work_dirs/whisper/decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"))
+    encoder = HMONNXInference(
+        str(
+            Path(hmonnx_dir)
+            / "encoder/hmonnx/whisper_meduim_encoder_xh2a_w8a8_sefp.onnx"
+        )
+    )
+    prefill = HMONNXInference(
+        str(
+            Path(hmonnx_dir)
+            / "prefill/hmonnx/whisper_meduim_prefill_xh2a_w8a8_sefp.onnx"
+        )
+    )
+    decoder = HMONNXInference(
+        str(
+            Path(hmonnx_dir)
+            / "decoder/hmonnx/whisper_meduim_decoder_xh2a_w8a8_sefp.onnx"
+        )
+    )
     encoder.to(device)
     prefill.to(device)
     decoder.to(device)
@@ -59,8 +88,12 @@ def main():
         decoder_input_names[4]: mask_atten,
     }
 
-    k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
+    k_cache = [
+        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
+    v_cache = [
+        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
 
     for data_detect, k_data_cache in zip(decoder_input_names[5:29], k_cache):
         decoder_detext_inputs[data_detect] = k_data_cache
@@ -230,9 +263,13 @@ def main():
 
     output = prefill.run(prefill_inputs)
     logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
-    next_token_logits = logits[:, -1, :].to(copy=True, dtype=torch.float32, device=device)
+    next_token_logits = logits[:, -1, :].to(
+        copy=True, dtype=torch.float32, device=device
+    )
     next_tokens = torch.argmax(next_token_logits, dim=-1)
-    default_decoder_ids = torch.cat([default_decoder_ids.to(device), next_tokens[:, None]], dim=-1)
+    default_decoder_ids = torch.cat(
+        [default_decoder_ids.to(device), next_tokens[:, None]], dim=-1
+    )
     # decoder 2221 <=>   6966
 
     cnt = 3
@@ -242,10 +279,18 @@ def main():
         mask_atten = torch.ones(([1, 16, 1, 1024])).half()
         mask_atten[:, :, :, cnt + 1 :] *= -65504
 
-        prefill_inputs[prefill_input_names[0]] = next_tokens.unsqueeze(0).to(torch.int32)
-        prefill_inputs[prefill_input_names[1]] = torch.tensor([[cnt]]).to(torch.int32).to(device)
-        prefill_inputs[prefill_input_names[2]] = torch.tensor([cnt]).to(device).to(torch.int32)
-        prefill_inputs[prefill_input_names[3]] = torch.tensor([1]).to(device).to(torch.int32)
+        prefill_inputs[prefill_input_names[0]] = next_tokens.unsqueeze(0).to(
+            torch.int32
+        )
+        prefill_inputs[prefill_input_names[1]] = (
+            torch.tensor([[cnt]]).to(torch.int32).to(device)
+        )
+        prefill_inputs[prefill_input_names[2]] = (
+            torch.tensor([cnt]).to(device).to(torch.int32)
+        )
+        prefill_inputs[prefill_input_names[3]] = (
+            torch.tensor([1]).to(device).to(torch.int32)
+        )
         prefill_inputs[prefill_input_names[4]] = mask_atten
 
         for data_detect, k_data_cache in zip(prefill_input_names[5:29], new_k_cache):
@@ -256,13 +301,19 @@ def main():
 
         output = decoder.run(prefill_inputs)
         logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
-        next_token_logits = logits[:, -1, :].to(copy=True, dtype=torch.float32, device=device)
+        next_token_logits = logits[:, -1, :].to(
+            copy=True, dtype=torch.float32, device=device
+        )
         next_tokens = torch.argmax(next_token_logits, dim=-1)
-        default_decoder_ids = torch.cat([default_decoder_ids.to(device), next_tokens[:, None]], dim=-1)
+        default_decoder_ids = torch.cat(
+            [default_decoder_ids.to(device), next_tokens[:, None]], dim=-1
+        )
 
     # [50257] 448
 
-    transcription = processor.batch_decode(default_decoder_ids, skip_special_tokens=True)
+    transcription = processor.batch_decode(
+        default_decoder_ids, skip_special_tokens=True
+    )
     print(transcription)
 
     # onnx =========================================

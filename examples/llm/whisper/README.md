@@ -9,4 +9,9 @@ pip install transformers==4.57
 pip install torchcodec
 ```
 
-2. 将下载的whisper-medium模型软链接到目录: data/models/  
+## 导出HMONNX
+
+```bash
+python examples/llm/whisper/hmonnx_export_encoder_prefill.py --model data/models/whisper-medium/
+python examples/llm/whisper/hmonnx_export_decoder.py --model data/models/whisper-medium/
+```

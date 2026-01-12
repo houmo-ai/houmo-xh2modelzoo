@@ -69,12 +69,16 @@ class Decoder(nn.Module):
 
 
 def main(args):
-    model = WhisperForConditionalGeneration.from_pretrained(args.model)
+    target_device = "XH2a"
+    model_dir = os.path.normpath(args.model)
+
+    model = WhisperForConditionalGeneration.from_pretrained(model_dir)
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
     model.model.encoder.decoder_m = model.model.decoder
+    cfg_name = Path(model_dir).stem + f"_{target_device}"
 
-    work_dirs = Path("work_dirs") / "whisper" / "encoder"
+    work_dirs = Path("work_dirs") / cfg_name / "encoder"
     work_dirs.mkdir(exist_ok=True, parents=True)
     onnx_file = work_dirs / "whisper_meduim.onnx"
 
@@ -149,7 +153,7 @@ def main(args):
 
     # prefill ===========================================
     name = "prefill"
-    work_dirs = Path("work_dirs") / "whisper" / name
+    work_dirs = Path("work_dirs") / cfg_name / name
     quant_config = create_quant_config(quant_scheme)
     onnx_file = work_dirs / f"whisper_meduim_{name}.onnx"
     hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
@@ -159,13 +163,19 @@ def main(args):
     cache_position = torch.tensor([[0, 1, 2, 3]])
     past_len = torch.tensor([0])
 
+    k_cache = [
+        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
+    v_cache = [
+        torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
 
-    k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-
-    k_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    v_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-
+    k_list = [
+        torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
+    v_list = [
+        torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)
+    ]
 
     inputs_names = [
         "decoder_input_ids",
@@ -196,7 +206,17 @@ def main(args):
     current_len = torch.tensor([cache_len])
 
     # warp
-    warp_inp = (decoder_input_ids, cache_position, past_len, current_len, mask_atten, k_cache, v_cache, k_list, v_list)
+    warp_inp = (
+        decoder_input_ids,
+        cache_position,
+        past_len,
+        current_len,
+        mask_atten,
+        k_cache,
+        v_cache,
+        k_list,
+        v_list,
+    )
 
     trace_inp = (
         (decoder_input_ids, cache_position, past_len, current_len, mask_atten)
@@ -232,7 +252,6 @@ def main(args):
         hm_inputs.append(v_list[i])
 
     if not Path(hmonnx_file).exists():
-
         # quanted_graph_module = _convert_model_to_quanted_model(
         #     model, FrontendType.DynamoFX, warp_inp, DeviceType.XH2a, quant_config
         # )
@@ -254,149 +273,9 @@ def main(args):
             else:
                 input_args.append(arg)
 
-        assert len(_input_names) == len(input_args), f"input_names: {len(_input_names)}, input_args: {len(input_args)}"
-        for input_name, input_arg in zip(_input_names, input_args):
-            input_qconfig = ConfigDict(
-                dict(
-                    quantizer=dict(
-                        qspec=dict(),
-                    ),
-                )
-            )
-            if isinstance(input_arg, torch.Tensor):
-                if input_arg.dtype in TORCH_DTYPE_TO_FAKE_DTYPE:
-                    input_qconfig.quantizer.qspec.fake_dtype = TORCH_DTYPE_TO_FAKE_DTYPE[input_arg.dtype]
-                else:
-                    raise ValueError(f"Unsupported dtype: {input_arg.dtype}")
-
-            quant_config.inputs[input_name] = input_qconfig
-
-        quanted_graph_module = to_quant_graph(fronted_graph_module, DeviceType.XH2a.name, quant_config)
-        execution_devce = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        ptq_quantize(quanted_graph_module, [input_args], PrecisionMode.ALIGNED, execution_devce)
-
-        convert_quanted_model_to_hmonnx(
-            quanted_graph_module,
-            warp_inp,
-            hmonnx_file,
-            inputs_names,
-            output_names,
+        assert len(_input_names) == len(input_args), (
+            f"input_names: {len(_input_names)}, input_args: {len(input_args)}"
         )
-
-    if args.gen_golden and not Path(golden_path).exists():
-        session = HMONNXGoldenInference(hmonnx_file)
-        session.to("cuda")
-        session.save_golden = True
-        session.golden_dir = work_dirs / "hmonnx/golden"
-        session.step = 0
-        session(*hm_inputs)
-
-
-    # decoder ===========================================
-    name = "decoder"
-
-    work_dirs = Path("work_dirs") / "whisper" / name
-    quant_config = create_quant_config(quant_scheme)
-    onnx_file = work_dirs / f"whisper_meduim_{name}.onnx"
-    hmonnx_file = work_dirs / "hmonnx" / f"whisper_meduim_{name}_xh2a_{quant_type}.onnx"
-    golden_path = work_dirs / "hmonnx / golden"
-
-    decoder_input_ids = torch.tensor([[2221]])
-    cache_position = torch.tensor([[4]])
-    encoder_outputs_kv = torch.randn([1, 1500, 16, 64]).transpose(1, 2).contiguous()
-    past_ket_length = torch.tensor([0])
-    past_len = torch.tensor([0])
-
-
-    k_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    v_cache = [torch.ones([1, 16, 1024, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-
-    k_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-    v_list = [torch.ones([1, 16, 1500, 64], dtype=torch.float16) * (-65504) for i in range(24)]
-
-    inputs_names = [
-        "decoder_input_ids",
-        "cache_position",
-        "past_len",
-        "current_len",
-        "mask_atten",
-    ]  # , "past_key_length"
-
-    for i in range(24):
-        inputs_names.append(f"k_cache_{i}")
-    for i in range(24):
-        inputs_names.append(f"v_cache_{i}")
-
-    inputs_names += output_names
-
-    model_cus = Decoder(model.model, model.proj_out, config=model.config)
-
-    output_names = ["logits"]
-    for i in range(24):
-        output_names.append(f"newk_cache_{i}")
-    for i in range(24):
-        output_names.append(f"newv_cache_{i}")
-
-    cache_len = decoder_input_ids.shape[0]
-    mask_atten = torch.ones(([1, 16, cache_len, 1024])).half()
-    mask_atten[:, :, :, past_len + cache_len :] *= -65504
-    current_len = torch.tensor([cache_len])
-
-    # warp
-    warp_inp = (decoder_input_ids, cache_position, past_len, current_len, mask_atten, k_cache, v_cache, k_list, v_list)
-
-    trace_inp = (
-        (decoder_input_ids, cache_position, past_len, current_len, mask_atten)
-        + tuple(k_cache)
-        + tuple(v_cache)
-        + tuple(k_list)
-        + tuple(v_list)
-    )
-
-    with RewriterContext(None, backend="onnxruntime"):
-        warp_model_cus = wrap_llm_model(model_cus)
-        warp_model_cus = warp_model_cus.half()
-        # output, k_cache_list, v_cache_list = warp_model_cus(*warp_inp)
-        fronted_graph_module = to_frontend_graph(warp_model_cus, "DynamoFX", warp_inp)
-
-        # output, k_cache_list, v_cache_list = frontend_model(*warp_inp)
-
-    hm_inputs = [
-        decoder_input_ids.to(torch.int32),
-        cache_position.to(torch.int32),
-        past_len.to(torch.int32),
-        current_len.to(torch.int32),
-        mask_atten,
-    ]
-    for i in range(24):
-        hm_inputs.append(k_cache[i])
-
-    for i in range(24):
-        hm_inputs.append(v_cache[i])
-
-    for i in range(24):
-        hm_inputs.append(k_list[i])
-        hm_inputs.append(v_list[i])
-
-    if not Path(hmonnx_file).exists():
-        _input_names = fronted_graph_module.get_input_names()
-        if quant_config is None:
-            quant_config = ConfigDict()
-        if isinstance(quant_config, dict):
-            quant_config = ConfigDict(quant_config)
-
-        if "inputs" not in quant_config:
-            quant_config.inputs = ConfigDict()
-
-        ## 将输入的List展开
-        input_args = []
-        for arg in warp_inp:
-            if isinstance(arg, (list, tuple)):
-                input_args.extend(arg)
-            else:
-                input_args.append(arg)
-
-        assert len(_input_names) == len(input_args), f"input_names: {len(_input_names)}, input_args: {len(input_args)}"
         for input_name, input_arg in zip(_input_names, input_args):
             input_qconfig = ConfigDict(
                 dict(
@@ -407,16 +286,26 @@ def main(args):
             )
             if isinstance(input_arg, torch.Tensor):
                 if input_arg.dtype in TORCH_DTYPE_TO_FAKE_DTYPE:
-                    input_qconfig.quantizer.qspec.fake_dtype = TORCH_DTYPE_TO_FAKE_DTYPE[input_arg.dtype]
+                    input_qconfig.quantizer.qspec.fake_dtype = (
+                        TORCH_DTYPE_TO_FAKE_DTYPE[input_arg.dtype]
+                    )
                 else:
                     raise ValueError(f"Unsupported dtype: {input_arg.dtype}")
 
             quant_config.inputs[input_name] = input_qconfig
 
-        quanted_graph_module = to_quant_graph(fronted_graph_module, DeviceType.XH2a.name, quant_config)
-        execution_devce = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        ptq_quantize(quanted_graph_module, [input_args], PrecisionMode.ALIGNED, execution_devce)
+        quanted_graph_module = to_quant_graph(
+            fronted_graph_module, DeviceType.XH2a.name, quant_config
+        )
+        execution_devce = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        ptq_quantize(
+            quanted_graph_module, [input_args], PrecisionMode.ALIGNED, execution_devce
+        )
+        import pdb
 
+        pdb.set_trace()
         convert_quanted_model_to_hmonnx(
             quanted_graph_module,
             warp_inp,
@@ -436,9 +325,13 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="/data02/datasets/whisper_medium")
+    parser.add_argument("--model", type=str, default="./data/models/whisper-medium")
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
-    parser.add_argument("--gen_golden", action="store_true", help="generate golden data")
+    parser.add_argument(
+        "--quant-type", default="w8a8_sefp", help="quant type, default is w8a8"
+    )
+    parser.add_argument(
+        "--gen_golden", action="store_true", help="generate golden data"
+    )
     args = parser.parse_args()
     main(args)
