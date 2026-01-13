@@ -4,9 +4,7 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from sympy import true
 from torch import Tensor
-from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
 
 from ....utils import DeviceDtypeMixin
@@ -14,7 +12,13 @@ from ....xh_llm.utils import decode_next_token
 
 
 class Qwen3LegacyInference(DeviceDtypeMixin):
-    def __init__(self, model_config_file: str, fast_mode=True, device: str = "cuda", tokenizer=None):
+    def __init__(
+        self,
+        model_config_file: str,
+        fast_mode=True,
+        device: str = "cuda",
+        tokenizer=None,
+    ):
         super().__init__()
 
         self.fast_mode = fast_mode
@@ -51,7 +55,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
 
         # token embedding
         token_embedding_state_dict = torch.load(
-            model_dir / meta_info["token_embedding_file"], map_location="cpu", weights_only=True
+            model_dir / meta_info["token_embedding_file"],
+            map_location="cpu",
+            weights_only=True,
         )
         self.token_embedding = nn.Embedding(
             token_embedding_state_dict["weight"].shape[0],
@@ -61,7 +67,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
 
         self.batch_size = 1
 
-        self.prefill_input_sequence_length = meta_info["wrap_cfg"]["input_sequence_length"]
+        self.prefill_input_sequence_length = meta_info["wrap_cfg"][
+            "input_sequence_length"
+        ]
         self.input_sequence_length = self.prefill_input_sequence_length
         self.pad_token_id = self.tokenizer.eos_token_id
         self._phase_prefill = True
@@ -115,13 +123,13 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
         seq_length = input_ids.shape[1]
         input_ids = input_ids.to(self.execution_device)
-        assert (
-            seq_length <= input_sequence_length
-        ), f"Input sequence length is too long. max input sequence length is {input_sequence_length} but got {seq_length}"
+        assert seq_length <= input_sequence_length, (
+            f"Input sequence length is too long. max input sequence length is {input_sequence_length} but got {seq_length}"
+        )
         if input_sequence_length > seq_length:
-            padding_input_ids = torch.zeros((1, input_sequence_length - seq_length), dtype=torch.long).to(
-                self.execution_device
-            )
+            padding_input_ids = torch.zeros(
+                (1, input_sequence_length - seq_length), dtype=torch.long
+            ).to(self.execution_device)
             padding_input_ids.fill_(self.pad_token_id)
             input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
         inputs_embeds = self.token_embedding.to(self.execution_device)(input_ids)
@@ -133,7 +141,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
 
         return (
             inputs_embeds.to(self.execution_device),
-            torch.tensor([past_seq_length], dtype=torch.int32).to(self.execution_device),
+            torch.tensor([past_seq_length], dtype=torch.int32).to(
+                self.execution_device
+            ),
             torch.tensor([seq_length], dtype=torch.int32).to(self.execution_device),
             past_key_caches,
             past_value_caches,
@@ -149,7 +159,9 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
     ) -> torch.FloatTensor:
         if self._phase_prefill:
             self.init_prefill()
-            assert self.prefill_session is not None, "Prefill session is not initialized."
+            assert self.prefill_session is not None, (
+                "Prefill session is not initialized."
+            )
             out = self.prefill_session(
                 inputs_embeds.to(self._device),
                 past_seq_length.to(self._device),
@@ -180,7 +192,10 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         assert len(messages) == self.batch_size
 
         texts = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, enable_thinking=enable_thinking, add_generation_prompt=True
+            messages,
+            tokenize=False,
+            enable_thinking=enable_thinking,
+            add_generation_prompt=True,
         )
 
         batch_input_ids = []
@@ -197,17 +212,31 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         execution_device = torch.device(self.execution_device)
 
         # prefill
-        prefill_inputs = self.prepare_inputs(data_prefill, self.prefill_input_sequence_length)
-        inputs_embeds, past_seq_length, seq_length, past_key_caches, past_value_caches = prefill_inputs
+        prefill_inputs = self.prepare_inputs(
+            data_prefill, self.prefill_input_sequence_length
+        )
+        (
+            inputs_embeds,
+            past_seq_length,
+            seq_length,
+            past_key_caches,
+            past_value_caches,
+        ) = prefill_inputs
 
         prefill_session = HMONNXInference(str(self.prefill_onnx_file))
         prefill_session.to(device)
         prefill_session.exec_device = execution_device
 
         prefill_logits = prefill_session(
-            inputs_embeds, past_seq_length, seq_length, *past_key_caches, *past_value_caches
+            inputs_embeds,
+            past_seq_length,
+            seq_length,
+            *past_key_caches,
+            *past_value_caches,
         )
-        prefill_next_token_id, prefill_next_token_text = decode_next_token(self.tokenizer, prefill_logits)
+        prefill_next_token_id, prefill_next_token_text = decode_next_token(
+            self.tokenizer, prefill_logits
+        )
 
         del prefill_session
         torch.cuda.empty_cache()
@@ -221,16 +250,32 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
             "past_seq_length": past_seq_len[0],
         }
         decode_inputs = self.prepare_inputs(data_decode, 1)
-        inputs_embeds, past_seq_length, seq_length, past_key_caches, past_value_caches = decode_inputs
+        (
+            inputs_embeds,
+            past_seq_length,
+            seq_length,
+            past_key_caches,
+            past_value_caches,
+        ) = decode_inputs
 
         decode_session = HMONNXInference(str(self.decode_onnx_file))
         decode_session.to(device)
         decode_session.exec_device = execution_device
 
-        decode_logits = decode_session(inputs_embeds, past_seq_length, seq_length, *past_key_caches, *past_value_caches)
-        decode_next_token_id, decode_next_token_text = decode_next_token(self.tokenizer, decode_logits)
+        decode_logits = decode_session(
+            inputs_embeds,
+            past_seq_length,
+            seq_length,
+            *past_key_caches,
+            *past_value_caches,
+        )
+        decode_next_token_id, decode_next_token_text = decode_next_token(
+            self.tokenizer, decode_logits
+        )
         # logger.info(f"Decode next token: {decode_next_token_id} {decode_next_token_text}")
         generate_ids = torch.cat([prefill_next_token_id, decode_next_token_id], dim=1)
 
-        generate_text = self.tokenizer.batch_decode(generate_ids, skip_special_tokens=True)
+        generate_text = self.tokenizer.batch_decode(
+            generate_ids, skip_special_tokens=True
+        )
         return (generate_ids, generate_text)

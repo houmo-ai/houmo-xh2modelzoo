@@ -1,14 +1,9 @@
-import dataclasses
 import argparse
 from dataclasses import dataclass, field
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Tuple
 
-from sympy import false
+from xhquant.api import ConfigDict, QuantScheme, create_quant_config
 
-from xhquant.api import QuantScheme, ConfigDict,create_quant_config
-
-from transformers import AutoConfig
-from transformers.models.llama.configuration_llama import LlamaConfig
 from xh_model_zoo_new.core import ConverterConfig
 
 
@@ -30,10 +25,10 @@ class BaseLLMConverterConfig(ConverterConfig):
     gptq = False
 
     # Wrap Config
-    only_first_block:bool = False
-    num_logits_to_keep:int = 1  # 1表示取最后一个,
-    use_cache:bool = True
-    cache_axis:int = 2
+    only_first_block: bool = False
+    num_logits_to_keep: int = 1  # 1表示取最后一个,
+    use_cache: bool = True
+    cache_axis: int = 2
 
     # Eval Config
     eval_ppl: bool = False  # TODO not used now

@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from sympy import im
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen2ForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    Qwen2ForCausalLM,
+)
 from xhquant import nn as xhnn
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
@@ -40,9 +43,9 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
         assert not hasattr(native_model, "hf_quantizer")
-        assert isinstance(
-            native_model, Qwen2ForCausalLM
-        ), f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, Qwen2ForCausalLM), (
+            f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        )
         native_model: Qwen2ForCausalLM = native_model  # type: ignore
 
         if native_model.config.tie_word_embeddings:  # type: ignore
@@ -60,7 +63,10 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         config = self.config
 
         native_model = self.load_hf_model(
-            hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
+            hf_model_path,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map="cpu",
         )
 
         hidden_size = native_model.config.hidden_size
@@ -80,7 +86,9 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         # batch_size = config.batch_size
         context_length = config.context_length
         input_sequence_length = config.input_sequence_length
-        assert target_device == DeviceType.XH2a, f"Only support convert to XH2a, but got {target_device}"
+        assert target_device == DeviceType.XH2a, (
+            f"Only support convert to XH2a, but got {target_device}"
+        )
         quant_type = config.quant_scheme.quant_type
         quant_config = create_quant_config(config.quant_scheme)
         quant_config = ConfigDict(quant_config)
@@ -117,9 +125,13 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
 
         token_embedding_file = Path(work_dir) / "token_embedding.pt"
         torch.save(token_embedding.state_dict(), str(token_embedding_file))
-        meta_info["token_embedding_file"] = str(token_embedding_file.relative_to(work_dir))
+        meta_info["token_embedding_file"] = str(
+            token_embedding_file.relative_to(work_dir)
+        )
 
-        from ._model import register_wrap_modules as qwen2_register_wrap_modules  # noqa: F403, F401
+        from ._model import (
+            register_wrap_modules as qwen2_register_wrap_modules,  # noqa: F403, F401
+        )
 
         qwen2_register_wrap_modules(native_model)
 
@@ -163,15 +175,21 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         past_key_caches = []
         past_value_caches = []
         for _ in range(num_decoder_layers):
-            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
-            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            past_key_caches.append(
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+            )
+            past_value_caches.append(
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+            )
 
         # 导出Prefill模型
         input_ids = []
         current_input_length = []
         # position_ids = []
         for _ in range(1):
-            input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long)
+            input_id = torch.randint(
+                0, 1000, (input_sequence_length,), dtype=torch.long
+            )
             seq_length = input_id.shape[0]
             # past_seq_length = 0
             # position_id = torch.arange(past_seq_length, past_seq_length + seq_length, dtype=torch.long)
@@ -209,12 +227,14 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
 
-        logger.info(f"********************* start export prefill model *********************")
+        logger.info(
+            f"********************* start export prefill model *********************"
+        )
 
         quanted_model = convert_fx_model_to_quanted_model(
             wraped_qwen_model,
@@ -237,10 +257,14 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+        convert_quanted_model_to_hmonnx(
+            quanted_model, inputs, str(prefill_onnx_file), input_names, output_names
+        )
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
-        logger.info(f"********************* start export decode model *********************")
+        logger.info(
+            f"********************* start export decode model *********************"
+        )
         decode_inputs = (
             inputs_embeds[:, :1, :],
             past_seq_length_t,
@@ -258,15 +282,25 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
+        convert_quanted_model_to_hmonnx(
+            quanted_model,
+            decode_inputs,
+            str(decode_onnx_file),
+            input_names,
+            output_names,
+        )
 
         logger.info(f"Export decode model to {decode_onnx_file}")
         json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
 
     @classmethod
-    def convert(cls, hf_model_path: str, config: Qwen2LegacyConvertConfig, output_dir: str):
+    def convert(
+        cls, hf_model_path: str, config: Qwen2LegacyConvertConfig, output_dir: str
+    ):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            assert (
+                config.quant_weight is not None and Path(config.quant_weight).exists()
+            )
         Qwen2LegacyConverterXH2a(config)._convert(hf_model_path, output_dir)

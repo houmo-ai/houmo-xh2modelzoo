@@ -7,7 +7,6 @@ import torch
 import xhquant.xhonnxruntime.config
 from gguf import Path
 from loguru import logger
-from sympy import im
 from xhquant.api import HMONNXInference
 
 
@@ -42,10 +41,21 @@ def main(args):
     scores = scores.max(-1)
 
     for box, score, label in zip(boxes, scores, labels):
-        x1, y1, x2, y2 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+        x1, y1, x2, y2 = (
+            int(box[0] * w),
+            int(box[1] * h),
+            int(box[2] * w),
+            int(box[3] * h),
+        )
         cv2.rectangle(org_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
         cv2.putText(
-            org_img, f"{int(label)}: {score:.2f}", (int(x1), int(y1)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
+            org_img,
+            f"{int(label)}: {score:.2f}",
+            (int(x1), int(y1)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
         )
     out_file = str(work_dir / "result.png")
     cv2.imwrite(out_file, org_img)
@@ -60,7 +70,9 @@ if __name__ == "__main__":
         default="data/models/rtdetr/rtdetr_hgnetv2_l_6x_coco-sim.onnx",
         help="hmonnx file",
     )
-    parser.add_argument("--image", type=str, default="data/images/dog.jpg", help="image file")
+    parser.add_argument(
+        "--image", type=str, default="data/images/dog.jpg", help="image file"
+    )
     parser.add_argument("--threshold", type=float, default=0.5, help="threshold")
     args = parser.parse_args()
     print(args)

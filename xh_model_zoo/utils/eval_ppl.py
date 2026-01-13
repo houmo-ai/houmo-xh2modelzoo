@@ -1,9 +1,11 @@
-from sympy import true
-import torch
 import os
-from tqdm import tqdm
+
+import torch
 import torch.nn as nn
+from tqdm import tqdm
+
 from .datautils import get_loaders
+
 
 @torch.no_grad()
 def evaluate(lm, model_path=None, seed=0, output_dir="data"):
@@ -20,11 +22,10 @@ def evaluate(lm, model_path=None, seed=0, output_dir="data"):
     # else:
     #     lm.model = lm.model.to(lm.device)
 
-
-    if true:
+    if True:
         # for dataset in ["wikitext2", "ptb", "c4","ptb-new",'c4-new']:
-        for dataset in ["wikitext2", 'c4']:
-            cache_testloader = f'{output_dir}/testloader__{dataset}_all.cache'
+        for dataset in ["wikitext2", "c4"]:
+            cache_testloader = f"{output_dir}/testloader__{dataset}_all.cache"
             if os.path.exists(cache_testloader):
                 testloader = torch.load(cache_testloader, weights_only=False)
                 # logger.info(f"load calibration from {cache_testloader}")
@@ -48,14 +49,16 @@ def evaluate(lm, model_path=None, seed=0, output_dir="data"):
             nlls = []
             with tqdm(range(nsamples)) as pbar:
                 for i in pbar:
-                    batch = testenc[:, (i * lm.seqlen): ((i + 1) * lm.seqlen)].to(lm.device)
+                    batch = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)].to(
+                        lm.device
+                    )
                     outputs = lm.model(batch)
                     hidden_states = outputs[0]
                     logits = lm.lm_head(hidden_states)
                     shift_logits = logits[:, :-1, :]
-                    shift_labels = testenc[:, (i * lm.seqlen): ((i + 1) * lm.seqlen)][
-                                :, 1:
-                                ].to(lm.lm_head.weight.device)
+                    shift_labels = testenc[:, (i * lm.seqlen) : ((i + 1) * lm.seqlen)][
+                        :, 1:
+                    ].to(lm.lm_head.weight.device)
                     loss_fct = nn.CrossEntropyLoss()
                     loss = loss_fct(
                         shift_logits.view(-1, shift_logits.size(-1)),
@@ -63,17 +66,19 @@ def evaluate(lm, model_path=None, seed=0, output_dir="data"):
                     )
                     neg_log_likelihood = loss.float() * lm.seqlen
                     nlls.append(neg_log_likelihood)
-                    tmp_ppl =  torch.exp(torch.stack(nlls).sum() / ((i+1) * lm.seqlen)).item()
+                    tmp_ppl = torch.exp(
+                        torch.stack(nlls).sum() / ((i + 1) * lm.seqlen)
+                    ).item()
                     pbar.set_postfix_str(f"--{tmp_ppl:4.4}")
                     # if i == args.limit:
                     #     break
             ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * lm.seqlen))
             # logger.info(f'{dataset} : {ppl.item()}')
             lm.config.use_cache = use_cache
-            results[dataset] = round(ppl.item(),4)
-        results['ppl_avg'] = round(sum(results.values()) / len(results.values()), 4)
+            results[dataset] = round(ppl.item(), 4)
+        results["ppl_avg"] = round(sum(results.values()) / len(results.values()), 4)
 
-    '''
+    """
     if args.eval_mmlu:
         # eval quantized model on MMLU
         from mmlu_eval import run_mmlu_eval
@@ -109,6 +114,6 @@ def evaluate(lm, model_path=None, seed=0, output_dir="data"):
         task_results['acc_avg']=round(sum(metric_vals.values()) / len(metric_vals.values()), 4)
         results.update(task_results)
         logger.info(results)
-    '''
+    """
 
     return results

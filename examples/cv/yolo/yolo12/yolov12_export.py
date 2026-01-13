@@ -1,19 +1,14 @@
 import argparse
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List
 
-import cv2
-import numpy as np
 import torch
-from sympy import false, true
 from torch import Tensor
 from ultralytics import YOLO
-from ultralytics.utils import ops
 from xhquant.api import (
     DeviceType,
     HMONNXGoldenInference,
     QuantScheme,
-    convert_onnx_to_hmonnx,
     create_quant_config,
     get_root_logger,
     ptq_quantize,
@@ -27,9 +22,7 @@ from xhquant.common.types import DeviceType, FrontendType, PrecisionMode
 from xhquant.export import export_onnx, to_export_graph
 from xhquant.mix_precision.mix_precision import MixPrecisionSearch
 from xhquant.utils.config import Config, ConfigDict
-from xhquant.utils.logger import get_root_logger, padding_message
-
-from xh2_model_zoo.utils.onnx.onnx_shape_infer import replace_reshape_minus_one_by_infer
+from xhquant.utils.logger import padding_message
 
 
 def get_obj_feats(self, feat_maps, idxs):
@@ -38,9 +31,17 @@ def get_obj_feats(self, feat_maps, idxs):
 
     s = min([x.shape[1] for x in feat_maps])  # find smallest vector length
     obj_feats = torch.cat(
-        [x.permute(0, 2, 3, 1).reshape(x.shape[0], -1, s, x.shape[1] // s).mean(dim=-1) for x in feat_maps], dim=1
+        [
+            x.permute(0, 2, 3, 1)
+            .reshape(x.shape[0], -1, s, x.shape[1] // s)
+            .mean(dim=-1)
+            for x in feat_maps
+        ],
+        dim=1,
     )  # mean reduce all vectors to same length
-    return [feats[idx] if len(idx) else [] for feats, idx in zip(obj_feats, idxs)]  # for each img in batch
+    return [
+        feats[idx] if len(idx) else [] for feats, idx in zip(obj_feats, idxs)
+    ]  # for each img in batch
 
 
 def main(args):
@@ -59,7 +60,11 @@ def main(args):
     work_dirs = Path("work_dirs") / onnx_name
     work_dirs.mkdir(exist_ok=True, parents=True)
     target_device = DeviceType.XH2a
-    out_hmonnx_file = work_dirs / "hmonnx" / f"{onnx_name}_{args.quant_type}_{target_device.name}.onnx"
+    out_hmonnx_file = (
+        work_dirs
+        / "hmonnx"
+        / f"{onnx_name}_{args.quant_type}_{target_device.name}.onnx"
+    )
     out_hmonnx_file.parent.mkdir(exist_ok=True, parents=True)
     out_hmonnx_file = str(out_hmonnx_file)
 
@@ -69,10 +74,14 @@ def main(args):
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     quant_config = create_quant_config(quant_scheme)
 
-    execution_devce = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    execution_devce = (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
 
     fronted_graph_module = to_frontend_graph(
-        onnx_file, FrontendType.ONNX, [torch.randn(1, 3, 640, 640, dtype=torch.float32).to(execution_devce)]
+        onnx_file,
+        FrontendType.ONNX,
+        [torch.randn(1, 3, 640, 640, dtype=torch.float32).to(execution_devce)],
     )
     # image = cv2.imread(args.image)
     # results = model.predictor.preprocess(image, (640, 640))
@@ -86,7 +95,9 @@ def main(args):
 
     logger.debug(f"{Config(quant_config, format_python_code=False).pretty_text}")
 
-    quanted_graph_module = to_quant_graph(fronted_graph_module, target_device.name, quant_config)
+    quanted_graph_module = to_quant_graph(
+        fronted_graph_module, target_device.name, quant_config
+    )
     logger.debug(padding_message("Quanted graph"))
     logger.debug(f"{quanted_graph_module.graph}")
     logger.debug(padding_message("Quanted graph"))
@@ -99,7 +110,9 @@ def main(args):
         else:
             input_args.append(arg)
 
-    ptq_quantize(quanted_graph_module, [input_args], PrecisionMode.ALIGNED, execution_devce)
+    ptq_quantize(
+        quanted_graph_module, [input_args], PrecisionMode.ALIGNED, execution_devce
+    )
 
     if args.mix_search:
         quanted_graph_module.enable_quant()
@@ -123,7 +136,8 @@ def main(args):
         quanted_graph_module = ms.module
 
     exported_graph_module = to_export_graph(
-        quanted_graph_module.to("cpu"), [torch.randn(1, 3, 640, 640, dtype=torch.float32)]
+        quanted_graph_module.to("cpu"),
+        [torch.randn(1, 3, 640, 640, dtype=torch.float32)],
     )
     export_cfg = ConfigDict(
         dict(
@@ -145,10 +159,14 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # 修改默认的onnx文件路径为yolov6m
-    parser.add_argument("--onnx", type=str, default="data/model_zoo2/houmo/yolo12m/yolo12m.onnx")
+    parser.add_argument(
+        "--onnx", type=str, default="data/model_zoo2/houmo/yolo12m/yolo12m.onnx"
+    )
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--image", type=str, default="data/images/000000001490.jpg")
-    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
+    parser.add_argument(
+        "--quant-type", default="w8a8_sefp", help="quant type, default is w8a8"
+    )
     parser.add_argument("--mix_search", default=false)
     args = parser.parse_args()
     main(args)

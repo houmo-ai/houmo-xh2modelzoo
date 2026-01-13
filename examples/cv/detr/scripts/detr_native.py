@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from loguru import logger
 from PIL import Image
-from sympy import loggamma
 from transformers import AutoImageProcessor, DetrForObjectDetection
 from transformers.models.detr.modeling_detr import DetrObjectDetectionOutput
 

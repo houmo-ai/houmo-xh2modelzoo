@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from sympy import true
 from torch import Tensor
 from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference

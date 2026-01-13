@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from loguru import logger
 from PIL import Image
-from sympy import loggamma
 from transformers import AutoImageProcessor, DetrForObjectDetection
 from transformers.models.detr.modeling_detr import DetrObjectDetectionOutput
 
@@ -51,9 +50,13 @@ def main(args):
     outputs = DetrObjectDetectionOutput(logits=outputs[0], pred_boxes=outputs[1])
     # convert outputs (bounding boxes and class logits) to Pascal VOC format (xmin, ymin, xmax, ymax)
     target_sizes = torch.tensor([image.size[::-1]])
-    results = image_processor.post_process_object_detection(outputs, threshold=0.9, target_sizes=target_sizes)[0]
+    results = image_processor.post_process_object_detection(
+        outputs, threshold=0.9, target_sizes=target_sizes
+    )[0]
 
-    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+    for score, label, box in zip(
+        results["scores"], results["labels"], results["boxes"]
+    ):
         box = [round(i, 2) for i in box.tolist()]
         print(
             f"Detected {model.config.id2label[label.item()]} with confidence "
@@ -88,10 +91,16 @@ def main(args):
             "pixel_mask": inputs[1].cpu().numpy(),
         },
     )
-    outputs = DetrObjectDetectionOutput(logits=torch.from_numpy(outputs[0]), pred_boxes=torch.from_numpy(outputs[1]))
-    results = image_processor.post_process_object_detection(outputs, threshold=0.9, target_sizes=target_sizes)[0]
+    outputs = DetrObjectDetectionOutput(
+        logits=torch.from_numpy(outputs[0]), pred_boxes=torch.from_numpy(outputs[1])
+    )
+    results = image_processor.post_process_object_detection(
+        outputs, threshold=0.9, target_sizes=target_sizes
+    )[0]
 
-    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+    for score, label, box in zip(
+        results["scores"], results["labels"], results["boxes"]
+    ):
         box = [round(i, 2) for i in box.tolist()]
         print(
             f"Detected {model.config.id2label[label.item()]} with confidence "

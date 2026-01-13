@@ -11,8 +11,6 @@ import torch.nn.functional as F
 import torchvision
 import yaml
 from loguru import logger
-from sympy import im
-from ultralytics.utils import ops
 
 
 def _scale_size(
@@ -63,7 +61,9 @@ def rescale_size(
         max_short_edge = min(scale)
         scale_factor = min(max_long_edge / max(h, w), max_short_edge / min(h, w))
     else:
-        raise TypeError(f"Scale must be a number or tuple of int, but got {type(scale)}")
+        raise TypeError(
+            f"Scale must be a number or tuple of int, but got {type(scale)}"
+        )
 
     new_size = _scale_size((w, h), scale_factor)
 
@@ -113,8 +113,12 @@ def make_anchors(shapes, features, strides, grid_cell_offset=0.5):
     dtype, device = features.dtype, features.device
     for i, stride in enumerate(strides):
         h, w = shapes[i]
-        sx = torch.arange(end=w, device=device, dtype=dtype) + grid_cell_offset  # shift x
-        sy = torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset  # shift y
+        sx = (
+            torch.arange(end=w, device=device, dtype=dtype) + grid_cell_offset
+        )  # shift x
+        sy = (
+            torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset
+        )  # shift y
         sy, sx = torch.meshgrid(sy, sx, indexing="ij")
         anchor_points.append(torch.stack((sx, sy), -1).view(-1, 2))
         stride_tensor.append(torch.full((h * w, 1), stride, dtype=dtype, device=device))
@@ -223,9 +227,15 @@ def non_max_suppression_v8(
     """
 
     # Checks
-    assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
-    assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
-    if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
+    assert 0 <= conf_thres <= 1, (
+        f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+    )
+    assert 0 <= iou_thres <= 1, (
+        f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+    )
+    if isinstance(
+        prediction, (list, tuple)
+    ):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
@@ -295,7 +305,9 @@ def non_max_suppression_v8(
         if not n:  # no boxes
             continue
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            x = x[
+                x[:, 4].argsort(descending=True)[:max_nms]
+            ]  # sort by confidence and remove excess boxes
 
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
@@ -306,7 +318,9 @@ def non_max_suppression_v8(
             # Update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
             iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
             weights = iou * scores[None]  # box weights
-            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(
+                1, keepdim=True
+            )  # merged boxes
             if redundant:
                 i = i[iou.sum(1) > 1]  # require redundancy
 
@@ -396,16 +410,24 @@ def yaml_load(file="data.yaml", append_filename=False):
     Returns:
         (dict): YAML data and file name.
     """
-    assert Path(file).suffix in {".yaml", ".yml"}, f"Attempting to load non-YAML file {file} with yaml_load()"
+    assert Path(file).suffix in {".yaml", ".yml"}, (
+        f"Attempting to load non-YAML file {file} with yaml_load()"
+    )
     with open(file, errors="ignore", encoding="utf-8") as f:
         s = f.read()  # string
 
         # Remove special characters
         if not s.isprintable():
-            s = re.sub(r"[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010ffff]+", "", s)
+            s = re.sub(
+                r"[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010ffff]+",
+                "",
+                s,
+            )
 
         # Add YAML filename to dict and return
-        data = yaml.safe_load(s) or {}  # always return a dict (yaml.safe_load() may return None for empty files)
+        data = (
+            yaml.safe_load(s) or {}
+        )  # always return a dict (yaml.safe_load() may return None for empty files)
         if append_filename:
             data["yaml_file"] = str(file)
         return data
@@ -463,9 +485,15 @@ def non_max_suppression(
     import torchvision  # scope for faster 'import ultralytics'
 
     # Checks
-    assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
-    assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
-    if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
+    assert 0 <= conf_thres <= 1, (
+        f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+    )
+    assert 0 <= iou_thres <= 1, (
+        f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+    )
+    if isinstance(
+        prediction, (list, tuple)
+    ):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
@@ -492,7 +520,9 @@ def non_max_suppression(
         if in_place:
             prediction[..., :4] = xywh2xyxy(prediction[..., :4])  # xywh to xyxy
         else:
-            prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
+            prediction = torch.cat(
+                (xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1
+            )  # xywh to xyxy
 
     output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
@@ -531,7 +561,9 @@ def non_max_suppression(
         if not n:  # no boxes
             continue
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            x = x[
+                x[:, 4].argsort(descending=True)[:max_nms]
+            ]  # sort by confidence and remove excess boxes
 
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes

@@ -1,6 +1,5 @@
 import onnx
-from onnx import helper
-from sympy import true
+
 
 def remove_equal_and_where(model_path, output_path):
     # 1. 加载模型
@@ -37,7 +36,7 @@ def remove_equal_and_where(model_path, output_path):
     for where_node in where_nodes:
         # 记录：Where的输入2（MatMul输出） → Where的输出（后续节点的输入）
         where_input_matmul = where_node.input[2]  # Where的第3个输入（MatMul的输出）
-        where_output = where_node.output[0]       # Where的输出（后续节点的输入）
+        where_output = where_node.output[0]  # Where的输出（后续节点的输入）
         where_connections.append((where_input_matmul, where_output))
 
     # 5. 删除Equal和所有Where节点
@@ -46,7 +45,7 @@ def remove_equal_and_where(model_path, output_path):
     new_nodes = [node for node in nodes if node.name not in nodes_to_remove]
 
     # 6. 重新连接前后节点：用MatMul的输出替换Where的输出
-    for (matmul_output, where_output) in where_connections:
+    for matmul_output, where_output in where_connections:
         for node in new_nodes:
             # 遍历所有节点的输入，将引用Where输出的地方替换为MatMul输出
             for idx, inp in enumerate(node.input):
@@ -58,12 +57,18 @@ def remove_equal_and_where(model_path, output_path):
     graph.node.extend(new_nodes)
 
     # 8. 保存修改后的模型
-    onnx.save(model, output_path, save_as_external_data=true, all_tensors_to_one_file=True,size_threshold=1)
+    onnx.save(
+        model,
+        output_path,
+        save_as_external_data=true,
+        all_tensors_to_one_file=True,
+        size_threshold=1,
+    )
     print(f"已删除Equal节点和{len(where_nodes)}个Where节点，并重新连接链路")
 
 
 # 调用（替换为你的模型路径）
 remove_equal_and_where(
     model_path="/data01/home/xuchen/xh2/xh2_model_zoo/examples/llm/mit/fp/model_all.sim.onnx",
-    output_path="/data01/home/xuchen/xh2/xh2_model_zoo/examples/llm/mit/fp/model_all_del_sim.sim.onnx"
+    output_path="/data01/home/xuchen/xh2/xh2_model_zoo/examples/llm/mit/fp/model_all_del_sim.sim.onnx",
 )

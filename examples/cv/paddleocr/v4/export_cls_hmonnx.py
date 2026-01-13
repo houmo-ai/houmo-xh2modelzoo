@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import torch
-from sympy import O
 from xhquant.api import (
     DeviceType,
     HMONNXGoldenInference,

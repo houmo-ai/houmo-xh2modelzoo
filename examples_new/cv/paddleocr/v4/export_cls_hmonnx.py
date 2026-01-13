@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import torch
-from sympy import O
 from xhquant.api import (
     DeviceType,
     HMONNXGoldenInference,
@@ -42,7 +41,9 @@ def main(args):
             output_names=["save_infer_model/scale_0.tmp_0"],
         )
         logger = get_root_logger()
-        logger.info(f"Convert onnx to hmonnx success, out hmonnx file to: {out_hmonnx_file}")
+        logger.info(
+            f"Convert onnx to hmonnx success, out hmonnx file to: {out_hmonnx_file}"
+        )
 
     hm_model = HMONNXGoldenInference(out_hmonnx_file)
     hm_model.save_golden = True
@@ -60,8 +61,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--onnx", type=str, default="data/models/paddleocr/v4/paddleocr_cls-sim.onnx")
+    parser.add_argument(
+        "--onnx", type=str, default="data/models/paddleocr/v4/paddleocr_cls-sim.onnx"
+    )
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
+    parser.add_argument(
+        "--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8"
+    )
     args = parser.parse_args()
     main(args)
