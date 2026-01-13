@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from ...llm_convert_config import LLMConvertConfig
 
