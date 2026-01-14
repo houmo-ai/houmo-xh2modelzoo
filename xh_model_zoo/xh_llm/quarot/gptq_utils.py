@@ -205,6 +205,55 @@ def process_qwen2_5_vl_batch(batch, device, processor):
     inputs = inputs.to(device)
     return inputs
 
+class Qwen3VLMoeTextExperts_Linearized(nn.Module):
+    def __init__(self, ori_experts):
+        super().__init__()
+        self.num_experts = ori_experts.num_experts
+        self.intermediate_size = ori_experts.intermediate_size
+        self.hidden_size = ori_experts.hidden_size
+        self.expert_dim = ori_experts.expert_dim
+        self.act_fn =ori_experts.act_fn
+
+        self.gate_up_proj = nn.ModuleList([
+            nn.Linear(self.hidden_size, 2 * self.expert_dim, bias=False)
+            for _ in range(self.num_experts)
+        ])
+        self.down_proj = nn.ModuleList([
+            nn.Linear(self.expert_dim, self.hidden_size, bias=False)
+            for _ in range(self.num_experts)
+        ])
+        if ori_experts is not None:
+            for i in range(self.num_experts):
+                # self.gate_up_proj[i].weight.copy_(ori_experts.gate_up_proj[i].T.contiguous())
+                # self.down_proj[i].weight.copy_(ori_experts.down_proj[i].T.contiguous())
+                self.gate_up_proj[i].weight.data = ori_experts.gate_up_proj[i].T.contiguous().data
+                self.down_proj[i].weight.data = ori_experts.down_proj[i].T.contiguous().data
+
+
+    def forward(
+        self, hidden_states: torch.Tensor, routing_weights: torch.Tensor, router_indices: torch.Tensor
+    ) -> torch.Tensor:
+        batch_size = hidden_states.shape[0]
+        hidden_states = hidden_states.reshape(-1, self.hidden_size)
+        # 推理模式：并行执行所有 expert
+        hidden_states = hidden_states.repeat(self.num_experts, 1)
+        hidden_states = hidden_states.view(self.num_experts, -1, self.hidden_size)
+
+        outs = []
+        for i in range(self.num_experts):
+            gate_up = self.gate_up_proj[i](hidden_states[i])
+            gate, up = gate_up.chunk(2, dim=-1)
+            out = self.down_proj[i](up * self.act_fn(gate))
+            outs.append(out)
+
+        next_states = torch.stack(outs, dim=0)
+        next_states = next_states.reshape(self.num_experts, batch_size, -1, self.hidden_size)
+        next_states = (
+            next_states * routing_weights.transpose(0, 1).view(self.num_experts, batch_size, -1)[..., None]
+        )
+        next_states = next_states.sum(dim=0)
+
+        return next_states
 
 @torch.no_grad()
 def gptq_fwrd(
@@ -230,6 +279,7 @@ def gptq_fwrd(
     is_qwen3_vl=False,
     is_moe=False,
     use_hession_mse=False,
+    self_attn_weight = None
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -341,16 +391,35 @@ def gptq_fwrd(
         position_embeddings = cache["position_embeddings"]
 
     quantizers: Dict[str, Any] = {}
-    sequential = [
+    if is_moe:
+        names_gate_up = []
+        names_down = []
+        for i in range(128):
+            name_gate = 'mlp.experts.gate_up_proj.'+str(i)
+            name_down =  'mlp.experts.down_proj.'+str(i)
+            names_gate_up.append(name_gate)
+            names_down.append(name_down)
+        sequential =  [
         [
             "self_attn.k_proj.module",
             "self_attn.v_proj.module",
             "self_attn.q_proj.module",
         ],
         ["self_attn.o_proj.module"],
-        ["mlp.up_proj.module", "mlp.gate_proj.module"],
-        ["mlp.down_proj.module"],
+        ["mlp.gate.module"]+names_gate_up,
+        names_down,
     ]
+    else:
+        sequential = [
+            [
+                "self_attn.k_proj.module",
+                "self_attn.v_proj.module",
+                "self_attn.q_proj.module",
+            ],
+            ["self_attn.o_proj.module"],
+            ["mlp.up_proj.module", "mlp.gate_proj.module"],
+            ["mlp.down_proj.module"],
+        ]
 
     # 加载输入cache
     inps_cache_file: Optional[str] = None
@@ -380,7 +449,8 @@ def gptq_fwrd(
             except Exception:
                 pass
             continue
-        
+        if is_moe:
+            layers[i].mlp.experts = Qwen3VLMoeTextExperts_Linearized(layers[i].mlp.experts)
         if is_qwen2_5_vl or is_qwen3_vl:
             layer = layers[i].to(device=device, dtype=torch.float16) # use flash attention 2
         else:
@@ -389,12 +459,14 @@ def gptq_fwrd(
         full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
 
         for names in sequential:
-            subset = {n: full[n.rstrip(".module")] for n in names}
+            subset = {n: full[n.replace('.module', '', 1)] for n in names}
             gptq: Dict[str, GPTQ] = {}
             for name in subset:
                 print(f"{name}", end="  ", flush=True)
                 layer_weight_bits = w_bits
                 layer_weight_sym = not (w_asym)
+                if self_attn_weight is not None and "self_attn" in name:
+                    layer_weight_bits = self_attn_weight
                 if "lm_head" in name:
                     layer_weight_bits = 16
                     continue

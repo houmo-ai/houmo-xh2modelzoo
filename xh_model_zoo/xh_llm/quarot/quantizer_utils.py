@@ -55,6 +55,7 @@ def gptq(
     data_files=None,
     is_moe=False,
     use_hession_mse=False,
+    self_attn_weight=None,
 ):
     yaml_dict = dict()
     if args is not None and hasattr(args, "gptq_config"):
@@ -140,6 +141,9 @@ def gptq(
             layers_cache_dir=layers_cache_dir,
             is_qwen2_5_vl=is_qwen2_5_vl,
             processor=processor,
+            is_qwen3_vl=is_qwen3_vl,
+            is_moe=is_moe,
+            use_hession_mse=use_hession_mse,
             tokenizer = tokenizer,
         )
     else:
@@ -174,5 +178,6 @@ def gptq(
             is_qwen3_vl=is_qwen3_vl,
             is_moe=is_moe,
             use_hession_mse=use_hession_mse,
+            self_attn_weight = self_attn_weight
         )
     return model

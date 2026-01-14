@@ -32,16 +32,21 @@ def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[to
     fuse the linear operations in Layernorm into the adjacent linear blocks.
     """
     for linear in linear_layers:
-        linear_dtype = linear.weight.dtype
-
-        W_ = linear.weight.data.double()
-        linear.weight.data = (W_ * layernorm.weight.double()).to(linear_dtype)
+        if hasattr(linear,'weight'):
+            linear_dtype = linear.weight.dtype
+            W_ = linear.weight.data.double()
+            linear.weight.data = (W_ * layernorm.weight.double()).to(linear_dtype)
+        else:
+            linear_dtype = linear.dtype
+            W_ = linear.data.double()
+            linear.data = (W_.transpose(1,2) * layernorm.weight.double()).transpose(1,2).to(linear_dtype)
 
         if hasattr(layernorm, "bias") and layernorm.bias is not None:
             if linear.bias is None:
                 linear.bias = torch.nn.Parameter(torch.zeros(linear.out_features, dtype=torch.float64))
             linear.bias.data = linear.bias.data.double() + torch.matmul(W_, layernorm.bias.double())
             linear.bias.data = linear.bias.data.to(linear_dtype)
+            layernorm.bias.zero_()
 
 
 def bake_mean_into_linear(linear: torch.nn.Linear) -> None:
@@ -104,7 +109,7 @@ def fuse_layer_norms(model, device=None, llm_rotate=True):
 
     # Embedding fusion
     for W in model_utils.get_embeddings(**kwargs):
-        if model_type in [model_utils.LLAMA_MODEL, model_utils.QWEN_MODEL, model_utils.QWEN2_5_VL_MODEL,  model_utils.QWEN3_VL_MODEL]:
+        if model_type in [model_utils.LLAMA_MODEL, model_utils.QWEN_MODEL, model_utils.QWEN2_5_VL_MODEL,  model_utils.QWEN3_VL_MODEL,model_utils.QWEN3_VL_MOE_MODEL]:
             continue
         W_ = W.weight.data.double()
         W.weight.data = (W_ - W_.mean(dim=-1, keepdim=True)).to(W.weight.data.dtype)
@@ -121,7 +126,7 @@ def fuse_layer_norms(model, device=None, llm_rotate=True):
         )
         model.model.visual.merger.ln_q.weight.fill_(1.0)
 
-    elif model_type == model_utils.QWEN3_VL_MODEL:
+    elif model_type == model_utils.QWEN3_VL_MODEL or model_type==model_utils.QWEN3_VL_MOE_MODEL:
         bake_mean_into_conv(model.visual.patch_embed.proj)
 
         for layer in model.visual.blocks:
@@ -199,6 +204,18 @@ def fuse_layer_norms(model, device=None, llm_rotate=True):
                 ],
             )
             fuse_ln_linear(layer.final_layer_norm, [layer.fc1])
+        elif model_type in [
+            model_utils.QWEN3_VL_MOE_MODEL,
+        ]:
+            fuse_ln_linear(layer.post_attention_layernorm, [layer.mlp.gate,layer.mlp.experts.gate_up_proj])
+            fuse_ln_linear(
+                layer.input_layernorm,
+                [
+                    layer.self_attn.q_proj,
+                    layer.self_attn.k_proj,
+                    layer.self_attn.v_proj,
+                ],
+            )
         else:
             raise ValueError(f"Unknown model type {model_type}")
 
@@ -215,7 +232,7 @@ def fuse_layer_norms(model, device=None, llm_rotate=True):
         model_utils.get_pre_head_layernorm(**kwargs),
         [model_utils.get_lm_head(**kwargs)],
     )
-    if model_type in [model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL]:
+    if model_type in [model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL,model_utils.QWEN3_VL_MOE_MODEL]:
        model.model.language_model.norm.weight.fill_(1.0)
        model.model.language_model.norm.fuse_weight = True
     else:
@@ -534,7 +551,7 @@ def rotate_attention_output(layer, Q, model_type) -> None:
         W = layer.self_attn.o_proj
     elif model_type == model_utils.OPT_MODEL:
         W = layer.self_attn.out_proj
-    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL):
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL,model_utils.QWEN3_VL_MOE_MODEL):
         try:
             W = layer.self_attn.o_proj
         except:
@@ -571,11 +588,16 @@ def rotate_mlp_input(layer, Q, model_type):
         mlp_inputs = [layer.fc1]
     elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
         mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
-    elif model_type == model_utils.QWEN3_VL_MODEL:
+    elif model_type == model_utils.QWEN3_VL_MODEL or model_type == model_utils.QWEN3_VL_MOE_MODEL:
         try:
             mlp_inputs = [layer.mlp.linear_fc1]
+            llm_part = False
         except:
-            mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+            if model_type == model_utils.QWEN3_VL_MOE_MODEL:
+                mlp_inputs = [layer.mlp.experts.gate_up_proj, layer.mlp.gate]
+            else:
+                mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+            llm_part = True
     elif model_type == model_utils.QWEN3MOE_MODEL:
         mlp_inputs = [layer.mlp.gate]
         for expert in layer.mlp.experts:
@@ -584,13 +606,21 @@ def rotate_mlp_input(layer, Q, model_type):
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
-    for W in mlp_inputs:
-        dtype = W.weight.dtype
-        W_ = W.weight.data.to(dtype=torch.float64)
+    for W in mlp_inputs:        
+        #if model_type == model_utils.QWEN3_VL_MOE_MODEL and llm_part:
+        try:
+            dtype = W.dtype
+            W_ = W.data.to(dtype=torch.float64)
+        except:
+            dtype = W.weight.dtype
+            W_ = W.weight.data.to(dtype=torch.float64)
         if W_.shape[-1] != Q.shape[0]:
-            origin_shape = W_.shape
-            W_ = W_.reshape(-1, Q.shape[0])
-            W.weight.data = torch.matmul(W_, Q).to(dtype=dtype).reshape(origin_shape)
+            if model_type == model_utils.QWEN3_VL_MOE_MODEL and llm_part:
+                W.data = torch.matmul(Q.T, W_).to(dtype=dtype)
+            else:
+                origin_shape = W_.shape
+                W_ = W_.reshape(-1, Q.shape[0])
+                W.weight.data = torch.matmul(W_, Q).to(dtype=dtype).reshape(origin_shape)
         else:
             W.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
 
@@ -625,31 +655,45 @@ def rotate_mlp_output(layer, Q, model_type):
         W = layer.fc2
     elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
         W = layer.mlp.down_proj
-    elif model_type == model_utils.QWEN3_VL_MODEL:
+    elif model_type == model_utils.QWEN3_VL_MODEL or model_type == model_utils.QWEN3_VL_MOE_MODEL:
         try:
             W = layer.mlp.linear_fc2
+            llm_part = False
         except:
-            W = layer.mlp.down_proj
+            if model_type == model_utils.QWEN3_VL_MOE_MODEL:
+                W = layer.mlp.experts.down_proj
+            else:
+                W = layer.mlp.down_proj
+            llm_part = True
     else:
         raise ValueError(f"Unknown model type {model_type}")
-
-    dtype = W.weight.data.dtype
-    W_ = W.weight.data.to(dtype=torch.float64)
+    if model_type == model_utils.QWEN3_VL_MOE_MODEL and llm_part:
+        dtype = W.dtype
+        W_ = W.data.to(dtype=torch.float64)
+    else:
+        dtype = W.weight.dtype
+        W_ = W.weight.data.to(dtype=torch.float64)
     if Q.shape[0] != W_.shape[0]:
-        origin_shape = W_.shape
-        W_ = W_.reshape(Q.shape[0], -1)
-        W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype).reshape(origin_shape)
+        if model_type == model_utils.QWEN3_VL_MOE_MODEL and llm_part:
+            W.data = torch.matmul(W_,Q).to(dtype=dtype)
+            # origin_shape = W_.shape
+            # W_ = W_.reshape(Q.shape[0], -1)
+            # W.data = torch.matmul(Q.T, W_).to(dtype=dtype).reshape(origin_shape)
+        else:
+            origin_shape = W_.shape
+            W_ = W_.reshape(Q.shape[0], -1)
+            W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype).reshape(origin_shape)
     else:
         W.weight.data = torch.matmul(Q.T, W_).to(dtype=dtype)
-
-    if W.bias is not None:
-        b = W.bias.data.to(dtype=torch.float64)
-        if Q.shape[0] != b.shape[0]:
-            origin_shape = b.shape
-            b = b.reshape(Q.shape[0], -1)
-            W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
-        else:
-            W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+    if hasattr(W,'bias'):
+        if W.bias is not None:
+            b = W.bias.data.to(dtype=torch.float64)
+            if Q.shape[0] != b.shape[0]:
+                origin_shape = b.shape
+                b = b.reshape(Q.shape[0], -1)
+                W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
+            else:
+                W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
 
 
 def matmul_hadU_cuda_had(X, hadK, transpose=False):
@@ -720,10 +764,10 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
 
 
 @torch.inference_mode()
-def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate=False):
+def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate=True):
     model_type = model_utils.model_type_extractor(model)
 
-    llm_hidden_size = model.config.hidden_size if (model_type != model_utils.QWEN3_VL_MODEL) else model.config.text_config.hidden_size
+    llm_hidden_size = model.config.hidden_size if (model_type != model_utils.QWEN3_VL_MODEL and model_type !=model_utils.QWEN3_VL_MOE_MODEL) else model.config.text_config.hidden_size
 
     if quarot_matrix_size is None:
         Q = get_orthogonal_matrix(llm_hidden_size, rotate_mode, device=device)
@@ -742,9 +786,9 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate
             Q[i : i + quarot_matrix_size, i : i + quarot_matrix_size] = local_Q
 
     config = model.config
-    num_heads = config.num_attention_heads if (model_type != model_utils.QWEN3_VL_MODEL) else config.text_config.num_attention_heads
-    model_dim = config.hidden_size  if (model_type != model_utils.QWEN3_VL_MODEL) else config.text_config.hidden_size
-    if model_type != model_utils.QWEN3_VL_MODEL:
+    num_heads = config.num_attention_heads if (model_type != model_utils.QWEN3_VL_MODEL and model_type !=model_utils.QWEN3_VL_MOE_MODEL) else config.text_config.num_attention_heads
+    model_dim = config.hidden_size  if (model_type != model_utils.QWEN3_VL_MODEL and model_type !=model_utils.QWEN3_VL_MOE_MODEL) else config.text_config.hidden_size
+    if (model_type != model_utils.QWEN3_VL_MODEL) and (model_type !=model_utils.QWEN3_VL_MOE_MODEL):
         head_dim = model_dim // num_heads
     else:
         if not hasattr(model.config.text_config, "head_dim"):
@@ -756,7 +800,7 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
         rotate_qwen2_5_vl_visual_model(model.model.visual)
-    elif model_type == model_utils.QWEN3_VL_MODEL:
+    elif model_type == model_utils.QWEN3_VL_MODEL or model_type==model_utils.QWEN3_VL_MOE_MODEL:
         rotate_qwen3_vl_visual_model(model.model, model_type)
 
     if not llm_rotate:
@@ -766,7 +810,7 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
         rotate_qwen2_5_vl_embeddings(model.model, Q)
-    elif model_type == model_utils.QWEN3_VL_MODEL:
+    elif model_type == model_utils.QWEN3_VL_MODEL or model_type == model_utils.QWEN3_VL_MOE_MODEL:
         rotate_qwen3_vl_embeddings(model.model, Q)
     else:
         rotate_embeddings(model, Q)
