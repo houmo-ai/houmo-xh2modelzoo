@@ -41,7 +41,7 @@ class LLMConverter:
             converter_cls = Qwen2_5_VLConverterXH2a
         elif architecture == "Qwen3VLForConditionalGeneration":
             from .models.qwen3_vl import Qwen3_VLConverterXH2a
-            
+
             converter_cls = Qwen3_VLConverterXH2a
         elif architecture == "Qwen2ForCausalLM":
             if hasattr(config, "quantization_config"):
@@ -83,9 +83,12 @@ class LLMConverter:
                     from .models._qwen3 import Qwen3GPTQConverterXH2a
 
                     converter_cls = Qwen3GPTQConverterXH2a
-                elif hasattr(config, "quantization_config") and config.quantization_config["quant_method"].lower() == "auto-round":
+                elif (
+                    hasattr(config, "quantization_config")
+                    and config.quantization_config["quant_method"].lower() == "auto-round"
+                ):
                     from .models._qwen3 import Qwen3GPTQConverterXH2a
-                    
+
                     converter_cls = Qwen3GPTQConverterXH2a
                 else:
                     raise ValueError(f"Unsupported quantization method: {config.quantization_config.quant_method}")
@@ -137,6 +140,10 @@ class LLMConverter:
             from .models.minicpmo.minicpmo_tts_vocos_convert import MinicpmoTTSVocosConverterXH2a
 
             converter_cls = MinicpmoTTSVocosConverterXH2a
+        elif architecture == "Qwen3ForCausalLM_LoRA":
+            from .models.qwen3_legacy_lora.qwen3_converter import Qwen3LegacyLoRAConverterXH2a
+
+            converter_cls = Qwen3LegacyLoRAConverterXH2a
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
 

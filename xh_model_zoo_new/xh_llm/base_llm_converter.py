@@ -4,41 +4,42 @@ import re
 import shutil
 import time
 from functools import cached_property
-from dataclasses import dataclass, field
-from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
-from abc import abstractmethod
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
 import yaml
 from torch import Tensor
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, AutoModelForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    PretrainedConfig,
+)
 from transformers.utils.quantization_config import QuantizationMethod
-
 from xhquant.api import (
     CacheTensor,
     ConfigDict,
-    DeviceType,
     HMONNXGoldenInference,
     PrecisionMode,
     QuantGraph,
     convert_fx_model_to_quanted_model,
     convert_quanted_model_to_hmonnx,
     get_root_logger,
-    release_quanted_model_unused_parameters,
 )
 from xhquant.utils import TimeProfiler
 
-from xh_model_zoo_new.datasets.preprocess.mix_search_preprocess import ms_data_preprocess
-from xh_model_zoo_new.xh_llm.models.builder import wrap_llm_model
+from xh_model_zoo_new.core.converter import Converter
+from xh_model_zoo_new.datasets.preprocess.mix_search_preprocess import (
+    ms_data_preprocess,
+)
 from xh_model_zoo_new.xh_llm.llm_utils._dequant_utils import (
     _dequantize_awq_hf_model,
     _dequantize_gptq_hf_model,
-    _dequantize_gptqmodel_hf_model,
 )
+from xh_model_zoo_new.xh_llm.models.builder import wrap_llm_model
+
 from .base_llm_converter_config import BaseLLMConverterConfig
-from xh_model_zoo_new.core.converter import Converter, ConverterConfig
 
 
 class BaseLLMConverter(Converter):
@@ -102,7 +103,7 @@ class BaseLLMConverter(Converter):
             and hf_config.quantization_config["quant_method"].lower() == "auto-round"
         ):
             # from auto_round import AutoRoundConfig ##must import for auto-round format
-            from modelscope import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoModelForCausalLM
 
             native_model = AutoModelForCausalLM.from_pretrained(
                 hf_model_dir, torch_dtype="auto", revision="14dbc8", **kwargs
@@ -115,7 +116,6 @@ class BaseLLMConverter(Converter):
             and ("gptqmodel" in str(hf_config.quantization_config["meta"].get("quantizer", None)))
         ):
             from gptqmodel import GPTQModel
-            from gptqmodel.models.auto import check_and_get_model_definition
 
             kwargs["device"] = kwargs.pop("device_map", "cpu")
             native_model = GPTQModel.from_quantized(hf_model_dir, **kwargs)
@@ -137,54 +137,6 @@ class BaseLLMConverter(Converter):
             native_model = self.dequantize_hf_model(native_model)
         if self.config.quant_weight is not None:
             self.load_quant_weight(self.config.quant_weight, native_model)
-        self.token_embedding = native_model.get_input_embeddings()
-        return native_model
-
-    def load_hf_model(self, hf_model_dir: str, **kwargs) -> nn.Module:
-        hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-
-        if hasattr(hf_config, "quantization_config"):
-            # 1. Load model quantized by gptqmodel
-            if (
-                hf_config.quantization_config["quant_method"].lower() == "gptq"
-                and hf_config.quantization_config.get("meta", None) is not None
-                and ("gptqmodel" in str(hf_config.quantization_config["meta"].get("quantizer", None)))
-            ):
-                from gptqmodel import GPTQModel
-
-                kwargs["device"] = kwargs.pop("device_map", "cpu")
-                native_model = GPTQModel.from_quantized(hf_model_dir, **kwargs).model
-                native_model = _dequantize_gptqmodel_hf_model(native_model)
-
-            # 2. Load model quantized by auto-round
-            elif hf_config.quantization_config["quant_method"].lower() == "auto-round":
-                from modelscope import AutoModelForCausalLM, AutoTokenizer
-
-                native_model = AutoModelForCausalLM.from_pretrained(
-                    hf_model_dir, torch_dtype="auto", revision="14dbc8", **kwargs
-                )
-            # 3. Load model quantized by other methods, like autogptq,autoawq,etc.
-            else:
-                native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-                native_model = self.dequantize_hf_model(native_model)
-
-        else:
-            from transformers import AutoModelForCausalLM
-
-            native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-            assert not hasattr(native_model, "hf_quantizer")
-
-        if hasattr(native_model.config, "tie_word_embeddings") and native_model.config.tie_word_embeddings:  # type: ignore
-            old_torchscript = native_model.config.torchscript  # type: ignore
-            native_model.config.torchscript = True  # type: ignore
-            native_model.tie_weights()  # type: ignore
-            native_model.config.tie_word_embeddings = False  # type: ignore
-            native_model.config.torchscript = old_torchscript  # type: ignore
-        native_model.eval()
-
-        if self.config.quant_weight is not None:
-            self.load_quant_weight(self.config.quant_weight, native_model)
-
         self.token_embedding = native_model.get_input_embeddings()
         return native_model
 
@@ -242,7 +194,12 @@ class BaseLLMConverter(Converter):
         hf_config, config = self.hf_config, self.config
         num_decoder_layers = 1 if config.only_first_block else hf_config.num_hidden_layers
         head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
-        kv_cache_shape = [1, hf_config.num_key_value_heads, config.context_length, head_dim]
+        kv_cache_shape = [
+            1,
+            hf_config.num_key_value_heads,
+            config.context_length,
+            head_dim,
+        ]
         past_key_caches = [
             CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_decoder_layers)
         ]
@@ -258,9 +215,9 @@ class BaseLLMConverter(Converter):
             assert input_embeds.shape[0] == 1, "only support batch size 1"
             seq_length = input_embeds.shape[1]
             input_embeds = input_embeds.to(torch.device("cpu"))
-            assert (
-                seq_length <= config.input_sequence_length
-            ), f"Input sequence length is too long. max input sequence length is {config.input_sequence_length} but got {seq_length}"
+            assert seq_length <= config.input_sequence_length, (
+                f"Input sequence length is too long. max input sequence length is {config.input_sequence_length} but got {seq_length}"
+            )
             if config.input_sequence_length > seq_length:
                 padding_embedding = torch.zeros(1, config.input_sequence_length - seq_length, input_embeds.shape[-1])
                 input_embeds = torch.cat([input_embeds, padding_embedding], dim=1)
@@ -274,12 +231,14 @@ class BaseLLMConverter(Converter):
             assert input_ids.shape[0] == 1, "only support batch size 1"
             input_ids = input_ids.to(self.token_embedding.weight.device)
             seq_length = input_ids.shape[1]
-            assert (
-                seq_length <= config.input_sequence_length
-            ), f"Input sequence length is too long. max input sequence length is {config.input_sequence_length} but got {seq_length}"
+            assert seq_length <= config.input_sequence_length, (
+                f"Input sequence length is too long. max input sequence length is {config.input_sequence_length} but got {seq_length}"
+            )
             if seq_length < config.input_sequence_length:
                 padding_input_ids = torch.zeros(
-                    (1, config.input_sequence_length - seq_length), dtype=input_ids.dtype, device=input_ids.device
+                    (1, config.input_sequence_length - seq_length),
+                    dtype=input_ids.dtype,
+                    device=input_ids.device,
                 )
                 input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
             input_embeds = self.token_embedding(input_ids)
@@ -289,7 +248,13 @@ class BaseLLMConverter(Converter):
             else torch.tensor([0], dtype=torch.int32, device=input_ids.device)
         )
         current_input_length = current_input_length or torch.tensor([seq_length], dtype=torch.int32)
-        inputs = (input_embeds, past_seq_length, current_input_length, past_key_caches, past_value_caches)
+        inputs = (
+            input_embeds,
+            past_seq_length,
+            current_input_length,
+            past_key_caches,
+            past_value_caches,
+        )
         return inputs
 
     def _register_wrap_module(self, *args, **kwargs):
@@ -341,7 +306,10 @@ class BaseLLMConverter(Converter):
     def native_model(self) -> nn.Module:
         with TimeProfiler("load_hf_model", self.logger) as tp:
             return self.load_hf_model(
-                self.hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
+                self.hf_model_path,
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+                device_map="cpu",
             )
 
     @cached_property
@@ -373,7 +341,7 @@ class BaseLLMConverter(Converter):
                 work_dir
                 / "hmonnx"
                 / "prefill"
-                / f"{Path(self.hf_model_path).name}-{self.config.quant_scheme.target_device}-{self.config.context_length//1024}k-{self.config.quant_scheme.quant_type}_prefill.onnx"
+                / f"{Path(self.hf_model_path).name}-{self.config.quant_scheme.target_device}-{self.config.context_length // 1024}k-{self.config.quant_scheme.quant_type}_prefill.onnx"
             )
             prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
             self.export_to_hmonnx(quanted_model, input_args, str(prefill_onnx_file))
@@ -395,7 +363,7 @@ class BaseLLMConverter(Converter):
                 work_dir
                 / "hmonnx"
                 / "decode"
-                / f"{Path(self.hf_model_path).name}-{self.config.quant_scheme.target_device}-{self.config.context_length//1024}k-{self.config.quant_scheme.quant_type}_decoder.onnx"
+                / f"{Path(self.hf_model_path).name}-{self.config.quant_scheme.target_device}-{self.config.context_length // 1024}k-{self.config.quant_scheme.quant_type}_decoder.onnx"
             )
             decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
             self.export_to_hmonnx(quanted_model, decode_input_args, str(decode_onnx_file))
@@ -476,6 +444,10 @@ class BaseLLMConverter(Converter):
 
     @classmethod
     def convert_and_export(
-        cls, hf_model_path: str, config: BaseLLMConverterConfig, output_dir: str, generate_golden: bool = False
+        cls,
+        hf_model_path: str,
+        config: BaseLLMConverterConfig,
+        output_dir: str,
+        generate_golden: bool = False,
     ):
         return cls(hf_model_path, config).export(output_dir, generate_golden)

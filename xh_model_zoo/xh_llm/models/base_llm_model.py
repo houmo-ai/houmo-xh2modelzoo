@@ -18,7 +18,9 @@ from .generation_mixin import BaseGenerationMixin
 
 
 def qlinear_cuda_old_converter(self: nn.Module):
-    from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
+    from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
+        QuantLinear as CudaOldQuantLinear,
+    )
 
     assert isinstance(self, CudaOldQuantLinear)
     if self.bits in [2, 4, 8]:
@@ -207,9 +209,9 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     # diff = quant_weight.to(torch.int32) - quant_weight
     # error = diff.abs().float()
     # assert torch.allclose(error, t.tensor(0.0), atol=1e-3), f"{error.max()}"
-    assert (
-        quant_weight.max() < maxq and quant_weight.min() >= -maxq
-    ), f"min={quant_weight.min()}, max={quant_weight.max()}, not in [{-maxq}, {maxq})"
+    assert quant_weight.max() < maxq and quant_weight.min() >= -maxq, (
+        f"min={quant_weight.min()}, max={quant_weight.max()}, not in [{-maxq}, {maxq})"
+    )
     if hasattr(self, "qweight"):
         delattr(self, "qweight")
     if hasattr(self, "qzeros"):
@@ -226,7 +228,6 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
 
 
 class LLMBaseModel(BaseModel):
-
     def __init__(
         self,
         hf_model: str,
@@ -269,7 +270,7 @@ class LLMBaseModel(BaseModel):
         if self._default_pad_token_id is None or self._default_pad_token_id == 0:
             try:
                 self._default_pad_token_id = self.tokenizer.pad_token_id
-            except:
+            except Exception:
                 pass
         return self._default_pad_token_id
 
@@ -348,11 +349,21 @@ class LLMBaseModel(BaseModel):
 
         QuantLinear = hf_quantizer.optimum_quantizer.quant_linear  # type: ignore
         if is_auto_gptq_available():
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as Exllamav2QuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
+            from auto_gptq.nn_modules.qlinear.qlinear_cuda import (
+                QuantLinear as GeneralQuantLinear,
+            )
+            from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import (
+                QuantLinear as CudaOldQuantLinear,
+            )
+            from auto_gptq.nn_modules.qlinear.qlinear_exllama import (
+                QuantLinear as ExllamaQuantLinear,
+            )
+            from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import (
+                QuantLinear as Exllamav2QuantLinear,
+            )
+            from auto_gptq.nn_modules.qlinear.qlinear_marlin import (
+                QuantLinear as MarlinQuantLinear,
+            )
 
             if QuantLinear is GeneralQuantLinear:
                 converter = general_qlinear_converter
@@ -392,7 +403,10 @@ class LLMBaseModel(BaseModel):
 
         import compressed_tensors.quantization.lifecycle.forward
         from compressed_tensors.linear.compressed_linear import CompressedLinear
-        from compressed_tensors.quantization.quant_args import QuantizationArgs, QuantizationStrategy
+        from compressed_tensors.quantization.quant_args import (
+            QuantizationArgs,
+            QuantizationStrategy,
+        )
 
         hf_model = native_hf_model
         for _, module in hf_model.named_modules():  # type: ignore
@@ -415,7 +429,15 @@ class LLMBaseModel(BaseModel):
                     self._args = args
                     self._original_shape = x.shape
                     return _process_quantization_orig(
-                        x, scale, zero_point, args, g_idx, dtype, do_quantize, do_dequantize, global_scale
+                        x,
+                        scale,
+                        zero_point,
+                        args,
+                        g_idx,
+                        dtype,
+                        do_quantize,
+                        do_dequantize,
+                        global_scale,
                     )
 
                 def _module_dequantize(
@@ -488,9 +510,9 @@ class LLMBaseModel(BaseModel):
             assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
             seq_length = input_ids.shape[1]
             input_ids = input_ids.to(self.execution_device)
-            assert (
-                seq_length <= self.input_sequence_length
-            ), f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
+            assert seq_length <= self.input_sequence_length, (
+                f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
+            )
             if self.input_sequence_length > seq_length:
                 padding_input_ids = torch.zeros((1, self.input_sequence_length - seq_length), dtype=torch.long).to(
                     self.execution_device
@@ -502,9 +524,9 @@ class LLMBaseModel(BaseModel):
             assert inputs_embeds.shape[0] == 1, "Batch size should be 1 in inference mode."
             seq_length = inputs_embeds.shape[1]
             inputs_embeds = inputs_embeds.to(self.execution_device)
-            assert (
-                seq_length <= self.input_sequence_length
-            ), "Input sequence length should be larger than input_sequence_length."
+            assert seq_length <= self.input_sequence_length, (
+                "Input sequence length should be larger than input_sequence_length."
+            )
             if self.input_sequence_length > seq_length:
                 padding_token_id = self.pad_token_id
                 padding_input_ids = (
@@ -531,7 +553,13 @@ class LLMBaseModel(BaseModel):
         )
 
     def prepare_inputs_for_graph(self, data: Union[dict, tuple, list]):
-        inputs_embeds, past_seq_length, seg_length, past_key_caches, past_value_caches = self.prepare_inputs(data)
+        (
+            inputs_embeds,
+            past_seq_length,
+            seg_length,
+            past_key_caches,
+            past_value_caches,
+        ) = self.prepare_inputs(data)
         # 从CacheTensor转为Tensor
         # past_key_caches = [t.data for t in past_key_caches]
         # past_value_caches = [t.data for t in past_value_caches]
@@ -589,7 +617,6 @@ class LLMBaseModel(BaseModel):
         past_key_caches: List[Tensor],
         past_value_caches: List[Tensor],
     ):
-
         logits = self(
             inputs_embeds,
             past_seq_length,

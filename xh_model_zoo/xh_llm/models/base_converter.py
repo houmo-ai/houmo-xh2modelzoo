@@ -206,9 +206,9 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     # diff = quant_weight.to(torch.int32) - quant_weight
     # error = diff.abs().float()
     # assert torch.allclose(error, t.tensor(0.0), atol=1e-3), f"{error.max()}"
-    assert (
-        quant_weight.max() < maxq and quant_weight.min() >= -maxq
-    ), f"min={quant_weight.min()}, max={quant_weight.max()}, not in [{-maxq}, {maxq})"
+    assert quant_weight.max() < maxq and quant_weight.min() >= -maxq, (
+        f"min={quant_weight.min()}, max={quant_weight.max()}, not in [{-maxq}, {maxq})"
+    )
     if hasattr(self, "qweight"):
         delattr(self, "qweight")
     if hasattr(self, "qzeros"):
@@ -413,9 +413,20 @@ class HFTransfromersConverter(BaseConverter):
         return hf_model
 
     def dequantize_hf_model(self, native_hf_model: nn.Module):
+        if (
+            not hasattr(native_hf_model.config, "quantization_config")
+            or native_hf_model.config.quantization_config is None
+        ):
+            return native_hf_model
+
         hf_model = native_hf_model
         if hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ:
             hf_model = self._dequantize_awq_hf_model(hf_model)
         elif hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ:
             hf_model = self._dequantize_gptq_hf_model(hf_model)
         return hf_model
+
+    def get_hf_model(self, hf_model_dir: str, **kwargs) -> Any:
+        native_hf_model = self.load_hf_model(hf_model_dir, **kwargs)
+        native_hf_model = self.dequantize_hf_model(native_hf_model)
+        return native_hf_model

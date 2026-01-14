@@ -5,7 +5,7 @@ dependencies = [
   "yapf",
   "ipython",
   "addict",
-  "numpy (>=2.1.1, < 2.2.0)",
+  "numpy (>=2.3.3, < 2.4.0)",
   "pyyaml",
   "rich",
   "termcolor",
@@ -13,7 +13,7 @@ dependencies = [
   "multiprocess",
   "onnx ( >=1.16.2, <1.17.0)",
   "prettytable",
-  "protobuf (>=3.20.3, <3.21.0)",
+  "protobuf (>=5.29.3, <6.33.2)",
   "terminaltables",
   "pytest",
   "networkx",
@@ -69,16 +69,16 @@ version = "0.9.0"
 package-mode = true
 packages = [{include = "xh_model_zoo"}]
 
-[tool.poetry.group.torch24]
-optional = true
+# [tool.poetry.group.torch24]
+# optional = true
 
-[tool.poetry.group.torch24.dependencies]
-# onnxruntime = "1.19.2"
-onnxruntime-gpu = {version = "^1.20.1", source = "onnxruntime-cuda-11"}
-onnxscript = "0.2.2"
-torch = {version = "2.4.1", source = "pytorch_cu118"}
-torchaudio = {version = "2.4.1", source = "pytorch_cu118"}
-torchvision = {version = "0.19.1", source = "pytorch_cu118"}
+# [tool.poetry.group.torch24.dependencies]
+# # onnxruntime = "1.19.2"
+# onnxruntime-gpu = {version = "^1.20.1", source = "onnxruntime-cuda-11"}
+# onnxscript = "0.2.2"
+# torch = {version = "2.4.1", source = "pytorch_cu118"}
+# torchaudio = {version = "2.4.1", source = "pytorch_cu118"}
+# torchvision = {version = "0.19.1", source = "pytorch_cu118"}
 
 # [tool.poetry.group.torch27]
 # optional = true
@@ -159,6 +159,16 @@ line_length = 120
 section_whitelines = 1
 sequence_style = 'keep_style'
 whitelines = 1
+
+[tool.ruff]
+# 设置最大行长
+line-length = 120
+
+[tool.ruff.lint]
+# 其他 lint 设置...
+
+[tool.ruff.format]
+# 其他 format 设置...
 
 [tool.black]
 extend-exclude = '''

@@ -2,11 +2,11 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional
 
 import torch
 import yaml
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Qwen3ForCausalLM
 from xhquant.api import CacheTensor
 
 from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
@@ -24,7 +24,6 @@ from xhquant.api import (  # type: ignore # isort:skip
     create_quant_config,
     is_ssfp_quant_config,
     PrecisionMode,
-    CacheTensor,
 )
 
 
@@ -42,9 +41,9 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
         assert not hasattr(native_model, "hf_quantizer")
-        assert isinstance(
-            native_model, Qwen3ForCausalLM
-        ), f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, Qwen3ForCausalLM), (
+            f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        )
         native_model: Qwen3ForCausalLM = native_model  # type: ignore
 
         if native_model.config.tie_word_embeddings:  # type: ignore
@@ -205,7 +204,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -288,9 +287,9 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
         assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
         assert not hasattr(native_model, "hf_quantizer")
-        assert isinstance(
-            native_model, Qwen3ForCausalLM
-        ), f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, Qwen3ForCausalLM), (
+            f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
+        )
         native_model: Qwen3ForCausalLM = native_model  # type: ignore
 
         if native_model.config.tie_word_embeddings:  # type: ignore
@@ -453,7 +452,7 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
