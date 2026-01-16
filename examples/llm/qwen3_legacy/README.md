@@ -42,7 +42,7 @@ python examples/llm/qwen3_legacy/qwen3_xh2a_common_quant.py  --model data/models
 #### 2. 导出
 
 ```bash
-python examples/llm/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w4a8h0_ssfp --quant-weight work_dirs/Qwen3-8B_quarot_gptq/quarot_gptq-state-dict.safetensors
+python examples/llm/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py --model data/models/Qwen3-8B/ --context-length 2048 --input-sequence-length 256 --quant-type w4a8h0_ssfp --quant-weight work_dirs/qwen3_8b_instruct_xh2a_2k_quarot_gptq_4bit/quarot_gptq-state-dict.safetensors
 ```
 
 #### 3. GPU仿真

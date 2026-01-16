@@ -100,6 +100,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             "tokenizer_config.json",
             "vocab.json",
             "tokenizer.json",
+            "chat_template.jinja",
         ]
         for cfg_file in hf_config_files:
             src_file = Path(hf_model_path) / cfg_file

@@ -217,10 +217,10 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         assert Path(self.config.lora_checkpoint).exists(), f"LoRA checkpoint {self.config.lora_checkpoint} not exists"
 
     def load_hf_model(self, hf_model_dir: str, **kwargs) -> nn.Module:
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        assert not hasattr(config, "quantization_config")
+        # config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        # assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        assert not hasattr(native_model, "hf_quantizer")
+        # assert not hasattr(native_model, "hf_quantizer")
         assert isinstance(native_model, Qwen3ForCausalLM), (
             f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
         )
@@ -244,6 +244,11 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
             hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
         )
         resume_from = self.config.quant_weight
+
+        # 融合GPTQ权重
+        resume_from = self.config.quant_weight
+        if resume_from is not None:
+            self.load_quant_weight(resume_from, native_model)
 
         # load lora权重
         lora_checkpoint = self.config.lora_checkpoint
@@ -292,6 +297,7 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
             "tokenizer_config.json",
             "vocab.json",
             "tokenizer.json",
+            "chat_template.jinja",
         ]
         for cfg_file in hf_config_files:
             src_file = Path(hf_model_path) / cfg_file
@@ -496,5 +502,7 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         Qwen3LegacyLoRAConverterXH2a(config)._convert(hf_model_path, output_dir)
