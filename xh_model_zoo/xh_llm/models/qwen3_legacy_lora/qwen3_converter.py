@@ -424,7 +424,9 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         xh_builder.USER_FX_TRANS.append(lora_trans)
 
         logger.info("********************* start export prefill model *********************")
-
+        inputs = list(inputs)
+        lora_mask = torch.tensor([1.0], dtype=torch.float16)
+        inputs.append(lora_mask)  # 增加lora_mask输入
         quanted_model = convert_fx_model_to_quanted_model(
             wraped_qwen_model,
             inputs,
@@ -453,9 +455,7 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         input_names.append("lora_mask")
-        inputs = list(inputs)
-        lora_mask = torch.tensor([1.0], dtype=torch.float16)
-        inputs.append(lora_mask)  # 增加lora_mask输入
+
         convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
 

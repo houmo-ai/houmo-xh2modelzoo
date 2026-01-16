@@ -121,8 +121,8 @@ def apply_lora_to_linear(fronted_model: FrontendGraph, inputs, lora_scale: float
 
     assert last_placeholder_node is not None, "No placeholder node found in the graph"
     with fronted_model.graph.inserting_after(last_placeholder_node):
-        lora_mask_node = fronted_model.graph.placeholder("lora_mask", default_value=None)
-    inputs.append(torch.tensor([1.0]))  # 输入增加lora_mask
+        lora_mask_node = fronted_model.graph.placeholder("lora_mask", default_value=1.0)
+    # inputs.append(torch.tensor([1.0]))  # 输入增加lora_mask
 
     logger.info("********************** apply lora **********************")
     pbar = tqdm(list(lora_nodes.values()))
