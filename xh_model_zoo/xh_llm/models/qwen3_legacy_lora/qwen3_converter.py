@@ -272,6 +272,7 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         input_sequence_length = config.input_sequence_length
         assert target_device == DeviceType.XH2a, f"Only support convert to XH2a, but got {target_device}"
         quant_type = config.quant_scheme.quant_type
+        config.quant_scheme.ops["LoRALinear"] = "w8a8h1_sefp"
         quant_config = create_quant_config(config.quant_scheme)
         quant_config = ConfigDict(quant_config)
 
