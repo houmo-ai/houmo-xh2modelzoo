@@ -118,7 +118,7 @@ def main(args):
     xh_xhonnxruntime_config.disable_progress = True
 
     if args.eval_ppl:
-        from xh_model_zoo_new.evaluation.wikippl_eval import evaluate_wikitext
+        from xh_model_zoo_develop.evaluation.wikippl_eval import evaluate_wikitext
         wiki_ppl = evaluate_wikitext(wraped_hf_model, tokenizer, seqlen=256)
         with open(f"{args.eval_ppl}", "w", encoding="utf-8") as f:
             f.write(str(wiki_ppl))

@@ -1,0 +1,300 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+
+This project references, or depends on the following
+third-party software, models, datasets, or tools.
+Each component is licensed under its own respective license.
+
+This declaration only addresses third-party components that 
+require special attention, are not runtime dependencies, and 
+are not included in the project, and advises users to strictly 
+adhere to the terms of the license agreements specified for 
+those third-party dependencies.
+
+DISCLAIMER
+The authors and contributors of this project make no representation
+or warranty regarding third-party software, models, or datasets.
+Use of such components is at the user's own risk.
+
+1. Third-party open source libraries
+----------------------------------------------------------------------
+half (half-precision floating-point library)
+----------------------------------------------------------------------
+Component Name: half
+Version: 2.2.1
+Author / Copyright Holder: Christian Rau <rauy@users.sourceforge.net>
+Copyright Statement: Copyright (c) 2012-2025 Christian Rau <rauy@users.sourceforge.net>
+License:
+MIT License
+License Text:
+https://opensource.org/licenses/MIT
+The "half" library is licensed under the MIT License, which allows use,
+copying, modification, merging, publishing, distribution, sublicensing,
+and/or selling copies of the library, subject to the following condition:
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the software.
+Users are responsible for complying with the MIT License when using,
+redistributing, or modifying the "half" library.
+
+----------------------------------------------------------------------
+tokenizers-cpp
+----------------------------------------------------------------------
+Component Name: tokenizers-cpp
+Source:
+https://github.com/mlc-ai/tokenizers-cpp
+Copyright Statement:
+Copyright (c) the tokenizers-cpp contributors
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/mlc-ai/tokenizers-cpp/blob/main/LICENSE
+The tokenizers-cpp library is licensed under the Apache License, Version 2.0,
+which allows use, modification, and distribution of the software in source
+and binary forms, with or without modification, subject to the terms of the
+license.
+
+----------------------------------------------------------------------
+Eigen3 (Linear Algebra Library)
+----------------------------------------------------------------------
+Component Name: Eigen3 (Eigen Linear Algebra Library)
+Version: 3.4.0
+Author / Copyright Holder: Eigen Team (Gaël Guennebaud, Benoit Jacob, et al.)
+Copyright Statement: Copyright (c) 2008-2024 Gaël Guennebaud, Benoit Jacob and others
+License:
+Mozilla Public License Version 2.0 (MPL 2.0)
+License Text:
+https://www.mozilla.org/en-US/MPL/2.0/
+Only MPL 2.0-licensed modules are referenced. The Eigen3 library is licensed 
+under the Mozilla Public License 2.0 (MPL 2.0), which allows use, modification, 
+and distribution of the library under the terms of the license.
+Users are responsible for complying with the MPL 2.0 license when using,
+redistributing, or modifying the Eigen3 library.
+
+----------------------------------------------------------------------
+JSON for Modern C++ (nlohmann/json)
+----------------------------------------------------------------------
+Component Name: JSON for Modern C++ (nlohmann/json)
+Version: 3.12.0
+Author / Copyright Holder: Niels Lohmann
+Copyright Statement: Copyright (c) 2013-2025 Niels Lohmann
+License:
+MIT License
+License Text:
+https://opensource.org/licenses/MIT
+The JSON for Modern C++ library is licensed under the MIT License.
+Users are responsible for complying with the MIT License when using,
+redistributing, or modifying this library.
+
+----------------------------------------------------------------------
+spdlog (Fast C++ Logging Library)
+----------------------------------------------------------------------
+Component Name: spdlog
+Source:
+https://github.com/gabime/spdlog
+Copyright Statement:
+Copyright (c) 2016-present, Gabi Melman <gmelman1@gmail.com>
+License:
+MIT License
+License Text:
+https://opensource.org/licenses/MIT
+The spdlog library is licensed under the MIT License.
+Users are responsible for complying with the MIT License when using,
+redistributing, or modifying spdlog.
+
+2. Datasets
+----------------------------------------------------------------------
+COCO Dataset (Common Objects in Context)
+----------------------------------------------------------------------
+Copyright © Microsoft Corporation
+License:
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+License Text:
+https://creativecommons.org/licenses/by/4.0/
+The COCO dataset is licensed under CC BY 4.0. This project does NOT 
+redistribute the COCO dataset itself. Users must obtain the dataset directly 
+from the official COCO website and provide appropriate credit in accordance 
+with the CC BY 4.0 license.
+
+----------------------------------------------------------------------
+ImageNet Dataset (ILSVRC 2012)
+----------------------------------------------------------------------
+Copyright © ImageNet Organization
+License / Terms of Use:
+ImageNet Terms of Use
+https://www.image-net.org/download?
+The ImageNet dataset is provided for non-commercial research and
+educational purposes only. This project does NOT redistribute the ImageNet dataset.
+Users must obtain the ImageNet dataset directly from the official website.
+
+----------------------------------------------------------------------
+BDD100K/nuScenes/WIDER FACE Datasets
+----------------------------------------------------------------------
+BDD100K: (CC BY-NC-SA 4.0) https://bair.berkeley.edu/blog/2018/05/30/bdd/
+nuScenes: (CC BY-NC-SA 4.0) https://www.nuscenes.org/
+WIDER FACE: (CC BY-NC-ND 4.0) https://shuoyang1213.me/WIDERFACE/
+These datasets are provided for non-commercial research purposes.
+This project does NOT redistribute these datasets.
+
+----------------------------------------------------------------------
+CCPD Dataset
+----------------------------------------------------------------------
+Copyright © CCPD contributors
+License: MIT License
+https://github.com/detectRecog/CCPD
+This project does NOT redistribute the CCPD dataset.
+
+3. Algorithm (Not including only using pretrained models)
+----------------------------------------------------------------------
+Whisper (Automatic Speech Recognition System)
+----------------------------------------------------------------------
+Component Name: Whisper
+Source: https://github.com/openai/whisper
+License: MIT License
+Users are responsible for complying with the MIT License when using, 
+redistributing, or modifying Whisper.
+
+----------------------------------------------------------------------
+bge-m3 and bge-reranker-m3-v2 (FlagEmbedding)
+----------------------------------------------------------------------
+Component Name: bge-m3 / bge-reranker
+Source: https://github.com/FlagOpen/FlagEmbedding
+License: MIT License
+Users are responsible for complying with the MIT License.
+
+----------------------------------------------------------------------
+DeepSeek-R1-0528-Qwen3-8B
+----------------------------------------------------------------------
+Component Name: DeepSeek-R1-0528-Qwen3-8B
+Source: https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+License: MIT License
+Users are responsible for complying with the MIT License.
+
+----------------------------------------------------------------------
+gpt-oss-20b / gpt-oss-120b
+----------------------------------------------------------------------
+Component Name: gpt-oss
+Source: https://modelscope.cn/models/openai-mirror/gpt-oss-20b
+License: Apache License, Version 2.0
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+Qwen3 Series (4B, 8B, 14B, 30B, 32B)
+----------------------------------------------------------------------
+Component Name: Qwen3
+Source: https://modelscope.cn/organization/Qwen
+License: Apache License, Version 2.0
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+Qwen2.5-VL / Qwen3-VL Series
+----------------------------------------------------------------------
+Component Name: Qwen2.5-VL / Qwen3-VL
+Source: https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct
+License: Apache License, Version 2.0
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+MiniCPM-O-2.6 / MiniCPM Series
+----------------------------------------------------------------------
+Component Name: MiniCPM-O-2.6
+Source: https://github.com/OpenBMB/MiniCPM-V
+License: Apache License, Version 2.0
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+Flux
+----------------------------------------------------------------------
+Component Name: Flux
+Source: https://github.com/black-forest-labs/flux
+License: Apache License, Version 2.0
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+Gemma 3
+----------------------------------------------------------------------
+Component Name: Gemma 3
+Source: https://github.com/google/gemma_pytorch
+License: Gemma Terms of Use / Apache 2.0 (Check specific model card)
+Users are responsible for complying with the applicable license terms.
+
+----------------------------------------------------------------------
+Llama 3
+----------------------------------------------------------------------
+Component Name: Llama 3
+Source: https://github.com/meta-llama/llama3
+License: Llama 3 Community License
+Users are responsible for complying with the Llama 3 Community License
+and Acceptable Use Policy.
+
+----------------------------------------------------------------------
+Stable Diffusion 3 (SD3)
+----------------------------------------------------------------------
+Component Name: Stable Diffusion 3
+Source: https://stability.ai/
+License: Stability AI Community License
+Users are responsible for complying with the Stability AI Community License.
+
+----------------------------------------------------------------------
+YOLO Series (YOLOv3 - YOLOv11)
+----------------------------------------------------------------------
+Component Name: YOLO
+Source: https://github.com/ultralytics/ultralytics
+License: AGPL-3.0 (for newer versions like v8/v11), others vary.
+Users are responsible for complying with the applicable AGPL-3.0 license
+or other specific licenses for older versions.
+
+----------------------------------------------------------------------
+CogVLM
+----------------------------------------------------------------------
+Component Name: CogVLM
+Source: https://github.com/THUDM/CogVLM
+License: Apache License, Version 2.0 (Check specific model weights license)
+
+----------------------------------------------------------------------
+InternVL
+----------------------------------------------------------------------
+Component Name: InternVL
+Source: https://github.com/OpenGVLab/InternVL
+License: MIT License / Apache 2.0
+
+----------------------------------------------------------------------
+MinerU 2.5
+----------------------------------------------------------------------
+Component Name: MinerU
+Source: https://github.com/opendatalab/MinerU
+License: Apache License, Version 2.0
+
+----------------------------------------------------------------------
+Kimi MoE
+----------------------------------------------------------------------
+Component Name: Kimi MoE
+Source: https://github.com/MoonshotAI/Kimi-1.5
+License: Apache License, Version 2.0
+
+----------------------------------------------------------------------
+SAM (Segment Anything Model)
+----------------------------------------------------------------------
+Component Name: SAM
+Source: https://github.com/facebookresearch/segment-anything
+License: Apache License, Version 2.0
+
+----------------------------------------------------------------------
+OpenPose
+----------------------------------------------------------------------
+Component Name: OpenPose
+Source: https://github.com/CMU-Perceptual-Computing-Lab/openpose
+License: CMU License (Non-commercial Use Only)
+Users are responsible for complying with the non-commercial restrictions.
+
+----------------------------------------------------------------------
+RT-DETR
+----------------------------------------------------------------------
+Component Name: RT-DETR
+Source: https://github.com/lyuwenyu/RT-DETR
+License: Apache License, Version 2.0
+
+----------------------------------------------------------------------
+PP-OCRv4
+----------------------------------------------------------------------
+Component Name: PP-OCRv4
+Source: https://github.com/PaddlePaddle/PaddleOCR
+License: Apache License, Version 2.0
