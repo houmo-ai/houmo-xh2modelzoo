@@ -1,8 +1,7 @@
 import dataclasses
-from dataclasses import dataclass
-
+from traitlets import default
 from ...llm_convert_config import LLMConvertConfig
-
+from dataclasses import dataclass, field
 
 @dataclass
 class VisualConfig:
@@ -15,4 +14,4 @@ class VisualConfig:
 
 @dataclass
 class Qwen2VLConvertConfig(LLMConvertConfig):
-    visual_config: VisualConfig = VisualConfig()
+    visual_config: VisualConfig = field(default=VisualConfig())

@@ -11,18 +11,18 @@ pipe = ZImagePipeline.from_pretrained(
 )
 pipe.to("cuda")
 
-weights = load_file("/data02/datasets/zimage/diffusion_pytorch_model.safetensors")
-model_dict = pipe.transformer.state_dict()
+# weights = load_file("/data02/datasets/zimage/diffusion_pytorch_model.safetensors")
+# model_dict = pipe.transformer.state_dict()
 
-load_keys = [k for k in weights.keys() if k in model_dict]
-for k in load_keys:
-    model_dict[k] = weights[k]
+# load_keys = [k for k in weights.keys() if k in model_dict]
+# for k in load_keys:
+#     model_dict[k] = weights[k]
 
 
 
 
 # 加载到模型
-pipe.transformer.load_state_dict(model_dict, strict=True)
+# pipe.transformer.load_state_dict(model_dict, strict=True)
 
 # [Optional] Attention Backend
 # Diffusers uses SDPA by default. Switch to Flash Attention for better efficiency if supported:
@@ -34,7 +34,7 @@ pipe.transformer.load_state_dict(model_dict, strict=True)
 # [Optional] CPU Offloading
 # Enable CPU offloading for memory-constrained devices.
 # pipe.enable_model_cpu_offload()
-prompt = "一朵长得像蝴蝶一样缤纷绚丽的奇异花朵，开在丛林中，散发着柔和的光芒"
+prompt = "一个坐在云朵上唱歌的女生，背后一顿五彩的翅膀"
 # 2. Generate Image
 image = pipe(
     prompt=prompt,

@@ -33,6 +33,7 @@ class cus_ZImagePipeline(ZImagePipeline):
         )
         self.token_embedding.weight.data = token_embedding_state_dict["weight"]
         # self.token_embedding.load_state_dict(token_embedding_state_dict)
+        self.wraped_transformer = None
     
     def text_encoder_infer(self, input_ids, attention_mask):
         self._past_seq_length = 0
@@ -97,15 +98,107 @@ class cus_ZImagePipeline(ZImagePipeline):
             ).to(current_input_length.device)
 
             output_hidden = self._text_encoder(
-                sub_inputs_embeds,
-                sub_past_seq_length,
-                sub_current_input_length,
+                sub_inputs_embeds, # [1, 256, 2560
+                sub_past_seq_length, # 0
+                sub_current_input_length, # 28
                 past_key_caches,
                 past_value_caches,
             )
 
         output_hidden = output_hidden[0,:seq_length, :]
         return output_hidden
+
+    def transformer_infer(self, latent_model_input_list, timestep_model_input, prompt_embeds_model_input):
+        # latent = torch.randn(1, 16, 128, 128).cuda()
+        latent = latent_model_input_list[0].cuda()
+        timestep_model_input = timestep_model_input.cuda() * 1000.0
+        cap_feats = prompt_embeds_model_input[0].cuda() # [15, 2560]
+        patch_size = 2
+        f_patch_size = 1
+
+        # latent = torch.load("examples/llm/zimage/dit/input/latent.pt").cuda() # [16, 1, 128, 128]
+        # cap_feats = torch.load("examples/llm/zimage/dit/input/prompt.pt").cuda() # [15, 2560]
+
+        device = "cuda"
+        with torch.no_grad():
+            adaln_input = self.transformer.t_embedder(timestep_model_input).to(torch.float16) 
+
+            (
+                x, # [4096, 64]
+                cap_feats, # [128, 2560]   # [L, 2560]
+                x_size,
+                x_pos_ids,
+                cap_pos_ids,
+                x_pad_mask,
+                cap_pad_mask,
+            ) = self.transformer.patchify_and_embed([latent], [cap_feats], patch_size, f_patch_size) # [16, 1, 128, 128]   [101, 2560]   2 1 
+            x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None     
+
+            valid_len = int(cap_feats[0].shape[0])
+            required_len = int(256) # 256
+
+            # ==================
+            x_freqs = self.transformer.rope_embedder( torch.cat(x_pos_ids, dim=0) ).unsqueeze(0)
+            freqs_cis_expanded = x_freqs.unsqueeze(2)
+            f_real = freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
+            f_imag = freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
+
+            # Attention mask =========
+            attn_mask = torch.zeros((1, 4096), dtype=torch.bool, device=device) # [1,4096]
+            x_mask = attn_mask
+
+            
+            # ------------------------------------------------------------------------------
+            pad_len = required_len - valid_len # 256 -32
+            cap_mask = torch.zeros((1, valid_len), device=device)
+            cap_feats = torch.concat( [ cap_feats[0], torch.zeros(pad_len, cap_feats[0].shape[1]).to(device)], dim=0)# .unsqueeze(0)  # [256, 2560]
+            cap_mask = torch.concat([ cap_mask, torch.ones(pad_len).to(device).unsqueeze(0)*-65504], dim=1)
+            cap_pos_ids = torch.concat(
+                        [ torch.range(0, required_len-1).to(device).unsqueeze(-1), torch.zeros((required_len,2)).to(cap_feats.device) ], dim=1
+                    ).to(torch.long) # [256, 3]
+                    
+            c_freqs_cis = self.transformer.rope_embedder( cap_pos_ids ).unsqueeze(0) # [256, 64]
+            c_freqs_cis_expanded = c_freqs_cis.unsqueeze(2)
+            c_f_real = c_freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
+            c_f_imag = c_freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
+
+            cap_pad_mask = torch.concat( [cap_pad_mask[0], torch.zeros(pad_len, device=device)] ).half().unsqueeze(-1)
+            # ------------------------------------------------------------------------------
+            n_cap_pad_mask = 1 - cap_pad_mask
+
+            # if self.wraped_transformer is None:
+            #     from xh_model_zoo.xh_llm.models.zimage._dit_model import register_wrap_cls as llm_register_wrap_cls
+            #     from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
+            #     from xhquant.api import Config
+
+            #     llm_register_wrap_cls(self.transformer)
+            #     wrap_cfg = Config(
+            #         dict(
+            #             batch_size=1,
+            #             token_len=256
+            #         )
+            #     )
+
+            #     wrap_cfg["f_real"] = f_real.half().repeat([1,1,1,2])
+            #     wrap_cfg["f_imag"] = f_imag.half().repeat([1,1,1,2])
+            #     wrap_cfg["c_f_real"] = c_f_real.half().repeat([1,1,1,2])
+            #     wrap_cfg["c_f_imag"] = c_f_imag.half().repeat([1,1,1,2])
+
+            #     wraped_transformer = wrap_llm_model(self.transformer, wrap_cfg)
+            #     wraped_transformer.cuda()
+            #     wraped_transformer.to(torch.float16)
+            #     self.wraped_transformer = wraped_transformer
+
+            if True:
+                # output = self.wraped_transformer(
+                output = self._transformer(
+                    x[0], x_mask.half(),  adaln_input, # f_real.half(), f_imag.half(),#
+                    cap_feats.half(), cap_mask.half(),  cap_pad_mask, n_cap_pad_mask, # c_f_real.half(), c_f_imag.half(),
+                )
+                # Unpatchify
+                output = output[:, :4096+valid_len]
+                x = self.transformer.unpatchify(list((output).unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
+        return x
 
     def __setup__(self, text_encoder, transformer=None, vae=None):
         """"""
@@ -223,7 +316,7 @@ class cus_ZImagePipeline(ZImagePipeline):
         height = height or 1024
         width = width or 1024
 
-        vae_scale = self.vae_scale_factor * 2
+        vae_scale = 8 * 2
         if height % vae_scale != 0:
             raise ValueError(
                 f"Height must be divisible by {vae_scale} (got {height}). "
@@ -352,9 +445,12 @@ class cus_ZImagePipeline(ZImagePipeline):
                 latent_model_input = latent_model_input.unsqueeze(2)
                 latent_model_input_list = list(latent_model_input.unbind(dim=0))
 
-                model_out_list = self.transformer(
-                    latent_model_input_list, timestep_model_input, prompt_embeds_model_input, return_dict=False # [0]
-                )[0]
+                # model_out_list = self.transformer(
+                #     latent_model_input_list, timestep_model_input, prompt_embeds_model_input, return_dict=False # [0]
+                # )[0]
+                model_out_list = self.transformer_infer(
+                    latent_model_input_list, timestep_model_input, prompt_embeds_model_input #, return_dict=False
+                )
 
                 if apply_cfg:
                     # Perform CFG
@@ -407,10 +503,12 @@ class cus_ZImagePipeline(ZImagePipeline):
             image = latents
 
         else:
-            latents = latents.to(self.vae.dtype)
-            latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+            latents = latents.to(torch.float16)
+            latents = (latents / 0.3611) + 0.1159
 
-            image = self.vae.decode(latents, return_dict=False)[0]
+            # image = self.vae.decode(latents, return_dict=False)[0]
+            image = self._vae(latents)
+
             image = self.image_processor.postprocess(image, output_type=output_type)
 
         return image

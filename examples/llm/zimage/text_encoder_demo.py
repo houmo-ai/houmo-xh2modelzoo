@@ -7,7 +7,7 @@ from pathlib import Path
 from xh_model_zoo.xh_llm.models.zimage import Qwen3LegacyConverterXH2a, Qwen3LegacyInference
 from xh_model_zoo.xh_llm.models.zimage.pipeline_cus import cus_ZImagePipeline
 import argparse
-from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, HMONNXGoldenInference
+from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, HMONNXGoldenInference, Config
 
 def main(args):
     model_name = "/data02/datasets/zimage"
@@ -37,6 +37,15 @@ def main(args):
     text_encoder = HMONNXGoldenInference(text_encoder_prefill)
     text_encoder.exec_device = torch.device("cuda:0")
 
+    hm_vae_path = "work_dirs/zimage/hmonnx/zimage_vae-XH2a-w8a8h1_sefp.onnx"
+    hm_vae = HMONNXGoldenInference(hm_vae_path)
+    hm_vae.exec_device = torch.device("cuda:0")
+
+    hm_dit_path = "work_dirs/zimage/hmonnx/zimage_dit-XH2a-w8a8h1_sefp.onnx"
+    hm_dit = HMONNXGoldenInference(hm_dit_path)
+    hm_dit = hm_dit.cuda()
+    hm_dit.exec_device = torch.device("cuda:0")
+
     pipe.text_encoder = None
     # pipe.vae = None
     del pipe.text_encoder
@@ -51,10 +60,26 @@ def main(args):
     work_dir.mkdir(exist_ok=True, parents=True)
 
     # Qwen3LegacyConverterXH2a(config)._convert(pipe.text_encoder.half(), work_dir)
+
+    # ========= warp transformer =========
+    # from xh_model_zoo.xh_llm.models.zimage._dit_model import register_wrap_cls as llm_register_wrap_cls
+    # from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
+    # llm_register_wrap_cls(pipe.transformer)
+    # wrap_cfg = Config(
+    #     dict(
+    #         batch_size=1,
+    #         token_len=256
+    #     )
+    # )
+    # wraped_transformer = wrap_llm_model(pipe.transformer, wrap_cfg)
+    # wraped_transformer.cuda()
+    # wraped_transformer.to(torch.float16)
+
+    # wraped_transformer = None
     
     inference_engine = Qwen3LegacyInference("work_dirs/zimage/meta.json", fast_mode=True, tokenizer=pipe.tokenizer)
     xhmodel = cus_ZImagePipeline.to_hf_compatible(
-        pipe, text_encoder=inference_engine, vae=None, transformers=None,
+        pipe, text_encoder=inference_engine, vae=hm_vae, transformers=hm_dit,
         meta_info="work_dirs/zimage/meta.json",
     )
 

@@ -58,8 +58,9 @@ class _Attention(DynamicModule):
         key = self.to_k(encoder_hidden_states)
         value = self.to_v(encoder_hidden_states)
 
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // self.heads
+        # inner_dim = key.shape[-1]
+        # head_dim = inner_dim // self.heads
+        head_dim = 512
 
         query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
 
@@ -72,10 +73,20 @@ class _Attention(DynamicModule):
         # hidden_states = F.scaled_dot_product_attention(
         #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         # )
-        query = query * self.kv_scale
-        key = key.transpose(2, 3)
-        attn_weights = torch.matmul(query, key) 
-        attn_weights = F.softmax(attn_weights, dim=-1)
+
+
+        # query = query * self.kv_scale
+        # key = key.transpose(2, 3) # 先缩小 再减最大值 再放大
+        # attn_weights = torch.matmul(query, key)
+        # attn_weights = F.softmax(attn_weights, dim=-1)  
+        # hidden_states = torch.matmul(attn_weights, value) # [1, 1, 16384, 512]
+
+        query_r = query * self.kv_scale
+        key = key.transpose(2, 3) 
+        # query_r = query * self.q_scale
+        key_r = key * self.k_scale
+        attn_weights_r = torch.matmul(query_r, key_r)
+        attn_weights = F.softmax(attn_weights_r, dim=-1)  
         hidden_states = torch.matmul(attn_weights, value) # [1, 1, 16384, 512]
 
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.heads * head_dim)
@@ -90,13 +101,19 @@ class _Attention(DynamicModule):
 
         hidden_states = hidden_states + residual
 
-        hidden_states = hidden_states / self.rescale_output_factor
+        # hidden_states = hidden_states / self.rescale_output_factor
 
         return hidden_states
     def _setup(self, cfg: Optional[Dict] = None):
 
         _kv_scale = 1 / math.sqrt(512)
         self.kv_scale = _kv_scale
+
+        self.q_scale = 1.0 / 64
+        self.k_scale = 1.0 / 640
+
+        self.kv_scale = self.q_scale * self.kv_scale
+
         return self
 
 
