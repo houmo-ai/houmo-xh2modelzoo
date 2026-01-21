@@ -147,6 +147,9 @@ class LLMConverter:
             from .models.qwen3_legacy_lora.qwen3_converter import Qwen3LegacyLoRAConverterXH2a
 
             converter_cls = Qwen3LegacyLoRAConverterXH2a
+        elif architecture == "DeepSeekV2":
+            from .models.deepseek_ocr.deepseekv2_converter import DeepSeekV2ConverterXH2a
+            converter_cls = DeepSeekV2ConverterXH2a
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
 

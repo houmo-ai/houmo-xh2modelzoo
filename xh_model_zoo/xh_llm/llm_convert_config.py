@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional,Union,Any,Dict
 
 from xhquant.api import QuantScheme
 
@@ -8,8 +8,18 @@ from xhquant.api import QuantScheme
 @dataclass
 class BaseConvertConfig:
     """Base configuration class for model conversion."""
-
-    pass
+    @classmethod
+    def from_dict_or_other(cls, other: Union[dict, "BaseConvertConfig", Any]) -> "BaseConvertConfig":
+        if isinstance(other, (dict, Dict)):
+            return cls(**other)
+        elif isinstance(other, BaseConvertConfig):
+            # 检查 other 是否是 cls 的实例（包括子类）
+            if isinstance(other, cls):  # type: ignore
+                return other
+            else:
+                return cls(**other.to_dict())
+        else:
+            raise ValueError(f"Invalid type: {type(other)}")
 
 
 @dataclass
