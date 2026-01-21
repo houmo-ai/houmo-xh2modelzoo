@@ -1,0 +1,2 @@
+### requirements
+- transformers==4.46.3
