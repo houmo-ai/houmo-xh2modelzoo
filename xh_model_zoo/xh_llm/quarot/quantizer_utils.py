@@ -8,6 +8,7 @@ from xhquant.api import Config, get_root_logger
 from . import data_utils, gptq_utils, rotation_utils, utils
 import json
 from transformers import AutoTokenizer
+from tqdm import tqdm
 
 @torch.no_grad()
 def quarot(model, rotate_mode="hadamard", device=None, quarot_matrix_size=None):
@@ -111,7 +112,7 @@ def gptq(
     )
     logger.info(f"gptq config:\n{gptq_cfg.pretty_text}")
 
-    if calib_dataset not in ['wikitext2','c4','ptb','laion/220k-GPT4Vision-captions-from-LIVIS','vllm_custom_data']:
+    if calib_dataset not in ['wikitext2','c4','ptb','laion/220k-GPT4Vision-captions-from-LIVIS','vllm_custom_data'] and 'rerank' not in calib_dataset.lower():
         print('use gen calib data!')
         dataset = []
         cnt = 0
@@ -123,6 +124,58 @@ def gptq(
                     break
         trainloader = torch.utils.data.DataLoader(dataset, batch_size=1,shuffle=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        gptq_utils.gptq_fwrd(
+            model,
+            trainloader,
+            nsamples=calib_samples,
+            seqlen=seqlen,
+            w_clip=w_clip,
+            w_bits=w_bits,
+            w_head_bits=w_head_bits,
+            w_asym=w_asym,
+            w_groupsize=w_groupsize,
+            percdamp=percdamp,
+            act_order=act_order,
+            int8_down_proj=int8_down_proj,
+            heading_gptq=heading_gptq,
+            device=device,
+            layers_cache_dir=layers_cache_dir,
+            is_qwen2_5_vl=is_qwen2_5_vl,
+            processor=processor,
+            is_qwen3_vl=is_qwen3_vl,
+            is_moe=is_moe,
+            use_hession_mse=use_hession_mse,
+            tokenizer = tokenizer,
+        )
+    elif  'rerank' in calib_dataset.lower():
+        from datasets import load_dataset
+        import random
+        dataset = load_dataset('parquet', data_files={"test": calib_dataset})["test"]
+        dataset_shuffled = dataset.shuffle(seed=42)
+        subset = dataset_shuffled.select(range(calib_samples))
+        prompt_template = "查询: {query}\n文档: {text}\n相关性:"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        calib_datasets =  []
+        skip_count = 0 
+        for sample in tqdm(subset):
+            query = sample['query']
+            pos_docs = sample['positive'] 
+            neg_docs = sample['negative']
+            if not pos_docs or (isinstance(pos_docs, list) and len(pos_docs) == 0):
+                skip_count += 1
+                if skip_count <= 3:
+                    print(f"\n[Warning] 跳过一条无正例数据: Query='{query[:10]}...'")
+                continue 
+            true_doc = pos_docs[0] if isinstance(pos_docs, list) else pos_docs
+            if not neg_docs:
+                neg_docs = []
+            candidates = [true_doc] + (neg_docs if isinstance(neg_docs, list) else [neg_docs])
+            pairs = [[query, doc] for doc in candidates]
+            random_pair = random.choice(pairs)
+            selected_pair = prompt_template.format(query=random_pair[0], text=random_pair[1])
+            format_text = {'text':selected_pair}
+            calib_datasets.append(format_text)
+        trainloader = torch.utils.data.DataLoader(calib_datasets, batch_size=1,shuffle=True)
         gptq_utils.gptq_fwrd(
             model,
             trainloader,
