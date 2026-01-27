@@ -1,530 +1,198 @@
 import argparse
 import json
-from pathlib import Path
-
-import numpy as np
+import gc
 import torch
+import soundfile as sf
+from pathlib import Path
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
-from transformers.pipelines.audio_utils import ffmpeg_read
-from xhquant.api import (
-    HMONNXInference,
-)
+from xhquant.api import HMONNXInference
 
-from xh_model_zoo.xh_llm.models.whisper._model_opt import *  # noqa: F403
+MAX_GEN_LEN = 448
 
+def clean_memory():
+    """强制清理显存和内存"""
+    gc.collect()
+    torch.cuda.empty_cache()
 
 def main(args):
     device = torch.device("cuda")
-    # load model and processor
-    hmonnx_dir = args.hmonnx_model
-    hf_model = args.hf_model
-    work_dir = Path(hmonnx_dir)
-    meta_info_file = work_dir / "meta_info.json"
-    meta_info = json.load(meta_info_file.open("r", encoding="utf-8"))
-    encoder_hmonnx_file = str(work_dir / meta_info["encoder"])
-    prefill_hmonnx_file = str(work_dir / meta_info["prefill"])
-    decoder_hmonnx_file = str(work_dir / meta_info["decoder"])
-
+    
+    # 1. 准备配置
+    work_dir = Path(args.hmonnx_model)
+    meta_info = json.load((work_dir / "meta_info.json").open("r", encoding="utf-8"))
+    
     num_heads = meta_info["model_cfg"]["num_heads"]
     head_dim = meta_info["model_cfg"]["head_dim"]
-    embed_dim = meta_info["model_cfg"]["embed_dim"]
-    max_source_positions = meta_info["model_cfg"]["max_source_positions"]
     num_decode_layers = meta_info["model_cfg"]["num_decode_layers"]
+    
+    processor = WhisperProcessor.from_pretrained(args.hf_model)
+    model_config = WhisperForConditionalGeneration.from_pretrained(args.hf_model).config
 
-    processor = WhisperProcessor.from_pretrained(hf_model)
-    model = WhisperForConditionalGeneration.from_pretrained(hf_model)
-    model.config.forced_decoder_ids = None
+    # 获取 Prompt Tokens ID
+    sot_id = model_config.decoder_start_token_id
+    lang_id = processor.tokenizer.convert_tokens_to_ids("<|zh|>")
+    transcribe_id = processor.tokenizer.convert_tokens_to_ids("<|transcribe|>")
+    notime_id = processor.tokenizer.convert_tokens_to_ids("<|notimestamps|>")
+    eos_id = model_config.eos_token_id
 
-    model.model.encoder.decoder_m = model.model.decoder
+    prompt_tokens = [sot_id, lang_id, transcribe_id, notime_id]
 
-    # # load dummy dataset and read audio files
-    # ds = load_dataset(
-    #     "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
-    # )
-    # sample = ds[1]["audio"]
-    # input_features = processor(
-    #     sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
-    # ).input_features
-    # # [1,80,3000]
-
-    audio_file = args.audio
-    sampling_rate = 16000
-    with open(audio_file, "rb") as f:
-        inputs = f.read()
-    if isinstance(inputs, bytes):
-        inputs = ffmpeg_read(inputs, sampling_rate)
-    sample = {
-        "array": inputs,
-        "sampling_rate": sampling_rate,
-    }
-    input_features = processor(
-        sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt"
-    ).input_features
-
-    # input_features = torch.load("work_dirs/whisper/input.pt")
-
-    encoder = HMONNXInference(encoder_hmonnx_file)
-    prefill = HMONNXInference(prefill_hmonnx_file)
-    decoder = HMONNXInference(decoder_hmonnx_file)
+    print(f">>> 加载音频文件: {args.audio_file}")
+    audio_array, sr = sf.read(args.audio_file)
+    
+    # --- Encoder ---
+    print(">>> 运行 Encoder...")
+    encoder = HMONNXInference(str(work_dir / meta_info["encoder"]))
+    encoder.to_fast_mode()
     encoder.to(device)
-    prefill.to(device)
+    
+    input_features = processor(audio_array, sampling_rate=16000, return_tensors="pt").input_features.half().to(device)
+    enc_out = encoder(input_features)
+    
+    # 动态获取序列长度
+    enc_seq_len = enc_out[0].shape[2] # 1500
+    # print(f"Encoder 输出范围: {enc_out[0].min().item():.4f} ~ {enc_out[0].max().item():.4f}")
+    
+    # enc_out 交错结构
+    # [k0, v0, k1, v1, k2, v2, k3, v3]
+    # 这里已经将 hidden states 切分成了 key 和 value
+    k_list = enc_out[0::2]
+    v_list = enc_out[1::2]
+    
+    del encoder
+    clean_memory()
+
+    # --- Decoder ---
+    print(">>> 准备 Decoder...")
+    decoder_model_path = str(work_dir / meta_info["decoder"])
+    decoder = HMONNXInference(decoder_model_path)
     decoder.to(device)
-    encoder.exec_device = device
-    prefill.exec_device = device
-    decoder.exec_device = device
+    decoder.to_fast_mode()
+    
+    prefill_model_path = str(work_dir / meta_info["prefill"])
+    prefill = HMONNXInference(prefill_model_path)
+    prefill.to(device)
+    prefill.to_fast_mode()
+    
+    dec_names = decoder.get_input_names()
+    
+    # 预分配 self-attention 的 K/V Cache
+    CACHE_MAX_LEN = 1280 
+    k_cache = [torch.zeros([1, num_heads, CACHE_MAX_LEN, head_dim], device=device, dtype=torch.float16) for _ in range(num_decode_layers)]
+    v_cache = [torch.zeros([1, num_heads, CACHE_MAX_LEN, head_dim], device=device, dtype=torch.float16) for _ in range(num_decode_layers)]
+    
+    # 构造 Encoder Mask
+    # 和 enc_seq_len 对齐
+    encoder_attention_mask = torch.zeros((1, 1, 1, enc_seq_len), device=device, dtype=torch.float16)
 
-    generation_config = model.generation_config
-    config = model.config
-    init_tokens = [generation_config.decoder_start_token_id]
-    forced_decoder_ids = getattr(generation_config, "forced_decoder_ids", None)
-
-    if (
-        forced_decoder_ids is None
-        and getattr(config, "forced_decoder_ids", None) is not None
-    ):
-        forced_decoder_ids = config.forced_decoder_ids
-
-    if forced_decoder_ids is not None and forced_decoder_ids[0][0] == 1:
-        i = 1
-        while len(forced_decoder_ids) > 0 and forced_decoder_ids[0][0] == i:
-            init_tokens += [forced_decoder_ids[0][1]]
-            forced_decoder_ids = forced_decoder_ids[1:]
-            i += 1
-    init_tokens.append(generation_config.no_timestamps_token_id)
-    init_tokens = [t if t is not None else 0 for t in init_tokens]
-    # detect_ids = torch.tensor([[50258]])  # [1,1]
-    # default_decoder_ids = torch.tensor([[50258, 0, 50359, 50363]])  # [1,1]
-    detect_ids = torch.tensor([[init_tokens[0]]])  # [1,1]
-    default_decoder_ids = torch.tensor([init_tokens])
-    cache_position = torch.tensor([[0]])
-    cache_position_prefill = torch.tensor([[0, 1, 2, 3]])
-
-    # detect language  input_features  detect_ids => [1,51865]
-    detect_encoder_out = encoder(input_features.to(device).half())
-
-    mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
-    mask_atten[:, :, :, 0 + 1 :] *= -65504
-
-    decoder_input_names = decoder.get_input_names()
-    decoder_detext_inputs = {
-        decoder_input_names[0]: detect_ids.to(device).to(torch.int32),
-        decoder_input_names[1]: cache_position.to(device).to(torch.int32),
-        decoder_input_names[2]: torch.tensor([0]).to(device).to(torch.int32),
-        decoder_input_names[3]: torch.tensor([1]).to(device).to(torch.int32),
-        decoder_input_names[4]: mask_atten,
+    all_tokens_list = []
+    
+    logits = None
+    step = 0 
+    
+    # === 阶段 1: Prefill ===
+    print(">>> 开始并行处理 Prefill ...")
+    
+    # [sot_id, lang_id, transcribe_id, notime_id]
+    input_ids = torch.tensor([prompt_tokens], device=device, dtype=torch.int32)
+    prompt_len = len(prompt_tokens) # 4
+    # 2. Position IDs: [1, 4] -> [[0, 1, 2, 3]]
+    position_ids = torch.arange(prompt_len, device=device, dtype=torch.int32).unsqueeze(0)
+    # 构造 self-attention Mask，作用在 logits 上
+    mask_atten = torch.full((1, num_heads, prompt_len, CACHE_MAX_LEN), -65504.0, device=device, dtype=torch.float16)
+    
+    # 将可见部分填为 0.0 (下三角)
+    # Token 0 看 [0]
+    # Token 1 看 [0, 1]
+    # Token 2 看 [0, 1, 2]
+    # Token 3 看 [0, 1, 2, 3]
+    for i in range(prompt_len):
+        mask_atten[:, :, i, :i+1] = 0.0
+    
+    # This block of code is creating a dictionary named `inputs` that contains various tensors used as
+    # input for the model during the Prefill stage of the decoding process. Here's a breakdown of each
+    # key-value pair in the `inputs` dictionary:
+    inputs = {
+        dec_names[0]: input_ids,
+        dec_names[1]: position_ids,                                          
+        dec_names[2]: torch.tensor([0], device=device, dtype=torch.int32),   # past_key_values_length = 0
+        dec_names[3]: torch.tensor([prompt_len], device=device, dtype=torch.int32), # current_sequence_length = 4
+        dec_names[4]: mask_atten,
+        dec_names[5]: encoder_attention_mask
     }
+    
+    base_idx = 6
+    for l in range(num_decode_layers):
+        inputs[dec_names[base_idx + l]] = k_cache[l]
+        inputs[dec_names[base_idx + num_decode_layers + l]] = v_cache[l]
+        inputs[dec_names[base_idx + num_decode_layers*2 + l]] = k_list[l]
+        inputs[dec_names[base_idx + num_decode_layers*3 + l]] = v_list[l]
 
-    k_cache = [
-        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
-        for i in range(num_decode_layers)
-    ]
-    v_cache = [
-        torch.ones([1, num_heads, embed_dim, head_dim], dtype=torch.float16) * (-65504)
-        for i in range(num_decode_layers)
-    ]
-    # for data_detect, k_data_cache in zip(decoder_input_names[5:29], k_cache):
-    for data_detect, k_data_cache in zip(
-        decoder_input_names[5 : 5 + num_decode_layers], k_cache
-    ):
-        decoder_detext_inputs[data_detect] = k_data_cache
+    # 运行 Prefill
+    out = prefill.run(inputs)
+    
+    logits = out[0]
+    k_cache = out[1:1+num_decode_layers]
+    v_cache = out[1+num_decode_layers:1+2*num_decode_layers]
+    
+    step += prompt_len
 
-    # logits = decoder.run(decoder_detext_inputs)
+    print(">>> Prefill 完成，开始 Generate...")
 
-    # for data_detect, v_data_cache in zip(decoder_input_names[29:53], v_cache):
-    for data_detect, v_data_cache in zip(
-        decoder_input_names[5 + num_decode_layers : 5 + num_decode_layers * 2],
-        v_cache,
-    ):
-        decoder_detext_inputs[data_detect] = v_data_cache
+    # === 阶段 2: Decode ===
+    next_token = torch.argmax(logits[:, -1, :], dim=-1).item()
+    
+    while step < MAX_GEN_LEN:
+        all_tokens_list.append(next_token)
+        
+        current_tensor = torch.tensor([all_tokens_list], device=device)
+        decoded_text = processor.batch_decode(current_tensor, skip_special_tokens=True)[0]
+        print(f"\rStep {step}: {decoded_text}", end="", flush=True)
+        
+        if next_token == eos_id:
+            print(f"\nStep {step}: {decoded_text} [EOS]")
+            break
+            
+        input_ids = torch.tensor([[next_token]], device=device, dtype=torch.int32)
+        
+        mask_atten = torch.zeros(([1, num_heads, 1, CACHE_MAX_LEN]), device=device, dtype=torch.float16)
+        if step + 1 < CACHE_MAX_LEN:
+            mask_atten[:, :, :, step+1:] = -65504
+        
+        inputs = {
+            dec_names[0]: input_ids,
+            dec_names[1]: torch.tensor([[step]], device=device, dtype=torch.int32),
+            dec_names[2]: torch.tensor([step], device=device, dtype=torch.int32),
+            dec_names[3]: torch.tensor([1], device=device, dtype=torch.int32),
+            dec_names[4]: mask_atten,
+            dec_names[5]: encoder_attention_mask
+        }
+        
+        base_idx = 6
+        for l in range(num_decode_layers):
+            inputs[dec_names[base_idx + l]] = k_cache[l]
+            inputs[dec_names[base_idx + num_decode_layers + l]] = v_cache[l]
+            inputs[dec_names[base_idx + num_decode_layers*2 + l]] = k_list[l]
+            inputs[dec_names[base_idx + num_decode_layers*3 + l]] = v_list[l]
+            
+        out = decoder.run(inputs)
+        logits = out[0]
+        k_cache = out[1:1+num_decode_layers]
+        v_cache = out[1+num_decode_layers:1+2*num_decode_layers]
+        
+        next_token = torch.argmax(logits[:, -1, :], dim=-1).item()
+        step += 1
 
-    k_list = []
-    for i in range(num_decode_layers):
-        k_list.append(detect_encoder_out[2 * i])
-
-    v_list = []
-    for i in range(num_decode_layers):
-        v_list.append(detect_encoder_out[2 * i + 1])
-
-    # for data_detect, k_data in zip(decoder_input_names[53:77], k_list):
-    for data_detect, k_data in zip(
-        decoder_input_names[5 + num_decode_layers * 2 : 5 + num_decode_layers * 3],
-        k_list,
-    ):
-        decoder_detext_inputs[data_detect] = k_data
-
-    # for data_detect, v_data in zip(decoder_input_names[77:101], v_list):
-    for data_detect, v_data in zip(
-        decoder_input_names[5 + num_decode_layers * 3 : 5 + num_decode_layers * 4],
-        v_list,
-    ):
-        decoder_detext_inputs[data_detect] = v_data
-
-    output = decoder.run(decoder_detext_inputs)
-
-    # logits, _, _ = output[0], output[1:25], output[25:49]
-
-    logits, _, _ = (
-        output[0],
-        output[1 : 1 + num_decode_layers],
-        output[1 + num_decode_layers : 1 + num_decode_layers * 2],
-    )
-
-    lang_to_id = list(generation_config.lang_to_id.values())
-    # postprocess  50259
-    # lang_to_id = [
-    #     50327,
-    #     50334,
-    #     50272,
-    #     50350,
-    #     50304,
-    #     50355,
-    #     50330,
-    #     50292,
-    #     50302,
-    #     50347,
-    #     50309,
-    #     50315,
-    #     50270,
-    #     50283,
-    #     50297,
-    #     50285,
-    #     50261,
-    #     50281,
-    #     50259,
-    #     50262,
-    #     50307,
-    #     50310,
-    #     50300,
-    #     50277,
-    #     50338,
-    #     50265,
-    #     50319,
-    #     50333,
-    #     50352,
-    #     50354,
-    #     50279,
-    #     50276,
-    #     50291,
-    #     50339,
-    #     50286,
-    #     50312,
-    #     50275,
-    #     50311,
-    #     50274,
-    #     50266,
-    #     50356,
-    #     50329,
-    #     50316,
-    #     50323,
-    #     50306,
-    #     50264,
-    #     50294,
-    #     50345,
-    #     50353,
-    #     50336,
-    #     50293,
-    #     50301,
-    #     50349,
-    #     50295,
-    #     50308,
-    #     50296,
-    #     50314,
-    #     50320,
-    #     50282,
-    #     50343,
-    #     50346,
-    #     50313,
-    #     50271,
-    #     50342,
-    #     50288,
-    #     50328,
-    #     50321,
-    #     50269,
-    #     50340,
-    #     50267,
-    #     50284,
-    #     50263,
-    #     50344,
-    #     50332,
-    #     50322,
-    #     50298,
-    #     50305,
-    #     50324,
-    #     50326,
-    #     50317,
-    #     50303,
-    #     50357,
-    #     50273,
-    #     50318,
-    #     50287,
-    #     50299,
-    #     50331,
-    #     50289,
-    #     50341,
-    #     50348,
-    #     50268,
-    #     50351,
-    #     50280,
-    #     50290,
-    #     50337,
-    #     50278,
-    #     50335,
-    #     50325,
-    #     50260,
-    # ]
-
-    non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
-    non_lang_mask[0, list(lang_to_id)] = False
-    logits[:, :, non_lang_mask[0]] = -np.inf
-    lang_ids = logits.argmax(-1)
-
-    non_lang_mask = torch.ones_like(logits, dtype=torch.bool)
-    non_lang_mask[0, 0, list(lang_to_id)] = False
-    logits[:, :, non_lang_mask[0][0]] = -np.inf
-    lang_ids = logits.argmax(-1)
-
-    # prefill 2221
-    default_decoder_ids[0, 1] = lang_ids  # [[50258, 50259, 50359, 50363]] # 34.5197
-
-    mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
-    mask_atten[:, :, :, 0 + 4 :] *= -65504
-
-    prefill_input_names = prefill.get_input_names()
-    prefill_inputs = {
-        prefill_input_names[0]: default_decoder_ids.to(device).to(torch.int32),
-        prefill_input_names[1]: cache_position_prefill.to(device).to(torch.int32),
-        prefill_input_names[2]: torch.tensor([0]).to(device).to(torch.int32),
-        prefill_input_names[3]: torch.tensor([4]).to(device).to(torch.int32),
-        prefill_input_names[4]: mask_atten,
-    }
-
-    # for data_detect, k_data_cache in zip(prefill_input_names[5:29], k_cache):
-    for data_detect, k_data_cache in zip(
-        prefill_input_names[5 : 5 + num_decode_layers], k_cache
-    ):
-        prefill_inputs[data_detect] = k_data_cache
-
-    # for data_detect, v_data_cache in zip(prefill_input_names[29:53], v_cache):
-    for data_detect, v_data_cache in zip(
-        prefill_input_names[
-            5 + num_decode_layers : 5 + num_decode_layers + num_decode_layers
-        ],
-        v_cache,
-    ):
-        prefill_inputs[data_detect] = v_data_cache
-
-    # for data_detect, k_data in zip(prefill_input_names[53:77], k_list):
-    for data_detect, k_data in zip(
-        prefill_input_names[5 + num_decode_layers * 2 : 5 + num_decode_layers * 3],
-        k_list,
-    ):
-        prefill_inputs[data_detect] = k_data
-    # for data_detect, v_data in zip(prefill_input_names[77:101], v_list):
-    for data_detect, v_data in zip(
-        prefill_input_names[5 + num_decode_layers * 3 : 5 + num_decode_layers * 4],
-        v_list,
-    ):
-        prefill_inputs[data_detect] = v_data
-
-    output = prefill.run(prefill_inputs)
-
-    # logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
-    logits, new_k_cache, new_v_cache = (
-        output[0],
-        output[1 : 1 + num_decode_layers],
-        output[1 + num_decode_layers : 1 + num_decode_layers + num_decode_layers],
-    )
-    next_token_logits = logits[:, -1, :].to(
-        copy=True, dtype=torch.float32, device=device
-    )
-    next_tokens = torch.argmax(next_token_logits, dim=-1)
-    default_decoder_ids = torch.cat(
-        [default_decoder_ids.to(device), next_tokens[:, None]], dim=-1
-    )
-    # decoder 2221 <=>   6966
-
-    cnt = 3
-    while default_decoder_ids.shape[1] < 448 and next_tokens.item() != 50257:
-        cnt += 1
-
-        mask_atten = torch.ones(([1, num_heads, 1, embed_dim])).half()
-        mask_atten[:, :, :, cnt + 1 :] *= -65504
-
-        prefill_inputs[prefill_input_names[0]] = next_tokens.unsqueeze(0).to(
-            torch.int32
-        )
-        prefill_inputs[prefill_input_names[1]] = (
-            torch.tensor([[cnt]]).to(torch.int32).to(device)
-        )
-        prefill_inputs[prefill_input_names[2]] = (
-            torch.tensor([cnt]).to(device).to(torch.int32)
-        )
-        prefill_inputs[prefill_input_names[3]] = (
-            torch.tensor([1]).to(device).to(torch.int32)
-        )
-        prefill_inputs[prefill_input_names[4]] = mask_atten
-
-        # for data_detect, k_data_cache in zip(prefill_input_names[5:29], new_k_cache):
-        for data_detect, k_data_cache in zip(
-            prefill_input_names[5 : 5 + num_decode_layers], new_k_cache
-        ):
-            prefill_inputs[data_detect] = k_data_cache
-
-        # for data_detect, v_data_cache in zip(prefill_input_names[29:53], new_v_cache):
-        for data_detect, v_data_cache in zip(
-            prefill_input_names[5 + num_decode_layers : 5 + num_decode_layers * 2],
-            new_v_cache,
-        ):
-            prefill_inputs[data_detect] = v_data_cache
-
-        output = decoder.run(prefill_inputs)
-        # logits, new_k_cache, new_v_cache = output[0], output[1:25], output[25:49]
-        logits, new_k_cache, new_v_cache = (
-            output[0],
-            output[1 : 1 + num_decode_layers],
-            output[1 + num_decode_layers : 1 + num_decode_layers * 2],
-        )
-        next_token_logits = logits[:, -1, :].to(
-            copy=True, dtype=torch.float32, device=device
-        )
-        next_tokens = torch.argmax(next_token_logits, dim=-1)
-        default_decoder_ids = torch.cat(
-            [default_decoder_ids.to(device), next_tokens[:, None]], dim=-1
-        )
-
-        transcription = processor.batch_decode(
-            default_decoder_ids, skip_special_tokens=True
-        )
-        print(transcription)
-
-    # [50257] 448
-
-    transcription = processor.batch_decode(
-        default_decoder_ids, skip_special_tokens=True
-    )
-    print(transcription)
-
-    # onnx =========================================
-    # input_names = [inp.name for inp in encoder_session.get_inputs()]
-    # detect_encoder_out = encoder_session.run( None, {input_names[0]:input_features.cpu().numpy()} )
-    # decoder_input_names = decoder.get_input_names()
-    # decoder_detext_inputs = {
-    #     decoder_input_names[0]: detect_ids.cpu().numpy() ,
-    #     decoder_input_names[1]: cache_position.cpu().numpy() ,
-    # }
-
-    # for data_detect, kv_data in zip(decoder_input_names[2:], detect_encoder_out):
-    #     decoder_detext_inputs[data_detect] = kv_data
-
-    # logits = decoder_session.run(None,decoder_detext_inputs)
-
-    # # postprocess  50259
-    # lang_to_id = [50327, 50334, 50272, 50350, 50304,
-    #     50355, 50330, 50292, 50302, 50347, 50309, 50315, 50270,
-    #     50283, 50297, 50285, 50261, 50281, 50259, 50262, 50307,
-    #     50310, 50300, 50277, 50338, 50265, 50319, 50333, 50352,
-    #     50354, 50279, 50276, 50291, 50339, 50286, 50312, 50275,
-    #     50311, 50274, 50266, 50356, 50329, 50316, 50323, 50306,
-    #     50264, 50294, 50345, 50353, 50336, 50293, 50301, 50349,
-    #     50295, 50308, 50296, 50314, 50320, 50282, 50343, 50346,
-    #     50313, 50271, 50342, 50288, 50328, 50321, 50269, 50340,
-    #     50267, 50284, 50263, 50344, 50332, 50322, 50298, 50305,
-    #     50324, 50326, 50317, 50303, 50357, 50273, 50318, 50287,
-    #     50299, 50331, 50289, 50341, 50348, 50268, 50351, 50280,
-    #     50290, 50337, 50278, 50335, 50325, 50260]
-
-    # logits = torch.from_numpy(logits[0])
-
-    # non_lang_mask = torch.ones_like(logits, dtype=torch.bool)
-    # non_lang_mask[0, 0, list(lang_to_id)] = False
-    # logits[:, :, non_lang_mask[0][0]] = -np.inf
-    # lang_ids = logits.argmax(-1)
-
-    # # prefill 2221
-    # default_decoder_ids[0,1] = 50259 # lang_ids # [[50258, 50259, 50359, 50363]] # 34.5197
-
-    # prefill_input_names = prefill.get_input_names()
-    # prefill_inputs = {
-    #     prefill_input_names[0]: default_decoder_ids.cpu().numpy(),
-    #     prefill_input_names[1]: cache_position_prefill.cpu().numpy(),
-    # }
-
-    # for data_prefill, kv_data in zip(prefill_input_names[2:], detect_encoder_out):
-    #     prefill_inputs[data_prefill] = kv_data
-
-    # logits = prefill_session.run(None, prefill_inputs)
-    # logits = torch.from_numpy(logits[0])
-    # next_token_logits = logits[:, -1, :].to(copy=True, dtype=torch.float32, device=device)
-    # next_tokens = torch.argmax(next_token_logits, dim=-1)
-    # default_decoder_ids = torch.cat([default_decoder_ids.to(device), next_tokens[:, None]], dim=-1)
-    # # decoder 2221
-
-    # cnt = 3
-    # while default_decoder_ids.shape[1] < 448 and next_tokens.item() != 50257:
-    #     cnt += 1
-    #     prefill_inputs[prefill_input_names[0]] = next_tokens.unsqueeze(0).cpu().numpy()
-    #     prefill_inputs[prefill_input_names[1]] = torch.tensor([[cnt]]).cpu().numpy()
-
-    #     logits = decoder_session.run(None,prefill_inputs)[0]
-    #     logits = torch.from_numpy(logits)
-    #     next_token_logits = logits[:, -1, :].to(copy=True, dtype=torch.float32, device=device)
-
-    #     scores = next_token_logits
-    #     input_ids = default_decoder_ids
-
-    #     # post process 1  88913.0938
-    #     begin_suppress_tokens = torch.tensor([220, 50257], device=device)
-    #     vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
-    #     suppress_token_mask = isin_mps_friendly(vocab_tensor, begin_suppress_tokens)
-    #     scores_processed = scores
-    #     if input_ids.shape[-1] == 4:
-    #         scores_processed = torch.where(suppress_token_mask, -float("inf"), scores)
-
-    #     scores = scores_processed
-    #     # post process 2
-    #     suppress_token = torch.tensor([
-    #         1,     2,     7,     8,     9,    10,    14,    25,    26,    27,
-    #         28,    29,    31,    58,    59,    60,    61,    62,    63,    90,
-    #         91,    92,    93,   359,   503,   522,   542,   873,   893,   902,
-    #         918,   922,   931,  1350,  1853,  1982,  2460,  2627,  3246,  3253,
-    #         3268,  3536,  3846,  3961,  4183,  4667,  6585,  6647,  7273,  9061,
-    #         9383, 10428, 10929, 11938, 12033, 12331, 12562, 13793, 14157, 14635,
-    #         15265, 15618, 16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130,
-    #         26161, 26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425,
-    #         49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362
-    #     ], device=device)
-
-    #     vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
-    #     suppress_token_mask = isin_mps_friendly(vocab_tensor, suppress_token)
-    #     scores = torch.where(suppress_token_mask, -float("inf"), scores)
-
-    #     next_tokens = torch.argmax(scores, dim=-1)
-    #     default_decoder_ids = torch.cat([default_decoder_ids.to(device), next_tokens[:, None]], dim=-1)
-
-    # # [[50258, 50259, 50359, 50363,  2221,    13,  2326,   388,   391,   307,
-    # #       264, 50244,   295,   264,  2808,  5359,   293,   321,   366,  5404,
-    # #       281,  2928,   702, 14943,    13, 50257]]
-
-    # transcription = processor.batch_decode(default_decoder_ids, skip_special_tokens=True)
-
+    print("\n🎉 推理完成！")
+    print(f"最终结果: {decoded_text}")
+    
+    del decoder
+    clean_memory()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--hf-model",
-        type=str,
-        # default="./data/models/whisper-medium",
-        default="data/models/whisper-large-v3-turbo",
-    )
-    parser.add_argument(
-        "--hmonnx-model",
-        type=str,
-        default="./work_dirs/whisper-large-v3-turbo_XH2a",
-    )
-    parser.add_argument(
-        "--audio",
-        type=str,
-        default="./examples/llm/whisper/audio.mp3",
-    )
+    parser.add_argument("--hf-model", type=str, default="/data01/home/USER/models/openai/whisper-large-v3-turbo")
+    parser.add_argument("--hmonnx-model", type=str, default="/data01/home/USER/xh2modelzoo/examples/llm/whisper/new_work_dirs/whisper-large-v3-turbo_XH2a")
+    # parser.add_argument("--audio-file", type=str, default="/data01/home/USER/DATA/audio.mp3", help="Path to audio file")
     args = parser.parse_args()
     main(args)

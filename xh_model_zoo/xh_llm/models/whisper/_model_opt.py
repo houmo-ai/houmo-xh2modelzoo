@@ -29,14 +29,15 @@ def eager_attention_forward_cus(
     attention_mask: Optional[torch.Tensor],
 ):
     attn_weights = torch.matmul(query, key.transpose(2, 3))
+    # attn_weights = torch.matmul(query, key.transpose(2, 3)) / math.sqrt(query.size(-1))
     if attention_mask is not None and attention_mask.ndim == 4:
-        attn_weights = attn_weights + attention_mask
         attn_weights = attn_weights + attention_mask
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1)
     attn_output = torch.matmul(attn_weights, value)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
+
 
 
 @FUNCTION_REWRITER.register_rewriter(
@@ -172,6 +173,7 @@ def whisper_decoder_forward_v2(
     k_list=None,
     v_list=None,
     mask_atten=None,
+    encoder_attention_mask=None
 ):
     output_attentions = (
         output_attentions
@@ -305,6 +307,7 @@ def whisper_decoder_forward_v2(
             current_len=current_len,
             past_len=past_len,
             mask_atten=mask_atten,
+            encoder_attention_mask=encoder_attention_mask,
         )
         hidden_states = layer_outputs[0]
 
@@ -521,11 +524,20 @@ class _Whisper_attention(DynamicRegister):
         #     )
         #     attention_mask[:,:,:,  current_len+cache_len: ] *= -65504
 
+        # attn_output, attn_weights = eager_attention_forward_cus(
+        #     query_states,  # [1, 16, 1, 64]  4.4932
+        #     key_states,  # [1, 16, 1024, 64] 62.2250
+        #     value_states,  # [1, 16, 1024, 64] 10.9369
+        #     mask_atten,  # none
+        # )
+        
+        real_mask = attention_mask if is_cross_attention else mask_atten
+
         attn_output, attn_weights = eager_attention_forward_cus(
-            query_states,  # [1, 16, 1, 64]  4.4932
-            key_states,  # [1, 16, 1024, 64] 62.2250
-            value_states,  # [1, 16, 1024, 64] 10.9369
-            mask_atten,  # none
+            query_states,  
+            key_states,  
+            value_states,  
+            real_mask,  # 传入根据情况选择的 mask
         )
 
         attn_output = attn_output.reshape(bsz, tgt_len, -1).contiguous()  # 6.1019
