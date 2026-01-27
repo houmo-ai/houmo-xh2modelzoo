@@ -1,3 +1,24 @@
+# Copyright 2025 HOUMO AI
+#
+# File: parallel_utils.py
+# Description:
+#   Parallel processing utilities for multi-GPU setups.
+#   This module provides functions for monitoring and managing
+#   GPU memory usage across multiple devices.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
 import torch
 import torch.nn as nn
 from typing import List
@@ -166,3 +187,4 @@ def map_layers_to_multi_gpus(layers):
 if __name__ == "__main__":
     info = get_gpu_memory()
     print(info)
+

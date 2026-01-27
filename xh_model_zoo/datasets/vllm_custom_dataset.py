@@ -1,3 +1,25 @@
+# Copyright 2025 HOUMO AI
+#
+# File: vllm_custom_dataset.py
+# Description:
+#   Custom dataset class for VLLM calibration data.
+#   This module provides dataset formatting and loading functionality for
+#   Qwen3-VL and Qwen2-VL models, supporting various calibration datasets
+#   including CMMMU, MMMU, OCRBench, DocVQA, and COCO.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
 from torch.utils.data import Dataset
 import json
 from pathlib import Path
