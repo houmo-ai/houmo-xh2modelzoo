@@ -204,6 +204,7 @@ def main() -> None:
 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.quant_type)
     quant_config = create_quant_config(quant_scheme)
+    quant_config.ops_cfg["LayerNorm"] = dict(force_fp32=True)
 
     if "w_cfg" in quant_config and "quantizer" in quant_config["w_cfg"]:
         # Move calib_metric to outer level of quantizer config, not inside qspec
@@ -301,4 +302,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

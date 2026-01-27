@@ -35,6 +35,7 @@
 ```bash
 python examples/audio/sensevoice_small/sensevoice_export_onnx.py \
   --model-dir /data01/nfs_shared/ASR_TTS/SenseVoiceSmall \
+  --static \
   --out-dir work_dirs/sensevoice_small/export_fp32
 ```
 
@@ -51,6 +52,7 @@ python examples/audio/sensevoice_small/sensevoice_export_hmonnx.py \
   --onnx work_dirs/sensevoice_small/export_fp32/onnx/model.onnx \
   --hf-dataset openslr/librispeech_asr \
   --hf-split validation \
+  --hf-streaming \
   --calib-samples 128 \
   --quant-type w8a8h1_sefp \
   --out-dir work_dirs/sensevoice_small/export_xh2a
