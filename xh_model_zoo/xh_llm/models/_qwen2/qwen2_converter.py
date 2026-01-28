@@ -58,9 +58,9 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
         assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_path, **kwargs)
         assert not hasattr(native_model, "hf_quantizer")
-        assert isinstance(
-            native_model, Qwen2ForCausalLM
-        ), f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, Qwen2ForCausalLM), (
+            f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        )
 
         if native_model.config.tie_word_embeddings:
             old_torchscript = native_model.config.torchscript
@@ -177,6 +177,7 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
 
         if hasattr(config, "eval_ppl"):
             from xh2_model_zoo.utils.eval_ppl import evaluate  # isort:skip
+
             wraped_qwen_model.seqlen = input_sequence_length
             evaluate(wraped_qwen_model, model_path=hf_model_path, output_dir=output_dir)
 
@@ -223,7 +224,7 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-batch_{batch_size}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-batch_{batch_size}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -270,5 +271,7 @@ class Qwen2ConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         Qwen2ConverterXH2a(config)._convert(hf_model_path, output_dir)

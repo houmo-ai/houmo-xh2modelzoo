@@ -359,6 +359,8 @@ class CogVLM2ConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
 
         CogVLM2ConverterXH2a(config)._convert(hf_model_path, output_dir)

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.llama import LlamaForCausalLM
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
@@ -52,9 +52,9 @@ class LlamaConverterXH2a(HFTransfromersConverter):
     def load_hf_model(self, hf_model_path, **kwargs):
         native_model: LlamaForCausalLM = AutoModelForCausalLM.from_pretrained(hf_model_path, **kwargs)
 
-        assert isinstance(
-            native_model, LlamaForCausalLM
-        ), f"The model is not LlamaForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, LlamaForCausalLM), (
+            f"The model is not LlamaForCausalLM, but {type(native_model)}"
+        )
 
         if native_model.config.tie_word_embeddings:
             old_torchscript = native_model.config.torchscript
@@ -208,7 +208,7 @@ class LlamaConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-batch_{batch_size}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-batch_{batch_size}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -252,6 +252,8 @@ class LlamaConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
 
         LlamaConverterXH2a(config)._convert(hf_model_path, output_dir)

@@ -44,6 +44,7 @@ from xhquant.api import (  # type: ignore # isort:skip
 )
 import os
 
+
 class Qwen3ConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
@@ -56,17 +57,24 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
     def load_hf_model(self, hf_model_dir: str, **kwargs):
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
         # assert not hasattr(config, "quantization_config")
-        if hasattr(config, "quantization_config") and config.quantization_config['quant_method'].lower() == 'auto-round':
+        if (
+            hasattr(config, "quantization_config")
+            and config.quantization_config["quant_method"].lower() == "auto-round"
+        ):
             # from auto_round import AutoRoundConfig ##must import for auto-round format
-            from modelscope import AutoModelForCausalLM,AutoTokenizer
-            native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, torch_dtype='auto', revision="14dbc8", **kwargs)
+            from modelscope import AutoModelForCausalLM, AutoTokenizer
+
+            native_model = AutoModelForCausalLM.from_pretrained(
+                hf_model_dir, torch_dtype="auto", revision="14dbc8", **kwargs
+            )
         else:
             # assert not hasattr(native_model, "hf_quantizer")
             from transformers import AutoModelForCausalLM
+
             native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        assert isinstance(
-            native_model, Qwen3ForCausalLM
-        ), f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, Qwen3ForCausalLM), (
+            f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
+        )
         native_model: Qwen3ForCausalLM = native_model  # type: ignore
 
         if native_model.config.tie_word_embeddings:  # type: ignore
@@ -231,7 +239,7 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -249,10 +257,13 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
             input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
             logger.info(f"Export Prefill model to {prefill_onnx_file}")
-        
 
         ## generate golden ==================================
-        inp = [ inputs[0], inputs[1], inputs[2],]
+        inp = [
+            inputs[0],
+            inputs[1],
+            inputs[2],
+        ]
         for i in range(len(inputs[3])):
             inp.append(inputs[3][i])
 
@@ -304,5 +315,7 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         Qwen3ConverterXH2a(config)._convert(hf_model_path, output_dir)

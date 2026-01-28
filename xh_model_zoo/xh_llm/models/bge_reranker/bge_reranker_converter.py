@@ -177,5 +177,5 @@ class BGERerankerConverterXH2a(HFTransfromersConverter):
     def convert(cls, hf_model_path: str, config: BGERerankerConvertConfig, output_dir: str):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
-        assert not is_ssfp, f"不支持SSFP量化"
+        assert not is_ssfp, "不支持SSFP量化"
         BGERerankerConverterXH2a(config)._convert(hf_model_path, output_dir)

@@ -57,10 +57,10 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         self.output_dir: Optional[str] = None
 
     def load_hf_model(self, hf_model_dir: str, **kwargs):
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        assert not hasattr(config, "quantization_config")
+        # config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        # assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        assert not hasattr(native_model, "hf_quantizer")
+        # assert not hasattr(native_model, "hf_quantizer")
         assert isinstance(native_model, Qwen3ForCausalLM), (
             f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
         )
@@ -80,9 +80,10 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         logger = get_root_logger()
         config = self.config
 
-        native_model = self.load_hf_model(
-            hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
-        )
+        native_model = self.get_hf_model(hf_model_path, torch_dtype=torch.float16, device_map="cpu")
+        # native_model = self.load_hf_model(
+        #     hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
+        # )
 
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
@@ -289,8 +290,11 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
     def convert(cls, hf_model_path: str, config: Qwen3LegacyConvertConfig, output_dir: str):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
+
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         Qwen3LegacyConverterXH2a(config)._convert(hf_model_path, output_dir)
 
 

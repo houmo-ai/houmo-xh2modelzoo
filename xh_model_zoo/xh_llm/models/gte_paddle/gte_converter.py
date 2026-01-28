@@ -22,12 +22,13 @@ import json
 import shutil
 import time
 from pathlib import Path
-from turtle import pos
 from typing import Any, Dict, Optional
-import torch.nn.functional as F
-from matplotlib import axis
+
 import torch
+import torch.nn.functional as F
+
 # from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel, Qwen3ForCausalLM
+from transformers import AutoConfig
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
@@ -44,22 +45,7 @@ from xhquant.api import (  # type: ignore # isort:skip
     HMONNXGoldenInference,
 )
 import os
-from xhquant.api import (
-    ConfigDict,
-    ExportedGraph,
-    FrontendGraph,
-    FrontendType,
-    FXInterpreter,
-    Hook,
-    PrecisionMode,
-    QuantGraph,
-    export_onnx,
-    to_export_graph,
-    to_export_hmonnx,
-    to_export_hmonnx_v2,
-    to_frontend_graph,
-    to_quant_graph,
-)
+
 
 class GteConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
@@ -212,16 +198,16 @@ class GteConverterXH2a(HFTransfromersConverter):
 
         input_ids_t = torch.cat(input_ids, dim=0)
         # position_ids = torch.cat(position_ids, dim=0)
-        
+
         word_embedding.cuda()
         token_type_embedding.cuda()
         wraped_qwen_model.cuda()
 
         # rope [4, 11, 1, 64]
         token_type_ids = torch.zeros_like(input_ids_t)
-        word_embeds = word_embedding(input_ids_t) # [4, 11, 768]
-        token_embeds = token_type_embedding(token_type_ids) # [4, 11, 768]
-        attention_mask = torch.zeros( (1,1,1,input_sequence_length), device=device)
+        word_embeds = word_embedding(input_ids_t)  # [4, 11, 768]
+        token_embeds = token_type_embedding(token_type_ids)  # [4, 11, 768]
+        attention_mask = torch.zeros((1, 1, 1, input_sequence_length), device=device)
         position_ids = torch.arange(input_ids_t.shape[-1], device=device).unsqueeze(0)
         # past_seq_length_t = torch.tensor([0], dtype=torch.int32, device=device)
         # current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32, device=device)
@@ -254,18 +240,18 @@ class GteConverterXH2a(HFTransfromersConverter):
                 "what is the capital of China?",
                 "how to implement quick sort in python?",
                 "北京",
-                "快排算法介绍"
+                "快排算法介绍",
             ]
             b_outputs = []
             for text in input_texts:
-                data_dict = self.tokenizer(text, max_length=8192, padding=True, truncation=True, return_tensors='pt')
-                input_ids_t = data_dict['input_ids'].cuda()
-                attention_mask = torch.zeros_like( data_dict['attention_mask'] ).cuda()
+                data_dict = self.tokenizer(text, max_length=8192, padding=True, truncation=True, return_tensors="pt")
+                input_ids_t = data_dict["input_ids"].cuda()
+                attention_mask = torch.zeros_like(data_dict["attention_mask"]).cuda()
 
-                word_embeds = word_embedding(input_ids_t) # [4, 11, 768]
-                
+                word_embeds = word_embedding(input_ids_t)  # [4, 11, 768]
+
                 token_type_ids = torch.zeros_like(input_ids_t)
-                token_embeds = token_type_embedding(token_type_ids) # [4, 11, 768]
+                token_embeds = token_type_embedding(token_type_ids)  # [4, 11, 768]
                 # attention_mask = torch.zeros( (1,1,1,input_ids_t.shape[-1]), device=device)
                 position_ids = torch.arange(input_ids_t.shape[-1], device=device).unsqueeze(0)
 
@@ -275,14 +261,14 @@ class GteConverterXH2a(HFTransfromersConverter):
                 outputs = outputs[:, 0][:768]
                 b_outputs.append(outputs)
 
-            out_data  = torch.concat(b_outputs, dim=0)
+            out_data = torch.concat(b_outputs, dim=0)
             embeddings = F.normalize(out_data, p=2, dim=1)
-            scores = (embeddings[:1] @ embeddings[1:].T)
+            scores = embeddings[:1] @ embeddings[1:].T
             print(scores.tolist())
 
         # output = wraped_qwen_model(*inputs)
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -300,7 +286,6 @@ class GteConverterXH2a(HFTransfromersConverter):
             input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
             logger.info(f"Export Prefill model to {prefill_onnx_file}")
-        
 
         if True:
             session = HMONNXGoldenInference(prefill_onnx_file)
@@ -311,18 +296,18 @@ class GteConverterXH2a(HFTransfromersConverter):
                 "what is the capital of China?",
                 "how to implement quick sort in python?",
                 "北京",
-                "快排算法介绍"
+                "快排算法介绍",
             ]
             b_outputs = []
             for text in input_texts:
-                data_dict = self.tokenizer(text, max_length=8192, padding=True, truncation=True, return_tensors='pt')
-                input_ids_t = data_dict['input_ids'].cuda()
-                attention_mask = torch.zeros_like( data_dict['attention_mask'] ).cuda()
+                data_dict = self.tokenizer(text, max_length=8192, padding=True, truncation=True, return_tensors="pt")
+                input_ids_t = data_dict["input_ids"].cuda()
+                attention_mask = torch.zeros_like(data_dict["attention_mask"]).cuda()
 
-                word_embeds = word_embedding(input_ids_t) # [4, 11, 768]
-                
+                word_embeds = word_embedding(input_ids_t)  # [4, 11, 768]
+
                 token_type_ids = torch.zeros_like(input_ids_t)
-                token_embeds = token_type_embedding(token_type_ids) # [4, 11, 768]
+                token_embeds = token_type_embedding(token_type_ids)  # [4, 11, 768]
                 # attention_mask = torch.zeros( (1,1,1,input_ids_t.shape[-1]), device=device)
                 position_ids = torch.arange(256, device=device).unsqueeze(0)
 
@@ -332,13 +317,13 @@ class GteConverterXH2a(HFTransfromersConverter):
                 outputs = outputs[:, 0][:768]
                 b_outputs.append(outputs)
 
-            out_data  = torch.concat(b_outputs, dim=0)
+            out_data = torch.concat(b_outputs, dim=0)
             embeddings = F.normalize(out_data, p=2, dim=1)
-            scores = (embeddings[:1] @ embeddings[1:].T)
-            print(scores.tolist())        
+            scores = embeddings[:1] @ embeddings[1:].T
+            print(scores.tolist())
 
         ## generate golden ==================================
-        inp = [ inputs[0].half(), inputs[1].half(), inputs[2].half(), inputs[3].to(torch.int32)]
+        inp = [inputs[0].half(), inputs[1].half(), inputs[2].half(), inputs[3].to(torch.int32)]
         session = HMONNXGoldenInference(prefill_onnx_file)
         session.to(device)
         session.save_golden = True
@@ -363,5 +348,7 @@ class GteConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         GteConverterXH2a(config)._convert(hf_model_path, output_dir)

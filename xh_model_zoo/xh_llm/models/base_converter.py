@@ -21,6 +21,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import re
+from functools import partial
+from types import MethodType
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -327,7 +329,7 @@ class HFTransfromersConverter(BaseConverter):
         return True
 
     def _dequantize_awq_hf_model(self, native_hf_model: nn.Module):
-        assert hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ
+        assert native_hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ
         hf_model = native_hf_model
         for name, module in hf_model.named_modules():
             if isinstance(module, WQLinear_GEMM):
@@ -433,6 +435,78 @@ class HFTransfromersConverter(BaseConverter):
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model
 
+    def _dequantize_compressed_tensors_hf_model(self, native_hf_model: nn.Module) -> nn.Module:
+        import compressed_tensors.quantization.lifecycle.forward
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        from compressed_tensors.quantization.quant_args import QuantizationArgs, QuantizationStrategy
+
+        hf_model = native_hf_model
+        for _, module in hf_model.named_modules():  # type: ignore
+            if isinstance(module, CompressedLinear):
+                _process_quantization_orig = compressed_tensors.quantization.lifecycle.forward._process_quantization
+                _dequantize_orig = compressed_tensors.quantization.lifecycle.forward._dequantize
+
+                def _module_process_quantization(
+                    self: nn.Module,
+                    x: torch.Tensor,
+                    scale: torch.Tensor,
+                    zero_point: torch.Tensor,
+                    args: QuantizationArgs,
+                    g_idx: torch.Tensor | None = None,
+                    dtype: torch.dtype | None = None,
+                    do_quantize: bool = True,
+                    do_dequantize: bool = True,
+                    global_scale: torch.Tensor | None = None,
+                ):
+                    self._args = args
+                    self._original_shape = x.shape
+                    nonlocal _process_quantization_orig
+                    return _process_quantization_orig(
+                        x, scale, zero_point, args, g_idx, dtype, do_quantize, do_dequantize, global_scale
+                    )
+
+                def _module_dequantize(
+                    self: nn.Module,
+                    x_q: torch.Tensor,
+                    scale: torch.Tensor,
+                    zero_point: torch.Tensor | None = None,
+                    dtype: torch.dtype | None = None,
+                    global_scale: torch.Tensor | None = None,
+                ):
+                    quanted_strategy = self._args.strategy
+
+                    quant_weight = x_q
+                    if zero_point is not None:
+                        quant_weight = x_q - zero_point
+                    if quanted_strategy in (
+                        QuantizationStrategy.GROUP,
+                        QuantizationStrategy.TENSOR_GROUP,
+                    ):
+                        quant_weight = quant_weight.flatten(start_dim=-2)
+                    elif quanted_strategy == QuantizationStrategy.BLOCK:
+                        original_shape = self._original_shape
+                        quant_weight = quant_weight.transpose(1, 2).reshape(original_shape)
+
+                    self.register_buffer("quant_weight", quant_weight)
+                    nonlocal _dequantize_orig
+                    return _dequantize_orig(x_q, scale, zero_point, dtype, global_scale)
+
+                compressed_tensors.quantization.lifecycle.forward._dequantize = partial(_module_dequantize, module)
+                compressed_tensors.quantization.lifecycle.forward._process_quantization = partial(
+                    _module_process_quantization, module
+                )
+
+                weight_data = module.compressor.decompress_module(module)
+                compressed_tensors.quantization.lifecycle.forward._dequantize = _dequantize_orig
+                compressed_tensors.quantization.lifecycle.forward._process_quantization = _process_quantization_orig
+                param = nn.Parameter(weight_data, requires_grad=False)
+
+                module.register_parameter("weight", param)
+                module.__class__ = nn.Linear
+                module.forward = MethodType(nn.Linear.forward, module)
+
+        return hf_model
+
     def dequantize_hf_model(self, native_hf_model: nn.Module):
         if (
             not hasattr(native_hf_model.config, "quantization_config")
@@ -445,6 +519,12 @@ class HFTransfromersConverter(BaseConverter):
             hf_model = self._dequantize_awq_hf_model(hf_model)
         elif hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ:
             hf_model = self._dequantize_gptq_hf_model(hf_model)
+        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.COMPRESSED_TENSORS:
+            hf_model = self._dequantize_compressed_tensors_hf_model(hf_model)
+        else:
+            raise NotImplementedError(
+                f"Dequantize not implemented for quantization method: {hf_model.config.quantization_config.quant_method}"
+            )
         return hf_model
 
     def get_hf_model(self, hf_model_dir: str, **kwargs) -> Any:

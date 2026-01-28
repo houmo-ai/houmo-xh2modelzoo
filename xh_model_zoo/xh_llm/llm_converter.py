@@ -66,6 +66,7 @@ class LLMConverter:
             converter_cls = Qwen3_VLConverterXH2a
         elif architecture == "Qwen3VLMoeForConditionalGeneration":
             from .models.qwen3_vl_moe import Qwen3_VL_MOEConverterXH2a
+
             converter_cls = Qwen3_VL_MOEConverterXH2a
         elif architecture == "Qwen2ForCausalLM":
             if hasattr(config, "quantization_config"):
@@ -170,7 +171,13 @@ class LLMConverter:
             converter_cls = Qwen3LegacyLoRAConverterXH2a
         elif architecture == "DeepSeekV2":
             from .models.deepseek_ocr.deepseekv2_converter import DeepSeekV2ConverterXH2a
+
             converter_cls = DeepSeekV2ConverterXH2a
+        elif architecture == "Qwen3Embedding":
+            from .models.qwen3_embeding.qwen3_embeding_converter import Qwen3EmbeddingConverterXH2a
+
+            converter_cls = Qwen3EmbeddingConverterXH2a
+
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
 

@@ -19,21 +19,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import shutil
-import time
 import math
+import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
-from transformers import AutoConfig, AutoModelForCausalLM
-from xhquant.api import CacheTensor
-from moviepy import VideoFileClip
-import tempfile
 import librosa
-from PIL import Image
 import numpy as np
-from transformers import AutoProcessor, AutoTokenizer
+import torch
+from moviepy import VideoFileClip
+from PIL import Image
+from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+from xhquant.api import CacheTensor
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
@@ -50,10 +49,14 @@ from xhquant.api import (  # type: ignore # isort:skip
     is_ssfp_quant_config,
     CacheTensor,
 )
+import os
+
 from xhquant.utils import set_random_seed
+
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.minicpmo.minicpmo_hf_compatible import MiniCPMO_HFCompatible
-import os
+
+
 def get_video_chunk_content(video_path, flatten=True):
     video = VideoFileClip(video_path)
     print("video_duration:", video.duration)
@@ -89,10 +92,9 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         self.hf_model_path: Optional[str] = None
         self.output_dir: Optional[str] = None
 
-
     def _convert(self, hf_model_path: str, output_dir: str):
         cfg = self.config
-        cfg.target_device = 'XH2a'
+        cfg.target_device = "XH2a"
         cfg.hf_model_dir = hf_model_path
         cfg_name = Path(hf_model_path).name
         if cfg.debug:
@@ -120,6 +122,7 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         tokenizer = AutoTokenizer.from_pretrained(cfg.hf_model_dir, trust_remote_code=True)
 
         from .minicpmo_audio_model import XHMiniCPMOAudioModel
+
         xh_model = XHMiniCPMOAudioModel(
             hf_model=cfg.hf_model_dir,
             frontend_type="TorchFX",
@@ -133,7 +136,7 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
                     "attention_mask",
                 ],
                 output_names=["audio_embeddings"],
-                ),
+            ),
         )
         native_model = xh_model.get_hf_model()
 
@@ -293,6 +296,7 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         onnx_file = onnx_dir / f"{cfg_name}_audio.onnx"
 
         from xhquant.api import convert_fx_model_to_hmonnx
+
         convert_fx_model_to_hmonnx(
             xh_model._wrap_model,
             net_inputs,
@@ -324,10 +328,8 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         #         net_inputs[1] = net_inputs[1].clone()
         #         net_inputs[1][mask] = min_fp16
         #         logger.info(f"已将 net_inputs[1] 中的 -inf 替换为 float16 最小值: {min_fp16}")
-        #     net_inputs[1] 
+        #     net_inputs[1]
         #     hm_model.forward(*net_inputs)
-
-        
 
     @classmethod
     def convert(cls, hf_model_path: str, config: MinicpmoAudioConvertConfig, output_dir: str):
@@ -335,6 +337,7 @@ class MinicpmoAudioConverterXH2a(HFTransfromersConverter):
         config.quant_config = ConfigDict(quant_config)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         MinicpmoAudioConverterXH2a(config)._convert(hf_model_path, output_dir)
-

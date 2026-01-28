@@ -95,7 +95,9 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        assert isinstance(native_model, GptOssForCausalLM), f"The model is not GptOssForCausalLM, but {type(native_model)}"
+        assert isinstance(native_model, GptOssForCausalLM), (
+            f"The model is not GptOssForCausalLM, but {type(native_model)}"
+        )
         native_model: GptOssForCausalLM = native_model  # type: ignore
 
         self.hf_model_path = hf_model_dir
@@ -274,7 +276,7 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_value_cache_{layer_idx}")
         output_names = ["logits"]
 
-        prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
         prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
@@ -302,7 +304,9 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
         if has_global_attention:
             width = kv_cache_shape[2]
             x = torch.empty((bz, decode_nq, width), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-            decode_global_attention_mask = prepare_casual_mask(x, torch.tensor([decode_past_seq_length], dtype=torch.int32), -1)
+            decode_global_attention_mask = prepare_casual_mask(
+                x, torch.tensor([decode_past_seq_length], dtype=torch.int32), -1
+            )
 
         if has_local_attention and sliding_window is not None and sliding_window > 0:
             local_window = sliding_window + decode_nq - 1
@@ -340,6 +344,7 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
         if is_ssfp:
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
+            hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+            if not hasattr(hf_config, "quantization_config"):
+                assert config.quant_weight is not None and Path(config.quant_weight).exists()
         GptOssWithMaskConverterXH2a(config)._convert(hf_model_path, output_dir)
-
