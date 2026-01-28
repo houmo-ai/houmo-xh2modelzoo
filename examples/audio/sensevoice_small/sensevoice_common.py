@@ -235,6 +235,30 @@ def run_onnx(onnx_path: Path, inputs: Dict[str, Any]) -> Tuple[Any, Any]:
     if sess is None:
         sess = ort.InferenceSession(str(onnx_path), providers=["CUDAExecutionProvider"])
         _ONNX_SESS_CACHE[cache_key] = sess
+    input_info = {i.name: i for i in sess.get_inputs()}
+    if "speech" in inputs and "speech" in input_info:
+        speech = inputs["speech"]
+        if hasattr(speech, "numpy"):
+            speech = speech.numpy()
+        speech = np.asarray(speech)
+        target_shape = input_info["speech"].shape
+        if len(target_shape) == 3 and isinstance(target_shape[1], int):
+            target_t = target_shape[1]
+            cur_t = speech.shape[1]
+            if cur_t < target_t:
+                speech = np.pad(speech, ((0, 0), (0, target_t - cur_t), (0, 0)))
+            elif cur_t > target_t:
+                speech = speech[:, :target_t, :]
+            inputs = dict(inputs)
+            inputs["speech"] = speech
+            if "speech_lengths" in inputs:
+                speech_lengths = inputs["speech_lengths"]
+                if hasattr(speech_lengths, "numpy"):
+                    speech_lengths = speech_lengths.numpy()
+                speech_lengths = np.asarray(speech_lengths)
+                if speech_lengths.ndim == 1:
+                    speech_lengths = np.minimum(speech_lengths, target_t)
+                    inputs["speech_lengths"] = speech_lengths
     feed: Dict[str, Any] = {}
     for k, v in inputs.items():
         if hasattr(v, "numpy"):
