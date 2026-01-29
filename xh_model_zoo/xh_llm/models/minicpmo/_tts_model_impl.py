@@ -180,7 +180,6 @@ class _LlamaAttention(DynamicModule):
         attn_weights = torch.matmul(query_states, key_states)
 
         attn_weights = attn_weights + attention_mask
-        attn_weights = attn_weights + attention_mask
         attn_weights: Optional[Tensor] = torch.softmax(attn_weights, dim=-1)
 
         value_states = torch.repeat_interleave(
