@@ -28,7 +28,6 @@ import torch.nn as nn
 import tqdm
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as safetensors_save_file
-from traitlets import HasTraits
 
 from . import quant_utils, utils
 import torch.nn.functional as F

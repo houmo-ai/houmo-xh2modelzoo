@@ -28,8 +28,6 @@ import os.path as osp
 from pathlib import Path
 
 import torch
-import torch.nn as nn
-import transformers
 from loguru import logger
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
@@ -38,16 +36,16 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def parse_arguments():
-
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model", type=str, default="data/models/Meta-Llama-3.1-8B-Instruct")
     parser.add_argument("--skip-quarot", action="store_true", help="skip_quarot")
     parser.add_argument("--skip-gptq", action="store_true", help="skip_quarot")
-    parser.add_argument("--calib_data", type=str,default="wikitext2", help="calibration dataset choose")
+    parser.add_argument("--calib_data", type=str, default="wikitext2", help="calibration dataset choose")
     parser.add_argument("--w-bits", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--resume", action="store_true", help="resume from the cache")
     # parser.add_argument("--tie-embed_head", action="store_true", help="tie_embed_head")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     return parser
 
@@ -165,6 +163,7 @@ def main():
             **gptq_config,
             device=device,
             layers_cache_dir=str(layers_cache_dir),
+            cache_dir=args.datasets_dir,
         )
         logger.info(msg_output_format("End gptq quantization"))
 

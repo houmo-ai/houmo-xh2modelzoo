@@ -23,16 +23,6 @@ from typing import Any, Callable, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
@@ -43,13 +33,13 @@ from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, is_torchdynamo_compiling
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
 
-from transformers.models.qwen3_vl.modeling_qwen3_vl
 
 class Qwen3VLVisionMLP(nn.Module):
     def __init__(self, config):
@@ -1202,12 +1192,17 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             deepstack_image_embeds = list()
             for i in range(len(hm_pixel_values)):
                 image_embeds_i, deepstack_image_embeds_i = self.visual(
-                        hm_pixel_values[i].type(self.visual.dtype).to(self.visual.device),
-                    )
+                    hm_pixel_values[i].type(self.visual.dtype).to(self.visual.device),
+                )
                 image_embeds.append(image_embeds_i)
                 deepstack_image_embeds.append(deepstack_image_embeds_i)
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            deepstack_image_embeds = [torch.cat([deepstack_image_embeds[i][i_d] for i in range(len(deepstack_image_embeds))], dim=0).to(inputs_embeds.device, inputs_embeds.dtype) for i_d in range(len(deepstack_image_embeds[0]))]
+            deepstack_image_embeds = [
+                torch.cat([deepstack_image_embeds[i][i_d] for i in range(len(deepstack_image_embeds))], dim=0).to(
+                    inputs_embeds.device, inputs_embeds.dtype
+                )
+                for i_d in range(len(deepstack_image_embeds[0]))
+            ]
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
@@ -1288,9 +1283,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
                 delta = (
-                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                    if cache_position is not None
-                    else 0
+                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device) if cache_position is not None else 0
                 )
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)

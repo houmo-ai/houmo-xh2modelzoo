@@ -27,6 +27,7 @@ def parse_arguments():
     parser.add_argument("--validate", action="store_true", help="validate")
     parser.add_argument("--calib-samples", type=int, default=8)
     parser.add_argument("--data_files", nargs="+", type=str, help="List of dataset files")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     return parser
 
 
@@ -199,7 +200,7 @@ def main():
             act_order=False,
             int8_down_proj=False,
             heading_gptq=True,
-            w_head_bits=args.w_head_bits
+            w_head_bits=args.w_head_bits,
         )
 
         torch.cuda.reset_peak_memory_stats()
@@ -217,6 +218,7 @@ def main():
             is_qwen2_5_vl=True,
             processor=processor,
             data_files=args.data_files,
+            cache_dir=args.datasets_dir,
         )
         logger.info(msg_output_format("End gptq quantization"))
 

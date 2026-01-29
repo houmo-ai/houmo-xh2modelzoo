@@ -31,8 +31,7 @@ from qwen_vl_utils import process_vision_info
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
-
-from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
 
 
 def create_template(prompt, image_dir, resized_height=280, resized_width=420):
@@ -105,6 +104,7 @@ def parse_arguments():
     parser.add_argument("--data_files", nargs="+", type=str, help="List of dataset files")
     parser.add_argument("--heading_gptq", action="store_true", help="heading_gptq")
     parser.add_argument("--use_hession_mse", action="store_true", help="use_hession_mse")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     return parser.parse_args()
 
 
@@ -223,6 +223,7 @@ def main():
         data_files=args.data_files,
         is_qwen3_vl=True,
         use_hession_mse=args.use_hession_mse,
+        cache_dir=args.datasets_dir,
     )
     logger.info(msg_output_format("End gptq quantization"))
 

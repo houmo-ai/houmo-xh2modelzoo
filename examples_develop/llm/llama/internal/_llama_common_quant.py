@@ -18,7 +18,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def parse_arguments():
-
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model", type=str, default="data/models/Meta-Llama-3.1-8B-Instruct")
     parser.add_argument("--skip-quarot", action="store_true", help="skip_quarot")
@@ -28,6 +27,7 @@ def parse_arguments():
     parser.add_argument("--resume", action="store_true", help="resume from the cache")
     # parser.add_argument("--tie-embed_head", action="store_true", help="tie_embed_head")
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     return parser
 
 
@@ -143,6 +143,7 @@ def main():
             **gptq_config,
             device=device,
             layers_cache_dir=str(layers_cache_dir),
+            cache_dir=args.datasets_dir,
         )
         logger.info(msg_output_format("End gptq quantization"))
 

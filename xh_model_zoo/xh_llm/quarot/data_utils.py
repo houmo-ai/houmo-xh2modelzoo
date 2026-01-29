@@ -20,6 +20,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import random
+from pathlib import Path
 
 import datasets
 import transformers
@@ -182,9 +183,12 @@ def get_laion_220k_GPT4Vision_captions_from_LIVIS(
         trainloader = [format_qwen2_vl_dataset(sample["url"], sample["caption"]) for sample in traindata]
         return trainloader[:nsamples]
 
+
 def get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode=False, cache_dir=None):
-    from xh_model_zoo.datasets import VLLMCustomDataset
     import numpy as np
+
+    from xh_model_zoo.datasets import VLLMCustomDataset
+
     dataset = VLLMCustomDataset(data_files=data_files)
     rng = np.random.default_rng(seed)
     sample_size = min(nsamples, len(dataset))
@@ -193,16 +197,11 @@ def get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, ev
 
 
 def get_loaders(
-    name,
-    nsamples=128,
-    seed=0,
-    seqlen=2048,
-    model="",
-    hf_token=None,
-    eval_mode=False,
-    cache_dir=None,
-    **kwargs,
+    name, nsamples=128, seed=0, seqlen=2048, model="", hf_token=None, eval_mode=False, cache_dir=None, **kwargs
 ):
+    if cache_dir is not None and len(cache_dir) > 0:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
     if "wikitext2" in name:
         return get_wikitext2(nsamples, seed, seqlen, model, hf_token, eval_mode, cache_dir=cache_dir)
     if "ptb" in name:
@@ -218,4 +217,3 @@ def get_loaders(
         if data_files is None:
             raise ValueError("data_files is required for vllm_custom_data")
         return get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode, cache_dir=cache_dir)
-

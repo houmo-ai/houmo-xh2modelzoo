@@ -35,9 +35,7 @@ from transformers import AutoConfig, AutoProcessor, Qwen2_5_VLForConditionalGene
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         "--model",
         type=str,
@@ -52,9 +50,8 @@ def parse_arguments():
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     parser.add_argument("--validate", action="store_true", help="validate")
     parser.add_argument("--calib-samples", type=int, default=8)
-    parser.add_argument(
-        "--data_files", nargs="+", type=str, default=[], help="List of dataset files"
-    )
+    parser.add_argument("--data_files", nargs="+", type=str, default=[], help="List of dataset files")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     return parser
 
 
@@ -67,6 +64,7 @@ def msg_output_format(title):
 def demo(model, processor):
     from accelerate import dispatch_model, infer_auto_device_map
     from accelerate.utils import get_balanced_memory
+
     from xh_model_zoo.xh_llm.quarot import utils
 
     raw_device = next(model.parameters()).device
@@ -80,12 +78,8 @@ def demo(model, processor):
         "Qwen2DecoderLayer",
         "Qwen2_5_VLDecoderLayer",
     ]
-    max_memory = get_balanced_memory(
-        model, no_split_module_classes=no_split_module_classes
-    )
-    device_map = infer_auto_device_map(
-        model, max_memory=max_memory, no_split_module_classes=no_split_module_classes
-    )
+    max_memory = get_balanced_memory(model, no_split_module_classes=no_split_module_classes)
+    device_map = infer_auto_device_map(model, max_memory=max_memory, no_split_module_classes=no_split_module_classes)
     dispatch_model(
         model,
         device_map=device_map,
@@ -108,9 +102,7 @@ def demo(model, processor):
     ]
 
     # Preparation for inference
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
         text=[text],
@@ -123,10 +115,7 @@ def demo(model, processor):
 
     # Inference: Generation of the output
     generated_ids = model.generate(**inputs, max_new_tokens=512)
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
+    generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
     output_text = processor.batch_decode(
         generated_ids_trimmed,
         skip_special_tokens=True,
@@ -259,6 +248,7 @@ def main():
             is_qwen2_5_vl=True,
             processor=processor,
             data_files=args.data_files,
+            cache_dir=args.datasets_dir,
         )
         logger.info(msg_output_format("End gptq quantization"))
 

@@ -31,6 +31,7 @@ from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+
 def parse_arguments():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model", type=str, default="weights/UI-TARS-1.5-7B")
@@ -43,6 +44,7 @@ def parse_arguments():
     parser.add_argument("--out-dir", type=str, default="work_dirs/")
     parser.add_argument("--calib-samples", type=int, default=128)
     parser.add_argument("--data_files", nargs="+", type=str, default=[], help="List of dataset files (json format)")
+    parser.add_argument("--datasets-dir", type=str, default="data/datasets/")
     return parser
 
 
@@ -50,6 +52,7 @@ def msg_output_format(title):
     padding_str = "*" * 10
     title = f"{padding_str} {title} {padding_str}"
     return title
+
 
 def main():
     parser = parse_arguments()
@@ -69,7 +72,7 @@ def main():
 
     work_dir = Path(out_dir) / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
-    
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16
 
@@ -78,7 +81,7 @@ def main():
     native_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         hf_model_dir,
         torch_dtype=dtype,
-        device_map="cpu", # Load to CPU first to save GPU memory
+        device_map="cpu",  # Load to CPU first to save GPU memory
         trust_remote_code=True,
         # attn_implementation="flash_attention_2",
     )
@@ -96,14 +99,14 @@ def main():
     processor = AutoProcessor.from_pretrained(hf_model_dir)
 
     quant_methods = []
-    
+
     # 1. Quarot Quantization
     if not args.skip_quarot:
         torch.cuda.reset_peak_memory_stats()
         quant_methods.append("quarot")
         quant_name = "_".join(quant_methods)
         filename = work_dir / f"{quant_name}-state-dict.safetensors"
-        
+
         if not os.path.exists(filename):
             from xh_model_zoo.xh_llm.quarot.quantizer_utils import quarot
 
@@ -134,19 +137,19 @@ def main():
 
     if not args.skip_gptq:
         original_dataloader = torch.utils.data.DataLoader
-        
+
         class SafeDataLoader(original_dataloader):
             def __init__(self, *args, **kwargs):
-                if 'collate_fn' not in kwargs and kwargs.get('batch_size') == 1:
-                    kwargs['collate_fn'] = lambda x: x[0]
+                if "collate_fn" not in kwargs and kwargs.get("batch_size") == 1:
+                    kwargs["collate_fn"] = lambda x: x[0]
                 super().__init__(*args, **kwargs)
-        
+
         torch.utils.data.DataLoader = SafeDataLoader
-        
+
         from xh_model_zoo.xh_llm.quarot.quantizer_utils import gptq
 
         gptq_config = dict(
-            calib_dataset=args.data_files[0], # Use custom data list mode
+            calib_dataset=args.data_files[0],  # Use custom data list mode
             calib_samples=args.calib_samples,
             seqlen=2048,
             w_clip=True,
@@ -157,7 +160,7 @@ def main():
             act_order=False,
             int8_down_proj=False,
             heading_gptq=True,
-            w_head_bits=args.w_head_bits
+            w_head_bits=args.w_head_bits,
         )
 
         torch.cuda.reset_peak_memory_stats()
@@ -174,7 +177,8 @@ def main():
             device=device,
             is_qwen2_5_vl=True,
             processor=processor,
-            data_files=args.data_files, # Pass the generated json files
+            data_files=args.data_files,  # Pass the generated json files
+            cache_dir=args.datasets_dir,
         )
         logger.info(msg_output_format("End gptq quantization"))
 
@@ -194,7 +198,7 @@ def main():
         quant_name = "_".join(quant_methods)
         filename = work_dir / f"{quant_name}-state-dict.safetensors"
         state_dict = native_model.state_dict()
-        
+
         # Convert weights to target types (int8/int16/float16)
         for k in tqdm(state_dict, desc="Converting weights"):
             paths = k.split(".")
@@ -210,7 +214,7 @@ def main():
                 v = v.to(torch.float16)
 
             state_dict[k] = v
-            
+
         logger.info(msg_output_format(f"Saving final checkpoint to: {filename}"))
         save_safetensors_file(state_dict, filename)
         logger.info(f"Save checkpoint to: {filename}")
