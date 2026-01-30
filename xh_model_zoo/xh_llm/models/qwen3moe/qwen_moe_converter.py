@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.nn as nn
 import yaml
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3MoeForCausalLM
 from xhquant.api import CacheTensor
+from transformers.utils.quantization_config import QuantizationMethod
 
 from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from ..base_converter import BaseConverter, HFTransfromersConverter
@@ -59,12 +61,13 @@ class Qwen3MoeConverterXH2a(HFTransfromersConverter):
 
     def load_hf_model(self, hf_model_dir: str, **kwargs):
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        assert not hasattr(config, "quantization_config")
+        # assert not hasattr(config, "quantization_config")
         native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
-        assert not hasattr(native_model, "hf_quantizer")
+        # assert not hasattr(native_model, "hf_quantizer")
+        native_model = self.dequantize_hf_model(native_model)
         assert isinstance(
             native_model, Qwen3MoeForCausalLM
-        ), f"The model is not Qwen2ForCausalLM, but {type(native_model)}"
+        ), f"The model is not Qwen3ForCausalLM, but {type(native_model)}"
         native_model: Qwen3MoeForCausalLM = native_model  # type: ignore
 
         if native_model.config.tie_word_embeddings:  # type: ignore
@@ -76,6 +79,21 @@ class Qwen3MoeConverterXH2a(HFTransfromersConverter):
 
         self.hf_model_path = hf_model_dir
         return native_model
+
+    def dequantize_hf_model(self, native_hf_model: nn.Module) -> nn.Module:
+        hf_model = native_hf_model
+        if not hasattr(hf_model.config, "quantization_config") or hf_model.config.quantization_config is None:
+            return hf_model
+
+        if hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ:
+            hf_model = self._dequantize_awq_hf_model(hf_model)
+        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ:
+            hf_model = self._dequantize_gptq_hf_model(hf_model)
+        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.COMPRESSED_TENSORS:
+            hf_model = self._dequantize_compressed_tensors_hf_model(hf_model)
+        else:
+            raise Exception(f"Unsupported quantization method: {hf_model.config.quantization_config.quant_method}")
+        return hf_model
 
     def _convert(self, hf_model_path: str, output_dir: str):
         logger = get_root_logger()

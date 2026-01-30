@@ -62,7 +62,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="data/datasets/QQwen3-30B-A3B")
+    parser.add_argument("--model", type=str, default="/data02/chenzx/ssfp_weight/Qwen3-30B-A3B-w4-sefp-ceil-actorderfalse-with_lmhead/")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
     parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quant type, default is w8a8")
