@@ -41,6 +41,7 @@ from transformers.modeling_gguf_pytorch_utils import (
     read_field,
 )
 from xhquant.api import CacheTensor
+from xhquant.core.context import XHContext, XHRuntimeContext
 
 from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from ..base_converter import BaseConverter, HFTransfromersConverter
@@ -454,12 +455,15 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         inputs = list(inputs)
         lora_mask = torch.tensor([1.0], dtype=torch.float16)
         inputs.append(lora_mask)  # 增加lora_mask输入
-        quanted_model = convert_fx_model_to_quanted_model(
-            wraped_qwen_model,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
+        context = XHContext(arch=str(target_device))
+        context.strict_inputs = False
+        with XHRuntimeContext(context):
+            quanted_model = convert_fx_model_to_quanted_model(
+                wraped_qwen_model,
+                inputs,
+                target_device,
+                quant_config=quant_config,
+            )
         if self.config.mix_search is not None:
             quanted_model = quanted_model.cuda()
             quanted_model.enable_fast_precision_mode()
