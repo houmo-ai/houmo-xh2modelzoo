@@ -50,6 +50,23 @@ APP_STATE = {
 # 新增：记录当前测试进程PID
 CURRENT_TEST_PID = None
 
+# ========== 新增：获取本机IP地址 ==========
+import socket  # 若文件顶部已导入socket，可删除这行
+def get_local_ip():
+    """获取本机局域网IP地址"""
+    try:
+        # 创建UDP连接（不实际发送数据）来获取本机IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+LOCAL_IP = get_local_ip()
+PORT = 35001
+
 # ========== 日志配置 ==========
 def setup_logger():
     """配置日志系统，同时输出到文件和内存"""
@@ -970,26 +987,37 @@ def stop_service():
 
 # ========== 程序入口 ==========
 def start_web_server():
-    """启动Flask Web服务器（非阻塞）"""
+    """启动Flask Web服务器（适配端口转发的稳定版本）"""
     from werkzeug.serving import make_server
-    
-    # 再次确认关闭werkzeug日志
-    logging.getLogger('werkzeug').setLevel(logging.ERROR)
-    
-    # 创建服务器实例
+    import socket
+
+    # 关键修复1：开启地址复用（解决端口转发的端口占用问题）
+    socket.setdefaulttimeout(30)
     server = make_server(
-        host='0.0.0.0',
-        port=5000,
+        host='0.0.0.0',       # 监听所有网卡（端口转发核心）
+        port=PORT,
         app=app,
-        threaded=True
+        threaded=True,
+        processes=1,          # 单进程（避免多进程端口冲突）
+        request_handler=None
     )
-    
-    logger.info(f"Web服务已启动，访问地址：http://0.0.0.0:5000")
-    
-    # 启动服务器（非阻塞）
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # 开启地址复用（关键）
+    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+    # 关键修复2：关闭werkzeug日志但保留启动错误日志
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.WARNING)  # 保留WARNING级别（启动错误会打印）
+
+    # 打印清晰的访问地址（端口转发时用这个）
+    logger.info(f"=== Web服务启动成功（适配端口转发） ===")
+    logger.info(f"本地访问：http://127.0.0.1:{PORT}")
+    logger.info(f"  局域网访问：http://{LOCAL_IP}:{PORT}")
+
+    # 关键修复3：非守护线程启动（避免被系统回收）
+    server_thread = threading.Thread(target=server.serve_forever, daemon=False)
     server_thread.start()
-    
+
     return server, server_thread
 
 def main():
@@ -997,14 +1025,24 @@ def main():
     logger.info(f"测试服务启动，监听邮箱：{EMAIL_ACCOUNT}")
     logger.info("="*50)
     
+    # 前置校验：确认5000端口未被占用
+    # import socket
+    # with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #     try:
+    #         s.bind(("127.0.0.1", PORT))
+    #     except OSError as e:
+    #         logger.error(f"❌ {PORT}端口已被占用，无法启动服务：{e}")
+    #         sys.exit(1)
+    
     # 启动后台任务线程（邮件监听+定时任务）
-    bg_thread = threading.Thread(target=background_tasks, daemon=False)
+    bg_thread = threading.Thread(target=background_tasks, daemon=True)
     bg_thread.start()
     
-    # 启动Web服务器（非阻塞）
+    # 启动Web服务器（关键：等待服务启动完成）
     server, server_thread = start_web_server()
+    logger.info("✅ 所有服务启动完成，等待端口转发连接...")
     
-    # 保持主线程运行
+    # 保持主线程运行（端口转发核心：主线程不能退出）
     try:
         while APP_STATE["is_running"]:
             time.sleep(1)
@@ -1012,14 +1050,14 @@ def main():
         logger.info("接收到停止信号，正在关闭服务...")
         APP_STATE["is_running"] = False
         
-        # 停止Web服务器
+        # 优雅停止Web服务器
         server.shutdown()
-        server_thread.join()
+        server_thread.join(timeout=5)
         
         # 等待后台线程结束
-        bg_thread.join(timeout=10)
+        bg_thread.join(timeout=5)
         
-        logger.info("服务已完全停止")
+        logger.info("✅ 服务已完全停止")
         sys.exit(0)
 
 if __name__ == "__main__":

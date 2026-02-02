@@ -35,4 +35,4 @@ class VisualConfig:
 
 @dataclass
 class Qwen2VLConvertConfig(LLMConvertConfig):
-    visual_config: VisualConfig = field(default=VisualConfig())
+    visual_config: VisualConfig = field(default=VisualConfig)

@@ -302,7 +302,7 @@ class _ResnetBlock2D(DynamicModule):
         if self.conv_shortcut is not None:
             input_tensor = self.conv_shortcut(input_tensor.contiguous())
 
-        output_tensor = (input_tensor + hidden_states) / self.output_scale_factor
+        output_tensor = (input_tensor + hidden_states)
 
         return output_tensor
 
