@@ -27,5 +27,5 @@ from ...llm_convert_config import LLMConvertConfig
 @dataclass
 class Qwen2LegacyConvertConfig(LLMConvertConfig):
     mix_search: str = None
-    num_logits_to_keep: Optional[str] = None
+    num_logits_to_keep: Optional[int] = 1
     pass

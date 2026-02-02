@@ -67,7 +67,7 @@ from .modeling_deepseekv2 import DeepseekV2ForCausalLM
 @dataclass
 class DeepseekV2ConverterConfig(LLMConvertConfig):
     mix_search: Optional[str] = None
-    num_logits_to_keep: Optional[str] = None
+    num_logits_to_keep: Optional[int] = 1
     
 
 
