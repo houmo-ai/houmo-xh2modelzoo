@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 try:
     from awq.modules.linear.gemm import WQLinear_GEMM
@@ -417,19 +418,29 @@ class HFTransfromersConverter(BaseConverter):
             from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
             from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 
-            if QuantLinear is TorchQuantLinear:
+            torch_linear_cls = [TorchQuantLinear]
+            try:
+                from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+
+                torch_linear_cls.append(TorchFusedQuantLinear)
+            except Exception:
+                pass
+
+            if QuantLinear in torch_linear_cls:
                 converter = gptqmodel_torch_qlinear_converter
             elif QuantLinear is MarlinQuantLinear:
                 converter = None
 
         assert converter is not None, f"Not implemented for {QuantLinear} yet"
 
+        dequant_linears = []
         for name, module in hf_model.named_modules():  # type: ignore
             if isinstance(module, QuantLinear):
-                if converter is not None:
-                    converter(module)
-                else:
-                    raise NotImplementedError(f"Not implemented for {type(QuantLinear)} yet")
+                dequant_linears.append((name, module))
+        pbar = tqdm(dequant_linears, desc="Dequantizing GPTQ model")
+        for name, module in pbar:
+            pbar.set_description(f"Dequantizing GPTQ: {name}")
+            converter(module)
 
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
