@@ -140,7 +140,7 @@ class XHGemma05CLLMModel(LLMBaseModel):
 
             attention_mask[..., :50] = 0.0
 
-        inputs_embeds = torch.load("/data01/home/she.gao/lerobot/suffix_embs.pt").to(torch.float32)
+        # inputs_embeds = torch.load("/data01/home/she.gao/lerobot/suffix_embs.pt").to(torch.float32)
         # cond = torch.load("/data01/home/she.gao/xhquant_llm/examples/cond.pt")
         # cond = cond.to(torch.float16)
         cond = torch.ones(1, 1024, device=device, dtype=torch.float32)

@@ -12,13 +12,13 @@
 
 ```gemma-2B
 context-length
-input-sequence-length
+input-sequence-length = 968 (固定)
 quant-type: for example: w8a8h1-sefp
 ```
 
 ```gemma-300m
 context-length 
-input-sequence-length
+input-sequence-length = 50 （固定）
 quant-type: for example: w8a8h1-sefp
 ```
 

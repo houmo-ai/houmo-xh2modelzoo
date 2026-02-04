@@ -85,19 +85,19 @@ class XHGemmaHMONNXModel(LLMONNXModel):
 
         assert seq_length <= self.input_sequence_length, f"input_sequence_length must be greater than {seq_length}"
         
-        if attention_mask is not None:
-            # attention_mask: [1, 8, seq, 2048]
-            cur_seq = attention_mask.shape[2]
-            if cur_seq < self.input_sequence_length:
-                pad_len = self.input_sequence_length - cur_seq
-                pad_value = torch.finfo(torch.float16).min
-                pad_mask = torch.full(
-                    (attention_mask.shape[0], attention_mask.shape[1], pad_len, attention_mask.shape[3]),
-                    pad_value,
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                attention_mask = torch.cat([attention_mask, pad_mask], dim=2)
+        # if attention_mask is not None:
+        #     # attention_mask: [1, 8, seq, 2048]
+        #     cur_seq = attention_mask.shape[2]
+        #     if cur_seq < self.input_sequence_length:
+        #         pad_len = self.input_sequence_length - cur_seq
+        #         pad_value = torch.finfo(torch.float16).min
+        #         pad_mask = torch.full(
+        #             (attention_mask.shape[0], attention_mask.shape[1], pad_len, attention_mask.shape[3]),
+        #             pad_value,
+        #             dtype=attention_mask.dtype,
+        #             device=attention_mask.device,
+        #         )
+        #         attention_mask = torch.cat([attention_mask, pad_mask], dim=2)
 
         inputs_embeds = inputs_embeds.to(device)
         position_ids = torch.arange(past_seq_length[0], past_seq_length[0] + seq_length, dtype=torch.long)

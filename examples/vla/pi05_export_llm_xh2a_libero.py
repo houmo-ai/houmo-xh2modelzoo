@@ -141,9 +141,9 @@ def main(args):
     xh_model.to(device)
     xh_model.to(dtype)
     logger.info("Start wrap model prefill .......................")
-    with torch.no_grad():
-        outs = xh_model.test_step(data_batch)
-        wraped_hidden_states = outs.hidden_states
+    # with torch.no_grad():
+    #     outs = xh_model.test_step(data_batch)
+    #     wraped_hidden_states = outs.hidden_states
         #logger.info(f"wraped_logits shape: {wraped_logits.shape}")
 
     xh_model.interactive_mode = True

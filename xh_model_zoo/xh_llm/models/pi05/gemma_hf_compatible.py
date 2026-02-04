@@ -99,12 +99,12 @@ def create_llm_wraped_cls(cls):
                 sub_current_input_length = torch.tensor(
                     [min(end, seq_length) - start], dtype=current_input_length.dtype
                 ).to(current_input_length.device)
-                sub_attention_mask = attention_mask[:, :, start:end, :]
+                # sub_attention_mask = attention_mask[:, :, start:end, :]
                 outputs = self._llm_model(
                     sub_inputs_embeds,
                     sub_past_seq_length,
                     sub_current_input_length,
-                    sub_attention_mask,
+                    attention_mask,
                     past_key_caches,
                     past_value_caches,
                 )

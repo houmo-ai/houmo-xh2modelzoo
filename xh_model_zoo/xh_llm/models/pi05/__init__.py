@@ -1,10 +1,10 @@
-# from .gemma_llm_model import XHGemmaLLMModel
+from .gemma_llm_model import XHGemmaLLMModel
 from .gemma_llm_casual_model import XHGemmaCLLMModel
 from .gemma_hf_compatible import GemmaHFCompatible
 from .llm_onnx_model import XHGemmaHMONNXModel
 from .gemma_hf_casual_compatible import GemmaCHFCompatible
-# from .llm_onnx_model import XHGemmaCHMONNXModel, XHPI05GemmaCHMONNXModel
-# from .gemma_llm_casual_model_05 import XHGemma05CLLMModel
+from .llm_onnx_model import XHGemmaCHMONNXModel, XHPI05GemmaCHMONNXModel
+from .gemma_llm_casual_model_05 import XHGemma05CLLMModel
 
 __all__ = [
     "XHGemmaLLMModel",
