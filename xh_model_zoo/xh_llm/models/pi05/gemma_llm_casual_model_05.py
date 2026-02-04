@@ -98,7 +98,7 @@ class XHGemma05CLLMModel(LLMBaseModel):
         current_input_length = []
         for batch_idx, input_id in enumerate(raw_input_ids):
             input_id = torch.tensor(input_id, dtype=torch.long)
-            seq_length = 50 #input_id.shape[0]
+            seq_length = input_id.shape[0]
             past_seq_length = data["past_seq_length"][batch_idx]
             current_input_length.append(seq_length)
             assert (
