@@ -24,6 +24,10 @@ import typing
 
 import torch
 import tqdm
+try:
+    import fast_hadamard_transform
+except ImportError:
+    fast_hadamard_transform = None
 
 from . import model_utils, utils
 
@@ -934,3 +938,218 @@ def add_qk_rotation_wrapper_after_function_call_in_forward(module, function_name
         functools.partial(QKRotationWrapper, *args, **kwargs),
     )
     setattr(module, attr_name, wrapper)
+
+
+def apply_hadamard_blockwise(x: torch.Tensor, block_size: int) -> torch.Tensor:
+    """
+    Apply Hadamard transform block-wise using fast_hadamard_transform.
+    Input tensor x is expected to be flattened or have the dimension to be transformed as the last dimension.
+    """
+    if fast_hadamard_transform is None:
+        raise ImportError("fast_hadamard_transform is not installed.")
+    
+    init_shape = x.shape
+    x = x.reshape(-1, block_size)
+    scale = 1.0 / math.sqrt(block_size)
+    x = fast_hadamard_transform.hadamard_transform(x.contiguous(), scale)
+    return x.view(init_shape)
+
+
+def apply_hadamard_blockwise_on_output_dim(W_data: torch.Tensor, block_size: int) -> torch.Tensor:
+    """
+    Applies Hadamard transform to the first dimension (output features) of the weight matrix.
+    Handles the Transpose -> Transform -> Transpose pattern and ensures the result is contiguous.
+    
+    Args:
+        W_data: Tensor of shape [out_features, in_features]
+        block_size: Block size for Hadamard transform
+    Returns:
+        Tensor of shape [out_features, in_features] with contiguous memory layout.
+    """
+    # W shape: [out, in] -> Transpose to [in, out] so 'out' is the last dim
+    W_ = W_data.t()
+    W_ = apply_hadamard_blockwise(W_, block_size)
+    # Transpose back to [out, in] and force contiguous layout
+    return W_.t().contiguous()
+
+
+@torch.inference_mode()
+def online_rotate_blockwise(module, inp):
+    x = inp[0]
+    dtype = x.dtype
+    block_size = module.hadamard_block_size
+    
+    # x shape: [batch, seq_len, hidden_dim]
+    x = apply_hadamard_blockwise(x.float(), block_size).to(dtype)
+    
+    return (x,) + inp[1:]
+
+
+def register_online_hadamard_rotation_blockwise(module, block_size: int):
+    assert not hasattr(module, "hadamard_block_size")
+    module.hadamard_block_size = block_size
+    module.rotate_handle = module.register_forward_pre_hook(online_rotate_blockwise)
+
+
+def rotate_attention_inputs_blockwise(layer, block_size, model_type) -> None:
+    try:
+        layer_list = [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]
+    except:
+        layer_list = [layer.attn.qkv]
+
+    for W in layer_list:
+        dtype = W.weight.dtype
+        W_ = W.weight.data.float()
+        W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+
+
+def rotate_attention_output_blockwise(layer, block_size, model_type) -> None:
+    if model_type == model_utils.LLAMA_MODEL:
+        W = layer.self_attn.o_proj
+    elif model_type == model_utils.OPT_MODEL:
+        W = layer.self_attn.out_proj
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL):
+        try:
+            W = layer.self_attn.o_proj
+        except:
+            W = layer.attn.proj
+    elif model_type == model_utils.QWEN3MOE_MODEL:
+        W = layer.self_attn.o_proj
+    else:
+        raise ValueError(f"Unknown model type {model_type}")
+
+    dtype = W.weight.data.dtype
+    
+    W_ = W.weight.data.float()
+    W.weight.data = apply_hadamard_blockwise_on_output_dim(W_, block_size).to(dtype)
+
+    if W.bias is not None:
+        b = W.bias.data.float()
+        # bias shape: [out_features]
+        # Bias is added to the output, so it must also be rotated: b' = H @ b
+        b = apply_hadamard_blockwise(b, block_size)
+        W.bias.data = b.to(dtype)
+
+
+def rotate_mlp_input_blockwise(layer, block_size, model_type):
+    if model_type == model_utils.LLAMA_MODEL:
+        mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+    elif model_type == model_utils.OPT_MODEL:
+        mlp_inputs = [layer.fc1]
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
+        mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+    elif model_type == model_utils.QWEN3_VL_MODEL:
+        try:
+            mlp_inputs = [layer.mlp.linear_fc1]
+        except:
+            mlp_inputs = [layer.mlp.up_proj, layer.mlp.gate_proj]
+    elif model_type == model_utils.QWEN3MOE_MODEL:
+        mlp_inputs = [layer.mlp.gate]
+        for expert in layer.mlp.experts:
+            mlp_inputs.append(expert.gate_proj)
+            mlp_inputs.append(expert.up_proj)
+    else:
+        raise ValueError(f"Unknown model type {model_type}")
+
+    for W in mlp_inputs:
+        dtype = W.weight.dtype
+        # Input rotation: W' = W H. Apply to in_features (dim 1).
+        W_ = W.weight.data.float()
+        W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+
+
+def rotate_mlp_output_blockwise(layer, block_size, model_type):
+    if model_type == model_utils.QWEN3MOE_MODEL:
+        for expert in layer.mlp.experts:
+            W = expert.down_proj
+            dtype = W.weight.data.dtype
+            # Output rotation: W' = H W. Apply to out_features (dim 0).
+            W_ = W.weight.data.float()
+            W.weight.data = apply_hadamard_blockwise_on_output_dim(W_, block_size).to(dtype)
+
+            if W.bias is not None:
+                b = W.bias.data.float()
+                b = apply_hadamard_blockwise(b, block_size)
+                W.bias.data = b.to(dtype)
+        return
+
+    if model_type == model_utils.LLAMA_MODEL:
+        W = layer.mlp.down_proj
+    elif model_type == model_utils.OPT_MODEL:
+        W = layer.fc2
+    elif model_type in (model_utils.QWEN_MODEL, model_utils.QWEN3_MODEL, model_utils.QWEN2_5_VL_MODEL):
+        W = layer.mlp.down_proj
+    elif model_type == model_utils.QWEN3_VL_MODEL:
+        try:
+            W = layer.mlp.linear_fc2
+        except:
+            W = layer.mlp.down_proj
+    else:
+        raise ValueError(f"Unknown model type {model_type}")
+
+    dtype = W.weight.data.dtype
+    # Output rotation: W' = H W. Apply to out_features (dim 0).
+    W_ = W.weight.data.float()
+    W.weight.data = apply_hadamard_blockwise_on_output_dim(W_, block_size).to(dtype)
+
+    if W.bias is not None:
+        b = W.bias.data.float()
+        b = apply_hadamard_blockwise(b, block_size)
+        W.bias.data = b.to(dtype)
+
+
+def rotate_embeddings_blockwise(model, block_size) -> None:
+    # Rotate the embeddings.
+    model_type = model_utils.model_type_extractor(model)
+    for W in model_utils.get_embeddings(model, model_type):
+        dtype = W.weight.data.dtype
+        # Embedding weight: [vocab_size, hidden_dim]
+        W_ = W.weight.data.float()
+        W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+
+
+def rotate_head_blockwise(model, block_size) -> None:
+    # Rotate the head.
+    W = model_utils.get_lm_head(model, model_type=model_utils.model_type_extractor(model))
+    dtype = W.weight.data.dtype
+    # Head weight: [vocab_size, hidden_dim]
+    W_ = W.weight.data.float()
+    W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+
+
+@torch.inference_mode()
+def rotate_model_blockwise(model, block_size, device):
+    """
+    Applies block-wise Hadamard rotation to the model weights.
+    This implementation avoids constructing the dense Hadamard matrix, 
+    making it memory-efficient and suitable for micro-scaling (e.g., block_size=32).
+    """
+    print(f"Applying block-wise Hadamard rotation with block_size={block_size}")
+    model_type = model_utils.model_type_extractor(model)
+    
+    # Check for Vision-Language models support
+    if model_type in [model_utils.QWEN2_5_VL_MODEL, model_utils.QWEN3_VL_MODEL]:
+        raise NotImplementedError(
+            f"Block-wise rotation is currently not implemented for Vision-Language model type: {model_type}. "
+            "Please use the standard rotation method or implement the VL-specific rotation logic."
+        )
+
+    # Rotate Embeddings
+    rotate_embeddings_blockwise(model, block_size)
+    rotate_head_blockwise(model, block_size)
+    
+    utils.cleanup_memory()
+
+    layers = model_utils.get_transformer_layers(model, model_type=model_type)
+    for idx, layer in enumerate(tqdm.tqdm(layers, unit="layer", desc="Rotating Blockwise")):
+        raw_device = next(layer.parameters()).device
+        # Move layer to target device in-place for processing
+        layer.to(device)
+        
+        rotate_attention_inputs_blockwise(layer, block_size, model_type)
+        rotate_attention_output_blockwise(layer, block_size, model_type)
+        rotate_mlp_input_blockwise(layer, block_size, model_type)
+        rotate_mlp_output_blockwise(layer, block_size, model_type)
+        
+        # Move layer back to original device in-place
+        layer.to(raw_device)

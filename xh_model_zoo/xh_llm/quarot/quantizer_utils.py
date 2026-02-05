@@ -32,7 +32,7 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 
 @torch.no_grad()
-def quarot(model, rotate_mode="hadamard", device=None, quarot_matrix_size=None):
+def quarot(model, rotate_mode="hadamard", device=None, quarot_matrix_size=None, hadamard_block_size=None):
     # if device is None:
     #     device = model.device
     # else:
@@ -44,7 +44,10 @@ def quarot(model, rotate_mode="hadamard", device=None, quarot_matrix_size=None):
     rotation_utils.fuse_layer_norms(model)
 
     # rotation
-    rotation_utils.rotate_model(model, rotate_mode, device=device, quarot_matrix_size=quarot_matrix_size)
+    if hadamard_block_size is not None and hadamard_block_size > 0:
+        rotation_utils.rotate_model_blockwise(model, block_size=hadamard_block_size, device=device)
+    else:
+        rotation_utils.rotate_model(model, rotate_mode, device=device, quarot_matrix_size=quarot_matrix_size)
 
     utils.cleanup_memory(verbose=True)
     # model.to(device)
