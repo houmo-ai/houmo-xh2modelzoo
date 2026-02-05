@@ -31,8 +31,12 @@ import bitsandbytes.functional as BNBF
 import onnx
 import onnxsim
 import torch
+import torch.nn as nn
 import transformers
-from bitsandbytes.nn.modules import Linear4bit, bnb
+from bitsandbytes.nn.modules import (
+    Linear4bit,
+    bnb,  # noqa: F401
+)
 from diffusers import SD3Transformer2DModel, StableDiffusion3Pipeline
 from torch import Tensor
 from transformers.models.clip.modeling_clip import (
@@ -191,35 +195,47 @@ def scaled_dot_product_attention(
     return attn_weight @ value
 
 
-def linear4bit_forward(self, x: torch.Tensor):
-    if self.weight.shape[0] == self.out_features and self.weight.shape[1] == self.in_features:
-        return torch.nn.functional.linear(x, self.weight, self.bias)
-
+def linear4bit_dequant(self: Linear4bit):
     from bitsandbytes.nn.modules import fix_4bit_weight_quant_state_from_module
 
     fix_4bit_weight_quant_state_from_module(self)
 
-    # weights are cast automatically as Int8Params, but the bias has to be cast manually
-    if self.bias is not None and self.bias.dtype != x.dtype:
-        self.bias.data = self.bias.data.to(x.dtype)
-
-    if not self.compute_type_is_set:
-        self.set_compute_type(x)
-        self.compute_type_is_set = True
-
-    inp_dtype = x.dtype
-    if self.compute_dtype is not None:
-        x = x.to(self.compute_dtype)
-
-    bias = None if self.bias is None else self.bias.to(self.compute_dtype)
-
-    out1 = bnb.matmul_4bit(x, self.weight.t(), bias=bias, quant_state=self.weight.quant_state).to(inp_dtype)
-    weight = BNBF.dequantize_4bit(self.weight.t(), self.weight.quant_state).to(x.dtype).t()
+    # out1 = bnb.matmul_4bit(x, self.weight.t(), bias=bias, quant_state=self.weight.quant_state)
+    weight = BNBF.dequantize_4bit(self.weight.t(), self.weight.quant_state).t()
     self.weight = torch.nn.Parameter(weight, requires_grad=False)
-    out2 = torch.nn.functional.linear(x, weight, bias)
-    # diff = (out1 - out2).abs().sum().item()
-    # print(diff)
-    return out1
+    self.__class__ = nn.Linear
+    self.forward = types.MethodType(nn.Linear.forward, self)
+
+
+# def linear4bit_forward(self, x: torch.Tensor):
+#     if self.weight.shape[0] == self.out_features and self.weight.shape[1] == self.in_features:
+#         return torch.nn.functional.linear(x, self.weight, self.bias)
+
+#     from bitsandbytes.nn.modules import fix_4bit_weight_quant_state_from_module
+
+#     fix_4bit_weight_quant_state_from_module(self)
+
+#     # weights are cast automatically as Int8Params, but the bias has to be cast manually
+#     if self.bias is not None and self.bias.dtype != x.dtype:
+#         self.bias.data = self.bias.data.to(x.dtype)
+
+#     if not self.compute_type_is_set:
+#         self.set_compute_type(x)
+#         self.compute_type_is_set = True
+
+#     inp_dtype = x.dtype
+#     if self.compute_dtype is not None:
+#         x = x.to(self.compute_dtype)
+
+#     bias = None if self.bias is None else self.bias.to(self.compute_dtype)
+
+#     # out1 = bnb.matmul_4bit(x, self.weight.t(), bias=bias, quant_state=self.weight.quant_state)
+#     weight = BNBF.dequantize_4bit(self.weight.t(), self.weight.quant_state).to(x.dtype).t()
+#     # self.weight = torch.nn.Parameter(weight, requires_grad=False)
+#     out2 = torch.nn.functional.linear(x, weight, bias)
+#     # diff = (out1 - out2).abs().sum().item()
+#     # print(diff)
+#     return out2.to(inp_dtype)
 
 
 def CLIPSdpaAttention_forward(
@@ -304,7 +320,6 @@ def T5Block_forward(
     return_dict=True,
     cache_position=None,
 ):
-
     self_attention_outputs = self.layer[0](
         hidden_states,
         attention_mask=attention_mask,
@@ -609,7 +624,8 @@ class SD3Converter:
     def export_onnx_clip_l(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
         export_model = hf_model.text_encoder_2
-        export_model.to(device="cpu", dtype=torch.float32)
+        # export_model.to(device="cpu", dtype=torch.float32)
+        export_model.to(device="cpu")
         fuse_clip_l = True
         legacy_onnx = True
         simplify_onnx = True
@@ -656,7 +672,8 @@ class SD3Converter:
                 module.forward = types.MethodType(CLIPSdpaAttention_forward, module)
             if fuse_clip_l:
                 if isinstance(module, Linear4bit):
-                    module.forward = types.MethodType(linear4bit_forward, module)
+                    # module.forward = types.MethodType(linear4bit_forward, module)
+                    linear4bit_dequant(module)
 
         with torch.no_grad():
             export_model.eval()
@@ -755,7 +772,8 @@ class SD3Converter:
     def export_onnx_clip(cls, hf_model: StableDiffusion3Pipeline, convert_config: SD3ConvertConfig, output_onnx_file):
         logger = get_root_logger()
         export_model = hf_model.text_encoder
-        export_model.to(device="cpu", dtype=torch.float32)
+        # export_model.to(device="cpu", dtype=torch.float32)
+        export_model.to(device="cpu")
 
         onnx_name = Path(output_onnx_file).stem
         legacy_onnx = True
@@ -801,7 +819,8 @@ class SD3Converter:
                 module.forward = types.MethodType(CLIPSdpaAttention_forward, module)
             if fuse_clip:
                 if isinstance(module, Linear4bit):
-                    module.forward = types.MethodType(linear4bit_forward, module)
+                    # module.forward = types.MethodType(linear4bit_forward, module)
+                    linear4bit_dequant(module)
 
         with torch.no_grad():
             export_model.eval()
@@ -1147,6 +1166,7 @@ class SD3Converter:
         pipe = StableDiffusion3Pipeline.from_pretrained(
             pretrained_model_path,
             torch_dtype=torch.float16,
+            device_map="cpu",
         )
         return pipe
 
@@ -1186,7 +1206,7 @@ class SD3Converter:
             )
 
         ## export clip_l
-        clip_l_onnx_file = str(Path(onnx_dir) / f"clip_l.onnx")
+        clip_l_onnx_file = str(Path(onnx_dir) / "clip_l.onnx")
         if Path(clip_l_onnx_file).exists():
             logger.warning(f"{clip_l_onnx_file} already exists")
         else:

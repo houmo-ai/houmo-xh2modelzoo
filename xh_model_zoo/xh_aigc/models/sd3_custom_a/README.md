@@ -2,7 +2,11 @@
 
 ## 依赖项
 
-联想模型需要transformers版本4.46.2
+联想模型需要transformers版本4.46.0
+diffusers       0.29.2
+transformers    4.46.0
+sentencepiece
+peft            0.16.0
 
 ```text
 mmdit_hypersd_fp16_v1.3.0.0.safetensors :微调后的fp16

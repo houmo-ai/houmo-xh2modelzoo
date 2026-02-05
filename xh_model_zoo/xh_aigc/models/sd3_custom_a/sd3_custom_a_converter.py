@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import accelerate
+import accelerate.hooks
 import onnx
 import onnxsim
 import torch
@@ -36,7 +38,7 @@ from xhquant.api import get_root_logger
 from xhquant.utils import get_root_logger
 
 from ..sd3 import SD3ConvertConfig, SD3Converter
-from ..sd3.sd3_converter import CLIPSdpaAttention_forward, CLIPTextTransformer_forward, linear4bit_forward
+from ..sd3.sd3_converter import CLIPSdpaAttention_forward, CLIPTextTransformer_forward, linear4bit_dequant
 from .sd3_custom_a_diffusion_pipe import SD3CustomADiffusion3Pipe
 
 
@@ -54,8 +56,18 @@ class SD3CustomAConverter(SD3Converter):
 
     def load_model(self, pretrained_model_path, convert_config: SD3CustomAConvertConfig):  # type: ignore[override]
         pipe = SD3CustomADiffusion3Pipe.from_pretrained(
-            pretrained_model_path, self.custom_a_model_path, convert_config.mmdit_quant, convert_config.t5_quant
+            pretrained_model_path,
+            self.custom_a_model_path,
+            convert_config.mmdit_quant,
+            convert_config.t5_quant,
         )
+        pipe.to("cpu")
+        accelerate.hooks.remove_hook_from_module(pipe.text_encoder_2, recurse=True)
+        accelerate.hooks.remove_hook_from_module(pipe.text_encoder, recurse=True)
+        accelerate.hooks.remove_hook_from_module(pipe.transformer, recurse=True)
+        accelerate.hooks.remove_hook_from_module(pipe.vae.decoder, recurse=True)
+        accelerate.hooks.remove_hook_from_module(pipe.text_encoder_3, recurse=True)
+        pipe.to("cpu")
         return pipe
 
     @classmethod
@@ -111,7 +123,8 @@ class SD3CustomAConverter(SD3Converter):
                 module.forward = types.MethodType(CLIPSdpaAttention_forward, module)
             if fuse_clip:
                 if isinstance(module, Linear4bit):
-                    module.forward = types.MethodType(linear4bit_forward, module)
+                    # module.forward = types.MethodType(linear4bit_forward, module)
+                    linear4bit_dequant(module)
 
         with torch.no_grad():
             export_model.eval()
@@ -234,7 +247,8 @@ class SD3CustomAConverter(SD3Converter):
                 module.forward = types.MethodType(CLIPSdpaAttention_forward, module)
             if fuse_clip_l:
                 if isinstance(module, Linear4bit):
-                    module.forward = types.MethodType(linear4bit_forward, module)
+                    # module.forward = types.MethodType(linear4bit_forward, module)
+                    linear4bit_dequant(module)
 
         with torch.no_grad():
             export_model.eval()
@@ -321,9 +335,9 @@ class SD3CustomAConverter(SD3Converter):
     def from_pretrained(
         cls, pretrained_model_path: str, convert_config: SD3CustomAConvertConfig, work_dir: str, **kwargs
     ):  # type: ignore[override]
-        assert (
-            transformers.__version__ == "4.46.0"
-        ), "transformers version must be 4.46.0, please pip install transformers==4.46.0"
+        assert transformers.__version__ == "4.46.0", (
+            "transformers version must be 4.46.0, please pip install transformers==4.46.0"
+        )
         custom_a_model = kwargs.get("custom_a_model", "")
         if convert_config.t5_quant:
             convert_config.no_clip_fp16_t5 = True

@@ -122,7 +122,7 @@ class SD3CustomADiffusion3Pipe(StableDiffusion3Pipeline):
         text_encoder = transformers.models.clip.modeling_clip.CLIPTextModelWithProjection.from_pretrained(
             str(Path(hf_model_or_path) / name), quantization_config=bnb_config, torch_dtype=dtype
         )
-        logger.info(f"loaded text_encoder")
+        logger.info("loaded text_encoder")
 
         name2 = "text_encoder_2"
         text_encoder_2 = transformers.models.clip.modeling_clip.CLIPTextModelWithProjection.from_pretrained(
