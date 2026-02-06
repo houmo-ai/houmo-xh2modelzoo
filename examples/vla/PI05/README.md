@@ -2,7 +2,7 @@
 
 导出该模型需要同时使用xhquanttool和lerobot环境。lerobot环境配置可见 https://github.com/huggingface/lerobot;
 
-![PI05 模型结构](/data01/home/she.gao/xh2modelzoo/examples/vla/PI05_LIBERO.png)
+![PI05 模型结构](/data01/home/she.gao/xh2modelzoo/examples/vla/PI05/PI05_LIBERO.png)
 
 模型主体可分为三部分：vision , gemma-2B, gemma-300m
 

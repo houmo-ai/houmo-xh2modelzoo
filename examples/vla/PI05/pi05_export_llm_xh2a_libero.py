@@ -324,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="/data01/home/she.gao/xh2modelzoo/examples/vla/config/pi0/llm/pi05_gemma_2b_xh2a_2k_libero_mask.py",
+        default="/data01/home/she.gao/xh2modelzoo/examples/vla/PI05/config/pi0/llm/pi05_gemma_2b_xh2a_2k_libero_mask.py",
     )
     parser.add_argument("--valid", action="store_true", help="validate the model")
     parser.add_argument("--debug", action="store_true", help="debug mode")
