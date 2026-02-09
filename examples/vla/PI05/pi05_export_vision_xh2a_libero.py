@@ -13,6 +13,7 @@ from lerobot.policies.pi05 import PI05Config, PI05Policy
 from lerobot.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
 
 from xhquant.api import convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
+os.environ["ENABLE_LAYERNORM2RMSNORM"] = "1"
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 workdir = os.path.join(ROOT_DIR, "workdir")
