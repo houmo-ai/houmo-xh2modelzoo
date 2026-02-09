@@ -1,6 +1,8 @@
+      
 import onnx
 from onnx import helper, TensorProto
 import numpy as np
+import argparse
 
 def convert_onnx_fp16_to_fp32(input_onnx_path, output_onnx_path):
     """
@@ -114,6 +116,9 @@ def convert_onnx_fp16_to_fp32(input_onnx_path, output_onnx_path):
 
 # ===================== 运行转换 =====================
 if __name__ == "__main__":
-    INPUT_MODEL = "/data01/home/xuchen/xh2/xh2_model_zoo/data/models/L1csi-zgb_b24.sim.onnx"   # 输入FP16模型
-    OUTPUT_MODEL = "/data01/home/xuchen/xh2/xh2_model_zoo/data/models/L1csi-zgb_b24_fp32.sim.onnx" # 输出FP32模型
-    convert_onnx_fp16_to_fp32(INPUT_MODEL, OUTPUT_MODEL)
+    parser = argparse.ArgumentParser(description="将 FP16/FP64 ONNX 模型转换为 FP32 格式")
+    parser.add_argument("input_model", type=str, default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/L1csi-zgb_b8.sim.onnx", help="输入FP16/FP64模型路径")
+    parser.add_argument("output_model", type=str, default="/data01/home/xuchen/xh2/xh2_model_zoo/data/models/L1csi-zgb_b8_fp32.sim.onnx", help="输出FP32模型路径")
+    
+    args = parser.parse_args()
+    convert_onnx_fp16_to_fp32(args.input_model, args.output_model)

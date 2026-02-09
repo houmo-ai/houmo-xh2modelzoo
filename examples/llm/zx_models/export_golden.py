@@ -1,3 +1,5 @@
+      
+# copied from xh2modelzoo/examples/llm/zx_models/export_golden.py
 import torch
 import onnx
 from xhquant.api import (
@@ -15,15 +17,12 @@ import onnxruntime as ort
 def main(args):
     onnx_model_path = args.model
     output_dir = args.output_dir
-    device = "cuda"
+    device = "cpu"
 
     model_name = os.path.split(onnx_model_path)[-1][0:-5]
     quant_model_path = os.path.join(
         output_dir, 'hmquant_' + model_name + '_with_act.onnx',
     )
-    # if os.path.exists(quant_model_path):
-    #     return    
-    
     onnx_model = onnx.load(onnx_model_path)
     input_names = [_input.name for _input in onnx_model.graph.input]
     output_names = [_output.name for _output in onnx_model.graph.output]
@@ -50,26 +49,23 @@ def main(args):
         quant_config=quant_config,
         input_names=input_names,
         output_names=output_names,
-    )    
+    )
     session = HMONNXGoldenInference(quant_model_path)
-    device = 'cuda'
+    device = 'cpu'
     session.to(device)
     session.save_golden = True
-    session.golden_dir = output_dir + '/golden/batch_24'
+    session.golden_dir = os.path.join(output_dir, 'golden')
     output = session(calib_dataset[0].half())
 
-    print(torch.from_numpy(output_ori[0]).cuda() - output)
-    print(torch.cosine_similarity(torch.from_numpy(output_ori[0]).cuda(), output, dim=0))
+    print(torch.from_numpy(output_ori[0]) - output)
+    print(torch.cosine_similarity(torch.from_numpy(output_ori[0]), output, dim=0))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="data/models/L1csi-zgb_b24_fp32.sim.onnx")
-    parser.add_argument("--batch-size", type=int, default=1, help="batch size")
-    parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
-    parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
+    parser.add_argument("--model", type=str, default="data/models/L1csi-zgb_b8_fp32.sim.onnx")
     parser.add_argument("--quant-type", default="w4a8h1_sefp", help="quant type, default is w8a8")
-    parser.add_argument("--output_dir", default="work_dirs/zx", help="save model path")
+    parser.add_argument("--output-dir", default="work_dirs/zx", help="save model path")
     parser.add_argument(
         "--quant-weight",
         type=str,
