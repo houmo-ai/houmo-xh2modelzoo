@@ -45,8 +45,8 @@ class XHGemmaCLLMModel(LLMBaseModel):
         ).eval()
         return policy
     
-    def get_tokenizer(self):
-        tokenizer = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
+    def get_tokenizer(self, config_dir):
+        tokenizer = AutoTokenizer.from_pretrained(config_dir)
         return tokenizer
 
     def init_wrap_model(self, hf_model: Optional[GemmaModel] = None):

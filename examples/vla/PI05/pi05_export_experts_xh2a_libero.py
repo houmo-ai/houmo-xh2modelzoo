@@ -88,7 +88,7 @@ def main(args):
     dtype = getattr(torch, cfg.dtype)
     xh_model = MODELS.build(cfg.model)
     policy = xh_model.get_hf_model()
-    tokenizer = xh_model.get_tokenizer()
+    tokenizer = xh_model.get_tokenizer(cfg.config_dir)
     policy.model.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"
 
     assert isinstance(xh_model, XHGemma05CLLMModel), f"Model must be XHGemma05CLLMModel, but got {type(xh_model)}"

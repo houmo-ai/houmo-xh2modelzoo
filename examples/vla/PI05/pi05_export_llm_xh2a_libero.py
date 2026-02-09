@@ -75,7 +75,7 @@ def main(args):
     assert isinstance(xh_model, XHGemmaLLMModel), f"Model must be XHGemmaLLMModel, but got {type(xh_model)}"
 
     xh_model.init_wrap_model(policy.model.paligemma_with_expert.paligemma.model.language_model)
-    tokenizer = xh_model.get_tokenizer()
+    tokenizer = xh_model.get_tokenizer(cfg.config_dir)
 
     prefill_onnx_dir = Path(cfg.work_dir) / "prefill_onnx"
     decode_onnx_dir = Path(cfg.work_dir) / "decode_onnx"

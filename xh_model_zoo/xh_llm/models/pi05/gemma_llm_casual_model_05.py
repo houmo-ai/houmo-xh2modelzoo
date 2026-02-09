@@ -44,8 +44,8 @@ class XHGemma05CLLMModel(LLMBaseModel):
             ).eval()
         return policy
     
-    def get_tokenizer(self):
-        tokenizer = AutoTokenizer.from_pretrained("/data01/home/she.gao/.cache/huggingface/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c")
+    def get_tokenizer(self, config_dir: str):
+        tokenizer = AutoTokenizer.from_pretrained(config_dir)
         return tokenizer
 
     def init_wrap_model(self, hf_model: Optional[GemmaModel] = None):
