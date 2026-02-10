@@ -240,15 +240,7 @@ def main() -> None:
 
         export_kwargs = {"quantize": args.quantize, "type": args.export_type}
         if args.export_dir:
-            import inspect
-
-            sig = inspect.signature(model.export)
-            for key in ("output_dir", "export_dir", "dir", "path"):
-                if key in sig.parameters:
-                    export_kwargs[key] = args.export_dir
-                    break
-            else:
-                print(f"[warn] export_dir is not supported by model.export; ignore {args.export_dir}")
+            export_kwargs["output_dir"] = args.export_dir
 
         res = model.export(**export_kwargs)
         print("[run] export result:", res)
