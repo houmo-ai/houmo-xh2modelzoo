@@ -42,24 +42,6 @@ from xhquant.patch.core.rewriters import FUNCTION_REWRITER, MODULE_REWRITER
 from ..builder import XHLLM_TRACEABLE_MODULES, DynamicRegister
 
 
-def eager_attention_forward_cus(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-):
-    attn_weights = torch.matmul(query, key.transpose(2, 3))
-    # attn_weights = torch.matmul(query, key.transpose(2, 3)) / math.sqrt(query.size(-1))
-    if attention_mask is not None and attention_mask.ndim == 4:
-        attn_weights = attn_weights + attention_mask
-
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-    attn_output = torch.matmul(attn_weights, value)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    return attn_output, attn_weights
-
-
-
 @FUNCTION_REWRITER.register_rewriter(
     "transformers.models.whisper.modeling_whisper.WhisperEncoder.forward"
 )
@@ -443,6 +425,10 @@ class _Whisper_attention(DynamicRegister):
         self.v_cache = LLMCacheV2(
             axis=2,
         )
+        self.masked_softmax = MaskedSoftmax(
+            dim=-1,
+            attention_max_length=-1,
+        )
 
         return self
 
@@ -553,12 +539,29 @@ class _Whisper_attention(DynamicRegister):
         
         real_mask = attention_mask if is_cross_attention else mask_atten
 
-        attn_output, attn_weights = eager_attention_forward_cus(
-            query_states,  
-            key_states,  
-            value_states,  
-            real_mask,  # 传入根据情况选择的 mask
-        )
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3))
+        if is_cross_attention:
+            if real_mask is not None and real_mask.ndim == 4:
+                attn_weights = attn_weights + real_mask
+            attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+            attn_output = torch.matmul(attn_weights, value_states)
+            attn_output = attn_output.transpose(1, 2).contiguous()
+        else:
+            if real_mask is not None and real_mask.ndim == 4:
+                attn_weights = attn_weights + real_mask
+            attn_weights = self.masked_softmax(attn_weights, past_len)
+            attn_output = torch.matmul(attn_weights, value_states)
+            attn_output = attn_output.transpose(1, 2).contiguous()
+
+
+
+        # attn_output, attn_weights = eager_attention_forward_cus(
+        #     query_states,  
+        #     key_states,  
+        #     value_states,  
+        #     real_mask,  # 传入根据情况选择的 mask
+        #     past_len,  # 传入缓存的长度
+        # )
 
         attn_output = attn_output.reshape(bsz, tgt_len, -1).contiguous()  # 6.1019
         attn_output = self.out_proj(attn_output)  # -1.2885
