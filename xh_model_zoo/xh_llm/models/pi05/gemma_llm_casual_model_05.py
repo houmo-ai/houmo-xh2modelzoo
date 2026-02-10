@@ -132,7 +132,7 @@ class XHGemma05CLLMModel(LLMBaseModel):
         else:
             # attention_mask = torch.zeros((1, 8, 50, 2048), dtype=torch.bfloat16, device=device)
             attention_mask = torch.full(
-                (1, 8, 50, 2048),
+                (1, 1, 50, 2048),
                 torch.finfo(torch.float16).min,
                 dtype=torch.float16,
                 device=device,
