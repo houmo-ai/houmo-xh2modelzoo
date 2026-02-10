@@ -222,7 +222,7 @@ def main() -> None:
     decoder_input_names = [name for name, _ in get_onnx_input_specs(decoder_path)]
     decoder_inputs_q_list = [decoder_inputs_q[name] for name in decoder_input_names]
     decoder_inputs_q_torch = _to_torch_inputs(decoder_inputs_q_list, device, args.hmonnx_float_dtype)
-
+    decoder_inputs_q_torch[-1] = decoder_inputs_q_torch[-1].to(torch.int32)
     decoder_out_q = hmonnx_decoder(*decoder_inputs_q_torch)
     if isinstance(decoder_out_q, (list, tuple)):
         decoder_out_q = decoder_out_q[0]
