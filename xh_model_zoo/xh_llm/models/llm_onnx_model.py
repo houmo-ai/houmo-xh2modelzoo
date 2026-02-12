@@ -69,6 +69,10 @@ class LLMONNXModel(DeviceDtypeMixin):
         self.token_embedding = value
         self.token_embedding.to(torch.float16)
 
+    def set_input_embeddings_speech(self, value):
+        self.speech_embedding = value
+        self.speech_embedding.to(torch.float16).to(self.device)
+
     def _set_device(self, device):
         super()._set_device(device)
         if self.prefill_session is not None:
