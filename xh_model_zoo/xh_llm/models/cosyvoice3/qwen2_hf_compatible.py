@@ -47,6 +47,7 @@ def create_llm_wraped_cls(cls):
                 self._llm_model.set_phase_prefill(prefill)
 
         def generate(self, min_len, max_len, *args, **kwargs):
+            stop_token = [6561, 6562, 6563, 6564, 6565, 6566, 6567, 6568, 6569, 6570, 6571, 6572, 6573, 6574, 6575, 6576, 6577, 6578, 6579, 6580, 6581, 6582, 6583, 6584, 6585, 6586, 6587, 6588, 6589, 6590, 6591, 6592, 6593, 6594, 6595, 6596, 6597, 6598, 6599, 6600, 6601, 6602, 6603, 6604, 6605, 6606, 6607, 6608, 6609, 6610, 6611, 6612, 6613, 6614, 6615, 6616, 6617, 6618, 6619, 6620, 6621, 6622, 6623, 6624, 6625, 6626, 6627, 6628, 6629, 6630, 6631, 6632, 6633, 6634, 6635, 6636, 6637, 6638, 6639, 6640, 6641, 6642, 6643, 6644, 6645, 6646, 6647, 6648, 6649, 6650, 6651, 6652, 6653, 6654, 6655, 6656, 6657, 6658, 6659, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6670, 6671, 6672, 6673, 6674, 6675, 6676, 6677, 6678, 6679, 6680, 6681, 6682, 6683, 6684, 6685, 6686, 6687, 6688, 6689, 6690, 6691, 6692, 6693, 6694, 6695, 6696, 6697, 6698, 6699, 6700, 6701, 6702, 6703, 6704, 6705, 6706, 6707, 6708, 6709, 6710, 6711, 6712, 6713, 6714, 6715, 6716, 6717, 6718, 6719, 6720, 6721, 6722, 6723, 6724, 6725, 6726, 6727, 6728, 6729, 6730, 6731, 6732, 6733, 6734, 6735, 6736, 6737, 6738, 6739, 6740, 6741, 6742, 6743, 6744, 6745, 6746, 6747, 6748, 6749, 6750, 6751, 6752, 6753, 6754, 6755, 6756, 6757, 6758, 6759, 6760]
             out_tokens = []
             self.prefill = True
             self._past_seq_length = 0
@@ -54,18 +55,18 @@ def create_llm_wraped_cls(cls):
             out = self.forward(*args, **kwargs)
             logp = self._llm_model.llm_decoder_session(out.logits.squeeze(0))
             top_ids = self._llm_model.sampling_ids(logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if 0 < min_len else False).item()
-            if top_ids == 6561:
+            if top_ids in stop_token:
                 return out_tokens
-            if top_ids < 6561:             
+            if top_ids in stop_token:             
                 out_tokens.append(top_ids)
             lm_input = self._llm_model.speech_embedding.weight[top_ids].reshape(1, 1, -1)
             for i in range(1, max_len):
                 out = self.forward(inputs_embeds=lm_input)
                 logp = self._llm_model.llm_decoder_session(out.logits.squeeze(0))
                 top_ids = self._llm_model.sampling_ids(logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if i < min_len else False).item()
-                if top_ids == 6561:
+                if top_ids in stop_token:
                     break
-                if top_ids > 6561:
+                if top_ids in stop_token:
                     continue
                 out_tokens.append(top_ids)
                 lm_input = self._llm_model.speech_embedding.weight[top_ids].reshape(1, 1, -1)
