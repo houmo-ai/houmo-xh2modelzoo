@@ -39,7 +39,15 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 from transformers.generation import GenerationConfig
-from transformers.modeling_utils import no_init_weights
+try:
+    from transformers.modeling_utils import no_init_weights
+except ImportError:
+    # transformers >= 5.x removed no_init_weights; provide a minimal fallback
+    import contextlib
+
+    @contextlib.contextmanager
+    def no_init_weights(_enable=True):
+        yield
 from xhquant.api import (
     ConfigDict,
     ExportedGraph,
