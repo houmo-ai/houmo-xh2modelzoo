@@ -1,5 +1,16 @@
 {
   "typeCheckingMode": "off",
+  "executionEnvironments": [
+    {
+      "root": "examples/llm/paddleocr_vl"
+    },
+    {
+      "root": "examples/llm/paddleocr_vl_1_5"
+    },
+    {
+      "root": "."
+    }
+  ],
   "include": [
     "."
   ],
