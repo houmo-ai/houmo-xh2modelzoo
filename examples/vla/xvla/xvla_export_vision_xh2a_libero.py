@@ -19,8 +19,8 @@ from xhquant.api import convert_onnx_to_hmonnx, QuantScheme, create_quant_config
 
 # --- 路径设置 ---
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-workdir = os.path.join(ROOT_DIR, "workdir_xvla")
-hmonnx_dir = os.path.join(ROOT_DIR, "hmonnx_xvla")
+workdir = os.path.join(ROOT_DIR, "xvla_vision_onnx")
+hmonnx_dir = os.path.join(ROOT_DIR, "xvla_vision_hmonnx")
 os.makedirs(workdir, exist_ok=True)
 os.makedirs(hmonnx_dir, exist_ok=True)
 
@@ -93,7 +93,13 @@ class XVLAVisionPart(nn.Module):
         # 4. Temporal Embedding (如果 num_frames=1，这部分逻辑可能被跳过或简化)
         if self.visual_temporal_embed is not None:
             # 假设 num_frames=1，简化逻辑以利于导出
-            pass 
+            # pass 
+            visual_temporal_embed = self.visual_temporal_embed(
+                x.view(batch_size, num_frames, -1, x.shape[-1])[:, :, 0]
+            )
+            x = x.view(batch_size, num_frames, -1, x.shape[-1]) + visual_temporal_embed.view(
+                1, num_frames, 1, x.shape[-1]
+            )
 
         # 5. 特征提取与池化
         x_feat_dict = {}

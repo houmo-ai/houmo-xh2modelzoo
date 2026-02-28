@@ -41,8 +41,8 @@ def main(args):
     # Need to match the input shapes used during export
     batch_size = 1
     num_actions = 30
-    vlm_seq_len = 50
-    aux_visual_seq_len = 20
+    vlm_seq_len = 100
+    aux_visual_seq_len = 150
     
     hidden_size = 1024
     multi_modal_input_size = 1024
@@ -78,7 +78,7 @@ def main(args):
     hmonnx_path = work_dir / "soft_prompted_transformer.onnx"
     logger.info(f"Converting ONNX {onnx_path} to HMONNX at {hmonnx_path}...")
 
-    quant_type = "w8a8h1_sefp" 
+    quant_type = "w8a16h1_sefp" 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     quant_config = create_quant_config(quant_scheme)
 
