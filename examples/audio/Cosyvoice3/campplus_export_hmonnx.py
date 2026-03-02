@@ -50,7 +50,7 @@ onnx.save(slimmed_model, model_path_simplify)
 #convert hmonnx
 from xhquant.api import convert_fx_model_to_hmonnx, convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
 input = torch.randn(1, 1000, 80)
-quant_type = "w8a8h1_sefp"
+quant_type = "w8a16_sefp"
 quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
 quant_config = create_quant_config(quant_scheme)
 convert_onnx_to_hmonnx(model_path_simplify, (input,), out_hmonnx_file=osp.join(output_path,"campplus_1000.onnx"), device_type="XH2A", quant_config=quant_config)

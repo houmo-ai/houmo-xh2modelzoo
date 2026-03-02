@@ -554,8 +554,8 @@ class _Qwen2ForCausalLM(DynamicModule):
 
         # hidden_states = outputs[0]
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states)
-        return logits
+        # logits = self.lm_head(hidden_states)
+        return hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

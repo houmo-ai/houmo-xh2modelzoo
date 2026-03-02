@@ -60,4 +60,9 @@ python other_export_hmonnx.py
 python demo_new.py
 ```
 
+## cv3_eval 评估
+
+```bash
+python cv3_eval.py
+```
 

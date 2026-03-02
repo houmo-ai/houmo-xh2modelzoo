@@ -5,6 +5,7 @@ import onnxsim
 import onnxruntime as ort
 import numpy as np
 import os.path as osp
+from onnxsim import simplify
 from onnx import numpy_helper
 from onnx import helper, TensorProto
 
@@ -12,6 +13,7 @@ model_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hi
 model_path_simplify = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify.onnx"
 update_scale_simplify = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_update_scale.onnx"
 replace_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_reflect_replaced.onnx"
+replace_reflect_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_reflect_replaced_constant.onnx"
 output_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmonnx"
 
 fix shape
@@ -153,11 +155,22 @@ model_simplified, check = simplify(model)
 assert check, "onnx simplify 校验失败"
 onnx.save(model_simplified, replace_path)
 
+model = onnx.load(update_scale_simplify)
+for node in model.graph.node:
+    if node.op_type == "Pad":
+        for attr in node.attribute:
+            if attr.name == "mode":
+                attr.s = b"constant"
+                break
+
+model_simplified, check = simplify(model)
+assert check, "onnx simplify 校验失败"
+onnx.save(model_simplified, replace_reflect_path)
 
 #convert hmonnx
 from xhquant.api import convert_fx_model_to_hmonnx, convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
 input = torch.randn(1, 80, 1024)
-quant_type = "w8a8h1_sefp"
+quant_type = "w8a16_sefp"
 quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
 quant_config = create_quant_config(quant_scheme)
-convert_onnx_to_hmonnx(replace_path, (input,), out_hmonnx_file=osp.join(output_path,"hift_1024.onnx"), device_type="XH2A", quant_config=quant_config)
+convert_onnx_to_hmonnx(replace_reflect_path, (input,), out_hmonnx_file=osp.join(output_path,"hift_1024.onnx"), device_type="XH2A", quant_config=quant_config)
