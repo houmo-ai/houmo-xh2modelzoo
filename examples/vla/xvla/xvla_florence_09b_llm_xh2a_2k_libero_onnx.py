@@ -18,7 +18,7 @@ model = dict(
     # Florence-2 Decoder 的特定参数
     wrap_cfg=dict(
         max_sequence_length=2048,
-        input_sequence_length=256,
+        input_sequence_length=100, #256,
         use_cache=False,
         num_logits_to_keep=0,
         # kv_cache=dict(

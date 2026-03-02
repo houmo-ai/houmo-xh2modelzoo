@@ -16,13 +16,14 @@ from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
 
 # --- 量化工具导入 ---
 from xhquant.api import convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
-
+from pathlib import Path
 # --- 路径设置 ---
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-workdir = os.path.join(ROOT_DIR, "xvla_vision_onnx")
-hmonnx_dir = os.path.join(ROOT_DIR, "xvla_vision_hmonnx")
-os.makedirs(workdir, exist_ok=True)
-os.makedirs(hmonnx_dir, exist_ok=True)
+origin_workdir = Path("work_dirs/xvla_vision")
+origin_workdir.mkdir(parents=True, exist_ok=True)
+workdir = origin_workdir / "xvla_vision_onnx"
+hmonnx_dir = origin_workdir / "xvla_vision_hmonnx"
+workdir.mkdir(parents=True, exist_ok=True)
+hmonnx_dir.mkdir(parents=True, exist_ok=True)
 
 
 class XVLAVisionPart(nn.Module):
@@ -223,31 +224,6 @@ def run_xvla_export(args):
         else:
             print("Simplify check failed! Saving original simplified model anyway.")
             onnx.save(model_simplified, simplified_onnx_file)
-
-        # # === 精度验证 (PyTorch vs ONNX Runtime) ===
-        # print("Validating Accuracy...")
-        # import onnxruntime as ort
-        
-        # # PyTorch Output
-        # with torch.no_grad():
-        #     torch_out = vision_model(input_features)
-        # torch_out_np = torch_out.cpu().numpy()
-
-        # # ONNX Runtime Output
-        # sess = ort.InferenceSession(simplified_onnx_file, providers=["CPUExecutionProvider"])
-        # onnx_out = sess.run(None, {"pixel_values": input_features.cpu().numpy()})
-        # onnx_out_np = onnx_out[0]
-
-        # # 比较
-        # max_diff = np.max(np.abs(torch_out_np - onnx_out_np))
-        # mean_diff = np.mean(np.abs(torch_out_np - onnx_out_np))
-        # print(f"Max Diff: {max_diff}")
-        # print(f"Mean Diff: {mean_diff}")
-        
-        # if max_diff > 1e-3:
-        #     print("[Warning] Max diff is relatively high. Check if float16/bfloat16 mismatch occurred.")
-        # else:
-        #     print("[Pass] Accuracy verification passed.")
 
         # === 转换为 HMONNX XH2A ===
         print("Converting to HMONNX for Houmo XH2A...")

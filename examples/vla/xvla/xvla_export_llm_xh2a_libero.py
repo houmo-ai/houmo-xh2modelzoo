@@ -116,7 +116,7 @@ def main(args):
     torch.save(token_embedding.state_dict(), str(token_embedding_file))
     meta_info.token_embedding_file = str(token_embedding_file.relative_to(cfg.work_dir))
 
-    input_seq_len = xh_model.wrap_cfg.get("input_sequence_length", 256)
+    input_seq_len = xh_model.wrap_cfg.get("input_sequence_length", 100)
     # Dummy input_ids to generate embeddings
     input_ids = torch.randint(0, 1000, (1, input_seq_len), device=device)
     inputs_embeds = token_embedding(input_ids).to(dtype)
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="examples/vla/xvla/xvla_florence_09b_xh2a_2k_libero_mask.py",
+        default="examples/vla/xvla/xvla_florence_09b_llm_xh2a_2k_libero_onnx.py",
     )
     parser.add_argument("--valid", action="store_true", help="validate the model")
     parser.add_argument("--debug", action="store_true", help="debug mode")
