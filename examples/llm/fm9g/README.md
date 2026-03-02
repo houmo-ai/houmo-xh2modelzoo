@@ -17,10 +17,11 @@ quant-weight : GPTQ、Quarot量化后的权重文件
 ## 导出HMONNX
 
 transformers库需要升级到4.47.0以上版本，否则会报错。  
+
 ### w8a8
 
 #### 1. 导出
 
 ```bash
-python examples/llm/fm9g/fm9g_xh2a_export_hmonnx.py --model data/models/9g_8b_thinking --context-length 2048 --input-sequence-length 256 --quant-type w8a8h1_sefp
+python examples/llm/fm9g/fm9g_xh2a_export_hmonnx.py --model data/models/9g_8b_thinking --context-length 2048 --input-sequence-length 256 --quant-type w4a8_ssfp
 ```
