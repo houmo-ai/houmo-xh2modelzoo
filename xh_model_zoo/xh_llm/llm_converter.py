@@ -177,6 +177,10 @@ class LLMConverter:
             from .models.qwen3_embeding.qwen3_embeding_converter import Qwen3EmbeddingConverterXH2a
 
             converter_cls = Qwen3EmbeddingConverterXH2a
+        elif architecture == "FM9GForCausalLM":
+            from .models.fm9g import FM9GConverterXH2a
+
+            converter_cls = FM9GConverterXH2a
 
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
