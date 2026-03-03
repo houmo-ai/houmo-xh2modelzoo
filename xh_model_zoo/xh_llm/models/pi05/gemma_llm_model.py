@@ -137,7 +137,7 @@ class XHGemmaLLMModel(LLMBaseModel):
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
         if "attention_mask" not in data:
-            attention_mask = torch.zeros((1, 1, 968, 2048), dtype=torch.float16, device=device)
+            attention_mask = torch.zeros((1, 1, 968, 1024), dtype=torch.float16, device=device)
         else:
             attention_mask = data['attention_mask']
 

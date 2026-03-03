@@ -355,7 +355,6 @@ class _GemmaModel(DynamicModule):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         causal_mask = None  # 在Attention中处理
         # embed positions
-        attention_mask = attention_mask.expand(1, 8, 50, 2048)
         hidden_states = inputs_embeds
         cos = self.cos_slice(self.cos_cached, past_seq_length)
         sin = self.sin_slice(self.sin_cached, past_seq_length)
