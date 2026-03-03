@@ -264,7 +264,7 @@ class Qwen2LegacyConverterXH2a(HFTransfromersConverter):
         )
 
         # MatMul 配置为16bit
-        if is_7b:
+        if True:
             for node in quanted_model.graph.nodes:
                 if node.op == "call_module":
                     m = quanted_model.get_submodule(node.target)
