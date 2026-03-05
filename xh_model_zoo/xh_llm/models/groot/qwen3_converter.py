@@ -24,6 +24,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+<<<<<<< HEAD
+from sympy import false
+=======
+>>>>>>> 3a89f49a2e5934e3d95675423f707fd020fcb9c1
 import torch
 import yaml
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3ForCausalLM
@@ -147,7 +151,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
                 # batch_size=batch_size,
                 max_sequence_length=context_length,  # 最大上下文长度
                 input_sequence_length=input_sequence_length,  # prefill时输入的序列长度
-                use_cache=True,
+                use_cache=False,
                 num_logits_to_keep=1,
                 kv_cache=dict(
                     cache_axis=2,
@@ -157,6 +161,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
 
         meta_info["wrap_cfg"] = wrap_cfg.to_dict()
 
+        native_model = native_model.to(torch.float16)
         wraped_qwen_model = wrap_llm_model(native_model, wrap_cfg)
         # 设置kv cache
         num_hidden_layers = wraped_qwen_model.config.num_hidden_layers
@@ -166,32 +171,34 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         # head_dim = wraped_qwen_model.model.config.hidden_size // wraped_qwen_model.model.config.num_attention_heads
         # num_hidden_layers = wraped_qwen_model.model.config.num_hidden_layers
         num_decoder_layers = 16
-        kv_cache_shape = [
-            1,
-            wraped_qwen_model.config.num_key_value_heads,
-            wrap_cfg.max_sequence_length,
-            head_dim,
-        ]
-        meta_info["kv_cache"] = dict(
-            shape=kv_cache_shape,
-            num_decoder_layers=num_decoder_layers,
-        )
 
-        past_key_caches = []
-        past_value_caches = []
-        for _ in range(num_decoder_layers):
-            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=device)))
-            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=device)))
+        # kv_cache_shape = [
+        #     1,
+        #     wraped_qwen_model.config.num_key_value_heads,
+        #     wrap_cfg.max_sequence_length,
+        #     head_dim,
+        # ]
+        # meta_info["kv_cache"] = dict(
+        #     shape=kv_cache_shape,
+        #     num_decoder_layers=num_decoder_layers,
+        # )
+
+        # past_key_caches = []
+        # past_value_caches = []
+        # for _ in range(num_decoder_layers):
+        #     past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=device)))
+        #     past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=device)))
+
         # 导出Prefill模型
         input_ids = []
-        current_input_length = []
+        # current_input_length = []
         # position_ids = []
         for _ in range(1):
             input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long)
-            seq_length = input_id.shape[0]
+            # seq_length = input_id.shape[0]
             # past_seq_length = 0
             # position_id = torch.arange(past_seq_length, past_seq_length + seq_length, dtype=torch.long)
-            current_input_length.append(seq_length)
+            # current_input_length.append(seq_length)
 
             input_id = input_id.unsqueeze(0)
             # position_id = position_id.unsqueeze(0)
@@ -203,27 +210,39 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
 
         inputs_embeds = token_embedding(input_ids_t)
         past_seq_length_t = torch.tensor([0], dtype=torch.int32).to(device)
-        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32).to(device)
+        # current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32).to(device)
+        mask = torch.ones((1, input_sequence_length) ).to(device).half() * -65504
+        mask[0,:109] = 0
 
         inputs = (
             inputs_embeds,
-            past_seq_length_t,
-            current_input_length_t,
-            # position_ids,
-            past_key_caches,
-            past_value_caches,
+            # mask,
+            # past_seq_length_t,
+            # current_input_length_t,
+            # # position_ids,
+            # past_key_caches,
+            # past_value_caches,
         )
         input_names = [
             "inputs_embeds",
-            "past_seq_length",
-            "current_input_length",
+            # "mask",
+            # "past_seq_length",
+            # "current_input_length",
             # "position_ids",
         ]
-        for layer_idx in range(num_decoder_layers):
-            input_names.append(f"past_key_cache_{layer_idx}")
-        for layer_idx in range(num_decoder_layers):
-            input_names.append(f"past_value_cache_{layer_idx}")
-        output_names = ["logits"]
+        # for layer_idx in range(num_decoder_layers):
+        #     input_names.append(f"past_key_cache_{layer_idx}")
+        # for layer_idx in range(num_decoder_layers):
+        #     input_names.append(f"past_value_cache_{layer_idx}")
+
+        input_emb = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/input_embeds.pt")
+        output_ori = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/outputs.pt", weights_only=False)
+        wraped_qwen_model.use_cache = False
+
+        with torch.no_grad():
+            output = wraped_qwen_model(input_emb)
+
+        output_names = ["hidden_states"]
 
         prefix = f"{model_name}-{target_device}-{context_length//1024}k-{quant_type}"
         prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
@@ -231,18 +250,37 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
 
         logger.info(f"********************* start export prefill model *********************")
+        if not Path(prefill_onnx_file).exists():
+            quanted_model = convert_fx_model_to_quanted_model(
+                wraped_qwen_model,
+                inputs,
+                target_device,
+                quant_config=quant_config,
+            )
+            # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
+            # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+            logger.info(f"Export Prefill model to {prefill_onnx_file}")
+        
+        llm_golden_dir = f"/data02/users/cc_work/golden/groot/{model_name}" # str(work_dir / "golden" / f"{prefix}")
+        if not Path(llm_golden_dir).exists():
+            logger.info(f"start export vision model golden............")
+            from xhquant.api import HMONNXGoldenInference
 
-        quanted_model = convert_fx_model_to_quanted_model(
-            wraped_qwen_model,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
-        # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
-        # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
-        logger.info(f"Export Prefill model to {prefill_onnx_file}")
+            vae_model = HMONNXGoldenInference(prefill_onnx_file)
+            vae_model.save_golden = True
+            vae_model.exec_device = torch.device("cuda:0")
+
+            Path(llm_golden_dir).mkdir(exist_ok=True, parents=True)
+            vae_model.golden_dir = str(llm_golden_dir)
+
+            inputs[0] = inputs[0].half()
+            with torch.no_grad():
+                vae_model.forward(*inputs)
+            logger.info(f"Export vision model golden to {llm_golden_dir}")
+        else:
+            logger.info(f"{llm_golden_dir} exists, skip export vision model golden.")
 
         json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
 

@@ -19,15 +19,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from modelscope import AutoTokenizer, AutoModelForMaskedLM
-import torch
 from xh_model_zoo.xh_llm.models.bert.bert_converter import BertConverterXH2a
-from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger 
+from xhquant.api import DeviceType, QuantScheme 
 import argparse
 from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig, VisualConfig
 
 def main(args):
-    tokenizer = AutoTokenizer.from_pretrained("/data02/datasets/bert_chinese")
-    model = AutoModelForMaskedLM.from_pretrained("/data02/datasets/bert_chinese")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForMaskedLM.from_pretrained(args.model)
     model = model.to("cuda")
 
     input_txt = "你好"
@@ -36,19 +35,8 @@ def main(args):
     ).input_ids
 
     output = model(input_ids.cuda())
-    target_device = DeviceType.XH2a
 
     quant_type = args.quant_type
-    # ops=dict(MatMul=dict(
-    #             act_scheme=dict(
-    #                 bits=8,
-    #                 fp_mode="sefp",
-    #             ),
-    #             act_schema_2=dict(
-    #                 bits=16,
-    #                 fp_mode="sefp",
-    #             ),))
-
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type) # , ops=ops
 
     config = Qwen2_5_VLConvertConfig(
@@ -74,7 +62,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default="/data02/datasets/bert_chinese")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=256, help="max sequence length")
     parser.add_argument("--max_pe_length", type=int, default=32768, help="max pe length")

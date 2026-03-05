@@ -27,12 +27,13 @@ class cus_Head(Gr00tN1d6ActionHead):
     def __init__(self, *args, **kwargs):
         pass
     
-    def __setup__(self, backbone, transformer=None, vae=None):
+    def __setup__(self, preprocess_model, transformer_model):
         """"""
         """
         初始化模型
         """
-        self.backbone.model = backbone
+        self.preprocess_model = preprocess_model
+        self.transformer_model = transformer_model
         return self
 
     @classmethod
@@ -96,29 +97,46 @@ class cus_Head(Gr00tN1d6ActionHead):
     
 
 
-    def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
-        """
-        Generate actions using the flow matching diffusion process.
+    def get_action(self,  backbone_features, state, timesteps_tensor=None, actions=None, 
+            image_mask=None, backbone_attention_mask=None, device="cuda"):
+        
+        embodiment_id=torch.tensor([20], device=device)
 
-        Args:
-            backbone_output: Output from the backbone model containing:
-                - backbone_features: [B, seq_len, backbone_embedding_dim]
-                - backbone_attention_mask: [B, seq_len]
-            action_input: Input containing:
-                - state: [B, state_dim]
-                - embodiment_id: [B] (embodiment IDs)
+        # features = self.encoder(backbone_output, action_input)
+        backbone_features = self.vlln(backbone_features)
+        state_features = self.state_encoder(state, embodiment_id)
+        vl_embeds = backbone_features        
 
-        Returns:
-            BatchFeature containing:
-                - action_pred: [B, action_horizon, action_dim] predicted actions
-        """
-        features = self._encode_features(backbone_output, action_input)
-        return self.get_action_with_features(
-            backbone_features=features.backbone_features,
-            state_features=features.state_features,
-            embodiment_id=action_input.embodiment_id,
-            backbone_output=backbone_output,
-        )
+        for t in range(self.num_inference_timesteps):
+            timesteps_tensor
+
+            backbone_features = self.vlln(backbone_features)
+            state_features = self.state_encoder(state, embodiment_id)
+            vl_embeds = backbone_features
+
+            # Embed noised action trajectory.
+            action_features = self.action_encoder(actions, timesteps_tensor, torch.tensor([20], device=device, dtype=torch.float16))
+            action_features = action_features + self.pos_embs
+
+            # Join vision, language, state and action embedding along sequence dimension.
+            sa_embs = torch.cat((state_features, action_features), dim=1)
+
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embeds,
+                timestep=timesteps_tensor,
+                image_attention_mask=image_mask,
+                non_image_attention_mask=backbone_attention_mask,
+            )
+
+            pred = self.action_decoder(model_output, embodiment_id)
+
+            pred_velocity = pred[:, -self.action_horizon :]
+
+            # Update actions using euler integration.
+            actions = actions + 0.25 * pred_velocity
+
+        return actions
 
     @torch.no_grad()
     def get_action_with_features(

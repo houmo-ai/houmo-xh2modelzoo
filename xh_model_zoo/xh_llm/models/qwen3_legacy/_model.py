@@ -40,9 +40,8 @@ from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
 from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm, Rope
 from xhquant.utils.registry import DynamicModule
-
+import torch.nn.functional as F
 from ..builder import XHLLM_TRACEABLE_MODULES
-
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {

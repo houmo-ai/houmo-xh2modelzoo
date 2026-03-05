@@ -54,20 +54,20 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
         # self.decode_onnx_file = model_dir / meta_info["decode_onnx"]
 
         # kv cache
-        kv_cache_shape = meta_info["kv_cache"]["shape"]
-        num_decoder_layers = meta_info["kv_cache"]["num_decoder_layers"]
+        # kv_cache_shape = meta_info["kv_cache"]["shape"]
+        # num_decoder_layers = meta_info["kv_cache"]["num_decoder_layers"]
 
-        # create kv cache
-        past_key_caches: List[CacheTensor] = []
-        past_value_caches: List[CacheTensor] = []
-        for i in range(num_decoder_layers):
-            past_k_cache = CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            past_v_cache = CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            past_key_caches.append(past_k_cache)
-            past_value_caches.append(past_v_cache)
+        # # create kv cache
+        # past_key_caches: List[CacheTensor] = []
+        # past_value_caches: List[CacheTensor] = []
+        # for i in range(num_decoder_layers):
+        #     past_k_cache = CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+        #     past_v_cache = CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+        #     past_key_caches.append(past_k_cache)
+        #     past_value_caches.append(past_v_cache)
 
-        self.past_key_caches = past_key_caches
-        self.past_value_caches = past_value_caches
+        # self.past_key_caches = past_key_caches
+        # self.past_value_caches = past_value_caches
 
         # tokenizer
         # hf_model_config_dir = str(model_dir / meta_info["hf_config"])
@@ -172,10 +172,10 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
     def forward(
         self,
         inputs_embeds: Tensor,
-        past_seq_length: Tensor,
-        current_input_length: Tensor,
-        past_key_caches: List[CacheTensor],
-        past_value_caches: List[CacheTensor],
+        # past_seq_length: Tensor,
+        # current_input_length: Tensor,
+        # past_key_caches: List[CacheTensor],
+        # past_value_caches: List[CacheTensor],
     ) -> torch.FloatTensor:
         if self._phase_prefill:
             self.init_prefill()
@@ -184,10 +184,10 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
             )
             out = self.prefill_session(
                 inputs_embeds.to(self._device),
-                past_seq_length.to(self._device),
-                current_input_length.to(self._device),
-                *past_key_caches,
-                *past_value_caches,
+                # past_seq_length.to(self._device),
+                # current_input_length.to(self._device),
+                # *past_key_caches,
+                # *past_value_caches,
             )
             if isinstance(self.prefill_session, GoldenMixin):
                 self.prefill_session.update_step()
@@ -197,10 +197,10 @@ class Qwen3LegacyInference(DeviceDtypeMixin):
             assert self.decode_session is not None, "Decode session is not initialized."
             out = self.decode_session(
                 inputs_embeds.to(self._device),
-                past_seq_length.to(self._device),
-                current_input_length.to(self._device),
-                *past_key_caches,
-                *past_value_caches,
+                # past_seq_length.to(self._device),
+                # current_input_length.to(self._device),
+                # *past_key_caches,
+                # *past_value_caches,
             )
             if isinstance(self.decode_session, GoldenMixin):
                 self.decode_session.update_step()

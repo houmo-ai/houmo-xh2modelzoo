@@ -55,7 +55,7 @@ class _Qwen3RotaryEmbedding(DynamicModule):
 
         # self.max_position_embeddings = max_position_embeddings
         # Build here to make `torch.jit.trace` work.
-        self._setup_cos_sin_cache(seq_len=self.max_seq_len_cached, dtype=self.inv_freq.dtype)
+        self._setup_cos_sin_cache(seq_len=cfg.input_sequence_length, dtype=self.inv_freq.dtype)
 
     def _setup_cos_sin_cache(self, seq_len, dtype):
         """
@@ -163,10 +163,11 @@ class _Qwen3Attention(DynamicModule):
         self,
         hidden_states: torch.Tensor,
         # position_ids: torch.Tensor,
-        past_seq_length: Optional[Tensor] = None,
-        current_input_length: Optional[Tensor] = None,
-        past_k_cache: Optional[Tensor] = None,
-        past_v_cache: Optional[Tensor] = None,
+        # past_seq_length: Optional[Tensor] = None,
+        # current_input_length: Optional[Tensor] = None,
+        # past_k_cache: Optional[Tensor] = None,
+        # past_v_cache: Optional[Tensor] = None,
+        # attention_mask = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         # input_shape = hidden_states.shape[:-1]
@@ -227,7 +228,10 @@ class _Qwen3Attention(DynamicModule):
             attn_weights = torch.matmul(query_states, key_states)  # [4, 28, 256, 128], [4, 28, 128, 32768]
             # attn_weights = self.key_group_broadcast_matmul(query_states, key_states)
             # attn_weights = torch.matmul(query_states, key_states) / math.sqrt(self.head_dim) #fp16下会出现nan
-            attn_weights: Optional[Tensor] = self.masked_softmax(attn_weights, past_seq_length)
+            # attn_weights: Optional[Tensor] = self.masked_add(attn_weights, attention_mask)
+            # attn_weights = self.softmax(attn_weights)
+
+            attn_weights = self.masked_softmax(attn_weights, torch.tensor([0]))
 
             # TODO: HMMatMul broadcast
             # value_states = self.value_unsqueeze(value_states)
@@ -319,6 +323,9 @@ class _Qwen3Attention(DynamicModule):
         self.cos_gather = xhnn.Gather(0)
         self.sin_gather = xhnn.Gather(0)
 
+        self.masked_add = xhnn.MaskedAdd()
+
+        self.softmax = xhnn.Softmax(dim=-1)
         # self.sin_slice = xhnn.DynamicSlice([input_seq_len], [0], [1])
         # self.cos_slice = xhnn.DynamicSlice([input_seq_len], [0], [1])
 
@@ -392,10 +399,11 @@ class _Qwen3DecoderLayer(DynamicModule):
         hidden_states: torch.Tensor,
         # position_ids: Optional[torch.LongTensor] = None,
         # rotary_matrix: Optional[torch.Tensor] = None,
-        past_seq_length: Optional[Tensor] = None,
-        current_input_length: Optional[Tensor] = None,
-        past_k_cache: Optional[Tensor] = None,
-        past_v_cache: Optional[Tensor] = None,
+        # past_seq_length: Optional[Tensor] = None,
+        # current_input_length: Optional[Tensor] = None,
+        # past_k_cache: Optional[Tensor] = None,
+        # past_v_cache: Optional[Tensor] = None,
+        # attention_mask = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -427,12 +435,13 @@ class _Qwen3DecoderLayer(DynamicModule):
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
+            # attention_mask = attention_mask,
             # rotary_matrix=rotary_matrix,
             # position_ids=position_ids,
-            past_seq_length=past_seq_length,
-            current_input_length=current_input_length,
-            past_k_cache=past_k_cache,
-            past_v_cache=past_v_cache,
+            # past_seq_length=past_seq_length,
+            # current_input_length=current_input_length,
+            # past_k_cache=past_k_cache,
+            # past_v_cache=past_v_cache,
             position_embeddings=position_embeddings,
         )
         hidden_states = residual + hidden_states
@@ -477,17 +486,20 @@ class _Qwen3Model(DynamicModule):
         self,
         # position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_seq_length: Optional[Tensor] = None,
-        current_input_length: Optional[Tensor] = None,
-        past_key_cache: Optional[List[Tensor]] = None,
-        past_value_cache: Optional[List[Tensor]] = None,
+        # mask =None,
+        # past_seq_length: Optional[Tensor] = None,
+        # current_input_length: Optional[Tensor] = None,
+        # past_key_cache: Optional[List[Tensor]] = None,
+        # past_value_cache: Optional[List[Tensor]] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
         causal_mask = None  # 在Qwen2Attention中处理
         hidden_states = inputs_embeds
 
-        cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
-        sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
+        # cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
+        # sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
+        cos  = self.rotary_emb.cos_cached
+        sin  = self.rotary_emb.sin_cached
 
         # cos = self.cos_unsqueeze(cos)
         # sin = self.sin_unsqueeze(sin)
@@ -512,12 +524,12 @@ class _Qwen3Model(DynamicModule):
             #    time_start = time.time()
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                # attention_mask=mask,
                 # # position_ids=position_ids,
-                past_seq_length=past_seq_length,
-                current_input_length=current_input_length,
-                past_k_cache=_past_k_cache,
-                past_v_cache=_past_v_cache,
+                # past_seq_length=past_seq_length,
+                # current_input_length=current_input_length,
+                # past_k_cache=_past_k_cache,
+                # past_v_cache=_past_v_cache,
                 position_embeddings=position_embeddings,
             )
             # if idx == 0:
@@ -532,7 +544,7 @@ class _Qwen3Model(DynamicModule):
         #     pass
         # else:
         #     hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
-        # hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -599,7 +611,7 @@ class _Qwen3ForCausalLM(DynamicModule):
         self,
         # position_ids: Optional[Tensor] = None,
         inputs_embeds: Optional[Tensor] = None,
-        past_seq_length: Optional[Tensor] = None,
+        # past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         past_key_cache: Optional[List[Tensor]] = None,
         past_value_cache: Optional[List[Tensor]] = None,
@@ -612,16 +624,17 @@ class _Qwen3ForCausalLM(DynamicModule):
         outputs = self.model(
             # position_ids=position_ids,
             inputs_embeds=inputs_embeds,
-            past_seq_length=past_seq_length,
-            current_input_length=current_input_length,
+            # past_seq_length=past_seq_length,
+            # current_input_length=current_input_length,
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )
 
         # hidden_states = outputs[0]
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states)
-        return logits
+        # logits = self.lm_head(hidden_states)
+        # return logits
+        return hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

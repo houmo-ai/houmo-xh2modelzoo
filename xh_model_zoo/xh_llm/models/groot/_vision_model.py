@@ -151,7 +151,7 @@ class _NewAttention(DynamicModule):
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
-        query_states = query_states * self.kv_scale
+        query_states = query_states 
 
         # query_states [bsz, self.num_key_value_heads, seq_len, self.head_dim]
 
@@ -168,7 +168,7 @@ class _NewAttention(DynamicModule):
         #     dim=1,
         # )
 
-        attn_weights = torch.matmul(query_states, key_states)  # [4, 28, 256, 128], [4, 28, 128, 32768]
+        attn_weights = torch.matmul(query_states, key_states) * self.kv_scale  # [4, 28, 256, 128], [4, 28, 128, 32768]
         # attn_weights = self.key_group_broadcast_matmul(query_states, key_states)
         # attn_weights = torch.matmul(query_states, key_states) / math.sqrt(self.head_dim) #fp16下会出现nan
         

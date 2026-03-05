@@ -67,6 +67,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
         native_model = hf_model
 
         with torch.no_grad():
+            torch.manual_seed(42)
             vision_input = torch.rand(1, 3, 252, 252).to(self.device)
             outoput_ori = native_model([vision_input])
 
@@ -86,13 +87,13 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
 
         wraped_llm_model = wrap_llm_model(hf_model, wrap_cfg)
         wraped_llm_model = wraped_llm_model.to(self.device)
-        wraped_llm_model.to(torch.float16)
+        # wraped_llm_model.to(torch.float16)
 
         with torch.no_grad():
             # vision_input = torch.rand(1, 3, 252, 252).to(self.device)
             windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings([vision_input])
             outoput_hm = wraped_llm_model(windows_tensor)
-
+            outoput_hm = outoput_hm[:, reverse_mapping, :]
 
         model_name = "groot_vision"
         target_device = config.quant_scheme.target_device
@@ -123,6 +124,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
             windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings([vision_input])
             # last_hidden_state = last_hidden_state[:, reverse_mapping, :]
 
+        windows_tensor = torch.rand(1, 324, 1152).to(self.device).half()
         target_device = self.config.quant_scheme.target_device
         input_names = ["windows_tensor"]
         inputs = [windows_tensor,]
@@ -145,7 +147,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
             logger.info(f"{vison_onnx_file} exists, skip export vision model.")
 
         meta_info["onnx"] = str(Path(vison_onnx_file).relative_to(work_dir))
-        vison_golden_dir = "/data02/users/cc_work/golden/groot" # str(work_dir / "golden" / f"{prefix}")
+        vison_golden_dir = f"/data02/users/cc_work/golden/groot/{model_name}" # str(work_dir / "golden" / f"{prefix}")
 
         if not Path(vison_golden_dir).exists():
             logger.info(f"start export vision model golden............")
@@ -158,6 +160,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
             Path(vison_golden_dir).mkdir(exist_ok=True, parents=True)
             vae_model.golden_dir = str(vison_golden_dir)
 
+            inputs[0] = inputs[0].half()
             with torch.no_grad():
                 vae_model.forward(*inputs)
             logger.info(f"Export vision model golden to {vison_golden_dir}")

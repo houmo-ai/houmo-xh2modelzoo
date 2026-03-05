@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型性能看板</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Arial', 'Microsoft YaHei', sans-serif;
+        }
+        body {
+            background-color: #f5f7fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .header h1 {
+            color: #2c3e50;
+            font-size: 24px;
+        }
+        .nav-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .nav-tab {
+            padding: 10px 20px;
+            background: #e9ecef;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .nav-tab:hover {
+            background: #dee2e6;
+        }
+        .nav-tab.active {
+            background: #007bff;
+            color: white;
+        }
+        .tag-filter {
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .tag-filter-label {
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 16px;
+            margin-right: 15px;
+        }
+        .tag-filter-horizontal {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            align-items: flex-end;
+            flex: 1;
+        }
+        .tag-filter-item {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .tag-filter-item label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 13px;
+        }
+        .tag-filter-select {
+            padding: 8px 12px;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 13px;
+            background-color: white;
+            cursor: pointer;
+            min-width: 120px;
+            transition: all 0.3s;
+        }
+        .tag-filter-select:hover {
+            border-color: #007bff;
+        }
+        .tag-filter-select:focus {
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+        }
+        .tag-chip {
+            padding: 6px 14px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+        }
+        .tag-chip:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .tag-chip.active {
+            border-color: #333;
+            transform: scale(1.05);
+        }
+        .dashboard-content {
+            display: none;
+        }
+        .dashboard-content.active {
+            display: block;
+        }
+        .dashboard-header {
+            margin-bottom: 20px;
+        }
+        .dashboard-header h2 {
+            color: #2c3e50;
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+        .dashboard-header p {
+            color: #666;
+            font-size: 14px;
+        }
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .chart-card {
+            background: #fff;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .chart-card h3 {
+            color: #2c3e50;
+            font-size: 16px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .chart-header h3 {
+            margin: 0;
+            padding: 0;
+            border: none;
+        }
+        .chart-filter-select {
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            background-color: #fff;
+            cursor: pointer;
+        }
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        .model-table-container {
+            background: #fff;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            overflow-x: auto;
+        }
+        .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .table-header h3 {
+            color: #2c3e50;
+            font-size: 16px;
+            margin: 0;
+        }
+        .save-models-btn {
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .save-models-btn:hover {
+            background-color: #218838;
+            transform: translateY(-1px);
+        }
+        .save-models-btn:active {
+            transform: translateY(0);
+        }
+        .add-model-header-btn {
+            padding: 8px 16px;
+            background-color: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+            margin-right: 10px;
+        }
+        .add-model-header-btn:hover {
+            background-color: #138496;
+            transform: translateY(-1px);
+        }
+        .add-model-header-btn:active {
+            transform: translateY(0);
+        }
+        .add-model-btn {
+            padding: 6px 12px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+            margin-right: 5px;
+        }
+        .add-model-btn:hover {
+            background-color: #218838;
+        }
+        .cancel-model-btn {
+            padding: 6px 12px;
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+        .cancel-model-btn:hover {
+            background-color: #c82333;
+        }
+        .delete-model-btn {
+            padding: 4px 10px;
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s;
+        }
+        .delete-model-btn:hover {
+            background-color: #c82333;
+        }
+        .model-attribute-select {
+            padding: 4px 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            background-color: transparent;
+            cursor: pointer;
+            min-width: 80px;
+            max-width: 120px;
+            transition: all 0.3s;
+            -webkit-appearance: none;
+            -moz-appearance: none;
+            appearance: none;
+        }
+        .model-attribute-select:hover {
+            background-color: #f8f9fa;
+        }
+        .model-attribute-select:focus {
+            outline: none;
+            background-color: #f8f9fa;
+            box-shadow: none;
+        }
+        .model-type-CV {
+            background-color: #FF6384 !important;
+            color: white;
+        }
+        .model-type-OCR {
+            background-color: #36A2EB !important;
+            color: white;
+        }
+        .model-type-VLA {
+            background-color: #FFCE56 !important;
+            color: white;
+        }
+        .model-type-embedding {
+            background-color: #4BC0C0 !important;
+            color: white;
+        }
+        .model-type-代码生成 {
+            background-color: #9966FF !important;
+            color: white;
+        }
+        .model-type-光流模型 {
+            background-color: #FF9F40 !important;
+            color: white;
+        }
+        .model-type-分割 {
+            background-color: #FF6384 !important;
+            color: white;
+        }
+        .model-type-图像特征提取 {
+            background-color: #C9CBCF !important;
+            color: white;
+        }
+        .model-type-图像生成 {
+            background-color: #7BC225 !important;
+            color: white;
+        }
+        .model-type-多模态 {
+            background-color: #4BC0C0 !important;
+            color: white;
+        }
+        .model-type-开放世界目标检测 {
+            background-color: #FF6384 !important;
+            color: white;
+        }
+        .model-type-文本生成 {
+            background-color: #36A2EB !important;
+            color: white;
+        }
+        .model-type-检测 {
+            background-color: #FFCE56 !important;
+            color: white;
+        }
+        .model-type-深度估计 {
+            background-color: #9966FF !important;
+            color: white;
+        }
+        .model-type-超分 {
+            background-color: #FF9F40 !important;
+            color: white;
+        }
+        .model-type-音频 {
+            background-color: #4BC0C0 !important;
+            color: white;
+        }
+        .quantization-已完成 {
+            background-color: #4CAF50 !important;
+            color: white;
+        }
+        .quantization-计划中 {
+            background-color: #FF9800 !important;
+            color: white;
+        }
+        .quantization-适配中 {
+            background-color: #2196F3 !important;
+            color: white;
+        }
+        .model-input {
+            padding: 4px 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            background-color: transparent;
+            width: 120px;
+            max-width: 150px;
+            transition: all 0.3s;
+        }
+        .model-input:hover {
+            background-color: #f8f9fa;
+        }
+        .model-input:focus {
+            outline: none;
+            background-color: #f8f9fa;
+            box-shadow: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e9ecef;
+        }
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #2c3e50;
+            white-space: nowrap;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status-active {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-inactive {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-error {
+            background: #dc3545;
+            color: white;
+        }
+        .metric-value {
+            font-weight: 600;
+            color: #007bff;
+        }
+        .hide-chip-type {
+            display: none;
+        }
+        .tag-list {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        .mini-tag {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            color: white;
+        }
+        .stats-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .stat-card h4 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        .stat-card .value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .stat-card.purple {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .stat-card.blue {
+            background: linear-gradient(135deg, #36A2EB 0%, #4BC0C0 100%);
+        }
+        .stat-card.green {
+            background: linear-gradient(135deg, #4BC0C0 0%, #7BC225 100%);
+        }
+        .stat-card.orange {
+            background: linear-gradient(135deg, #FF9F40 0%, #FF6384 100%);
+        }
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .tag-manager-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-left: 10px;
+        }
+        .tag-manager-btn:hover {
+            background: #218838;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .modal-header h2 {
+            color: #2c3e50;
+            font-size: 20px;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+        }
+        .close-btn:hover {
+            color: #333;
+        }
+        .tag-section {
+            margin-bottom: 25px;
+        }
+        .tag-section h3 {
+            color: #2c3e50;
+            font-size: 16px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .tag-value-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+        .tag-value-row input {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .delete-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .delete-btn:hover {
+            background: #c82333;
+        }
+        .add-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .add-btn:hover {
+            background: #218838;
+        }
+        .save-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+        .save-btn:hover {
+            background: #0056b3;
+        }
+        @media (max-width: 768px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+            .nav-tabs {
+                flex-direction: column;
+            }
+            .tag-filter-horizontal {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .tag-filter-item {
+                width: 100%;
+            }
+            .tag-filter-select {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>模型性能看板</h1>
+            <div class="nav-tabs">
+                <button class="nav-tab" onclick="window.location.href='/'">测试管理</button>
+                <button class="nav-tab active">性能看板</button>
+            </div>
+        </div>
+
+        <div id="loading" class="loading">
+            <div class="loading-spinner"></div>
+            <p>正在加载看板数据...</p>
+        </div>
+
+        <div id="dashboard-content" style="display: none;">
+            <div class="tag-filter">
+                <span class="tag-filter-label">标签筛选:</span>
+                <div id="tag-chips"></div>
+                <button class="tag-manager-btn" onclick="openTagManager()">管理标签</button>
+            </div>
+
+            <div class="nav-tabs" id="dashboard-tabs"></div>
+
+            <div id="dashboard-contents"></div>
+        </div>
+    </div>
+
+    <div id="tag-manager-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>标签管理</h2>
+                <button class="close-btn" onclick="closeTagManager()">&times;</button>
+            </div>
+            <div id="tag-manager-content"></div>
+            <button class="save-btn" onclick="saveTagChanges()">保存更改</button>
+        </div>
+    </div>
+
+    <script>
+        let dashboardData = null;
+        let activeDashboard = null;
+        let activeTags = new Set();
+        let tagValuesCache = {};
+        let isAddingNewModel = false;
+        let chartFilters = {};
+
+        async function loadDashboardData() {
+            try {
+                const response = await fetch('/api/dashboard/data');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                dashboardData = await response.json();
+                tagValuesCache = {...dashboardData.tag_values};
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard-content').style.display = 'block';
+                
+                const chipTypeFilterKey = '芯片类型:XH2';
+                if (!activeTags.has(chipTypeFilterKey)) {
+                    activeTags.add(chipTypeFilterKey);
+                }
+                
+                chartFilters = {
+                    'accuracy_comparison': '音频',
+                    'inference_time': '音频'
+                };
+                
+                renderTags();
+                renderDashboardTabs();
+                if (dashboardData.dashboards.length > 0) {
+                    showDashboard(dashboardData.dashboards[0].id);
+                }
+            } catch (error) {
+                console.error('加载看板数据失败:', error);
+                document.getElementById('loading').innerHTML = '<div style="padding: 20px; text-align: center; color: #dc3545;">加载看板数据失败，请确保后端API正常运行</div>';
+            }
+        }
+
+        function renderTags() {
+            const container = document.getElementById('tag-chips');
+            const mainTags = dashboardData.tags.filter(tag => 
+                ['模型类型', '量化状态', '负责人', '芯片类型'].includes(tag.name)
+            );
+            
+            let html = '<div class="tag-filter-horizontal">';
+            mainTags.forEach(tag => {
+                const tagValues = dashboardData.tag_values && dashboardData.tag_values[tag.name] ? dashboardData.tag_values[tag.name] : [];
+                const selectedValue = Array.from(activeTags).find(key => key.startsWith(`${tag.name}:`))?.split(':')[1] || '';
+                
+                html += `
+                    <div class="tag-filter-item">
+                        <label class="tag-filter-label">${tag.name}</label>
+                        <select class="tag-filter-select" onchange="onTagFilterChange('${tag.name}', this.value)">
+                            <option value="">全部</option>
+                            ${tagValues.map(value => `
+                                <option value="${value}" ${selectedValue === value ? 'selected' : ''}>${value}</option>
+                            `).join('')}
+                        </select>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            container.innerHTML = html;
+        }
+
+        function onTagFilterChange(tagName, value) {
+            const filterKey = `${tagName}:${value}`;
+            
+            activeTags.forEach(key => {
+                if (key.startsWith(`${tagName}:`)) {
+                    activeTags.delete(key);
+                }
+            });
+            
+            if (value) {
+                activeTags.add(filterKey);
+            }
+            
+            renderTags();
+            renderDashboardTabs();
+            if (activeDashboard) {
+                showDashboard(activeDashboard.id);
+            }
+        }
+
+        function toggleTag(tagName) {
+            if (activeTags.has(tagName)) {
+                activeTags.delete(tagName);
+            } else {
+                activeTags.add(tagName);
+            }
+            renderTags();
+            renderDashboardTabs();
+            if (activeDashboard) {
+                showDashboard(activeDashboard.id);
+            }
+        }
+
+        function renderDashboardTabs() {
+            const container = document.getElementById('dashboard-tabs');
+            const filteredDashboards = filterDashboardsByTags(dashboardData.dashboards);
+            
+            container.innerHTML = filteredDashboards.map(dashboard => `
+                <button class="nav-tab ${activeDashboard && activeDashboard.id === dashboard.id ? 'active' : ''}"
+                        onclick="showDashboard('${dashboard.id}')">
+                    ${dashboard.name}
+                </button>
+            `).join('');
+        }
+
+        function filterDashboardsByTags(dashboards) {
+            return dashboards;
+        }
+
+        function showDashboard(dashboardId) {
+            const dashboard = dashboardData.dashboards.find(d => d.id === dashboardId);
+            if (!dashboard) return;
+            
+            activeDashboard = dashboard;
+            renderDashboardTabs();
+            
+            const container = document.getElementById('dashboard-contents');
+            const filteredModels = filterModelsByTags(dashboardData.models);
+            
+            container.innerHTML = `
+                <div class="dashboard-content active">
+                    <div class="dashboard-header">
+                        <h2>${dashboard.name}</h2>
+                        <p>${dashboard.description}</p>
+                    </div>
+                    
+                    <div class="stats-cards">
+                        <div class="stat-card purple">
+                            <h4>总模型数</h4>
+                            <div class="value">${filteredModels.length}</div>
+                        </div>
+                        <div class="stat-card blue">
+                            <h4>平均准确率</h4>
+                            <div class="value">${calculateAverageAccuracy(filteredModels)}%</div>
+                        </div>
+                        <div class="stat-card green">
+                            <h4>测试通过</h4>
+                            <div class="value">${calculateTotalTestsPassed(filteredModels)}</div>
+                        </div>
+                        <div class="stat-card orange">
+                            <h4>测试失败</h4>
+                            <div class="value">${calculateTotalTestsFailed(filteredModels)}</div>
+                        </div>
+                    </div>
+                    
+                    <div class="charts-grid">
+                        ${dashboard.charts.map(chart => `
+                            <div class="chart-card">
+                                <div class="chart-header">
+                                    <h3>${chart.title}</h3>
+                                    ${['accuracy_comparison', 'inference_time'].includes(chart.id) ? `
+                                        <select class="chart-filter-select" onchange="onChartFilterChange('${chart.id}', this.value)">
+                                            <option value="">全部模型</option>
+                                            ${dashboardData.tag_values['模型类型'].map(v => `<option value="${v}" ${v === '音频' ? 'selected' : ''}>${v}</option>`).join('')}
+                                        </select>
+                                    ` : ''}
+                                </div>
+                                <div class="chart-container">
+                                    <canvas id="chart-${chart.id}"></canvas>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    
+                    <div class="model-table-container">
+                        <div class="table-header">
+                            <h3>模型详细信息</h3>
+                            <div>
+                                <button class="add-model-header-btn" onclick="showNewModelRow()">添加新模型</button>
+                            </div>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>模型名称</th>
+                                    <th>模型类型</th>
+                                    <th>量化状态</th>
+                                    <th>负责人</th>
+                                    <th>算法文档</th>
+                                    <th>Jira链接</th>
+                                    <th class="hide-chip-type">芯片类型</th>
+                                    <th>准确率</th>
+                                    <th>推理时间</th>
+                                    <th>内存使用</th>
+                                    <th>状态</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${isAddingNewModel ? `
+                                    <tr id="new-model-row">
+                                        <td><input type="text" id="new-model-name" class="model-input" placeholder="模型名称"></td>
+                                        <td>
+                                            <select id="new-model-type" class="model-attribute-select">
+                                                <option value="">选择模型类型</option>
+                                                ${dashboardData.tag_values['模型类型'].map(v => `<option value="${v}">${v}</option>`).join('')}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select id="new-quantization" class="model-attribute-select">
+                                                <option value="">选择量化状态</option>
+                                                ${dashboardData.tag_values['量化状态'].map(v => `<option value="${v}">${v}</option>`).join('')}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select id="new-owner" class="model-attribute-select">
+                                                <option value="">选择负责人</option>
+                                                ${dashboardData.tag_values['负责人'].map(v => `<option value="${v}">${v}</option>`).join('')}
+                                            </select>
+                                        </td>
+                                        <td><input type="text" id="new-algorithm-doc" class="model-input" placeholder="算法文档链接"></td>
+                                        <td><input type="text" id="new-jira-link" class="model-input" placeholder="Jira链接"></td>
+                                        <td class="hide-chip-type">
+                                            <select id="new-chip-type" class="model-attribute-select">
+                                                <option value="">选择芯片类型</option>
+                                                ${dashboardData.tag_values['芯片类型'].map(v => `<option value="${v}" ${v === 'XH2' ? 'selected' : ''}>${v}</option>`).join('')}
+                                            </select>
+                                        </td>
+                                        <td><input type="number" id="new-accuracy" class="model-input" placeholder="准确率" style="width: 80px;"></td>
+                                        <td><input type="number" id="new-inference-time" class="model-input" placeholder="推理时间" style="width: 80px;"></td>
+                                        <td><input type="number" id="new-memory-usage" class="model-input" placeholder="内存" style="width: 80px;"></td>
+                                        <td></td>
+                                        <td>
+                                            <button class="add-model-btn" onclick="addNewModel()">添加</button>
+                                            <button class="cancel-model-btn" onclick="cancelNewModel()">取消</button>
+                                            <button class="delete-model-btn" onclick="clearNewModelInputs()">清空</button>
+                                        </td>
+                                    </tr>
+                                ` : ''}
+                                ${filteredModels.map(model => {
+                                    const modelType = model.attributes['模型类型'] || '';
+                                    const quantizationStatus = model.attributes['量化状态'] || '';
+                                    const modelTypeClass = modelType ? `model-type-${modelType}` : '';
+                                    const quantizationClass = quantizationStatus ? `quantization-${quantizationStatus}` : '';
+                                    
+                                    return `<tr data-model-id="${model.id}">
+                                        <td><strong>${model.name}</strong></td>
+                                        <td>
+                                            <select class="model-attribute-select ${modelTypeClass}" data-model-id="${model.id}" data-attribute="模型类型" onchange="updateModelAttribute('${model.id}', '模型类型', this.value)">
+                                                ${renderAttributeOptions('模型类型', model.attributes['模型类型'])}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select class="model-attribute-select ${quantizationClass}" data-model-id="${model.id}" data-attribute="量化状态" onchange="updateModelAttribute('${model.id}', '量化状态', this.value)">
+                                                ${renderAttributeOptions('量化状态', model.attributes['量化状态'])}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select class="model-attribute-select" data-model-id="${model.id}" data-attribute="负责人" onchange="updateModelAttribute('${model.id}', '负责人', this.value)">
+                                                ${renderAttributeOptions('负责人', model.attributes['负责人'])}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <input type="text" class="model-input" data-model-id="${model.id}" data-attribute="算法文档" value="${model.attributes['算法文档'] || ''}" onchange="updateModelAttribute('${model.id}', '算法文档', this.value)" placeholder="输入算法文档链接">
+                                        </td>
+                                        <td>
+                                            <input type="text" class="model-input" data-model-id="${model.id}" data-attribute="jira链接" value="${model.attributes['jira链接'] || ''}" onchange="updateModelAttribute('${model.id}', 'jira链接', this.value)" placeholder="输入Jira链接">
+                                        </td>
+                                        <td class="hide-chip-type">
+                                            <select class="model-attribute-select" data-model-id="${model.id}" data-attribute="芯片类型" onchange="updateModelAttribute('${model.id}', '芯片类型', this.value)">
+                                                ${renderAttributeOptions('芯片类型', model.attributes['芯片类型'])}
+                                            </select>
+                                        </td>
+                                        <td><span class="metric-value">${model.accuracy}%</span></td>
+                                        <td>${model.inference_time}ms</td>
+                                        <td>${model.memory_usage}GB</td>
+                                        <td><span class="status-badge ${model.status === '正常' ? 'status-active' : model.status === '异常' ? 'status-error' : 'status-inactive'}">${model.status}</span></td>
+                                        <td>
+                                            ${isAddingNewModel ? `<button class="delete-model-btn" onclick="deleteModel('${model.id}')">删除</button>` : ''}
+                                        </td>
+                                    </tr>`;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+            
+            dashboard.charts.forEach(chart => {
+                renderChart(chart, filteredModels);
+            });
+        }
+
+        function onChartFilterChange(chartId, modelType) {
+            chartFilters[chartId] = modelType;
+            const dashboard = dashboardData.dashboards.find(d => d.id === activeDashboard.id);
+            if (dashboard) {
+                const filteredModels = filterModelsByTags(dashboardData.models);
+                const chart = dashboard.charts.find(c => c.id === chartId);
+                if (chart) {
+                    renderChart(chart, filteredModels);
+                }
+            }
+        }
+
+        function filterModelsByTags(models) {
+            if (activeTags.size === 0) {
+                return models;
+            }
+            const filtered = models.filter(model => {
+                const modelAttributes = model.attributes || {};
+                return Array.from(activeTags).every(filterKey => {
+                    const [tagName, tagValue] = filterKey.split(':');
+                    const modelValue = modelAttributes[tagName];
+                    return modelValue === tagValue;
+                });
+            });
+            
+            return filtered.sort((a, b) => {
+                const modelTypeA = a.attributes?.['模型类型'] || '';
+                const modelTypeB = b.attributes?.['模型类型'] || '';
+                if (modelTypeA !== modelTypeB) {
+                    return modelTypeA.localeCompare(modelTypeB, 'zh-CN');
+                }
+                const nameA = a.name || '';
+                const nameB = b.name || '';
+                return nameA.localeCompare(nameB, 'zh-CN');
+            });
+        }
+
+        function renderAttributeOptions(attributeName, currentValue) {
+            const options = dashboardData.tag_values && dashboardData.tag_values[attributeName] ? dashboardData.tag_values[attributeName] : [];
+            return options.map(value => {
+                let cssClass = '';
+                if (attributeName === '模型类型') {
+                    cssClass = `model-type-${value}`;
+                } else if (attributeName === '量化状态') {
+                    cssClass = `quantization-${value}`;
+                }
+                return `<option value="${value}" ${currentValue === value ? 'selected' : ''} class="${cssClass}">${value}</option>`;
+            }).join('');
+        }
+
+        function showNewModelRow() {
+            isAddingNewModel = true;
+            if (activeDashboard) {
+                showDashboard(activeDashboard.id);
+            }
+        }
+
+        function cancelNewModel() {
+            isAddingNewModel = false;
+            clearNewModelInputs();
+            if (activeDashboard) {
+                showDashboard(activeDashboard.id);
+            }
+        }
+
+        function clearNewModelInputs() {
+            document.getElementById('new-model-name').value = '';
+            document.getElementById('new-model-type').value = '';
+            document.getElementById('new-quantization').value = '';
+            document.getElementById('new-owner').value = '';
+            document.getElementById('new-algorithm-doc').value = '';
+            document.getElementById('new-jira-link').value = '';
+            document.getElementById('new-chip-type').value = '';
+            document.getElementById('new-accuracy').value = '';
+            document.getElementById('new-inference-time').value = '';
+            document.getElementById('new-memory-usage').value = '';
+        }
+
+        async function addNewModel() {
+            const modelName = document.getElementById('new-model-name').value.trim();
+            const modelType = document.getElementById('new-model-type').value;
+            const quantization = document.getElementById('new-quantization').value;
+            const owner = document.getElementById('new-owner').value;
+            const algorithmDoc = document.getElementById('new-algorithm-doc').value.trim();
+            const jiraLink = document.getElementById('new-jira-link').value.trim();
+            let chipType = document.getElementById('new-chip-type').value;
+            const accuracy = parseFloat(document.getElementById('new-accuracy').value);
+            const inferenceTime = parseFloat(document.getElementById('new-inference-time').value);
+            const memoryUsage = parseFloat(document.getElementById('new-memory-usage').value);
+
+            if (!modelName) {
+                alert('请输入模型名称');
+                return;
+            }
+
+            if (!chipType) {
+                chipType = 'XH2';
+            }
+
+            const newModel = {
+                id: 'model_' + Date.now(),
+                name: modelName,
+                type: modelType || '其他',
+                accuracy: accuracy || 90.0,
+                inference_time: inferenceTime || 50,
+                memory_usage: memoryUsage || 8,
+                tests_passed: 0,
+                tests_failed: 0,
+                status: '正常',
+                attributes: {
+                    '模型类型': modelType,
+                    '量化状态': quantization,
+                    '负责人': owner,
+                    '算法文档': algorithmDoc,
+                    'jira链接': jiraLink,
+                    '芯片类型': chipType
+                }
+            };
+
+            try {
+                const response = await fetch('/api/dashboard/models', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(newModel)
+                });
+
+                if (response.ok) {
+                    alert('模型添加成功');
+                    cancelNewModel();
+                    await loadDashboardData();
+                    if (activeDashboard) {
+                        showDashboard(activeDashboard.id);
+                    }
+                } else {
+                    alert('添加失败，请重试');
+                }
+            } catch (error) {
+                console.error('添加模型失败:', error);
+                alert('添加失败，请检查网络连接');
+            }
+        }
+
+        let modelChanges = {};
+
+        function updateModelAttribute(modelId, attributeName, value) {
+            if (!modelChanges[modelId]) {
+                modelChanges[modelId] = {};
+            }
+            if (!modelChanges[modelId]['attributes']) {
+                modelChanges[modelId]['attributes'] = {};
+            }
+            modelChanges[modelId]['attributes'][attributeName] = value;
+            
+            if (attributeName === '模型类型') {
+                const selectElement = document.querySelector(`select[data-model-id="${modelId}"][data-attribute="模型类型"]`);
+                if (selectElement) {
+                    selectElement.className = `model-attribute-select model-type-${value}`;
+                }
+            } else if (attributeName === '量化状态') {
+                const selectElement = document.querySelector(`select[data-model-id="${modelId}"][data-attribute="量化状态"]`);
+                if (selectElement) {
+                    selectElement.className = `model-attribute-select quantization-${value}`;
+                }
+            }
+        }
+
+        async function saveModelChanges() {
+            try {
+                console.log('准备保存模型更改:', modelChanges);
+                
+                if (Object.keys(modelChanges).length === 0) {
+                    alert('没有需要保存的更改');
+                    return;
+                }
+                
+                const response = await fetch('/api/dashboard/models', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(modelChanges)
+                });
+                
+                console.log('响应状态:', response.status, response.statusText);
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    console.log('保存成功:', result);
+                    alert('模型更改已保存');
+                    modelChanges = {};
+                    await loadDashboardData();
+                } else {
+                    const errorData = await response.json();
+                    console.error('保存失败:', errorData);
+                    alert(`保存失败: ${errorData.error || '未知错误'}`);
+                }
+            } catch (error) {
+                console.error('保存模型更改失败:', error);
+                alert(`保存失败: ${error.message}`);
+            }
+        }
+
+        async function deleteModel(modelId) {
+            if (!confirm('确定要删除这个模型吗？此操作不可恢复。')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/dashboard/models/${modelId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    alert('模型删除成功');
+                    await loadDashboardData();
+                    if (activeDashboard) {
+                        showDashboard(activeDashboard.id);
+                    }
+                } else {
+                    const errorData = await response.json();
+                    console.error('删除失败:', errorData);
+                    alert(`删除失败: ${errorData.error || '未知错误'}`);
+                }
+            } catch (error) {
+                console.error('删除模型失败:', error);
+                alert(`删除失败: ${error.message}`);
+            }
+        }
+
+        function calculateAverageAccuracy(models) {
+            if (models.length === 0) return 0;
+            const sum = models.reduce((acc, model) => acc + model.accuracy, 0);
+            return (sum / models.length).toFixed(1);
+        }
+
+        function calculateTotalTestsPassed(models) {
+            return models.reduce((acc, model) => acc + model.tests_passed, 0);
+        }
+
+        function calculateTotalTestsFailed(models) {
+            return models.reduce((acc, model) => acc + model.tests_failed, 0);
+        }
+
+        function renderChart(chart, filteredModels) {
+            const ctx = document.getElementById(`chart-${chart.id}`).getContext('2d');
+            
+            let chartData = {...chart.data};
+            
+            if (chart.id === 'accuracy_comparison' || chart.id === 'inference_time') {
+                const selectedModelType = chartFilters[chart.id] || '';
+                let modelsToDisplay = selectedModelType 
+                    ? filteredModels.filter(model => model.attributes?.['模型类型'] === selectedModelType)
+                    : filteredModels;
+                
+                if (chart.id === 'accuracy_comparison') {
+                    const sortedModels = [...modelsToDisplay].sort((a, b) => b.accuracy - a.accuracy);
+                    chartData = {
+                        labels: sortedModels.map(model => model.name),
+                        datasets: [{
+                            label: '准确率 (%)',
+                            data: sortedModels.map(model => model.accuracy),
+                            backgroundColor: chart.data.datasets[0].backgroundColor
+                        }]
+                    };
+                } else if (chart.id === 'inference_time') {
+                    const sortedModels = [...modelsToDisplay].sort((a, b) => a.inference_time - b.inference_time);
+                    chartData = {
+                        labels: sortedModels.map(model => model.name),
+                        datasets: [{
+                            label: '推理时间',
+                            data: sortedModels.map(model => model.inference_time),
+                            borderColor: chart.data.datasets[0].borderColor,
+                            backgroundColor: chart.data.datasets[0].backgroundColor
+                        }]
+                    };
+                }
+            } else if (chart.id === 'model_category_distribution') {
+                const modelTypeCounts = {};
+                filteredModels.forEach(model => {
+                    const modelType = model.attributes?.['模型类型'] || '其他';
+                    modelTypeCounts[modelType] = (modelTypeCounts[modelType] || 0) + 1;
+                });
+                
+                const sortedTypes = Object.entries(modelTypeCounts).sort((a, b) => b[1] - a[1]);
+                chartData = {
+                    labels: sortedTypes.map(item => item[0]),
+                    datasets: [{
+                        data: sortedTypes.map(item => item[1]),
+                        backgroundColor: chart.data.datasets[0].backgroundColor
+                    }]
+                };
+            }
+            
+            new Chart(ctx, {
+                type: chart.type,
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        }
+                    },
+                    scales: chart.type !== 'pie' ? {
+                        y: {
+                            beginAtZero: true
+                        }
+                    } : {}
+                }
+            });
+        }
+
+        function openTagManager() {
+            const modal = document.getElementById('tag-manager-modal');
+            const content = document.getElementById('tag-manager-content');
+            
+            const mainTags = dashboardData.tags.filter(tag => 
+                ['模型类型', '量化状态', '负责人', '芯片类型'].includes(tag.name)
+            );
+            
+            content.innerHTML = mainTags.map(tag => {
+                const values = tagValuesCache[tag.name] || [];
+                return `
+                    <div class="tag-section">
+                        <h3>${tag.name}</h3>
+                        <div id="tag-values-${tag.name}">
+                            ${values.map((value, index) => `
+                                <div class="tag-value-row">
+                                    <input type="text" value="${value}" onchange="updateTagValue('${tag.name}', ${index}, this.value)">
+                                    <button class="delete-btn" onclick="deleteTagValue('${tag.name}', ${index})">删除</button>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <button class="add-btn" onclick="addTagValue('${tag.name}')">添加值</button>
+                    </div>
+                `;
+            }).join('');
+            
+            modal.classList.add('active');
+        }
+
+        function closeTagManager() {
+            document.getElementById('tag-manager-modal').classList.remove('active');
+        }
+
+        function updateTagValue(tagName, index, value) {
+            if (!tagValuesCache[tagName]) {
+                tagValuesCache[tagName] = [];
+            }
+            tagValuesCache[tagName][index] = value;
+        }
+
+        function addTagValue(tagName) {
+            if (!tagValuesCache[tagName]) {
+                tagValuesCache[tagName] = [];
+            }
+            tagValuesCache[tagName].push('新值');
+            
+            const container = document.getElementById(`tag-values-${tagName}`);
+            const index = tagValuesCache[tagName].length - 1;
+            const newRow = document.createElement('div');
+            newRow.className = 'tag-value-row';
+            newRow.innerHTML = `
+                <input type="text" value="新值" onchange="updateTagValue('${tagName}', ${index}, this.value)">
+                <button class="delete-btn" onclick="deleteTagValue('${tagName}', ${index})">删除</button>
+            `;
+            container.appendChild(newRow);
+        }
+
+        function deleteTagValue(tagName, index) {
+            if (!tagValuesCache[tagName]) return;
+            tagValuesCache[tagName].splice(index, 1);
+            
+            const container = document.getElementById(`tag-values-${tagName}`);
+            const rows = container.querySelectorAll('.tag-value-row');
+            if (rows[index]) {
+                rows[index].remove();
+            }
+        }
+
+        async function saveTagChanges() {
+            try {
+                const response = await fetch('/api/dashboard/tag-values', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(tagValuesCache)
+                });
+                
+                if (response.ok) {
+                    alert('标签值保存成功！');
+                    closeTagManager();
+                    await loadDashboardData();
+                } else {
+                    alert('保存失败，请重试');
+                }
+            } catch (error) {
+                console.error('保存标签值失败:', error);
+                alert('保存失败，请重试');
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', loadDashboardData);
+    </script>
+</body>
+</html>

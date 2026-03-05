@@ -9,11 +9,14 @@ import re
 import os
 from dotenv import load_dotenv
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for, send_from_directory
 import threading
 import logging
 from logging.handlers import RotatingFileHandler
 import sys
+
+# 导入看板API
+from dashboard_api import dashboard_bp
 
 # 加载环境变量
 load_dotenv()
@@ -65,7 +68,7 @@ def get_local_ip():
         return "127.0.0.1"
 
 LOCAL_IP = get_local_ip()
-PORT = 35001
+PORT = 35002
 
 # ========== 日志配置 ==========
 def setup_logger():
@@ -313,6 +316,72 @@ def background_tasks():
     logger.info("后台任务已停止")
 
 # ========== Flask Web 路由 ==========
+
+# 页面2的HTML内容（飞书链接内容占位）
+PAGE2_HTML = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>飞书文档页面</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Arial', sans-serif; }
+        body { background-color: #f5f7fa; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+        .nav-tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .nav-tab { padding: 10px 20px; background: #e9ecef; border: none; border-radius: 4px; cursor: pointer; transition: all 0.3s; }
+        .nav-tab:hover { background: #dee2e6; }
+        .nav-tab.active { background: #007bff; color: white; }
+        .content { padding: 20px; }
+        .placeholder { text-align: center; color: #666; padding: 50px 20px; }
+        .placeholder h2 { margin-bottom: 15px; color: #333; }
+        .placeholder p { margin-bottom: 10px; }
+        .placeholder a { color: #007bff; text-decoration: none; }
+        .placeholder a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>飞书文档页面</h1>
+            <div class="nav-tabs">
+                <button class="nav-tab" onclick="window.location.href='/'">测试管理</button>
+                <button class="nav-tab active">飞书文档</button>
+                <button class="nav-tab" onclick="window.location.href='/dashboard'">性能看板</button>
+            </div>
+        </div>
+        <div class="content">
+            <div class="placeholder">
+                <h2>飞书文档内容</h2>
+                <p>此页面用于显示飞书链接内容：</p>
+                <p><a href="https://houmo.feishu.cn/wiki/wikcnY1swl412d2G2RbxiUOLARd?table=tblcTzA7xhYhT33u&view=vewyxh8nGu" target="_blank">https://houmo.feishu.cn/wiki/wikcnY1swl412d2G2RbxiUOLARd</a></p>
+                <p style="margin-top: 20px; color: #999;">（请提供飞书文档内容，我将在此处填充）</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+@app.route('/page2')
+def page2():
+    """页面2：飞书文档页面"""
+    return render_template_string(PAGE2_HTML)
+
+@app.route('/dashboard')
+def dashboard():
+    """看板页面"""
+    try:
+        with open(os.path.join(ABS_PATH, 'dashboard.html'), 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "看板页面未找到", 404
+
+# 注册看板蓝图
+app.register_blueprint(dashboard_bp, url_prefix='')
+
 # 直接使用 render_template_string 替代模板文件，避免目录问题
 @app.route('/')
 def index():
@@ -488,6 +557,27 @@ def index():
             border: 1px solid #f5c6cb;
             display: block;
         }
+        /* 导航标签样式 */
+        .nav-tabs {
+            display: flex;
+            gap: 10px;
+        }
+        .nav-tab {
+            padding: 8px 16px;
+            background: #e9ecef;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        .nav-tab:hover {
+            background: #dee2e6;
+        }
+        .nav-tab.active {
+            background: #007bff;
+            color: white;
+        }
         /* 拖拽相关样式 */
         #file-list .file-item:hover {
             background: #007bff;
@@ -503,6 +593,11 @@ def index():
     <div class="container">
         <div class="header">
             <h1>测试任务管理系统</h1>
+            <div class="nav-tabs">
+                <button class="nav-tab active">测试管理</button>
+                <button class="nav-tab" onclick="window.location.assign('/page2')">飞书文档</button>
+                <button class="nav-tab" onclick="window.location.assign('/dashboard')">性能看板</button>
+            </div>
             <span>当前邮箱：{{ email_account }}</span>
         </div>
 
