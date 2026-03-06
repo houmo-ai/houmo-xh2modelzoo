@@ -79,7 +79,8 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --export_hmonnx \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --generate_hmonnx_golden
 ```
 
 #### 4.1.2 LLM
@@ -105,7 +106,8 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --export_hmonnx \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --generate_hmonnx_golden
 ```
 
 #### 4.2.2 LLM
@@ -133,7 +135,8 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --export_hmonnx \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --generate_hmonnx_golden
 ```
 
 #### 4.3.2 LLM（带 resume）
@@ -163,7 +166,8 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --export_hmonnx \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --generate_hmonnx_golden  
 ```
 
 #### 4.4.2 LLM（带 resume）
@@ -177,10 +181,28 @@ python examples/audio/fireredasr/audio_llm_xh2a_export.py \
   --rotated_adapter_path work_dirs/fireredasr_llm_xh2a_2k_gptq_quarot_4bit_ssfp_fireredasr_keep_lora/audio_projector_rotated.safetensors \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --golden
 ```
 
 ## 5. HMONNX Demo 正确性验证
+
+### 5.0 Golden 单独生成（不重新导出）
+
+当 ONNX 已经导出完成，只想单独验证 golden 生成时：
+
+```bash
+python examples/audio/fireredasr/audio_llm_xh2a_export.py \
+  --config configs/fireredasr/fireredasr_llm_xh2a_4k.py \
+  --fireredasr_model_dir weights/FireRedASR-LLM-L \
+  --lora_mode keep_lora \
+  --resume_from work_dirs/fireredasr_llm_xh2a_2k_gptq_quarot_4bit_ssfp_fireredasr_keep_lora/quarot_gptq-state-dict.safetensors \
+  --golden_only \
+  --golden_skip_pack
+```
+
+- `--golden_only`：仅基于已存在 prefill/decode ONNX 生成 golden，不走导出流程。
+- `--golden_skip_pack`：仅生成 golden 目录，不打包 `.tar.gz`（更快，便于验证）。
 
 ### 5.1 端到端 demo
 
@@ -213,4 +235,3 @@ python examples/audio/fireredasr/fireredasr_xh2a_demo.py \
 
 - `audio_encoder_<mode_suffix>.onnx`
 - `audio_encoder_<mode_suffix>_hmonnx.onnx`
-

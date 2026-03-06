@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -436,6 +437,100 @@ def validate_asr_hmonnx_llm(
     return summary
 
 
+def _generate_golden(cfg, input_ids: torch.Tensor, tokenizer, prefill_onnx_file: str, decode_onnx_file: str, logger):
+    from xhquant.api import HMONNXGoldenInference
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    input_sequence_length = cfg.model.wrap_cfg.input_sequence_length
+    valid_len = input_ids.shape[1]
+    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+    dtype = getattr(torch, cfg.dtype)
+
+    token_embedding_file = Path(cfg.work_dir) / "token_embedding.pt"
+    token_embedding_sd = torch.load(str(token_embedding_file), map_location="cpu", weights_only=True)
+    vocab_size, embed_dim = token_embedding_sd["weight"].shape
+    token_embedding = nn.Embedding(vocab_size, embed_dim)
+    token_embedding.load_state_dict(token_embedding_sd)
+    token_embedding = token_embedding.to(device).to(dtype).eval()
+
+    if valid_len < input_sequence_length:
+        input_ids_pad = torch.cat(
+            [input_ids, torch.full((input_ids.shape[0], input_sequence_length - valid_len), pad_token_id, dtype=torch.long)],
+            dim=-1,
+        )
+    else:
+        input_ids_pad = input_ids
+    prefill_inputs_embeds = token_embedding(input_ids_pad.to(device))
+
+    prefill_golden_dir = Path(prefill_onnx_file).parent / "golden" / Path(prefill_onnx_file).stem
+    prefill_golden_dir.mkdir(exist_ok=True, parents=True)
+    prefill_model = HMONNXGoldenInference(prefill_onnx_file)
+    prefill_model.save_golden = True
+    prefill_model.exec_device = str(device)
+    prefill_model.golden_dir = str(prefill_golden_dir)
+    prefill_model.to(str(device))
+    prefill_model.initialize()
+
+    prefill_input_feed: Dict[str, torch.Tensor] = {}
+    prefill_cache_feed: Dict[str, torch.Tensor] = {}
+    for name in prefill_model.get_input_names():
+        info = prefill_model.get_input(name)
+        if name in ("inputs_embeds", "input_1"):
+            prefill_input_feed[name] = prefill_inputs_embeds
+        elif name in ("past_seq_length", "valid_length"):
+            prefill_input_feed[name] = torch.tensor([0], dtype=info.dtype, device=device)
+        elif name in ("current_input_length", "current_length"):
+            prefill_input_feed[name] = torch.tensor([valid_len], dtype=info.dtype, device=device)
+        else:
+            t = torch.zeros(info.shape, dtype=info.dtype, device=device)
+            prefill_input_feed[name] = t
+            prefill_cache_feed[name] = t
+    prefill_out = prefill_model.forward(*[prefill_input_feed[n] for n in prefill_model.get_input_names()])
+    if isinstance(prefill_out, (list, tuple)):
+        prefill_logits = prefill_out[0]
+    else:
+        prefill_logits = prefill_out
+
+    decode_token_id = prefill_logits[:, -1:, :].argmax(dim=-1)
+    decode_inputs_embeds = token_embedding(decode_token_id.to(device))
+
+    decode_golden_dir = Path(decode_onnx_file).parent / "golden" / Path(decode_onnx_file).stem
+    decode_golden_dir.mkdir(exist_ok=True, parents=True)
+    decoder_model = HMONNXGoldenInference(decode_onnx_file)
+    decoder_model.save_golden = True
+    decoder_model.exec_device = str(device)
+    decoder_model.golden_dir = str(decode_golden_dir)
+    decoder_model.to(str(device))
+    decoder_model.initialize()
+
+    decode_input_feed: Dict[str, torch.Tensor] = {}
+    for name in decoder_model.get_input_names():
+        info = decoder_model.get_input(name)
+        if name in ("inputs_embeds", "input_1"):
+            decode_input_feed[name] = decode_inputs_embeds
+        elif name in ("past_seq_length", "valid_length"):
+            decode_input_feed[name] = torch.tensor([valid_len], dtype=info.dtype, device=device)
+        elif name in ("current_input_length", "current_length"):
+            decode_input_feed[name] = torch.tensor([1], dtype=info.dtype, device=device)
+        elif name in prefill_cache_feed:
+            decode_input_feed[name] = prefill_cache_feed[name]
+        else:
+            decode_input_feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=device)
+    decoder_model.forward(*[decode_input_feed[n] for n in decoder_model.get_input_names()])
+    logger.info(f"Export prefill/decode golden to {prefill_golden_dir} and {decode_golden_dir}")
+
+
+def _pack_golden(onnx_file: str, logger):
+    golden_dir = Path(onnx_file).parent / "golden" / Path(onnx_file).stem
+    if not golden_dir.exists():
+        logger.warning(f"Golden directory not found: {golden_dir}")
+        return
+    tar_file = golden_dir.parent / f"{golden_dir.name}.tar.gz"
+    with tarfile.open(str(tar_file), "w:gz") as tar:
+        tar.add(str(golden_dir), arcname=golden_dir.name)
+    logger.info(f"Packed golden: {tar_file}")
+
+
 class PingPangGPUHook(Hook):
     """CPU/GPU 乒乓方式执行，用于大模型导出时节省显存。"""
 
@@ -733,6 +828,32 @@ def xhmodel_export_onnx(
 def _export_impl(cfg, args):
     """导出实现主函数。"""
     logger = get_root_logger()
+    if getattr(args, "golden_only", False):
+        logger.info("Golden-only mode: skip export, generate golden from existing ONNX")
+        xh_model = MODELS.build(cfg.model)
+        tokenizer = xh_model.get_tokenizer()
+        del xh_model
+
+        messages = [{"role": "user", "content": args.prompt}]
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        input_ids = tokenizer([text], return_tensors="pt").input_ids
+
+        prefill_onnx_file = str(Path(cfg.work_dir) / "prefill_onnx" / f"{cfg.cfg_name}_prefill.onnx")
+        decode_onnx_file = str(Path(cfg.work_dir) / "decode_onnx" / f"{cfg.cfg_name}_decode.onnx")
+        if not Path(prefill_onnx_file).exists():
+            raise FileNotFoundError(f"Prefill ONNX not found: {prefill_onnx_file}")
+        if not Path(decode_onnx_file).exists():
+            raise FileNotFoundError(f"Decode ONNX not found: {decode_onnx_file}")
+
+        _generate_golden(cfg, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger)
+        if not getattr(args, "golden_skip_pack", False):
+            _pack_golden(prefill_onnx_file, logger)
+            _pack_golden(decode_onnx_file, logger)
+        else:
+            logger.info("Skip golden tar packing by --golden_skip_pack")
+        logger.info("Golden-only mode done.")
+        return
+
     only_export = not args.valid
 
     logger.info(f"Config:\n{cfg.pretty_text}")
@@ -1014,6 +1135,21 @@ def _export_impl(cfg, args):
     else:
         meta_info["valid_asr"] = {"skipped": True, "reason": "valid_asr_flag_disabled"}
 
+    if getattr(args, "golden", False):
+        _generate_golden(
+            cfg=cfg,
+            input_ids=input_ids,
+            tokenizer=tokenizer,
+            prefill_onnx_file=str(prefill_onnx_file),
+            decode_onnx_file=str(decode_onnx_file),
+            logger=logger,
+        )
+        if not getattr(args, "golden_skip_pack", False):
+            _pack_golden(str(prefill_onnx_file), logger)
+            _pack_golden(str(decode_onnx_file), logger)
+        else:
+            logger.info("Skip golden tar packing by --golden_skip_pack")
+
     # ============== 保存 meta 信息 ==============
     with open(export_meta_path, "w", encoding="utf-8") as f:
         json.dump(meta_info, f, indent=4, ensure_ascii=False)
@@ -1065,6 +1201,9 @@ def parse_arguments():
         default=None,
         help="可选：audio_projector_rotated.safetensors 路径（quarot 后建议传入）",
     )
+    parser.add_argument("--golden", action="store_true", help="导出后生成 HMONNX golden data")
+    parser.add_argument("--golden_only", action="store_true", help="仅生成 golden（不重新导出 ONNX）")
+    parser.add_argument("--golden_skip_pack", action="store_true", help="仅生成 golden 目录，不打包 tar.gz")
     return parser
 
 
