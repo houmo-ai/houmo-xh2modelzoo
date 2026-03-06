@@ -31,6 +31,7 @@ import tempfile
 import time
 import types
 from pathlib import Path
+import re
 
 import numpy as np
 import onnx
@@ -1043,16 +1044,39 @@ def _find_ref_text(wav_dir: str):
     return None
 
 
+def _normalize_name_tag(value: str) -> str:
+    value = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
+    return value or "default"
+
+
+def _extract_resume_tag(resume_path: str) -> str:
+    stem = Path(resume_path).stem
+    stem = re.sub(r"(-state-dict|_state_dict)$", "", stem, flags=re.IGNORECASE)
+    return _normalize_name_tag(stem)
+
+
+def _build_mode_suffix(args) -> str:
+    if args.resume_from:
+        resume_tag = _extract_resume_tag(args.resume_from)
+        return f"{_normalize_name_tag(args.lora_mode)}_resume_{resume_tag}"
+    return f"{_normalize_name_tag(args.lora_mode)}_w8a8_default"
+
+
 def main():
     parser = parse_arguments()
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    mode_suffix = _build_mode_suffix(args)
+    output_dir = Path(args.output_dir) / mode_suffix
     output_dir.mkdir(exist_ok=True, parents=True)
+    onnx_name = f"audio_encoder_{mode_suffix}.onnx"
+    hmonnx_name = f"audio_encoder_{mode_suffix}_hmonnx.onnx"
 
     print("=" * 60)
     print("FireRedASR Audio Encoder Export (xh2a)")
     print("=" * 60)
+    print(f"Naming: mode_suffix={mode_suffix}")
+    print(f"Output dir: {output_dir}")
 
     # ---- 1. 加载模型 ----
     print("\n[1/5] Loading FireRedASR model ...")
@@ -1131,7 +1155,7 @@ def main():
     )
     print(f"  Valid conv frames: {valid_conv_len}/{T_conv_total}")
 
-    onnx_path = str(output_dir / "audio_encoder.onnx")
+    onnx_path = str(output_dir / onnx_name)
     start_time = time.time()
     export_audio_encoder_onnx(
         export_model, fbank_dummy, attn_mask_dummy, conv_mask_dummy, onnx_path
@@ -1173,7 +1197,7 @@ def main():
 
     # ---- 6. 导出 HMONNX & 验证 ----
     if args.export_hmonnx:
-        hmonnx_path = str(output_dir / "audio_encoder_hmonnx.onnx")
+        hmonnx_path = str(output_dir / hmonnx_name)
         print(f"\n[6] Converting to HMONNX: {hmonnx_path} ...")
         convert_to_hmonnx(
             onnx_path,

@@ -208,14 +208,14 @@ class FireRedASRStandaloneHMONNX:
             self.meta_info.get("wrap_cfg", {}).get("input_sequence_length", 256)
         )
         llm_kwargs = dict(
-            prefill=SimpleNamespace(
+            prefill=dict(
                 onnx=str(Path(llm_hmonnx_dir) / self.meta_info["prefill_onnx_file"]),
                 input_sequence_length=prefill_seq_len,
             ),
-            decode=SimpleNamespace(
+            decode=dict(
                 onnx=str(Path(llm_hmonnx_dir) / self.meta_info["decode_onnx_file"]),
             ),
-            kv_cache=SimpleNamespace(
+            kv_cache=dict(
                 num_hidden_layers=self.meta_info["num_hidden_layers"],
                 shape=self.meta_info["kv_cache_shape"],
             ),
