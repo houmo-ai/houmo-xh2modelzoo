@@ -122,26 +122,26 @@ def main(args):
 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type, ops=ops)
 
-    native_model = Qwen3VLForConditionalGeneration.from_pretrained(
-        hf_model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="cpu",
-        # config=config,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
-    )
+    # native_model = Qwen3VLForConditionalGeneration.from_pretrained(
+    #     hf_model_path,
+    #     torch_dtype=torch.bfloat16,
+    #     device_map="cpu",
+    #     # config=config,
+    #     trust_remote_code=True,
+    #     attn_implementation="sdpa",
+    # )
 
-    if native_model.config.tie_word_embeddings:
-        old_torchscript = native_model.config.torchscript
-        native_model.config.torchscript = True
-        native_model.tie_weights()
-        native_model.config.tie_word_embeddings = False
-        native_model.config.torchscript = old_torchscript
+    # if native_model.config.tie_word_embeddings:
+    #     old_torchscript = native_model.config.torchscript
+    #     native_model.config.torchscript = True
+    #     native_model.tie_weights()
+    #     native_model.config.tie_word_embeddings = False
+    #     native_model.config.torchscript = old_torchscript
 
-    native_model.eval()
-    native_model.to(torch.bfloat16)
+    # native_model.eval()
+    # native_model.to(torch.bfloat16)
 
-    processor = AutoProcessor.from_pretrained(hf_model_path)
+    # processor = AutoProcessor.from_pretrained(hf_model_path)
 
     # demo(native_model, processor)
     config = Qwen3_VLConvertConfig(

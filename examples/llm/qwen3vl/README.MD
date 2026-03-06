@@ -39,6 +39,13 @@
     python ./examples/llm/qwen3vl/qwen3_vl_xh2a_export_hmonnx.py --model weights/Qwen3-VL-2B-Instruct --quant-type w4a8h0_ssfp --quant_weight work_dirs/Qwen3-VL-2B-Instruct_quarot_gptq_transformers-4.57.1/quarot_gptq_use_hession_mse_False_calib_samples_64_heading_gptq_False-state-dict.safetensors 
 ```
 
+# GPTQModel导出
+## w4a8 ssfp
+### 8B
+```shell
+    python ./examples/llm/qwen3vl/qwen3_vl_xh2a_export_hmonnx.py --model weights/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation --quant-type w4a8h0_ssfp 
+```
+
 # Demo
 
 ### 2B
@@ -47,4 +54,6 @@
 
 
     python examples/llm/qwen3vl/qwen3_vl_xh2a_demo.py --model_dir work_dirs/Qwen3-VL-2B-Instruct-XH2a --visual_onnx work_dirs/Qwen3-VL-2B-Instruct-XH2a/golden/Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp_vision/hmquant_Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp_vision_with_act.onnx --prefill_onnx work_dirs/Qwen3-VL-2B-Instruct-XH2a/golden/Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp-llm-prefill/hmquant_Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp-llm-prefill_with_act.onnx --decode_onnx work_dirs/Qwen3-VL-2B-Instruct-XH2a/golden/Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp-llm-decode/hmquant_Qwen3-VL-2B-Instruct-XH2a-w8a8h1_sefp-llm-decode_with_act.onnx --model_type 2B --image_size_w 448 --image_size_h 448
+
+    python examples/llm/qwen3vl/qwen3_vl_xh2a_demo.py --model_dir work_dirs/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a --visual_onnx work_dirs/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a/hmonnx/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a-w4a8h0_ssfp_vision.onnx --prefill_onnx work_dirs/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a/hmonnx/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a-w4a8h0_ssfp-llm-prefill.onnx --decode_onnx work_dirs/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a/hmonnx/Qwen3-VL-8B-Instruct-gptqmodel-4bit-all-rotation-XH2a-w4a8h0_ssfp-llm-decode.onnx --model_type 8B --image_size_w 448 --image_size_h 448
 ```
