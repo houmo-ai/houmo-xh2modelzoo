@@ -52,6 +52,31 @@ def bake_mean_into_conv(conv: torch.nn.Conv2d) -> None:
         conv.bias.data = conv.bias.data.to(conv_dtype)
 
 
+def _fuse_ln_lora_a(linear: torch.nn.Module, layernorm_weight: torch.Tensor) -> None:
+    """Fuse layernorm weight into LoRA A matrix (input-side scaling)."""
+    if not hasattr(linear, "weight_lora_a"):
+        return
+    if layernorm_weight is None:
+        return
+    lora_a = getattr(linear, "weight_lora_a")
+    if lora_a is None or not isinstance(lora_a, torch.Tensor):
+        return
+    if lora_a.ndim < 2:
+        return
+    if lora_a.shape[-1] != layernorm_weight.shape[0]:
+        return
+
+    lora_dtype = lora_a.dtype
+    norm_w = layernorm_weight.to(device=lora_a.device, dtype=torch.float64)
+    a_ = lora_a.to(dtype=torch.float64)
+    # lora_a shape: [rank, in_features], layernorm_weight shape: [in_features]
+    a_ = (a_ * norm_w).to(dtype=lora_dtype)
+    if "weight_lora_a" in linear._buffers:
+        linear._buffers["weight_lora_a"] = a_
+    else:
+        setattr(linear, "weight_lora_a", a_)
+
+
 def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[torch.nn.Linear]) -> None:
     """
     fuse the linear operations in Layernorm into the adjacent linear blocks.
@@ -65,6 +90,9 @@ def fuse_ln_linear(layernorm: torch.nn.Module, linear_layers: typing.Iterable[to
             linear_dtype = linear.dtype
             W_ = linear.data.double()
             linear.data = (W_.transpose(1,2) * layernorm.weight.double()).transpose(1,2).to(linear_dtype)
+
+        # keep_lora path: fuse the same ln scaling into LoRA A.
+        _fuse_ln_lora_a(linear, layernorm.weight)
 
         if hasattr(layernorm, "bias") and layernorm.bias is not None:
             if linear.bias is None:
@@ -552,6 +580,50 @@ def rotate_embeddings(model, Q: torch.Tensor) -> None:
             W.weight.data = torch.matmul(W_, Q).to(dtype=dtype).to(raw_device)
 
 
+def _rotate_linear_lora_input(linear: torch.nn.Module, Q: torch.Tensor) -> None:
+    """Apply input-side rotation to LoRA A branch: A <- A @ Q."""
+    if not hasattr(linear, "weight_lora_a"):
+        return
+
+    lora_a = getattr(linear, "weight_lora_a")
+    if lora_a is None or not isinstance(lora_a, torch.Tensor):
+        return
+
+    lora_dtype = lora_a.dtype
+    lora_device = lora_a.device
+    q = Q.to(lora_device)
+    a = lora_a.to(dtype=torch.float64)
+    if a.shape[-1] != q.shape[0]:
+        return
+    a = torch.matmul(a, q).to(dtype=lora_dtype)
+    if "weight_lora_a" in linear._buffers:
+        linear._buffers["weight_lora_a"] = a
+    else:
+        setattr(linear, "weight_lora_a", a)
+
+
+def _rotate_linear_lora_output(linear: torch.nn.Module, Q: torch.Tensor) -> None:
+    """Apply output-side rotation to LoRA B branch: B <- Q^T @ B."""
+    if not hasattr(linear, "weight_lora_b"):
+        return
+
+    lora_b = getattr(linear, "weight_lora_b")
+    if lora_b is None or not isinstance(lora_b, torch.Tensor):
+        return
+
+    lora_dtype = lora_b.dtype
+    lora_device = lora_b.device
+    q = Q.to(lora_device)
+    b = lora_b.to(dtype=torch.float64)
+    if b.shape[0] != q.shape[0]:
+        return
+    b = torch.matmul(q.T, b).to(dtype=lora_dtype)
+    if "weight_lora_b" in linear._buffers:
+        linear._buffers["weight_lora_b"] = b
+    else:
+        setattr(linear, "weight_lora_b", b)
+
+
 def rotate_attention_inputs(layer, Q, model_type) -> None:
     # Rotate the WQ, WK and WV matrices of the self-attention layer.
     try:
@@ -568,6 +640,7 @@ def rotate_attention_inputs(layer, Q, model_type) -> None:
             W.weight.data = torch.matmul(W_, Q).to(dtype=dtype).reshape(origin_shape)
         else:
             W.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+        _rotate_linear_lora_input(W, Q)
 
 
 def rotate_attention_output(layer, Q, model_type) -> None:
@@ -603,6 +676,7 @@ def rotate_attention_output(layer, Q, model_type) -> None:
             W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
         else:
             W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+    _rotate_linear_lora_output(W, Q)
 
 
 def rotate_mlp_input(layer, Q, model_type):
@@ -648,6 +722,7 @@ def rotate_mlp_input(layer, Q, model_type):
                 W.weight.data = torch.matmul(W_, Q).to(dtype=dtype).reshape(origin_shape)
         else:
             W.weight.data = torch.matmul(W_, Q).to(dtype=dtype)
+        _rotate_linear_lora_input(W, Q)
 
 
 def rotate_mlp_output(layer, Q, model_type):
@@ -672,6 +747,7 @@ def rotate_mlp_output(layer, Q, model_type):
                     W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
                 else:
                     W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+            _rotate_linear_lora_output(W, Q)
         return
 
     if model_type == model_utils.LLAMA_MODEL:
@@ -719,6 +795,7 @@ def rotate_mlp_output(layer, Q, model_type):
                 W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype).reshape(origin_shape)
             else:
                 W.bias.data = torch.matmul(Q.T, b).to(dtype=dtype)
+    _rotate_linear_lora_output(W, Q)
 
 
 def matmul_hadU_cuda_had(X, hadK, transpose=False):
@@ -792,6 +869,9 @@ def rotate_ov_proj(layer, model_type, head_num, head_dim):
 def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate=True):
     model_type = model_utils.model_type_extractor(model)
 
+    # Expose the rotation matrix to downstream adapter rotation (e.g., FireRedASR audio projector).
+    model._quarot_rotation_matrix = None
+
     llm_hidden_size = model.config.hidden_size if (model_type != model_utils.QWEN3_VL_MODEL and model_type !=model_utils.QWEN3_VL_MOE_MODEL) else model.config.text_config.hidden_size
 
     if quarot_matrix_size is None:
@@ -830,7 +910,10 @@ def rotate_model(model, rotate_mode, device, quarot_matrix_size=None, llm_rotate
 
     if not llm_rotate:
         print("Not rotate for llm part")
+        model._quarot_rotation_matrix = None
         return
+
+    model._quarot_rotation_matrix = Q.detach().cpu()
 
 
     if model_type == model_utils.QWEN2_5_VL_MODEL:
@@ -991,6 +1074,40 @@ def register_online_hadamard_rotation_blockwise(module, block_size: int):
     module.rotate_handle = module.register_forward_pre_hook(online_rotate_blockwise)
 
 
+def _rotate_linear_lora_input_blockwise(linear: torch.nn.Module, block_size: int) -> None:
+    if not hasattr(linear, "weight_lora_a"):
+        return
+    lora_a = getattr(linear, "weight_lora_a")
+    if lora_a is None or not isinstance(lora_a, torch.Tensor):
+        return
+    if lora_a.ndim < 2:
+        return
+
+    lora_dtype = lora_a.dtype
+    a = apply_hadamard_blockwise(lora_a.float(), block_size).to(dtype=lora_dtype)
+    if "weight_lora_a" in linear._buffers:
+        linear._buffers["weight_lora_a"] = a
+    else:
+        setattr(linear, "weight_lora_a", a)
+
+
+def _rotate_linear_lora_output_blockwise(linear: torch.nn.Module, block_size: int) -> None:
+    if not hasattr(linear, "weight_lora_b"):
+        return
+    lora_b = getattr(linear, "weight_lora_b")
+    if lora_b is None or not isinstance(lora_b, torch.Tensor):
+        return
+    if lora_b.ndim < 2:
+        return
+
+    lora_dtype = lora_b.dtype
+    b = apply_hadamard_blockwise_on_output_dim(lora_b.float(), block_size).to(dtype=lora_dtype)
+    if "weight_lora_b" in linear._buffers:
+        linear._buffers["weight_lora_b"] = b
+    else:
+        setattr(linear, "weight_lora_b", b)
+
+
 def rotate_attention_inputs_blockwise(layer, block_size, model_type) -> None:
     try:
         layer_list = [layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj]
@@ -1001,6 +1118,7 @@ def rotate_attention_inputs_blockwise(layer, block_size, model_type) -> None:
         dtype = W.weight.dtype
         W_ = W.weight.data.float()
         W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+        _rotate_linear_lora_input_blockwise(W, block_size)
 
 
 def rotate_attention_output_blockwise(layer, block_size, model_type) -> None:
@@ -1029,6 +1147,7 @@ def rotate_attention_output_blockwise(layer, block_size, model_type) -> None:
         # Bias is added to the output, so it must also be rotated: b' = H @ b
         b = apply_hadamard_blockwise(b, block_size)
         W.bias.data = b.to(dtype)
+    _rotate_linear_lora_output_blockwise(W, block_size)
 
 
 def rotate_mlp_input_blockwise(layer, block_size, model_type):
@@ -1056,6 +1175,7 @@ def rotate_mlp_input_blockwise(layer, block_size, model_type):
         # Input rotation: W' = W H. Apply to in_features (dim 1).
         W_ = W.weight.data.float()
         W.weight.data = apply_hadamard_blockwise(W_, block_size).to(dtype)
+        _rotate_linear_lora_input_blockwise(W, block_size)
 
 
 def rotate_mlp_output_blockwise(layer, block_size, model_type):
@@ -1071,6 +1191,7 @@ def rotate_mlp_output_blockwise(layer, block_size, model_type):
                 b = W.bias.data.float()
                 b = apply_hadamard_blockwise(b, block_size)
                 W.bias.data = b.to(dtype)
+            _rotate_linear_lora_output_blockwise(W, block_size)
         return
 
     if model_type == model_utils.LLAMA_MODEL:
@@ -1096,6 +1217,7 @@ def rotate_mlp_output_blockwise(layer, block_size, model_type):
         b = W.bias.data.float()
         b = apply_hadamard_blockwise(b, block_size)
         W.bias.data = b.to(dtype)
+    _rotate_linear_lora_output_blockwise(W, block_size)
 
 
 def rotate_embeddings_blockwise(model, block_size) -> None:

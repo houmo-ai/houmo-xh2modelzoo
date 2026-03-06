@@ -1,16 +1,5 @@
 {
   "typeCheckingMode": "off",
-  "executionEnvironments": [
-    {
-      "root": "examples/llm/paddleocr_vl"
-    },
-    {
-      "root": "examples/llm/paddleocr_vl_1_5"
-    },
-    {
-      "root": "."
-    }
-  ],
   "include": [
     "."
   ],
@@ -25,6 +14,4 @@
     "**/work_dirs/**",
     "**/dev/**"
   ],
-  "venvPath": "/data01/home/huxing/miniconda3/envs",
-  "venv": "xh2"
 }

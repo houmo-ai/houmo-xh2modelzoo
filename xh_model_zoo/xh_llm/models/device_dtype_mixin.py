@@ -13,6 +13,10 @@ class DeviceDtypeMixin(nn.Module):
     def dtype(self):
         return self._dtype
 
+    @property
+    def exec_device(self):
+        return self._exec_device
+
     def _set_device(self, device: torch.device) -> None:
         self._device = device
 

@@ -22,10 +22,16 @@ from .inference import Qwen2LegacyInference
 from .qwen2_convert_config import Qwen2LegacyConvertConfig
 from .qwen2_converter import Qwen2LegacyConverterXH2a
 from .qwen2_hf_compatible import Qwen2LegacyHFCompatible
+from .qwen_llm_model import XHQwen2LegacyModel
+
+# Keep old symbol name used by migration scripts.
+Qwen2_HFCompatible = Qwen2LegacyHFCompatible
 
 __all__ = [
+    "XHQwen2LegacyModel",
     "Qwen2LegacyConvertConfig",
     "Qwen2LegacyConverterXH2a",
     "Qwen2LegacyInference",
     "Qwen2LegacyHFCompatible",
+    "Qwen2_HFCompatible",
 ]

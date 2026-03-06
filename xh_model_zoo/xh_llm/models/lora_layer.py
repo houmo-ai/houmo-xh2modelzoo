@@ -1,25 +1,3 @@
-# Copyright 2025 HOUMO AI
-#
-# File: lora_layer.py
-# Description:
-#   LoRA (Low-Rank Adaptation) layer implementations.
-#   This module provides LoRALinear and LoRALayer classes for
-#   efficient parameter fine-tuning.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-from copy import deepcopy
 from typing import Dict
 
 import torch
@@ -28,6 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 from tqdm import tqdm
 from xhquant.api import FrontendGraph, get_xhquant_logger
+from xhquant.frontend.fx_transform.normalizer_transform import NormalizerTransform
 from xhquant.frontend.torchfx import xh_fx
 from xhquant.nn import FX_LEAF_MODULES
 
@@ -46,14 +25,32 @@ class LoRALayer(nn.Module):
         assert r == r_check, "Rank dimension mismatch"
 
         self.scaling = scaling / r if scaling is not None else None
+        linear_device = linear.weight.device
+        linear_dtype = linear.weight.dtype
 
         # 定义层 A: (in -> r)
-        self.lora_A = LoRALinear(in_dim, r, bias=False)
+        self.lora_A = LoRALinear(in_dim, r, bias=False, device=linear_device, dtype=linear_dtype)
 
         # 定义层 B: (r -> out)
-        self.lora_B = LoRALinear(r, out_dim, bias=False)
+        self.lora_B = LoRALinear(r, out_dim, bias=False, device=linear_device, dtype=linear_dtype)
 
-        self.linear = deepcopy(linear)  # 原始线性层
+        # NOTE:
+        # Frontend Graph 的 Linear 权重可能是 non-leaf Tensor，deepcopy 会报错。
+        # 这里按 Linear 结构重新建层并拷贝参数，避免 deepcopy 依赖。
+        if isinstance(linear, nn.Linear):
+            self.linear = LoRALinear(
+                linear.in_features,
+                linear.out_features,
+                bias=linear.bias is not None,
+                device=linear_device,
+                dtype=linear_dtype,
+            )
+            with torch.no_grad():
+                self.linear.weight.copy_(linear.weight.detach())
+                if linear.bias is not None:
+                    self.linear.bias.copy_(linear.bias.detach())
+        else:
+            raise TypeError(f"LoRALayer only supports nn.Linear, got {type(linear)}")
 
         # 加载权重
         with torch.no_grad():
@@ -72,13 +69,25 @@ class LoRALayer(nn.Module):
         return out
 
 
+class LoRAStaticLayer(LoRALayer):
+    def forward(self, x) -> Tensor:
+        src = self.linear(x)
+        lora = self.lora_A(x)
+        lora = self.lora_B(lora)
+        scale = self.scaling if self.scaling is not None else 1.0
+        out = src + lora * scale
+        return out
+
+
 def replace_linear_with_lora(
     fronted_model: FrontendGraph,
     node: fx.Node,
     lora_graph_module: fx.GraphModule,
-    lora_mask_node: fx.Node,
+    lora_mask_node: fx.Node = None,
 ) -> FrontendGraph:
-    matched_placeholders = [node.args[0], lora_mask_node]
+    matched_placeholders = [node.args[0]]
+    if lora_mask_node is not None:
+        matched_placeholders.append(lora_mask_node)
     replacement_placeholders = [n for n in lora_graph_module.graph.nodes if n.op == "placeholder"]
     assert len(matched_placeholders) == len(replacement_placeholders)
 
@@ -119,7 +128,12 @@ def replace_linear_with_lora(
     return fronted_model
 
 
-def apply_lora_to_linear(fronted_model: FrontendGraph, inputs, lora_scale: float = None) -> FrontendGraph:
+def apply_lora_to_linear(
+    fronted_model: FrontendGraph,
+    inputs,
+    lora_scale: float = None,
+    runtime_mask: bool = True,
+) -> FrontendGraph:
     logger = get_xhquant_logger()
     lora_nodes: Dict[str, fx.Node] = {}
     for node in fronted_model.graph.nodes:
@@ -140,10 +154,12 @@ def apply_lora_to_linear(fronted_model: FrontendGraph, inputs, lora_scale: float
             assert node.name != "lora_mask"
             last_placeholder_node = node
 
-    assert last_placeholder_node is not None, "No placeholder node found in the graph"
-    with fronted_model.graph.inserting_after(last_placeholder_node):
-        lora_mask_node = fronted_model.graph.placeholder("lora_mask", default_value=1.0)
-    # inputs.append(torch.tensor([1.0]))  # 输入增加lora_mask
+    lora_mask_node = None
+    if runtime_mask:
+        assert last_placeholder_node is not None, "No placeholder node found in the graph"
+        with fronted_model.graph.inserting_after(last_placeholder_node):
+            lora_mask_node = fronted_model.graph.placeholder("lora_mask", default_value=None)
+        inputs.append(torch.tensor([1.0]))  # 输入增加lora_mask
 
     logger.info("********************** apply lora **********************")
     pbar = tqdm(list(lora_nodes.values()))
@@ -156,7 +172,16 @@ def apply_lora_to_linear(fronted_model: FrontendGraph, inputs, lora_scale: float
             lora_a = lora_a.T
             lora_b = lora_b.T
         pbar.set_description(f"Applying lora for module {node.target}, {lora_a.shape}, {lora_b.shape}")
-        lora_layer = LoRALayer(m, lora_a, lora_b, scaling=lora_scale)
+        if runtime_mask:
+            lora_layer = LoRALayer(m, lora_a, lora_b, scaling=lora_scale)
+        else:
+            lora_layer = LoRAStaticLayer(m, lora_a, lora_b, scaling=lora_scale)
         lora_graph_module = xh_fx.symbolic_trace(lora_layer)
         replace_linear_with_lora(fronted_model, node, lora_graph_module, lora_mask_node)
         fronted_model.cpu()
+
+    # 将新增的 call_function(add/mul) 规范化为 call_module，避免量化阶段报 Unsupported op。
+    normalizer = NormalizerTransform()
+    normalizer.graph_module = fronted_model
+    fronted_model = normalizer.run()
+    return fronted_model

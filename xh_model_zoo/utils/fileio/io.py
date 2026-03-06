@@ -26,8 +26,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Generator, Iterator, Optional, Tuple, Union
 
-from ..misc import is_str
-from ..path import is_filepath
+from ..path import is_filepath, is_str
 from .backends import backends, prefix_to_backends
 from .file_client import FileClient
 from .handlers import file_handlers, register_handler  # noqa: F401

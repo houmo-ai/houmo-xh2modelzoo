@@ -48,3 +48,7 @@ def xh2modelzoo_init_logger(
     log_cfg.setdefault("file_mode", file_mode)
     _root_logger = MMLogger.get_instance(**log_cfg)  # type: ignore
     return _root_logger
+
+
+# Backward-compatible alias for legacy API callers.
+xhquant_llm_init_logger = xh2modelzoo_init_logger
