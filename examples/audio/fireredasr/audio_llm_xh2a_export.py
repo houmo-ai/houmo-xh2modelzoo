@@ -1204,6 +1204,18 @@ def parse_arguments():
     parser.add_argument("--golden", action="store_true", help="导出后生成 HMONNX golden data")
     parser.add_argument("--golden_only", action="store_true", help="仅生成 golden（不重新导出 ONNX）")
     parser.add_argument("--golden_skip_pack", action="store_true", help="仅生成 golden 目录，不打包 tar.gz")
+    parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=None,
+        help="覆盖配置中的 max_sequence_length（KV cache 最大上下文长度），audio ASR 场景建议设为 1024 或 2048",
+    )
+    parser.add_argument(
+        "--input_seq_length",
+        type=int,
+        default=None,
+        help="覆盖配置中的 input_sequence_length（prefill 输入序列长度），audio ASR 场景可按实际音频特征长度设置",
+    )
     return parser
 
 
@@ -1279,6 +1291,14 @@ def main(args):
     cfg.hf_model_dir = resolved_hf_model_dir
     cfg.model.hf_model = resolved_hf_model_dir
     logger.info(f"Resolved hf_model_dir: {resolved_hf_model_dir}")
+
+    # 覆盖上下文长度参数（audio ASR 不需要很长的上下文）
+    if args.max_seq_length is not None:
+        cfg.model.wrap_cfg.max_sequence_length = args.max_seq_length
+        logger.info(f"Override max_sequence_length -> {args.max_seq_length}")
+    if args.input_seq_length is not None:
+        cfg.model.wrap_cfg.input_sequence_length = args.input_seq_length
+        logger.info(f"Override input_sequence_length -> {args.input_seq_length}")
 
     xhquant.utils.suppress_printing.disable_printing = True
     _export_impl(cfg, args)
