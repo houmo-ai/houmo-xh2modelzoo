@@ -1,4 +1,3 @@
-
 import os
 import sys
 import json
@@ -57,28 +56,38 @@ _LARGE_MODEL_SIZE_THRESHOLD = int(2**30 * 1.8)
 def main(args):
     target_device = "XH2a"
     model_dir = os.path.normpath(args.model)
+    model_name = os.path.basename(model_dir)
     
     model = Qwen3ASRForConditionalGeneration.from_pretrained(model_dir)
+    cfg = Qwen3ASRConfig.from_pretrained(model_dir)
     processor = Qwen3ASRProcessor.from_pretrained(model_dir)
     
     model.eval()
     model.thinker.audio_tower.eval()
-    
+    # DEVICE = torch.device("cpu")
+    # model.to(DEVICE)
+    breakpoint()
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
 
-    model_name = Path(model_dir).stem
+    # model_name = Path(model_dir).stem
     cfg_name = f"{model_name}_{target_device}"
+
     work_dir = Path("work_dirs") / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
-    # print(model.thinker.model.layers[0].self_attn)
-    head_dim = model.thinker.model.layers[0].self_attn.head_dim
-    num_heads = model.thinker.model.layers[0].self_attn.config.num_attention_heads
-    num_key_value_heads = model.thinker.model.layers[0].self_attn.config.num_key_value_heads
-    embed_dim = model.thinker.model.layers[0].self_attn.config.hidden_size
+
+    # head_dim = model.thinker.model.layers[0].self_attn.head_dim
+    # num_heads = model.thinker.model.layers[0].self_attn.config.num_attention_heads
+    # num_key_value_heads = model.thinker.model.layers[0].self_attn.config.num_key_value_heads
+    # embed_dim = model.thinker.model.layers[0].self_attn.config.hidden_size
     
-    max_source_positions = model.config.thinker_config.audio_config.max_source_positions
-    num_decode_layers = model.config.thinker_config.text_config.num_hidden_layers
+    head_dim = cfg.thinker_config.text_config.head_dim
+    num_heads = cfg.thinker_config.text_config.num_attention_heads
+    num_key_value_heads = cfg.thinker_config.text_config.num_key_value_heads
+    embed_dim = cfg.thinker_config.text_config.hidden_size
+    num_decode_layers = cfg.thinker_config.text_config.num_hidden_layers
+
+    max_source_positions = cfg.thinker_config.audio_config.max_source_positions
     
     meta_info = {}
     meta_info_file = work_dir / "meta_info.json"
@@ -96,7 +105,7 @@ def main(args):
     }
     
     # encoder 处理过程 =======================================================================================
-    name = "encoder"
+    name = "Encoder"
     encoder_work_dir = work_dir / name
     encoder_work_dir.mkdir(exist_ok=True, parents=True)
     onnx_file = encoder_work_dir / f"{model_name}_{name}.onnx"
@@ -110,7 +119,7 @@ def main(args):
     meta_info["encoder"] = str(hmonnx_file.relative_to(work_dir))
     num_mel_bins = model.config.thinker_config.audio_config.num_mel_bins
     
-    # 固定在 T=1500，输出 seq_lens=216
+    # 固定在 T=3000 seq_lens
     input_features = torch.randn(1, 128, 3000).to(model.device).to(model.dtype)
     feature_lens = torch.tensor([3000], dtype=torch.int32).to(model.device)
     
@@ -191,7 +200,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-0.6B/"))
+    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-1.7B/"))
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument(
         "--quant-type", default="w8a8_sefp", help="quant type, default is w8a8"
@@ -201,3 +210,5 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args)
+
+# python hmonnx_export_encoder.py --model ~/models/Qwen/Qwen3-ASR-0.6B/ --quant-type w8a8_sefp

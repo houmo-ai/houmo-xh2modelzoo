@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from pathlib import Path
 from typing import List, Tuple
-from xhquant.api import ptq_quantize
+from xhquant.api import ptq_quantize, HMONNXGoldenInference
 
 from xhquant.api import Config, ConfigDict, PrecisionMode, get_root_logger, ptq_quantize
 from xhquant.common.types import PrecisionMode
@@ -19,10 +19,6 @@ from xhquant.utils.config import ConfigDict
 from xh_model_zoo.xh_llm.models.builder import MODELS
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.qwen3_asr import XHQwen3ASRLLMModel, XHQwen3ASRHMONNXModel
-
-# from qwen_asr.core.transformers_backend import (
-#     Qwen3ASRForConditionalGeneration
-# )
 
 from xh_model_zoo.xh_llm.models.qwen3_asr import (
     Qwen3ASRForConditionalGeneration
@@ -67,17 +63,28 @@ def xhmodel_export_onnx(
 def main(args):
 
     # ============================================================ 配置与初始化 ============================================================ # 
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    MODEL_PATH = os.path.normpath(args.model)
+
+    hf_model = Qwen3ASRForConditionalGeneration.from_pretrained(
+        MODEL_PATH,
+        dtype=torch.float16,
+        device_map=DEVICE,
+    )
+    hf_model.eval()
+
+    model_name = os.path.basename(MODEL_PATH)
+    target_device = "XH2a"  # 量化目标设备
+    
     cfg = Config.fromfile(args.config)
-    cfg_name = Path(args.config).stem
-    cfg_name = f"{cfg_name}"
-    cfg.work_dir = str(Path("./work_dirs") / cfg_name)
-    log_file = Path(cfg.work_dir) / f"{cfg_name}.log"
+    cfg_name = f"{model_name}_{target_device}"
+
+    cfg.work_dir = str(Path("work_dirs") / cfg_name)
+    # log_file = Path(cfg.work_dir) / f"{cfg_name}.log"
+    
     Path(cfg.work_dir).mkdir(exist_ok=True, parents=True)
     cfg.device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.exec_device = "cuda" if torch.cuda.is_available() else "cpu"
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    target_device = "XH2a"  # 量化目标设备
     
     cfg.dtype = "float16"
     # only_export = not args.valid  # 仅仅导出模型，不进行推理验证
@@ -86,20 +93,11 @@ def main(args):
     config_file = Path(cfg.work_dir) / Path(args.config).name
     cfg.dump(config_file)
     
-    MODEL_PATH = os.path.expanduser("~/models/Qwen/Qwen3-ASR-0.6B/")
-    hf_model = Qwen3ASRForConditionalGeneration.from_pretrained(
-        MODEL_PATH,
-        dtype=torch.float16,
-        device_map=DEVICE,
-    )
-    hf_model.eval()
-    
     device = torch.device(cfg.device)
     exec_device = torch.device(cfg.exec_device)
     dtype = getattr(torch, cfg.dtype)
     
     xh_model = MODELS.build(cfg.model)
-    # breakpoint()
     
     model = xh_model.get_hf_model()
     assert isinstance(xh_model, XHQwen3ASRLLMModel), f"Model must be XHQwen3ASRLLMModel, but got {type(xh_model)}"
@@ -112,11 +110,13 @@ def main(args):
         
     processor = xh_model.get_processor()
     
-    prefill_onnx_dir = Path(cfg.work_dir) / "prefill_onnx"
-    decode_onnx_dir = Path(cfg.work_dir) / "decode_onnx"
+    prefill_onnx_dir = Path(cfg.work_dir) / "Prefill"
+    prefill_golden_path = prefill_onnx_dir / "hmonnx/golden"
+    decode_onnx_dir = Path(cfg.work_dir) / "Decoder"
+    decode_golden_path = decode_onnx_dir / "hmonnx/golden"
     prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
     decode_onnx_dir.mkdir(exist_ok=True, parents=True)
-    
+
     meta_info = ConfigDict(
         dict(
             create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -129,7 +129,7 @@ def main(args):
     
     hf_model_config_dir = cfg.config_dir
 
-    hf_config_dir = Path(cfg.work_dir) / "hf_config"
+    hf_config_dir = Path(cfg.work_dir) / "ConfigFiles"
     hf_config_dir.mkdir(exist_ok=True, parents=True)
     hf_config_files = [
         "chat_template.json",
@@ -177,13 +177,14 @@ def main(args):
     head_dim = text_config.hidden_size // text_config.num_key_value_heads # 128
     num_key_value_heads = text_config.num_key_value_heads # 8
     num_decode_layers = text_config.num_hidden_layers # 28
+    hidden_size = text_config.hidden_size
     
     # ============================================================ 音频文本预处理与特征融合 ============================================================ # 
 
     tokenizer = processor.tokenizer
         
-    final_inputs_embeds = torch.randn((1, 411, 1024), device=device, dtype=torch.float16)
-    print(f"final_inputs_embeds.shape: {final_inputs_embeds.shape}") # torch.Size([1, 411, 2048])
+    final_inputs_embeds = torch.randn((1, 411, hidden_size), device=device, dtype=torch.float16)
+    print(f"final_inputs_embeds.shape: {final_inputs_embeds.shape}")
     
     # ============================================================ 构造输入 ============================================================ # 
 
@@ -223,7 +224,7 @@ def main(args):
     xh_model.to(device)
 
     logger.info("*************** Start PTQ Quantize ***************")
-    
+
     calib_data = xh_model.prepare_inputs(data_batch)
     new_args = []
     for arg in calib_data:
@@ -234,7 +235,6 @@ def main(args):
     calib_data = new_args
     ptq_quantize(xh_model.quanted_model, [calib_data], PrecisionMode.ALIGNED, [exec_device])
     logger.info("*************** Finished PTQ Quantize **************")
-
 
     xh_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
     xh_model.to(device)
@@ -252,10 +252,10 @@ def main(args):
     work_dir = Path("work_dirs") / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
 
-    prefill_onnx_dir = work_dir / "prefill_onnx"
-    decode_onnx_dir = work_dir / "decode_onnx"
-    prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
-    decode_onnx_dir.mkdir(exist_ok=True, parents=True)
+    # prefill_onnx_dir = work_dir / "Prefill"
+    # decode_onnx_dir = work_dir / "Decoder"
+    # prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
+    # decode_onnx_dir.mkdir(exist_ok=True, parents=True)
     
     # export_cfg 展开 past_key_cache 和 past_value_cache 的输入，变成多个输入，方便后续对齐
     num_hidden_layers = 28
@@ -279,6 +279,14 @@ def main(args):
         logger,
         False,
     )
+
+    if args.gen_golden and not Path(prefill_golden_path).exists():
+        session = HMONNXGoldenInference(prefill_onnx_file)
+        session.to("cuda")
+        session.save_golden = True
+        session.golden_dir = str(prefill_onnx_dir / "hmonnx/golden")
+        session.step = 0
+        session(*calib_data)
 
     xh_model.release_exported_model()
     logger.info(f"save prefill onnx model to {prefill_onnx_file}")
@@ -340,13 +348,30 @@ def main(args):
     meta_info.decode_onnx_file = str(Path(decode_onnx_file).relative_to(cfg.work_dir))
     json.dump(meta_info, open(Path(cfg.work_dir) / "export_meta_info.json", "w"), indent=4)
 
+    decode_inputs = xh_model.prepare_inputs(data_batch)
+    decode_calib_data = []
+    for arg in decode_inputs:
+        if isinstance(arg, (List, Tuple)):
+            decode_calib_data.extend(arg)
+        else:
+            decode_calib_data.append(arg)
+
+    if args.gen_golden and not Path(decode_golden_path).exists():
+        session = HMONNXGoldenInference(decode_onnx_file)
+        session.to("cuda")
+        session.save_golden = True
+        session.golden_dir = str(decode_onnx_dir / "hmonnx/golden")
+        session.step = 0
+        session(*decode_calib_data)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-0.6B/"))
+    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-1.7B/"))
     parser.add_argument(
         "--config",
         type=str,
-        default="/data01/home/binghu.ji/xh2modelzoo/examples/llm/qwen3_asr/config/llm/qwen3_asr_decode_xh2a.py",
+        default="./config/llm/qwen3_asr_decode_xh2a.py",
     )
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type")

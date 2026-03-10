@@ -1,13 +1,9 @@
 quant_config = dict(inputs=dict())
 target_device = "XH2a"
 frontend_type = "TorchFX"
-# hf_model_dir = "/data01/nfs_shared/ASR_TTS/Qwen3-ASR-0.6B"
-# config_dir = "/data01/nfs_shared/ASR_TTS/Qwen3-ASR-0.6B"
-# hf_model_dir = "/data01/nfs_shared/ASR_TTS/Qwen3-ASR-1.7B"
-# config_dir = "/data01/nfs_shared/ASR_TTS/Qwen3-ASR-1.7B"
+hf_model_dir = "/data01/home/binghu.ji/models/Qwen/Qwen3-ASR-1.7B"
+config_dir = "/data01/home/binghu.ji/models/Qwen/Qwen3-ASR-1.7B"
 
-hf_model_dir = "~/models/Qwen/Qwen3-ASR-0.6B/"
-config_dir = "~/models/Qwen/Qwen3-ASR-0.6B/"
 quant_config = dict()
 model = dict(
     type="XHQwen3ASRLLMModel",

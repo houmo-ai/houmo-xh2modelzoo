@@ -33,23 +33,22 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 AUDIO_PATH = "./dsj_20251212.wav"
 
-CFG_DIR = "./hf_config"
-WORK_DIR = Path("./")
-PREFILL_ONNX = WORK_DIR / "prefill_onnx/qwen3_asr_decode_xh2a_prefill.onnx"
-DECODE_ONNX  = WORK_DIR / "decode_onnx/qwen3_asr_decode_xh2a_decode.onnx"
-ENCODE_ONNX = "/data01/home/binghu.ji/xh2modelzoo/examples/llm/qwen3_asr/Qwen3_ASR_0.6B/work_dirs/Qwen3-ASR-0_XH2a/encoder/hmonnx/Qwen3-ASR-0_encoder_xh2a_w8a8_sefp.onnx"
-
+CFG_DIR = "./work_dirs/Qwen3-ASR-1.7B_XH2a/ConfigFiles"
+WORK_DIR = Path("./work_dirs/Qwen3-ASR-1.7B_XH2a/")
+ENCODE_ONNX = WORK_DIR / "Encoder/hmonnx/Qwen3-ASR-1.7B_Encoder_xh2a_w8a8_sefp.onnx"
+PREFILL_ONNX = WORK_DIR / "Prefill/Qwen3-ASR-1.7B_XH2a_prefill.onnx"
+DECODE_ONNX  = WORK_DIR / "Decoder/Qwen3-ASR-1.7B_XH2a_decode.onnx"
 encoder_sess = InferenceEngine(str(ENCODE_ONNX))
 encoder_sess.to(str(DEVICE))
-# encoder_sess.save_golden = True
-# encoder_sess.save_golden_dir = "./encode_onnx/step_0"
+encoder_sess.save_golden = True
+encoder_sess.save_golden_dir = f"./{WORK_DIR}/golden/encode_golden"
 
 # =========================== 2. 加载 PyTorch 模型 ===========================
 processor = Qwen3ASRProcessor.from_pretrained(CFG_DIR, fix_mistral_regex=True)
 tokenizer = AutoTokenizer.from_pretrained(CFG_DIR, trust_remote_code=True, use_fast=True)
 config = AutoConfig.from_pretrained(CFG_DIR, trust_remote_code=True)
 
-EMB_PT_PATH = "./token_embedding.pt"
+EMB_PT_PATH = WORK_DIR / "token_embedding.pt"
 
 w = torch.load(EMB_PT_PATH, map_location="cpu")["weight"]   # [vocab, hidden]
 embed_tokens = nn.Embedding(*w.shape).to(DEVICE, dtype=torch.float16).eval()
@@ -127,6 +126,7 @@ pad_indices = (text_input_ids == audio_pad_id).nonzero(as_tuple=True)[1]
 if len(pad_indices) > 0:
     start_idx = pad_indices[0].item()
     end_idx = pad_indices[-1].item()
+
     final_inputs_embeds = torch.cat([
         text_embeds[:, :start_idx, :], 
         audio_embeds, 
@@ -155,8 +155,8 @@ print(f">>> 加载 Prefill ONNX: {PREFILL_ONNX}")
 prefill_sess = InferenceEngine(str(PREFILL_ONNX))
 print("DEVICE:", DEVICE)
 prefill_sess.to(str(DEVICE))
-# prefill_sess.save_golden = True
-# prefill_sess.save_golden_dir = "./prefill_onnx/step_0"
+prefill_sess.save_golden = True
+prefill_sess.save_golden_dir = f"./{WORK_DIR}/golden/prefill_golden"
 
 max_prefill = 411
 seq_len = final_inputs_embeds.shape[1]
@@ -166,7 +166,7 @@ prefill_embeds = torch.zeros((1, max_prefill, hidden_size), dtype=torch.float16,
 prefill_embeds[:, :L, :] = final_inputs_embeds[:, :L, :].to(torch.float16).to(DEVICE)
 
 valid_length = torch.tensor([0], dtype=torch.int32, device=DEVICE)   # [1] 当前有效输入长度（区别于 padding）
-current_length = torch.tensor(L, dtype=torch.int32, device=DEVICE)   # scalar 当前生成位置
+current_length = torch.tensor([L], dtype=torch.int32, device=DEVICE)   # scalar 当前生成位置
 
 # kv cache 所需维度 num_layers * (batch_size, num_heads, cache_len/seq_len, head_dim)
 kcache = [torch.zeros((1, num_kv_heads, cache_len, head_dim), dtype=torch.float16, device=DEVICE)
@@ -215,11 +215,11 @@ max_new_tokens = 2048
 print(f">>> 加载 Decode ONNX: {DECODE_ONNX}")
 decode_sess = InferenceEngine(str(DECODE_ONNX))
 decode_sess.to(str(DEVICE))
-# decode_sess.save_golden = True
-# decode_sess.save_golden_dir = "./decode_onnx/step_0"
+decode_sess.save_golden = True
+decode_sess.save_golden_dir = f"./{WORK_DIR}/golden/decode_golden"
 
 valid_length = torch.tensor([L], dtype=torch.int32, device=DEVICE)   # [1] 当前有效输入长度（区别于 padding）
-current_length = torch.tensor(1, dtype=torch.int32, device=DEVICE)   # scalar 当前生成位置
+current_length = torch.tensor([1], dtype=torch.int32, device=DEVICE)   # scalar 当前生成位置
 
 generated_ids = [next_token_id]
 

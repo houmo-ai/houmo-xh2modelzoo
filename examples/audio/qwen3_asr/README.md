@@ -8,7 +8,9 @@ Qwen3-ASR
 
 ``` bash
 pip install qwen_asr
-pip install transformers
+pip install onnx-ir==0.1.14
+pip install onnx==1.16.2
+pip install onnxscript==0.5.7
 ```
 2. 导出 HMONNX
 
@@ -21,4 +23,3 @@ pip install transformers
 
 3. 其他
     核心依赖文件：`xh2modelzoo/xh_model_zoo/xh_llm/models/qwen3_asr`
-    推理脚本中默认为 0.6B 维度脚本，1.7B 脚本推理需要将维度从 1024 改为 2048。
