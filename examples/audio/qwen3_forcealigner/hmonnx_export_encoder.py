@@ -1,0 +1,203 @@
+import argparse
+import json
+import os
+import tempfile
+from copy import deepcopy
+from pathlib import Path
+import librosa
+import onnx
+import onnxsim
+import torch
+import torch.nn as nn
+from datasets import load_dataset
+
+from qwen_asr import Qwen3ASRModel
+
+from transformers.pipelines.audio_utils import ffmpeg_read
+from xhquant.api import (
+    DeviceType,
+    HMONNXGoldenInference,
+    QuantScheme,
+    convert_onnx_to_hmonnx,
+    create_quant_config,
+    ptq_quantize,
+    to_frontend_graph,
+    to_quant_graph,
+)
+from xhquant.api.ptq_export_hmonnx import (
+    convert_quanted_model_to_hmonnx,
+)
+from xhquant.common.types import PrecisionMode
+from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE
+from xhquant.frontend.convert import to_frontend_graph
+from xhquant.patch.core import RewriterContext
+from xhquant.utils.config import ConfigDict
+from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
+from xh_model_zoo.xh_llm.models.whisper._model_opt import *
+
+from xh_model_zoo.xh_llm.models.qwen3_asr import (
+    Qwen3ASRForConditionalGeneration
+)
+
+from qwen_asr.core.transformers_backend import (
+    Qwen3ASRConfig,
+    Qwen3ASRProcessor
+)
+
+# from qwen_asr.core.transformers_backend import (
+#     Qwen3ASRConfig,
+#     Qwen3ASRForConditionalGeneration,
+#     Qwen3ASRProcessor,
+# )
+
+GB = int(2**30)
+_LARGE_MODEL_SIZE_THRESHOLD = int(2**30 * 1.8)
+
+def main(args):
+    target_device = "XH2a"
+    model_dir = os.path.normpath(args.model)
+    model_name = os.path.basename(model_dir)
+
+    model = Qwen3ASRForConditionalGeneration.from_pretrained(model_dir)
+    cfg = Qwen3ASRConfig.from_pretrained(model_dir)
+    processor = Qwen3ASRProcessor.from_pretrained(model_dir)
+    
+    model.eval()
+    model.thinker.audio_tower.eval()
+    
+    model.config.forced_decoder_ids = None
+    model.config._attn_implementation = "eager"
+
+    cfg_name = f"{model_name}_{target_device}"
+    work_dir = Path("work_dirs") / cfg_name
+    work_dir.mkdir(exist_ok=True, parents=True)
+
+    head_dim = cfg.thinker_config.text_config.head_dim
+    num_heads = cfg.thinker_config.text_config.num_attention_heads
+    num_key_value_heads = cfg.thinker_config.text_config.num_key_value_heads
+    embed_dim = cfg.thinker_config.text_config.hidden_size
+    num_decode_layers = cfg.thinker_config.text_config.num_hidden_layers
+
+    max_source_positions = cfg.thinker_config.audio_config.max_source_positions
+
+    meta_info = {}
+    meta_info_file = work_dir / "meta_info.json"
+    if meta_info_file.exists():
+        with open(meta_info_file, "r", encoding="utf-8") as f:
+            meta_info = json.load(f)
+    meta_info["hf_model"] = model_dir
+    meta_info["model_cfg"] = {
+        "head_dim": head_dim,
+        "num_heads": num_heads,
+        "num_key_value_heads": num_key_value_heads,
+        "embed_dim": embed_dim,
+        "max_source_positions": max_source_positions,
+        "num_decode_layers": num_decode_layers,
+    }
+    
+    # encoder 处理过程 =======================================================================================
+    name = "Encoder"
+    encoder_work_dir = work_dir / name
+    encoder_work_dir.mkdir(exist_ok=True, parents=True)
+    onnx_file = encoder_work_dir / f"{model_name}_{name}.onnx"
+    quant_type = args.quant_type
+    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+    quant_config = create_quant_config(quant_scheme)
+    hmonnx_file = (
+        encoder_work_dir / "hmonnx" / f"{model_name}_{name}_xh2a_{quant_type}.onnx"
+    )
+    golden_path = encoder_work_dir / "hmonnx/golden"
+    meta_info["encoder"] = str(hmonnx_file.relative_to(work_dir))
+    num_mel_bins = model.config.thinker_config.audio_config.num_mel_bins
+    
+    # 固定在 T=1500，输出 seq_lens=216
+    input_features = torch.randn(1, 128, 3000).to(model.device).to(model.dtype)
+    feature_lens = torch.tensor([3000], dtype=torch.int32).to(model.device)
+    
+    # 1. 导出onnx
+    if not Path(onnx_file).exists():
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with RewriterContext(None, backend="onnxruntime"):
+                temp_onnx_file = str(Path(tmp_dir) / Path(onnx_file).name)
+                torch.onnx.export(
+                    model.thinker.audio_tower,
+                    (input_features, feature_lens),  # 传入 input_features 和 feature_lens
+                    temp_onnx_file,
+                    input_names=["input_features", "feature_lens"],
+                    output_names=["hidden_state"],
+                    # dynamo=True,
+                )
+                onnx_model = onnx.load(temp_onnx_file)
+                model_byte_size = onnx_model.ByteSize()
+                if model_byte_size <= _LARGE_MODEL_SIZE_THRESHOLD:
+                    onnx_model_sim, checked = onnxsim.simplify(
+                        onnx_model,
+                        skipped_optimizers=[
+                            "fuse_pad_into_conv",
+                            "fuse_consecutive_slices",
+                            "eliminate_common_subexpression",
+                            "fuse_qkv",
+                        ],
+                    )
+                else:
+                    from xhquant.utils.onnxsim_large_model import simplify_large_onnx
+                    onnx_model_sim, checked = simplify_large_onnx(
+                        onnx_model,
+                        skipped_optimizers=[
+                            "fuse_pad_into_conv",
+                            "fuse_consecutive_slices",
+                            "eliminate_common_subexpression",
+                            "fuse_qkv",
+                        ],
+                    )
+                if checked:
+                    onnx_model = onnx_model_sim
+    else:
+        onnx_model = onnx.load(onnx_file)
+    if not os.path.exists(onnx_file):
+        onnx.save(
+            onnx_model,
+            onnx_file,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{Path(onnx_file).stem}_external_data",
+        )
+    print(f"✅ ONNX 模型已保存: {onnx_file}, 大小: {onnx_model.ByteSize() / GB:.2f} GB")
+        
+    # 2. 构造输入
+    output_names = []
+    output_names.append("hidden_state")
+    # 3. 转换
+    if not Path(hmonnx_file).exists():
+        convert_onnx_to_hmonnx(
+            str(onnx_file),
+            [input_features, feature_lens],
+            # [input_features],
+            DeviceType.XH2a,
+            hmonnx_file,
+            quant_config=quant_config,
+            input_names=["input_features", "feature_lens"],
+            # input_names=["input_features"],
+            output_names=output_names,
+        )
+    # 生成golden
+    if args.gen_golden and not Path(golden_path).exists():
+        session = HMONNXGoldenInference(hmonnx_file)
+        session.to("cuda")
+        session.save_golden = True
+        session.golden_dir = str(encoder_work_dir / "hmonnx/golden")
+        session.step = 0
+        session(input_features.half().to("cuda"), feature_lens.to("cuda"))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ForcedAligner-0.6B/"))
+    parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument(
+        "--quant-type", default="w8a8_sefp", help="quant type, default is w8a8"
+    )
+    parser.add_argument(
+        "--gen_golden", action="store_true", help="generate golden data"
+    )
+    args = parser.parse_args()
+    main(args)
