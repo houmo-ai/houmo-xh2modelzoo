@@ -136,6 +136,7 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --valid \
   --valid_asr \
   --use_gpu \
+  --audio_seconds 15 \
   --generate_hmonnx_golden
 ```
 
@@ -150,7 +151,10 @@ python examples/audio/fireredasr/audio_llm_xh2a_export.py \
   --rotated_adapter_path work_dirs/fireredasr_llm_xh2a_2k_gptq_quarot_4bit_ssfp_fireredasr_merge_lora/audio_projector_rotated.safetensors \
   --valid \
   --valid_asr \
-  --use_gpu
+  --use_gpu \
+  --golden \
+  --max_seq_length 512 \
+  --input_seq_length 256
 ```
 
 ### 模式4：w4a8 resume，encoder w8w8，llm w4a8 keep_lora
@@ -167,6 +171,7 @@ python examples/audio/fireredasr/audio_encoder_xh2a_export.py \
   --valid \
   --valid_asr \
   --use_gpu \
+  --audio_seconds 15 \
   --generate_hmonnx_golden  
 ```
 
@@ -182,7 +187,9 @@ python examples/audio/fireredasr/audio_llm_xh2a_export.py \
   --valid \
   --valid_asr \
   --use_gpu \
-  --golden
+  --golden \
+  --max_seq_length 512 \
+  --input_seq_length 256
 ```
 
 ## 5. HMONNX Demo 正确性验证

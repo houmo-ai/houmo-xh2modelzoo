@@ -455,7 +455,7 @@ def _generate_golden(cfg, input_ids: torch.Tensor, tokenizer, prefill_onnx_file:
 
     if valid_len < input_sequence_length:
         input_ids_pad = torch.cat(
-            [input_ids, torch.full((input_ids.shape[0], input_sequence_length - valid_len), pad_token_id, dtype=torch.long)],
+            [input_ids, torch.full((input_ids.shape[0], input_sequence_length - valid_len), pad_token_id, dtype=torch.long, device=input_ids.device)],
             dim=-1,
         )
     else:
@@ -1077,6 +1077,7 @@ def _export_impl(cfg, args):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    original_input_seq_len = cfg.model.wrap_cfg.input_sequence_length
     xh_model.set_input_sequence_length(1)
 
     past_seq_len = input_ids.shape[-1]
@@ -1134,6 +1135,10 @@ def _export_impl(cfg, args):
         meta_info["valid_asr"] = asr_summary
     else:
         meta_info["valid_asr"] = {"skipped": True, "reason": "valid_asr_flag_disabled"}
+
+    # Restore original input_sequence_length before golden generation.
+    # set_input_sequence_length(1) for decode export may have mutated cfg.
+    cfg.model.wrap_cfg.input_sequence_length = original_input_seq_len
 
     if getattr(args, "golden", False):
         _generate_golden(
@@ -1227,6 +1232,13 @@ def _normalize_name_tag(value: str) -> str:
 
 def _build_mode_suffix_and_cfg_name(args, cfg) -> Tuple[str, str]:
     cfg_stem = _normalize_name_tag(Path(args.config).stem)
+    # Strip misleading seq-length patterns from config stem (e.g., _4k, _2k, _1k)
+    cfg_stem = re.sub(r"_\d+k$", "", cfg_stem)
+
+    # Append actual seq length info
+    max_seq = args.max_seq_length if args.max_seq_length is not None else cfg.model.wrap_cfg.max_sequence_length
+    input_seq = args.input_seq_length if args.input_seq_length is not None else cfg.model.wrap_cfg.input_sequence_length
+    seq_tag = f"s{max_seq}_i{input_seq}"
 
     mode_parts: List[str] = ["merge_lora" if args.lora_mode == "merge_lora" else "keep_lora"]
 
@@ -1250,7 +1262,7 @@ def _build_mode_suffix_and_cfg_name(args, cfg) -> Tuple[str, str]:
             mode_parts.append("w8a8")
 
     mode_suffix = "_".join(mode_parts)
-    cfg_name = f"{cfg_stem}_{mode_suffix}"
+    cfg_name = f"{cfg_stem}_{seq_tag}_{mode_suffix}"
     return mode_suffix, cfg_name
 
 
