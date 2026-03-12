@@ -13,8 +13,6 @@ from onnx import helper, TensorProto, numpy_helper
 # ==============================
 MODEL_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift.onnx"
 MODEL_SIMPLIFY = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify.onnx"
-UPDATE_SCALE = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_update_scale.onnx"
-REFLECT_REPLACED = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_reflect_replaced.onnx"
 REFLECT_CONSTANT = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_reflect_replaced_constant.onnx"
 FINAL_ONNX = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_final.onnx"
 FINAL_ONNX_1 = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_final_1.onnx"
@@ -67,102 +65,6 @@ def simplify_model(model, save_path):
     return model_s
 
 
-def update_scale_constant(model):
-    for init in model.graph.initializer:
-        if init.name == "/m_source/l_sin_gen/Constant_23_output_0":
-            data = numpy_helper.to_array(init).copy()
-            data[2] = np.float32(0.002084)
-            init.CopyFrom(numpy_helper.from_array(data, init.name))
-            break
-
-
-# ==============================
-# Pad reflect 替换
-# ==============================
-
-def replace_pad_reflect(graph, pad_name, L, pad):
-    pad_node = None
-    idx = None
-
-    for i, node in enumerate(graph.node):
-        if node.name == pad_name:
-            pad_node = node
-            idx = i
-            break
-
-    assert pad_node is not None
-
-    inp = pad_node.input[0]
-    out = pad_node.output[0]
-
-    graph.initializer.extend([
-        helper.make_tensor(f"{pad_name}_l_starts", TensorProto.INT64, [3], [0, 0, pad]),
-        helper.make_tensor(f"{pad_name}_l_ends", TensorProto.INT64, [3], [1, 1, 0]),
-        helper.make_tensor(f"{pad_name}_l_axes", TensorProto.INT64, [3], [0, 1, 2]),
-        helper.make_tensor(f"{pad_name}_l_steps", TensorProto.INT64, [3], [1, 1, -1]),
-    ])
-
-    left = helper.make_node(
-        "Slice",
-        [
-            inp,
-            f"{pad_name}_l_starts",
-            f"{pad_name}_l_ends",
-            f"{pad_name}_l_axes",
-            f"{pad_name}_l_steps",
-        ],
-        [f"{pad_name}_left"],
-    )
-
-    nodes = [left]
-
-    if pad_name == "/Pad":
-
-        graph.initializer.extend([
-            helper.make_tensor(f"{pad_name}_r_starts", TensorProto.INT64, [3], [0, 0, L - 2]),
-            helper.make_tensor(f"{pad_name}_r_ends", TensorProto.INT64, [3], [1, 1, L - pad - 2]),
-            helper.make_tensor(f"{pad_name}_r_axes", TensorProto.INT64, [3], [0, 1, 2]),
-            helper.make_tensor(f"{pad_name}_r_steps", TensorProto.INT64, [3], [1, 1, -1]),
-        ])
-
-        right = helper.make_node(
-            "Slice",
-            [
-                inp,
-                f"{pad_name}_r_starts",
-                f"{pad_name}_r_ends",
-                f"{pad_name}_r_axes",
-                f"{pad_name}_r_steps",
-            ],
-            [f"{pad_name}_right"],
-        )
-
-        concat = helper.make_node(
-            "Concat",
-            [f"{pad_name}_left", inp, f"{pad_name}_right"],
-            [out],
-            axis=2,
-        )
-
-        nodes.extend([right, concat])
-
-    else:
-
-        concat = helper.make_node(
-            "Concat",
-            [f"{pad_name}_left", inp],
-            [out],
-            axis=2,
-        )
-
-        nodes.append(concat)
-
-    graph.node.remove(pad_node)
-
-    for i, n in enumerate(nodes):
-        graph.node.insert(idx + i, n)
-
-
 # ==============================
 # Resize 修改
 # ==============================
@@ -192,101 +94,213 @@ def transform_scatter_add(model_path, output_path, win=16, hop=4):
 
     model = onnx.load(model_path)
     graph = model.graph
-
     K = win // hop
-    const_map = {i.name: numpy_helper.to_array(i) for i in graph.initializer}
 
-    new_nodes = []
+    const_map = {init.name: numpy_helper.to_array(init) for init in graph.initializer}
+
+    new_graph_nodes = []
+    transform_count = 0
 
     for node in graph.node:
+        if node.op_type == 'ScatterElements':
+            reduction = 'none'
+            axis = 0
+            for attr in node.attribute:
+                if attr.name == 'reduction':
+                    reduction = attr.s.decode() if attr.s else 'none'
+                elif attr.name == 'axis':
+                    axis = attr.i
 
-        if node.op_type != "ScatterElements":
-            new_nodes.append(node)
-            continue
+            if reduction == 'add':
+                print(f"\n分解节点: {node.name}")
+                transform_count += 1
 
-        reduction = "none"
-        axis = 0
+                data = node.input[0]
+                indices_name = node.input[1]
+                updates = node.input[2]
+                output = node.output[0]
 
-        for a in node.attribute:
-            if a.name == "reduction":
-                reduction = a.s.decode()
-            if a.name == "axis":
-                axis = a.i
+                print(f"  data: {data}")
+                print(f"  indices: {indices_name}")
+                print(f"  updates: {updates}")
 
-        if reduction != "add":
-            new_nodes.append(node)
-            continue
+                # 读取 indices 常量（或动态生成的值）
+                if indices_name in const_map:
+                    indices = const_map[indices_name]
+                    is_indices_const = True
+                else:
+                    print(f"  警告: indices 不是常量，尝试追溯...")
+                    # 如果 indices 是动态生成的，暂不支持
+                    new_graph_nodes.append(node)
+                    continue
 
-        data, indices_name, updates = node.input
-        output = node.output[0]
+                print(f"  indices shape: {indices.shape}")
+                print(f"  indices dtype: {indices.dtype}")
 
-        if indices_name not in const_map:
-            new_nodes.append(node)
-            continue
+                # 处理扁平化的 indices [1, total] 或 [total]
+                if indices.ndim == 2 and indices.shape[0] == 1:
+                    indices = indices[0]  # 去除单维度
+                    print(f"  展平后 shape: {indices.shape}")
 
-        indices = const_map[indices_name]
-        if indices.ndim == 2:
-            indices = indices[0]
+                total_len = len(indices)
+                num_frames = total_len // win
 
-        total = len(indices)
-        frames = total // win
+                print(f"  总长度: {total_len}")
+                print(f"  每帧长度 (win): {win}")
+                print(f"  帧数: {num_frames}")
+                print(f"  分组数 K: {K}")
 
-        shape_name = f"{output}_shape"
-        zero_name = f"{output}_zero"
+                # 创建零张量
+                zero_tensor = f"{output}_zero"
+                shape_name = f"{output}_shape"
 
-        new_nodes.append(helper.make_node("Shape", [data], [shape_name]))
+                new_graph_nodes.append(helper.make_node(
+                    'Shape',
+                    [data],
+                    [shape_name],
+                    f"{output}_Shape"
+                ))
 
-        zero_val = numpy_helper.from_array(np.array([0.0], dtype=np.float32))
-        cos = helper.make_node("ConstantOfShape", [shape_name], [zero_name])
-        cos.attribute.append(helper.make_attribute("value", zero_val))
+                zero_value = numpy_helper.from_array(np.array([0.0], dtype=np.float32))
+                const_of_shape_node = helper.make_node(
+                    'ConstantOfShape',
+                    [shape_name],
+                    [zero_tensor],
+                    f"{output}_ConstShape"
+                )
+                const_of_shape_node.attribute.append(
+                    helper.make_attribute('value', zero_value)
+                )
+                new_graph_nodes.append(const_of_shape_node)
 
-        new_nodes.append(cos)
+                # 按 q 分组处理
+                outs = []
 
-        outs = []
+                for q in range(K):
+                    print(f"  处理组 q={q}")
 
-        for q in range(K):
+                    # 生成新的 indices_q
+                    indices_q_list = []
+                    for t in range(num_frames):
+                        for r in range(hop):
+                            idx = (t + q) * hop + r
+                            indices_q_list.append(idx)
 
-            idx_list = []
+                    indices_q = np.array(indices_q_list, dtype=np.int64)
+                    # 保持与原始 indices 相同的维度（二维）
+                    indices_q = indices_q.reshape(1, -1)
+                    indices_q_name = f"{output}_indices_q{q}"
+                    graph.initializer.append(
+                        numpy_helper.from_array(indices_q, name=indices_q_name)
+                    )
 
-            for t in range(frames):
-                for r in range(hop):
-                    idx_list.append((t + q) * hop + r)
+                    updates_q_name = f"{output}_updates_q{q}"
 
-            idx_arr = np.array(idx_list, dtype=np.int64).reshape(1, -1)
-            idx_name = f"{output}_indices_q{q}"
+                    # Slice 参数
+                    starts = f"{output}_starts_q{q}"
+                    ends = f"{output}_ends_q{q}"
+                    axes = f"{output}_axes_q{q}"
+                    steps = f"{output}_steps_q{q}"
 
-            graph.initializer.append(
-                numpy_helper.from_array(idx_arr, idx_name)
-            )
+                    reshape_name = f"{output}_reshape_q{q}"
+                    reshape_shape = f"{output}_reshape_shape_q{q}"
 
-            scatter_out = f"{output}_out_q{q}"
+                    graph.initializer.append(
+                        helper.make_tensor(reshape_shape, TensorProto.INT64, [2],
+                                          [num_frames, win])
+                    )
 
-            scatter = helper.make_node(
-                "ScatterElements",
-                [zero_name, idx_name, updates],
-                [scatter_out],
-                axis=axis,
-            )
+                    new_graph_nodes.append(helper.make_node(
+                        'Reshape',
+                        [updates, reshape_shape],
+                        [reshape_name],
+                        f"{output}_Reshape_q{q}"
+                    ))
 
-            scatter.attribute.append(helper.make_attribute("reduction", "none"))
+                    slice_out_name = f"{output}_slice_q{q}"
+                    graph.initializer.extend([
+                        helper.make_tensor(f"{output}_s{q}_0", TensorProto.INT64, [2], [0, q*hop]),
+                        helper.make_tensor(f"{output}_e{q}_0", TensorProto.INT64, [2], [num_frames, (q+1)*hop]),
+                        helper.make_tensor(f"{output}_a{q}_0", TensorProto.INT64, [2], [0, 1]),
+                    ])
 
-            new_nodes.append(scatter)
-            outs.append(scatter_out)
+                    new_graph_nodes.append(helper.make_node(
+                        'Slice',
+                        [reshape_name, f"{output}_s{q}_0", f"{output}_e{q}_0", f"{output}_a{q}_0"],
+                        [slice_out_name],
+                        f"{output}_Slice_q{q}"
+                    ))
 
-        cur = outs[0]
-        for i in range(1, len(outs)):
-            add_out = f"{output}_add_{i}"
-            new_nodes.append(
-                helper.make_node("Add", [cur, outs[i]], [add_out])
-            )
-            cur = add_out
+                    shape_flat_name = f"{output}_shape_flat_q{q}"
+                    graph.initializer.append(
+                        helper.make_tensor(shape_flat_name, TensorProto.INT64, [2], [1, -1])
+                    )
 
-        new_nodes[-1].output[0] = output
+                    new_graph_nodes.append(helper.make_node(
+                        'Reshape',
+                        [slice_out_name, shape_flat_name],
+                        [updates_q_name],
+                        f"{output}_Reshape_back_q{q}"
+                    ))
 
-    graph.ClearField("node")
-    graph.node.extend(new_nodes)
+                    out_q_name = f"{output}_out_q{q}"
+                    scatter = helper.make_node(
+                        'ScatterElements',
+                        [zero_tensor, indices_q_name, updates_q_name],
+                        [out_q_name],
+                        f"{output}_Sct_q{q}",
+                        axis=axis
+                    )
+                    scatter.attribute.append(helper.make_attribute('reduction', 'none'))
+                    new_graph_nodes.append(scatter)
+                    outs.append(out_q_name)
+
+                # === 累加所有组 ===
+                if K == 1:
+                    new_graph_nodes.append(helper.make_node(
+                        'Identity',
+                        outs,
+                        [output],
+                        f"{output}_Id"
+                    ))
+                elif K == 2:
+                    new_graph_nodes.append(helper.make_node(
+                        'Add',
+                        outs,
+                        [output],
+                        f"{output}_Add"
+                    ))
+                else:
+                    current = outs[0]
+                    for i in range(1, len(outs)):
+                        next_out = f"{output}_add_{i}"
+                        new_graph_nodes.append(helper.make_node(
+                            'Add',
+                            [current, outs[i]],
+                            [next_out],
+                            f"{output}_Add_{i}"
+                        ))
+                        current = next_out
+                    new_graph_nodes[-1].output[0] = output
+
+            else:
+                new_graph_nodes.append(node)
+        else:
+            new_graph_nodes.append(node)
+
+    # 替换节点
+    graph.ClearField('node')
+    graph.node.extend(new_graph_nodes)
 
     onnx.save(model, output_path)
+    
+    try:
+        onnx.checker.check_model(output_path)
+        print("✓ 模型检查通过")
+    except Exception as e:
+        print(f"✗ 模型检查失败: {e}")
+        import traceback
+        traceback.print_exc()
 
     return output_path
 
@@ -317,7 +331,7 @@ def convert_hmonnx(model_path):
     convert_onnx_to_hmonnx(
         model_path,
         (inp,),
-        out_hmonnx_file=osp.join(OUTPUT_PATH, "hift_1024_conv.onnx"),
+        out_hmonnx_file=osp.join(OUTPUT_PATH, "hift_1024.onnx"),
         device_type="XH2A",
         quant_config=config,
     )
@@ -336,20 +350,6 @@ def main():
     fix_input_shape(model)
     model = simplify_model(model, MODEL_SIMPLIFY)
 
-    update_scale_constant(model)
-    onnx.save(model, UPDATE_SCALE)
-
-    model = onnx.load(UPDATE_SCALE)
-    graph = model.graph
-
-    replace_pad_reflect(graph, "/Pad", L=491520, pad=8)
-    replace_pad_reflect(graph, "/reflection_pad/Pad", L=122880, pad=1)
-
-    model = onnx.shape_inference.infer_shapes(model)
-    simplify_model(model, REFLECT_REPLACED)
-
-    model = onnx.load(UPDATE_SCALE)
-
     for node in model.graph.node:
         if node.op_type == "Pad":
             for a in node.attribute:
@@ -357,17 +357,72 @@ def main():
                     a.s = b"constant"
 
     simplify_model(model, REFLECT_CONSTANT)
+    compare_model_outputs(MODEL_SIMPLIFY, REFLECT_CONSTANT)
 
     model = onnx.load(REFLECT_CONSTANT)
 
     replace_resize_with_sizes(model)
 
     simplify_model(model, FINAL_ONNX)
+    compare_model_outputs(FINAL_ONNX, REFLECT_CONSTANT)
+
 
     transform_scatter_add(FINAL_ONNX, FINAL_ONNX_1)
+    
+    compare_model_outputs(FINAL_ONNX, FINAL_ONNX_1)
 
     convert_hmonnx(FINAL_ONNX_1)
 
+def compare_model_outputs(original_model, new_model):
+    """简单比较模型输出"""
+    print(f"\n{'='*60}")
+    print("验证模型等价性")
+    print(f"{'='*60}")
+
+    try:
+        sess_orig = ort.InferenceSession(original_model, providers=['CPUExecutionProvider'])
+        sess_new = ort.InferenceSession(new_model, providers=['CPUExecutionProvider'])
+        print("✓ 推理会话创建成功\n")
+    except Exception as e:
+        print(f"✗ 创建推理会话失败: {e}")
+        return False
+
+    # 获取输入
+    input_name = sess_orig.get_inputs()[0].name
+    input_shape = sess_orig.get_inputs()[0].shape
+
+    # 生成随机输入
+    batch_size = input_shape[0] if input_shape[0] > 0 else 1
+    seq_len = input_shape[1] if input_shape[1] > 0 else 80
+
+    test_input = np.random.randn(batch_size, seq_len, 1024).astype(np.float32)
+    print(f"测试输入形状: {test_input.shape}\n")
+
+    try:
+        outputs_orig = sess_orig.run(None, {input_name: test_input})
+        outputs_new = sess_new.run(None, {input_name: test_input})
+
+        for i, (out_orig, out_new) in enumerate(zip(outputs_orig, outputs_new)):
+            if out_orig.shape != out_new.shape:
+                print(f"✗ 输出 {i} 形状不匹配: {out_orig.shape} vs {out_new.shape}")
+                return False
+
+            max_diff = np.max(np.abs(out_orig - out_new))
+            if max_diff > 1e-4:
+                print(f"✗ 输出 {i} 不匹配，最大误差: {max_diff:.6e}")
+                return False
+            else:
+                print(f"✓ 输出 {i} 匹配，最大误差: {max_diff:.6e}")
+
+    except Exception as e:
+        print(f"✗ 推理失败: {e}")
+        return False
+
+    print(f"\n{'='*60}")
+    print("✓ 验证通过！")
+    print(f"{'='*60}")
+
+    return True
 
 if __name__ == "__main__":
     main()
