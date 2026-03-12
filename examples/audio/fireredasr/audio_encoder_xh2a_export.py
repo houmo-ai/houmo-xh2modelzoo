@@ -10,7 +10,7 @@ Mask 策略 (避免 masked_fill / -inf / bool 运算，适配 xh2a 硬件):
                直接与 ConvModule 的输入/输出相乘，替代 masked_fill_ 操作。
 
 输入:
-  - fbank_features: [B, T_pad, 80]      Pad 到 30s 长度的 Fbank 特征 (T_pad=3000)
+  - fbank_features: [B, T_pad, 80]      Pad 到导出配置长度的 Fbank 特征
   - attn_mask:      [B, 1, 1, T_conv]   Self-Attention 的加法 mask
   - conv_mask:      [B, 1, T_conv]       ConvModule 的乘法 mask
 
@@ -25,6 +25,7 @@ Mask 策略 (避免 masked_fill / -inf / bool 运算，适配 xh2a 硬件):
 import argparse
 import glob
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -52,12 +53,18 @@ sys.path.insert(0, str(FIREREDASR_ROOT))
 
 
 # ======================== 常量定义 ========================
-MAX_AUDIO_SECONDS = 30
+DEFAULT_MAX_AUDIO_SECONDS = 30.0
 FBANK_FRAME_SHIFT_MS = 10
 FBANK_DIM = 80
 CONTEXT_PAD = 6  # Conv2dSubsampling context padding: context=7, pad=context-1=6
-T_FBANK_MAX = MAX_AUDIO_SECONDS * 1000 // FBANK_FRAME_SHIFT_MS  # 3000
 ATTN_MASK_PAD_VALUE = -65504.0  # fp16 最大值的负数，替代 -inf
+
+
+def audio_seconds_to_fbank_frames(audio_seconds: float) -> int:
+    """将音频秒数转换为 fbank 帧数。"""
+    if audio_seconds <= 0:
+        raise ValueError(f"audio_seconds must be > 0, got {audio_seconds}")
+    return max(1, int(audio_seconds * 1000 / FBANK_FRAME_SHIFT_MS))
 
 
 # ======================== 长度计算 ========================
@@ -125,21 +132,25 @@ def create_masks_from_lengths(fbank_lengths, T_fbank_pad: int):
     return attn_mask, conv_mask
 
 
-def create_dummy_inputs(batch_size: int = 1, audio_seconds: float = 10.0, device="cpu"):
-    """创建用于导出和验证的 dummy 输入。"""
-    actual_frames = min(
-        int(audio_seconds * 1000 / FBANK_FRAME_SHIFT_MS), T_FBANK_MAX
-    )
+def create_dummy_inputs(
+    batch_size: int = 1,
+    max_audio_seconds: float = DEFAULT_MAX_AUDIO_SECONDS,
+    device="cpu",
+):
+    """创建用于导出和验证的 dummy 输入。
+
+    dummy 输入长度与导出静态输入长度保持一致，避免 `--audio_seconds`
+    只影响有效帧数而不影响导出 shape。
+    """
+    t_fbank_max = audio_seconds_to_fbank_frames(max_audio_seconds)
 
     fbank_features = torch.randn(
-        batch_size, T_FBANK_MAX, FBANK_DIM, device=device
+        batch_size, t_fbank_max, FBANK_DIM, device=device
     )
-    fbank_features[:, actual_frames:, :] = 0.0
-
     fbank_lengths = torch.full(
-        (batch_size,), actual_frames, dtype=torch.long, device=device
+        (batch_size,), t_fbank_max, dtype=torch.long, device=device
     )
-    attn_mask, conv_mask = create_masks_from_lengths(fbank_lengths, T_FBANK_MAX)
+    attn_mask, conv_mask = create_masks_from_lengths(fbank_lengths, t_fbank_max)
     attn_mask = attn_mask.to(device)
     conv_mask = conv_mask.to(device)
 
@@ -154,6 +165,14 @@ def pad_fbank_to_fixed(fbank: torch.Tensor, T_max: int) -> torch.Tensor:
     padded = torch.zeros(B, T_max, D, dtype=fbank.dtype, device=fbank.device)
     padded[:, :T, :] = fbank
     return padded
+
+
+def clamp_fbank_lengths(
+    fbank_lengths: torch.Tensor,
+    T_fbank_max: int,
+) -> torch.Tensor:
+    """限制有效长度，避免 pad/truncate 后长度与真实输入 shape 不一致。"""
+    return fbank_lengths.to(dtype=torch.long).clamp(max=T_fbank_max)
 
 
 # ======================== Impl 替换 ========================
@@ -217,6 +236,32 @@ def _impl_conformer_convolution_forward(self, x, mask=None):
     return out + residual
 
 
+def _impl_rel_positional_encoding_forward(self, x):
+    """替代 RelPositionalEncoding.forward。
+
+    原始实现返回长度 2T-1 的相对位置编码。导出时补一个全 0 位置，
+    将长度变为 2T，避免后续 constant/matmul/reshape 链路出现奇数维。
+    linear_pos 没有 bias，因此补零位置经过线性层后仍保持为 0。
+    """
+    Tmax, T = self.pe.size(1), x.size(1)
+    pos_emb = self.pe[:, Tmax // 2 - T + 1 : Tmax // 2 + T].clone().detach()
+    return F.pad(pos_emb, (0, 0, 0, 1))
+
+
+def _impl_rel_shift_gather(self, x):
+    """替代 RelPosMultiHeadAttention._rel_shift。
+
+    原始 skew 实现本质是按 idx[i, j] = T-1-i+j 从最后一维取值。
+    这里直接用 gather 表达，避免 odd reshape。
+    """
+    N, H, T1, _ = x.size()
+    row = torch.arange(T1, device=x.device, dtype=torch.long).unsqueeze(1)
+    col = torch.arange(T1, device=x.device, dtype=torch.long).unsqueeze(0)
+    index = T1 - 1 - row + col
+    index = index.view(1, 1, T1, T1).expand(N, H, -1, -1)
+    return torch.gather(x, dim=-1, index=index)
+
+
 def patch_encoder_for_export(encoder):
     """对 Conformer Encoder 进行 impl 替换。
 
@@ -225,19 +270,34 @@ def patch_encoder_for_export(encoder):
        → 加法 mask (-65504) 加两次, 替代 masked_fill(-inf)
     2. ConformerConvolution.forward
        → 乘法 mask (0/1) 相乘, 替代 masked_fill_(mask.ne(1), 0.0)
+    3. RelPositionalEncoding.forward
+       → 导出时将 2T-1 的位置编码补到 2T，消除奇数维
+    4. RelPosMultiHeadAttention._rel_shift
+       → 用 gather 精确替代 skew/reshape 子图
     """
+    encoder.positional_encoding.forward = types.MethodType(
+        _impl_rel_positional_encoding_forward,
+        encoder.positional_encoding,
+    )
     for block in encoder.layer_stack:
         # Patch attention
         block.mhsa.attention.forward_attention = types.MethodType(
             _impl_scaled_dot_product_attention_forward,
             block.mhsa.attention,
         )
+        block.mhsa._rel_shift = types.MethodType(
+            _impl_rel_shift_gather,
+            block.mhsa,
+        )
         # Patch conv module
         block.conv.forward = types.MethodType(
             _impl_conformer_convolution_forward,
             block.conv,
         )
-    print(f"  Patched {len(encoder.layer_stack)} Conformer blocks (impl 替换)")
+    print(
+        f"  Patched {len(encoder.layer_stack)} Conformer blocks "
+        f"(attn/conv/relpos impl 替换)"
+    )
 
 
 # ======================== 导出模型 ========================
@@ -370,6 +430,7 @@ def _load_llm_quant_helpers():
     try:
         from examples.audio.fireredasr.audio_llm_xh2a_common_quant import (
             _load_quantized_hf_model_from_checkpoint,
+            _materialize_runtime_lora_into_weight,
             _sync_fireredasr_llm_special_tokens,
         )
         from examples.audio.fireredasr.audio_llm_xh2a_export import (
@@ -378,6 +439,7 @@ def _load_llm_quant_helpers():
         )
         return (
             _load_quantized_hf_model_from_checkpoint,
+            _materialize_runtime_lora_into_weight,
             _sync_fireredasr_llm_special_tokens,
             _resolve_hf_model_dir,
             load_fireredasr_lora_weights,
@@ -402,6 +464,7 @@ def _load_llm_quant_helpers():
         export_spec.loader.exec_module(export_mod)
         return (
             common_mod._load_quantized_hf_model_from_checkpoint,
+            common_mod._materialize_runtime_lora_into_weight,
             common_mod._sync_fireredasr_llm_special_tokens,
             export_mod._resolve_hf_model_dir,
             export_mod.load_fireredasr_lora_weights,
@@ -421,6 +484,7 @@ def _load_quantized_llm_if_needed(full_model, args):
     from xh_model_zoo.api import Config
     (
         _load_quantized_hf_model_from_checkpoint,
+        _materialize_runtime_lora_into_weight,
         _sync_fireredasr_llm_special_tokens,
         _resolve_hf_model_dir,
         load_fireredasr_lora_weights,
@@ -444,7 +508,6 @@ def _load_quantized_llm_if_needed(full_model, args):
         lora_state_dict=lora_state_dict,
         lora_config=lora_config,
     )
-    quantized_llm.eval().to(torch.float16)
     class _StdoutLogger:
         @staticmethod
         def info(msg):
@@ -454,6 +517,13 @@ def _load_quantized_llm_if_needed(full_model, args):
         def warning(msg):
             print(msg)
 
+    if args.lora_mode == "keep_lora":
+        _materialize_runtime_lora_into_weight(
+            quantized_llm,
+            lora_config,
+            logger=_StdoutLogger(),
+        )
+    quantized_llm.eval().to(torch.float16)
     _sync_fireredasr_llm_special_tokens(quantized_llm, full_model.llm, logger=_StdoutLogger())
     full_model.llm = quantized_llm
     print(f"  Loaded quantized LLM checkpoint: {resume_file}")
@@ -700,6 +770,7 @@ def validate_real_audio(
     orig_speech_lens: torch.Tensor,
     fbank_padded: torch.Tensor,
     fbank_lengths: torch.Tensor,
+    T_fbank_max: int,
     uttids: list,
     backend: str = "onnx",
     max_diff_threshold: float = 0.05,
@@ -722,9 +793,9 @@ def validate_real_audio(
             continue
 
         # 逐条构建输入（batch_size=1）
-        fbank_i = fbank_padded[i : i + 1]  # [1, T_FBANK_MAX, 80]
+        fbank_i = fbank_padded[i : i + 1]
         attn_mask_i, conv_mask_i = create_masks_from_lengths(
-            fbank_lengths[i : i + 1], T_FBANK_MAX
+            fbank_lengths[i : i + 1], T_fbank_max
         )
         output_i = inference_model(fbank_i, attn_mask_i, conv_mask_i)
 
@@ -748,7 +819,7 @@ def validate_real_audio(
     return all_passed
 
 
-def _make_encoder_wrapper(inference_fn, device=None):
+def _make_encoder_wrapper(inference_fn, t_fbank_max: int, device=None):
     """创建一个 nn.Module wrapper，将 encoder+adapter 替换为外部推理函数。
 
     inference_fn: callable(fbank_features, attn_mask, conv_mask) -> torch.Tensor
@@ -759,8 +830,9 @@ def _make_encoder_wrapper(inference_fn, device=None):
             super().__init__()
 
         def forward(self, padded_feat, feat_lengths):
-            fbank_pad = pad_fbank_to_fixed(padded_feat, T_FBANK_MAX)
-            attn_m, conv_m = create_masks_from_lengths(feat_lengths, T_FBANK_MAX)
+            feat_lengths = clamp_fbank_lengths(feat_lengths, t_fbank_max)
+            fbank_pad = pad_fbank_to_fixed(padded_feat, t_fbank_max)
+            attn_m, conv_m = create_masks_from_lengths(feat_lengths, t_fbank_max)
             speech_features = inference_fn(fbank_pad, attn_m, conv_m)
             if isinstance(speech_features, np.ndarray):
                 speech_features = torch.from_numpy(speech_features)
@@ -783,6 +855,31 @@ def _make_encoder_wrapper(inference_fn, device=None):
             return speech_features, enc_lengths, None
 
     return _ExternalEncoder()
+
+
+def _make_native_encoder_wrapper(native_encoder, native_adapter, t_fbank_max: int):
+    """创建原生 encoder+adapter wrapper，并对输出按有效长度截断。
+
+    FireRedASR 原始 LLM 路径会忽略 `speech_lens`，直接使用 `speech_features.shape[1]`
+    作为语音 token 长度。这里显式裁掉 padding 区域，使原生/ONNX/HMONNX 的 valid_asr
+    比较基于同一份有效语音特征。
+    """
+
+    class _NativeEncoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+
+        def forward(self, padded_feat, feat_lengths):
+            feat_lengths = clamp_fbank_lengths(feat_lengths, t_fbank_max)
+            fbank_pad = pad_fbank_to_fixed(padded_feat, t_fbank_max)
+            encoder_outs, enc_lengths, _ = native_encoder(fbank_pad, feat_lengths)
+            speech_features, speech_lens = native_adapter(encoder_outs, enc_lengths)
+            max_valid_len = int(speech_lens.max().item())
+            if max_valid_len > 0:
+                speech_features = speech_features[:, :max_valid_len, :]
+            return speech_features, speech_lens, None
+
+    return _NativeEncoder()
 
 
 def _make_onnx_inference_fn(onnx_path: str):
@@ -821,12 +918,35 @@ def _make_hmonnx_inference_fn(hmonnx_path: str, device: str = "cuda"):
     return _infer
 
 
+class _TruncatingFeatExtractor:
+    """在验证阶段将真实音频特征截断到导出时的最大语音长度。"""
+
+    def __init__(self, feat_extractor, t_fbank_max: int, max_audio_seconds: float):
+        self.feat_extractor = feat_extractor
+        self.t_fbank_max = t_fbank_max
+        self.max_audio_seconds = max_audio_seconds
+
+    def __call__(self, wav_paths):
+        feats, lengths, durs = self.feat_extractor(wav_paths)
+        lengths = clamp_fbank_lengths(lengths, self.t_fbank_max)
+        feats = pad_fbank_to_fixed(feats, self.t_fbank_max)
+        durs = [min(float(d), self.max_audio_seconds) for d in durs]
+        return feats, lengths, durs
+
+
+class _IdentityProjector(nn.Module):
+    def forward(self, x, x_lens):
+        return x, x_lens
+
+
 def validate_asr_transcription(
     full_model,
     tokenizer,
     model_path: str,
     wav_dir: str,
     model_dir: str,
+    max_audio_seconds: float,
+    t_fbank_max: int,
     ref_text_file: str = None,
     use_gpu: bool = False,
     backend: str = "onnx",
@@ -865,33 +985,37 @@ def validate_asr_transcription(
 
     asr_model = FireRedAsr.__new__(FireRedAsr)
     asr_model.asr_type = "llm"
-    asr_model.feat_extractor = feat_extractor
+    asr_model.feat_extractor = _TruncatingFeatExtractor(
+        feat_extractor,
+        t_fbank_max=t_fbank_max,
+        max_audio_seconds=max_audio_seconds,
+    )
     asr_model.model = full_model
     asr_model.tokenizer = tokenizer
+    orig_encoder = full_model.encoder
+    orig_projector = full_model.encoder_projector
 
     # 逐条转写（batch=1）
     print("    Running original transcription ...")
     orig_results = []
+    native_encoder_wrapper = _make_native_encoder_wrapper(
+        orig_encoder,
+        orig_projector,
+        t_fbank_max=t_fbank_max,
+    )
+    object.__setattr__(full_model, 'encoder', native_encoder_wrapper)
+    object.__setattr__(full_model, 'encoder_projector', _IdentityProjector())
     for uid, wp in zip(uttids, wav_paths):
         res = asr_model.transcribe([uid], [wp], {"use_gpu": use_gpu})
         orig_results.extend(res)
 
     # 替换 encoder + adapter
-    orig_encoder = full_model.encoder
-    orig_projector = full_model.encoder_projector
-
     if backend == "hmonnx":
         inference_fn = _make_hmonnx_inference_fn(model_path)
     else:
         inference_fn = _make_onnx_inference_fn(model_path)
 
-    ext_encoder = _make_encoder_wrapper(inference_fn)
-
-    class _IdentityProjector(nn.Module):
-        def forward(self, x, x_lens):
-            return x, x_lens
-
-    # 用 object.__setattr__ 避免 nn.Module 类型检查
+    ext_encoder = _make_encoder_wrapper(inference_fn, t_fbank_max=t_fbank_max)
     object.__setattr__(full_model, 'encoder', ext_encoder)
     object.__setattr__(full_model, 'encoder_projector', _IdentityProjector())
 
@@ -944,8 +1068,8 @@ def parse_arguments():
     parser.add_argument(
         "--audio_seconds",
         type=float,
-        default=10.0,
-        help="dummy 音频时长（秒），最大 30s",
+        default=DEFAULT_MAX_AUDIO_SECONDS,
+        help="导出/验证/HMONNX golden 使用的最大语音长度（秒）",
     )
     parser.add_argument(
         "--batch_size", type=int, default=1, help="batch 大小"
@@ -1055,16 +1179,53 @@ def _extract_resume_tag(resume_path: str) -> str:
     return _normalize_name_tag(stem)
 
 
+def _format_audio_seconds_tag(audio_seconds: float) -> str:
+    value = f"{audio_seconds:g}".replace(".", "_")
+    return f"audio{value}s"
+
+
 def _build_mode_suffix(args) -> str:
+    audio_tag = _format_audio_seconds_tag(args.audio_seconds)
     if args.resume_from:
         resume_tag = _extract_resume_tag(args.resume_from)
-        return f"{_normalize_name_tag(args.lora_mode)}_resume_{resume_tag}"
-    return f"{_normalize_name_tag(args.lora_mode)}_w8a8_default"
+        return f"{_normalize_name_tag(args.lora_mode)}_resume_{resume_tag}_{audio_tag}"
+    return f"{_normalize_name_tag(args.lora_mode)}_w8a8_default_{audio_tag}"
+
+
+def _save_audio_export_meta(
+    output_dir: Path,
+    mode_suffix: str,
+    onnx_name: str,
+    hmonnx_name: str,
+    max_audio_seconds: float,
+    t_fbank_max: int,
+    t_conv_total: int,
+    t_adapter_total: int,
+):
+    meta = {
+        "mode_suffix": mode_suffix,
+        "audio_seconds": max_audio_seconds,
+        "fbank_frame_shift_ms": FBANK_FRAME_SHIFT_MS,
+        "fbank_dim": FBANK_DIM,
+        "t_fbank_max": t_fbank_max,
+        "t_conv_total": t_conv_total,
+        "t_adapter_total": t_adapter_total,
+        "onnx_file": onnx_name,
+        "hmonnx_file": hmonnx_name,
+    }
+    meta_path = output_dir / "audio_encoder_export_meta.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print(f"  Saved export meta: {meta_path}")
 
 
 def main():
     parser = parse_arguments()
     args = parser.parse_args()
+    if args.audio_seconds <= 0:
+        parser.error("--audio_seconds must be > 0")
+
+    t_fbank_max = audio_seconds_to_fbank_frames(args.audio_seconds)
 
     mode_suffix = _build_mode_suffix(args)
     output_dir = Path(args.output_dir) / mode_suffix
@@ -1088,12 +1249,22 @@ def main():
     if rotated_adapter_path is not None:
         _load_rotated_adapter_if_needed(adapter, rotated_adapter_path)
 
-    T_conv_total = compute_conv_total_length(T_FBANK_MAX)
+    T_conv_total = compute_conv_total_length(t_fbank_max)
     T_adapter_total = compute_adapter_output_length(T_conv_total)
-    print(f"  Max audio: {MAX_AUDIO_SECONDS}s, fbank frames: {T_FBANK_MAX}")
+    print(f"  Max audio: {args.audio_seconds:g}s, fbank frames: {t_fbank_max}")
     print(f"  Conv output (total): {T_conv_total}")
     print(f"  Adapter output (total): {T_adapter_total}")
     print(f"  Encoder dim: {encoder.odim}, LLM dim: {adapter.linear2.out_features}")
+    _save_audio_export_meta(
+        output_dir=output_dir,
+        mode_suffix=mode_suffix,
+        onnx_name=onnx_name,
+        hmonnx_name=hmonnx_name,
+        max_audio_seconds=args.audio_seconds,
+        t_fbank_max=t_fbank_max,
+        t_conv_total=T_conv_total,
+        t_adapter_total=T_adapter_total,
+    )
 
     # ---- 2. 真实音频: 在 patch 前先用原始 encoder 跑一次 ----
     wav_dir = args.wav_dir or _find_wav_dir()
@@ -1117,8 +1288,14 @@ def main():
         print(f"  Found {len(wav_paths)} wav files: {wav_uttids}")
 
         feats, lengths, durs = feat_extractor(wav_paths)
-        fbank_lengths = lengths
-        fbank_padded = pad_fbank_to_fixed(feats, T_FBANK_MAX)
+        num_truncated = int((lengths > t_fbank_max).sum().item())
+        if num_truncated > 0:
+            print(
+                f"  WARNING: truncating {num_truncated} wav(s) to "
+                f"{args.audio_seconds:g}s for validation"
+            )
+        fbank_lengths = clamp_fbank_lengths(lengths, t_fbank_max)
+        fbank_padded = pad_fbank_to_fixed(feats, t_fbank_max)
 
         encoder.eval().float()
         adapter.eval().float()
@@ -1144,15 +1321,14 @@ def main():
     # ---- 4. 创建 dummy 输入 & 导出 ONNX ----
     print("\n[4/5] Creating dummy inputs & exporting ONNX ...")
     fbank_dummy, attn_mask_dummy, conv_mask_dummy = create_dummy_inputs(
-        batch_size=args.batch_size, audio_seconds=args.audio_seconds
+        batch_size=args.batch_size,
+        max_audio_seconds=args.audio_seconds,
     )
     print(f"  fbank_features: {fbank_dummy.shape}")
     print(f"  attn_mask:      {attn_mask_dummy.shape}")
     print(f"  conv_mask:      {conv_mask_dummy.shape}")
 
-    valid_conv_len = compute_conv_valid_length(
-        min(int(args.audio_seconds * 1000 / FBANK_FRAME_SHIFT_MS), T_FBANK_MAX)
-    )
+    valid_conv_len = compute_conv_valid_length(t_fbank_max)
     print(f"  Valid conv frames: {valid_conv_len}/{T_conv_total}")
 
     onnx_path = str(output_dir / onnx_name)
@@ -1178,6 +1354,7 @@ def main():
                 orig_speech_lens,
                 fbank_padded,
                 fbank_lengths,
+                t_fbank_max,
                 wav_uttids,
             )
 
@@ -1189,6 +1366,8 @@ def main():
                 onnx_path,
                 wav_dir,
                 args.model_dir,
+                max_audio_seconds=args.audio_seconds,
+                t_fbank_max=t_fbank_max,
                 ref_text_file=ref_text,
                 use_gpu=args.use_gpu,
             )
@@ -1237,6 +1416,7 @@ def main():
                 orig_speech_lens,
                 fbank_padded,
                 fbank_lengths,
+                t_fbank_max,
                 wav_uttids,
                 backend="hmonnx",
                 max_diff_threshold=0.5,
@@ -1251,6 +1431,8 @@ def main():
                 hmonnx_path,
                 wav_dir,
                 args.model_dir,
+                max_audio_seconds=args.audio_seconds,
+                t_fbank_max=t_fbank_max,
                 ref_text_file=ref_text,
                 use_gpu=args.use_gpu,
                 backend="hmonnx",

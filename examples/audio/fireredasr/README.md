@@ -66,7 +66,8 @@ python examples/audio/fireredasr/audio_llm_xh2a_common_quant.py \
 说明：
 - Encoder 固定导出为 `w8w8`。
 - LLM 默认导出 `w8a8`；带 `resume_from` 时复用 common quant 结果导出 `w4a8`。
-- `audio_encoder_xh2a_export.py` 已支持命名增强：输出目录自动区分 `merge/keep + resume/default`。
+- `audio_encoder_xh2a_export.py` 的 `--audio_seconds` 表示导出图的最大语音长度，dummy/valid/golden 也统一按该长度执行。
+- `audio_encoder_xh2a_export.py` 已支持命名增强：输出目录自动区分 `merge/keep + resume/default + audio_seconds`。
 
 ### 模式1：w8a8 默认，encoder w8w8，llm w8a8 merge_lora
 
@@ -223,6 +224,9 @@ python examples/audio/fireredasr/fireredasr_xh2a_demo.py \
   --use_gpu
 ```
 
+- demo 默认会从 encoder 导出目录下的 `audio_encoder_export_meta.json` 自动读取最大语音长度。
+- 如需手动覆盖，可额外指定 `--audio_seconds <N>`。
+
 ### 5.2 结果判定
 
 - Encoder 导出脚本中的 `--valid` + `--valid_asr` 需通过。
@@ -231,14 +235,15 @@ python examples/audio/fireredasr/fireredasr_xh2a_demo.py \
 
 ## 6. 输出产物命名
 
-`audio_encoder_xh2a_export.py` 输出目录和文件自动区分模式，示例：
+`audio_encoder_xh2a_export.py` 输出目录和文件自动区分模式与最大语音长度，示例：
 
-- `work_dirs/fireredasr_audio_encoder/merge_lora_w8a8_default/`
-- `work_dirs/fireredasr_audio_encoder/keep_lora_w8a8_default/`
-- `work_dirs/fireredasr_audio_encoder/merge_lora_resume_quarot_gptq/`
-- `work_dirs/fireredasr_audio_encoder/keep_lora_resume_quarot_gptq/`
+- `work_dirs/fireredasr_audio_encoder/merge_lora_w8a8_default_audio30s/`
+- `work_dirs/fireredasr_audio_encoder/keep_lora_w8a8_default_audio30s/`
+- `work_dirs/fireredasr_audio_encoder/merge_lora_resume_quarot_gptq_audio15s/`
+- `work_dirs/fireredasr_audio_encoder/keep_lora_resume_quarot_gptq_audio15s/`
 
 目录内文件名示例：
 
 - `audio_encoder_<mode_suffix>.onnx`
 - `audio_encoder_<mode_suffix>_hmonnx.onnx`
+- `audio_encoder_export_meta.json`

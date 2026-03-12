@@ -45,11 +45,10 @@ from fireredasr.data.asr_feat import ASRFeatExtractor  # noqa: E402
 from fireredasr.tokenizer.llm_tokenizer import DEFAULT_SPEECH_TOKEN  # noqa: E402
 
 
-MAX_AUDIO_SECONDS = 30
+DEFAULT_MAX_AUDIO_SECONDS = 30.0
 FBANK_FRAME_SHIFT_MS = 10
 FBANK_DIM = 80
 CONTEXT_PAD = 6
-T_FBANK_MAX = MAX_AUDIO_SECONDS * 1000 // FBANK_FRAME_SHIFT_MS  # 3000
 ATTN_MASK_PAD_VALUE = -65504.0
 
 DECODE_TEMPLATE = (
@@ -77,7 +76,13 @@ def compute_adapter_output_length(conv_len: int, downsample_rate: int = 2) -> in
     return int(conv_len // downsample_rate)
 
 
-def pad_fbank_to_fixed(fbank: torch.Tensor, t_max: int = T_FBANK_MAX) -> torch.Tensor:
+def audio_seconds_to_fbank_frames(audio_seconds: float) -> int:
+    if audio_seconds <= 0:
+        raise ValueError(f"audio_seconds must be > 0, got {audio_seconds}")
+    return max(1, int(audio_seconds * 1000 / FBANK_FRAME_SHIFT_MS))
+
+
+def pad_fbank_to_fixed(fbank: torch.Tensor, t_max: int) -> torch.Tensor:
     batch, t_cur, dim = fbank.shape
     if t_cur >= t_max:
         return fbank[:, :t_max, :]
@@ -87,7 +92,7 @@ def pad_fbank_to_fixed(fbank: torch.Tensor, t_max: int = T_FBANK_MAX) -> torch.T
 
 
 def build_masks_from_length(
-    fbank_length: int, fbank_padded_length: int = T_FBANK_MAX
+    fbank_length: int, fbank_padded_length: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     total_conv_len = compute_conv_total_length(fbank_padded_length)
     valid_conv_len = compute_conv_valid_length(fbank_length)
@@ -173,8 +178,11 @@ class FireRedASRStandaloneHMONNX:
         llm_hmonnx_dir: str,
         cmvn_path: str,
         device: torch.device,
+        max_audio_seconds: float,
     ):
         self.device = device
+        self.max_audio_seconds = float(max_audio_seconds)
+        self.t_fbank_max = audio_seconds_to_fbank_frames(self.max_audio_seconds)
         self.audio_encoder = AudioEncoderHMONNX(audio_hmonnx_path, device)
         self.feat_extractor = ASRFeatExtractor(cmvn_path)
 
@@ -391,10 +399,10 @@ class FireRedASRStandaloneHMONNX:
         uttid = Path(wav_path).stem
         feats, lengths, durs = self.feat_extractor([wav_path])
         fbank_len = int(lengths[0].item())
-        fbank_len = min(fbank_len, T_FBANK_MAX)
+        fbank_len = min(fbank_len, self.t_fbank_max)
 
-        fbank_padded = pad_fbank_to_fixed(feats, T_FBANK_MAX)
-        attn_mask, conv_mask = build_masks_from_length(fbank_len, T_FBANK_MAX)
+        fbank_padded = pad_fbank_to_fixed(feats, self.t_fbank_max)
+        attn_mask, conv_mask = build_masks_from_length(fbank_len, self.t_fbank_max)
 
         start_time = time.time()
         speech_features = self.audio_encoder(fbank_padded, attn_mask, conv_mask)
@@ -442,6 +450,12 @@ def parse_arguments():
     parser.add_argument("--llm_hmonnx_dir", type=str, required=True, help="LLM HMONNX export work dir")
     parser.add_argument("--cmvn_path", type=str, default=None, help="Kaldi cmvn.ark path")
     parser.add_argument("--model_dir", type=str, default=None, help="deprecated: only used to fallback cmvn path")
+    parser.add_argument(
+        "--audio_seconds",
+        type=float,
+        default=None,
+        help="最大语音长度（秒）；默认优先从 audio_encoder_export_meta.json 自动读取，缺失时回退 30s",
+    )
     parser.add_argument("--wav_path", type=str, nargs="+", required=True, help="wav path(s), glob, or directory")
     parser.add_argument("--prompt", type=str, default="请转写音频为文字", help="ASR prompt text (without <speech>)")
     parser.add_argument("--decode_max_len", type=int, default=0, help="max decode tokens (0 = use speech length)")
@@ -458,6 +472,14 @@ def parse_arguments():
     parser.add_argument("--ref_file", type=str, default=None, help="optional reference text file: uttid text")
     parser.add_argument("--out_json", type=str, default=None, help="optional output json path")
     return parser
+
+
+def _load_audio_export_meta(audio_hmonnx_path: str):
+    meta_path = Path(audio_hmonnx_path).parent / "audio_encoder_export_meta.json"
+    if not meta_path.exists():
+        return None, meta_path
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f), meta_path
 
 
 def main():
@@ -482,6 +504,17 @@ def main():
     if cmvn_path is None or not Path(cmvn_path).exists():
         raise FileNotFoundError(f"cmvn_path not found: {cmvn_path}")
 
+    audio_meta, audio_meta_path = _load_audio_export_meta(args.audio_hmonnx_path)
+    resolved_audio_seconds = args.audio_seconds
+    if resolved_audio_seconds is None and audio_meta is not None:
+        resolved_audio_seconds = float(
+            audio_meta.get("audio_seconds", DEFAULT_MAX_AUDIO_SECONDS)
+        )
+    if resolved_audio_seconds is None:
+        resolved_audio_seconds = DEFAULT_MAX_AUDIO_SECONDS
+    if resolved_audio_seconds <= 0:
+        raise ValueError(f"audio_seconds must be > 0, got {resolved_audio_seconds}")
+
     use_gpu = (args.use_gpu or args.exec_device.startswith("cuda")) and not args.no_gpu
     if not use_gpu or (not torch.cuda.is_available()):
         device = torch.device("cpu")
@@ -494,6 +527,9 @@ def main():
     print(f"llm_hmonnx_dir: {args.llm_hmonnx_dir}")
     print(f"cmvn_path: {cmvn_path}")
     print(f"num_wavs: {len(wav_paths)}")
+    print(f"max_audio: {resolved_audio_seconds:g}s")
+    if audio_meta is not None:
+        print(f"audio_meta: {audio_meta_path}")
     print(f"device: {device}")
     print("=" * 80)
 
@@ -502,6 +538,7 @@ def main():
         llm_hmonnx_dir=args.llm_hmonnx_dir,
         cmvn_path=cmvn_path,
         device=device,
+        max_audio_seconds=resolved_audio_seconds,
     )
 
     ref_texts = load_ref_texts(args.ref_file)
