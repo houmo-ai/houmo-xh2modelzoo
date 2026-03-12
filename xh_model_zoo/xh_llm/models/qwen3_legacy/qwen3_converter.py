@@ -23,6 +23,7 @@ import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+import os
 
 import torch
 import yaml
@@ -233,35 +234,38 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
 
         logger.info(f"********************* start export prefill model *********************")
 
-        quanted_model = convert_fx_model_to_quanted_model(
-            wraped_qwen_model,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
-        if self.config.mix_search is not None:
-            quanted_model = quanted_model.cuda()
-            quanted_model.enable_fast_precision_mode()
-            from xhquant.mix_precision.mix_precision import MixPrecisionSearch
-
-            with open(self.config.mix_search, "r") as f:
-                ms_cfg = yaml.safe_load(f)
-            ms = MixPrecisionSearch(quanted_model, ms_cfg)
-            tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
-            # data preprocess
-            gpu_loader, label_dataloader = ms_data_preprocess(
-                wraped_qwen_model, tokenizer, past_key_caches, past_value_caches
+        if os.path.exists(prefill_onnx_file):
+            logger.warning(f"{prefill_onnx_file} already exists, skip export")
+        else:
+            quanted_model = convert_fx_model_to_quanted_model(
+                wraped_qwen_model,
+                inputs,
+                target_device,
+                quant_config=quant_config,
             )
+            if self.config.mix_search is not None:
+                quanted_model = quanted_model.cuda()
+                quanted_model.enable_fast_precision_mode()
+                from xhquant.mix_precision.mix_precision import MixPrecisionSearch
 
-            precision_mode = PrecisionMode.FAST
-            ms.search(gpu_loader, precision_mode, label_dataloader, wrap_cfg)
-            quanted_model.enable_aligned_precision_mode()  # adjust precision mode
-            quanted_model = quanted_model.to("cpu")
-        # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
-        # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
-        logger.info(f"Export Prefill model to {prefill_onnx_file}")
+                with open(self.config.mix_search, "r") as f:
+                    ms_cfg = yaml.safe_load(f)
+                ms = MixPrecisionSearch(quanted_model, ms_cfg)
+                tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
+                # data preprocess
+                gpu_loader, label_dataloader = ms_data_preprocess(
+                    wraped_qwen_model, tokenizer, past_key_caches, past_value_caches
+                )
+
+                precision_mode = PrecisionMode.FAST
+                ms.search(gpu_loader, precision_mode, label_dataloader, wrap_cfg)
+                quanted_model.enable_aligned_precision_mode()  # adjust precision mode
+                quanted_model = quanted_model.to("cpu")
+            # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
+            # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+            logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
         logger.info(f"********************* start export decode model *********************")
         decode_inputs = (
@@ -281,9 +285,11 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
-
-        logger.info(f"Export decode model to {decode_onnx_file}")
+        if os.path.exists(decode_onnx_file):
+            logger.warning(f"{decode_onnx_file} already exists, skip export")
+        else:
+            convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
+            logger.info(f"Export decode model to {decode_onnx_file}")
         json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
 
     @classmethod
@@ -484,40 +490,46 @@ class Qwen3ConverterXH2a(HFTransfromersConverter):
 
         logger.info(f"********************* start export prefill model *********************")
 
-        quanted_model = convert_fx_model_to_quanted_model(
-            wraped_qwen_model,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
-        # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
-        # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
-        logger.info(f"Export Prefill model to {prefill_onnx_file}")
+        if os.path.exists(prefill_onnx_file):
+            logger.warning(f"{prefill_onnx_file} already exists, skip export")
+        else:
+            quanted_model = convert_fx_model_to_quanted_model(
+                wraped_qwen_model,
+                inputs,
+                target_device,
+                quant_config=quant_config,
+            )
+            # quant_info_onnx_file = str(Path(output_dir) / "quant_info.onnx")
+            # quanted_model.dump_quant_info_to_onnx(quant_info_onnx_file)
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+            logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
         logger.info(f"********************* start export decode model *********************")
-        decode_inputs = (
-            inputs_embeds[:, :1, :],
-            past_seq_length_t,
-            torch.ones_like(current_input_length_t),
-            # position_ids[:, :1],
-            past_key_caches,
-            past_value_caches,
-        )
+        if os.path.exists(decode_onnx_file):
+            logger.warning(f"{decode_onnx_file} already exists, skip export")
+        else:
+            decode_inputs = (
+                inputs_embeds[:, :1, :],
+                past_seq_length_t,
+                torch.ones_like(current_input_length_t),
+                # position_ids[:, :1],
+                past_key_caches,
+                past_value_caches,
+            )
 
-        # 更新与input_sequence_length相关的Module
-        wrap_cfg.input_sequence_length = 1
-        quanted_model.update_cfg(wrap_cfg)
+            # 更新与input_sequence_length相关的Module
+            wrap_cfg.input_sequence_length = 1
+            quanted_model.update_cfg(wrap_cfg)
 
-        decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
-        decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
-        meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
+            decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
+            decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
+            meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
+            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
 
-        logger.info(f"Export decode model to {decode_onnx_file}")
-        json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
+            logger.info(f"Export decode model to {decode_onnx_file}")
+            json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
 
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen3ConvertConfig, output_dir: str):

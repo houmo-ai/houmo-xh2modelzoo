@@ -58,6 +58,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="/data02/datasets/bge_reranker_base")
     parser.add_argument("--batch-size", type=int, default=10, help="batch size")
     parser.add_argument("--context-length", type=int, default=512, help="max sequence length")
-    parser.add_argument("--quant-type", default="w4a8_ssfp", help="quant type, default is w8a8_sefp")
+    parser.add_argument("--quant-type", default="w8a8_ssfp", help="quant type, default is w8a8_sefp")
     args = parser.parse_args()
     main(args)
