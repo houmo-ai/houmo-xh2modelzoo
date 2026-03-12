@@ -1,17 +1,20 @@
-import argparse
-import json
 import os
+import json
+import stat
+import onnx
+import torch
+import onnxsim
+import librosa
 import tempfile
+import argparse
+import torch.nn as nn
+import numpy as np
+
 from copy import deepcopy
 from pathlib import Path
-import librosa
-import onnx
-import onnxsim
-import torch
-import torch.nn as nn
 from datasets import load_dataset
-
 from qwen_asr import Qwen3ASRModel
+from onnx import TensorProto, helper, numpy_helper
 
 from transformers.pipelines.audio_utils import ffmpeg_read
 from xhquant.api import (
@@ -44,14 +47,141 @@ from qwen_asr.core.transformers_backend import (
     Qwen3ASRProcessor
 )
 
-# from qwen_asr.core.transformers_backend import (
-#     Qwen3ASRConfig,
-#     Qwen3ASRForConditionalGeneration,
-#     Qwen3ASRProcessor,
-# )
 
 GB = int(2**30)
-_LARGE_MODEL_SIZE_THRESHOLD = int(2**30 * 1.8)
+_LARGE_MODEL_SIZE_THRESHOLD = int(2**30 * 0.1)
+
+# ONNX TensorProto 类型 → numpy dtype 映射
+_ONNX_DTYPE_TO_NUMPY = {
+    TensorProto.FLOAT:   np.float32,
+    TensorProto.FLOAT16: np.float16,
+    TensorProto.DOUBLE:  np.float64,
+    TensorProto.INT8:    np.int8,
+    TensorProto.INT16:   np.int16,
+    TensorProto.INT32:   np.int32,
+    TensorProto.INT64:   np.int64,
+    TensorProto.UINT8:   np.uint8,
+    TensorProto.UINT16:  np.uint16,
+    TensorProto.UINT32:  np.uint32,
+    TensorProto.UINT64:  np.uint64,
+    TensorProto.BOOL:    np.bool_,
+}
+
+def change_onnx_initializer_type(
+    input_model_path: str,
+    output_model_path: str,
+    target_initializer_name: str,
+    new_data_type: int = TensorProto.FLOAT16
+):
+    input_model_path = os.path.abspath(input_model_path)
+    output_model_path = os.path.abspath(output_model_path)
+    print(f"📌 规范化路径：")
+    print(f"   输入模型：{input_model_path}")
+    print(f"   输出模型：{output_model_path}")
+    
+    # 1. 检查输入文件存在性 + 强制赋予读权限
+    if not os.path.exists(input_model_path):
+        raise FileNotFoundError(f"输入模型不存在：{input_model_path}")
+    
+    # 强制添加读权限（针对当前用户）
+    try:
+        os.chmod(input_model_path, os.stat(input_model_path).st_mode | stat.S_IRUSR)
+        print(f"✅ 已赋予输入文件读权限：{input_model_path}")
+    except Exception as e:
+        print(f"⚠️ 赋予读权限失败（可能需要sudo）：{e}")
+    
+    # 2. 检查输出目录 + 强制赋予写权限
+    output_dir = os.path.dirname(output_model_path)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True, mode=0o755) 
+        print(f"✅ 已创建输出目录：{output_dir}")
+    
+    # 强制添加输出目录写权限
+    try:
+        os.chmod(output_dir, os.stat(output_dir).st_mode | stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+        print(f"✅ 已赋予输出目录读写执行权限：{output_dir}")
+    except Exception as e:
+        print(f"⚠️ 赋予输出目录权限失败（可能需要sudo）：{e}")
+    
+    try:
+        model = onnx.load(input_model_path)
+        print("✅ 原始模型加载成功")
+    except Exception as e:
+        raise RuntimeError(f"加载模型失败：{e}")
+
+    target_np_dtype = _ONNX_DTYPE_TO_NUMPY.get(new_data_type)
+    if target_np_dtype is None:
+        raise ValueError(f"不支持的目标 ONNX 类型：{new_data_type}")
+
+    modified = False
+    for i, init in enumerate(model.graph.initializer):
+        if init.name == target_initializer_name:
+            old_type = init.data_type
+            np_array = numpy_helper.to_array(init)
+            np_array_converted = np_array.astype(target_np_dtype)
+            new_init = numpy_helper.from_array(np_array_converted, name=init.name)
+            model.graph.initializer[i].CopyFrom(new_init)
+            print(f"✅ 修改 initializer [{target_initializer_name}]：")
+            print(f"   原始类型：{TensorProto.DataType.Name(old_type)} ({np_array.dtype})"
+                  f" → 新类型：{TensorProto.DataType.Name(new_data_type)} ({target_np_dtype.__name__})")
+            print(f"   shape: {np_array.shape}")
+            modified = True
+            break
+
+    if not modified:
+        print(f"❌ 未找到 initializer：{target_initializer_name}")
+        print("📋 模型中前20个 initializer 名称：")
+        for idx, init in enumerate(model.graph.initializer[:20]):
+            print(f"   {idx+1}. {init.name}  dtype={TensorProto.DataType.Name(init.data_type)}")
+        raise ValueError(f"未找到指定的 initializer：{target_initializer_name}")
+
+    for inp in model.graph.input:
+        if inp.name == target_initializer_name:
+            inp.type.tensor_type.elem_type = new_data_type
+            print(f"✅ 同步更新 graph.input [{target_initializer_name}] 的类型声明")
+            break
+
+    for vi in model.graph.value_info:
+        if vi.name == target_initializer_name:
+            vi.type.tensor_type.elem_type = new_data_type
+            print(f"✅ 同步更新 graph.value_info [{target_initializer_name}] 的类型声明")
+            break
+
+    try:
+        onnx.checker.check_model(model)
+        print("✅ 修改后模型结构验证通过")
+    except onnx.checker.ValidationError as e:
+        print(f"⚠️ 模型验证警告（可忽略 hmonnx 自定义算子警告）：{e}")
+
+    output_stem = os.path.splitext(os.path.basename(output_model_path))[0]
+    model_byte_size = model.ByteSize()
+    use_external_data = model_byte_size > _LARGE_MODEL_SIZE_THRESHOLD
+    print(f"📌 模型大小：{model_byte_size / (1 << 30):.3f} GB，"
+          f"{'使用' if use_external_data else '不使用'} external data 格式保存")
+    try:
+        if use_external_data:
+            onnx.save(
+                model,
+                output_model_path,
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=f"{output_stem}_external_data",
+            )
+        else:
+            onnx.save(model, output_model_path)
+        print(f"✅ 模型已保存至：{output_model_path}")
+        saved_model = onnx.load(output_model_path)
+        print(f"✅ 回读验证通过，initializer 数量：{len(saved_model.graph.initializer)}")
+    except Exception as e:
+        temp_output = os.path.join("/tmp", "modified_model_temp.onnx")
+        try:
+            onnx.save(model, temp_output)
+            os.rename(temp_output, output_model_path)
+            print(f"✅ 临时目录保存后移动至目标路径：{output_model_path}")
+        except Exception as e2:
+            raise RuntimeError(f"保存模型失败：\n主方案：{e}\n临时目录方案：{e2}")
+
+
 
 def main(args):
     target_device = "XH2a"
@@ -180,6 +310,14 @@ def main(args):
             # input_names=["input_features"],
             output_names=output_names,
         )
+    
+        change_onnx_initializer_type(
+            input_model_path=hmonnx_file,
+            output_model_path=hmonnx_file,
+            target_initializer_name="_constant_48_output_0_",
+            new_data_type=TensorProto.FLOAT16,
+        )
+
     # 生成golden
     if args.gen_golden and not Path(golden_path).exists():
         session = HMONNXGoldenInference(hmonnx_file)
