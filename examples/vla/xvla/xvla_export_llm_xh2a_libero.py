@@ -75,7 +75,7 @@ def main(args):
     assert isinstance(xh_model, XHFlorence2EncoderLLMModel), f"Model must be XHFlorence2EncoderLLMModel, but got {type(xh_model)}"
 
     xh_model.init_wrap_model(policy)
-    tokenizer = xh_model.get_tokenizer()
+    tokenizer = xh_model.get_tokenizer(tokenizer_path=cfg.tokenizer_dir)
 
     onnx_dir = Path(cfg.work_dir) / "onnx"
     onnx_dir.mkdir(exist_ok=True, parents=True)

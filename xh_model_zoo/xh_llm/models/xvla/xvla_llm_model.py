@@ -43,9 +43,8 @@ class XHFlorence2EncoderLLMModel(LLMBaseModel):
         encoder = encoder.half()
         return encoder
     
-    def get_tokenizer(self):
-        # tokenizer = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
-        tokenizer = AutoTokenizer.from_pretrained("/data01/home/chenzx/.cache/huggingface/hub/models--facebook--bart-large/snapshots/cb48c1365bd826bd521f650dc2e0940aee54720c")
+    def get_tokenizer(self,tokenizer_path=None):
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         return tokenizer
 
     def init_wrap_model(self, hf_model: Optional[Florence2Encoder] = None):
