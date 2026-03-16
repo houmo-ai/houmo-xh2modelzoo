@@ -37,7 +37,7 @@ from xhquant.utils.registry import DynamicModule
 import torch.nn.functional as F
 from ..builder import XHLLM_TRACEABLE_MODULES
 
-from transformers.models.bert.modeling_bert import BertModel, BertEncoder, BertLayer, BertSdpaSelfAttention, BertForMaskedLM
+from transformers.models.bert.modeling_bert import BertModel, BertEncoder, BertLayer, BertSdpaSelfAttention, BertForMaskedLM, BertForSequenceClassification
 from transformers.cache_utils import Cache
 
 @XHLLM_TRACEABLE_MODULES.register_module({BertModel: "BertModel"})
@@ -86,6 +86,8 @@ class _BertModel(DynamicModule):
         encoder_extended_attention_mask = None
         head_mask = None
 
+        # attention_mask [1,1,512,512]
+
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=attention_mask,
@@ -98,10 +100,12 @@ class _BertModel(DynamicModule):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-        )
+        ) # [1, 512, 768]
         # sequence_output = encoder_outputs[0]
-
+        if self.pooler is not None:
+            encoder_outputs = self.pooler(encoder_outputs) # [1, 768]
         return encoder_outputs
+
     def _setup(self, cfg: Optional[Dict] = None):
         return self
 
@@ -255,6 +259,51 @@ class _BertForMaskedLM(DynamicModule):
 
         sequence_output = outputs[0]
         prediction_scores = self.cls(sequence_output)
+
+        return prediction_scores      
+            
+    
+    def _setup(self, cfg: Optional[Dict] = None):
+        return self   
+
+@XHLLM_TRACEABLE_MODULES.register_module({BertForSequenceClassification: "BertForSequenceClassification"})
+class _BertForSequenceClassification(DynamicModule):
+    def forward(
+        self,
+        token_embedding: Optional[torch.Tensor] = None,
+        token_type_embeddings = None,
+        position_embeddings = None,        
+        attention_mask: Optional[torch.Tensor] = None,
+        # token_type_ids: Optional[torch.Tensor] = None,
+        # position_ids: Optional[torch.Tensor] = None,
+        # head_mask: Optional[torch.Tensor] = None,
+        # inputs_embeds: Optional[torch.Tensor] = None,
+        # encoder_hidden_states: Optional[torch.Tensor] = None,
+        # encoder_attention_mask: Optional[torch.Tensor] = None,
+        # labels: Optional[torch.Tensor] = None,
+        # output_attentions: Optional[bool] = None,
+        # output_hidden_states: Optional[bool] = None,
+        # return_dict: Optional[bool] = None,
+    ):
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            token_embedding,
+            attention_mask=attention_mask,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=False,
+            token_type_embeddings=token_type_embeddings,
+            position_embeddings=position_embeddings,
+        )
+
+        prediction_scores = self.classifier(outputs)
 
         return prediction_scores      
             

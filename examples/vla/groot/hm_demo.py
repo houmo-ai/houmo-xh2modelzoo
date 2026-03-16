@@ -31,13 +31,12 @@ from xh_model_zoo.xh_llm.models.groot.inference import Qwen3LegacyInference
 from xh_model_zoo.xh_llm.models.groot.cus_egale3 import cus_eagle3_inference
 from xh_model_zoo.xh_llm.models.groot.cus_groot import cus_GROOT
 def main(args):
-    model_name = "/data02/datasets/groot"
-    device = "cuda"
+    device = args.device
     np.random.seed(42)
     policy = Gr00tPolicy(
-        model_path='/data02/datasets/GROOT-N1.6-3B',
+        model_path=args.model,
         embodiment_tag=EmbodimentTag('gr1'),
-        device='cuda',
+        device=device,
     )
     # policy.model.backbone.model.vision_model
     obs = {
@@ -57,24 +56,24 @@ def main(args):
     }
 
 
-    vision_model_path = "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/groot/hmonnx/groot_vision-XH2a-w8a8h1_sefp.onnx"
+    vision_model_path = args.hmonnx_path + "/groot_vision-XH2a-w8a8h1_sefp.onnx.onnx"
     vision_model = HMONNXGoldenInference(vision_model_path)
     vision_model.exec_device = torch.device("cuda:0")
 
-    qwen3_inference_engine = Qwen3LegacyInference("work_dirs/groot/meta.json", fast_mode=True, tokenizer=policy.collate_fn.processor.tokenizer)
+    qwen3_inference_engine = Qwen3LegacyInference(args.hmonnx_path + "/meta.json", fast_mode=True, tokenizer=policy.collate_fn.processor.tokenizer)
     
     backbone_engine = cus_eagle3_inference.to_hf_compatible(
         hf_model=policy.model.backbone.model,
         text_encoder=qwen3_inference_engine,
         vision=vision_model,
-        meta_info="work_dirs/groot/meta.json",
+        meta_info=args.hmonnx_path + "/meta.json",
     )
 
-    head_pre_path= "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/groot_head/hmonnx/groot_head_pre-XH2a-w8a8h1_sefp.onnx"
+    head_pre_path= args.hmonnx_path + "/groot_head_pre-XH2a-w8a8h1_sefp.onnx"
     head_pre_model = HMONNXGoldenInference(head_pre_path)
     head_pre_model.exec_device = torch.device("cuda:0")
 
-    head_path= "/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/groot_head/hmonnx/groot_head-XH2a-w8a8h1_sefp.onnx"
+    head_path= args.hmonnx_path + "/groot_head-XH2a-w8a8h1_sefp.onnx"
     head_model = HMONNXGoldenInference(head_path)
     head_model.exec_device = torch.device("cuda:0")
 
@@ -83,7 +82,7 @@ def main(args):
         backbone=backbone_engine,
         new_network_pre=head_pre_model,
         new_network=head_model,
-        meta_info="work_dirs/groot/meta.json",
+        meta_info=args.hmonnx_path + "/meta.json",
     )
 
 
@@ -91,9 +90,6 @@ def main(args):
     policy.model = policy.model.to(torch.float16)
     # policy.model.backbone.model = backbone_engine
 
-
-    work_dir = Path("work_dirs") / "groot"
-    work_dir.mkdir(exist_ok=True, parents=True)
 
     policy.model = xhmodel
     action = policy.get_action(obs)
@@ -106,7 +102,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default='/data02/datasets/GROOT-N1.6-3B')
+    parser.add_argument("--hmonnx_path", type=str, default="work_dirs/groot")
+    parser.add_argument("--device", type=str, default="cuda", help="device")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")

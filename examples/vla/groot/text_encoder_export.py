@@ -55,9 +55,9 @@ def main(args):
     )
 
     policy = Gr00tPolicy(
-        model_path='/data02/datasets/GROOT-N1.6-3B',
+        model_path=args.model,
         embodiment_tag=EmbodimentTag('gr1'),
-        device='cuda',
+        device=device,
     )
 
     obs = {
@@ -76,10 +76,10 @@ def main(args):
         },
     }
 
-    work_dir = Path("work_dirs") / "groot"
+    work_dir = Path(args.output_path)
     work_dir.mkdir(exist_ok=True, parents=True)
 
-    Qwen3LegacyConverterXH2a(config)._convert(policy.model.backbone.model.language_model.model.half(), work_dir)
+    Qwen3LegacyConverterXH2a(config)._convert(policy.model.backbone.model.language_model.model.half(), args.output_path)
 
     # image = pipe(
     #     prompt=prompt + positive_magic["en"],
@@ -97,7 +97,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default='/data02/datasets/GROOT-N1.6-3B')
+    parser.add_argument("--output_path", type=str, default="work_dirs/groot")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")

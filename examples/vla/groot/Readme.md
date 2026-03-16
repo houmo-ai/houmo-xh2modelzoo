@@ -16,10 +16,31 @@
 ```bash
 pip install transformers==4.51.3
 ```
+### 1.2 Clone the Repository
+
+The Gr00t model repository is already cloned at:
+```
+/data01/home/xuchen/xh2/xh2_model_zoo/xh_model_zoo/xh_llm/models/groot/gr00t
+```
+
+If you need to re-clone or update the repository:
+
+```bash
+git clone https://github.com/NVIDIA/Isaac-GR00T.git
+```
+
+### 1.3 Soft Link Setup
+
+The Gr00t model is already soft-linked to the correct location:
+```
+ln -s Isaac-GR00T/gr00t xh_model_zoo/xh_llm/models/groot/gr00t
+```
+
+The current repository is already in the correct location, so no additional soft linking is needed.
 
 如未安装本仓库依赖，请先在仓库根目录完成基础安装（按项目既有方式，如 `pip install -e .` 或 `poetry install`）。
 
-### 1.2 模型与路径
+### 1.4 模型与路径
 
 当前脚本中存在硬编码路径，使用前请替换为你本机路径：
 

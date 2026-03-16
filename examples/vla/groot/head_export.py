@@ -16,7 +16,7 @@ def main(args):
     print('Loading GR00T N1.6...')
     with torch.no_grad():
         policy = Gr00tPolicy(
-            model_path='/data02/datasets/GROOT-N1.6-3B',
+            model_path=args.model,
             embodiment_tag=EmbodimentTag('gr1'),
             device='cuda',
         )
@@ -41,14 +41,15 @@ def main(args):
 
         Groot_HEAD_ConverterXH2a(config)._convert(
             policy.model.action_head,
-            "work_dirs/groot_head",
+            args.output_path,
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="data/models/Qwen3-8B")
+    parser.add_argument("--model", type=str, default='/data02/datasets/GROOT-N1.6-3B')
+    parser.add_argument("--output_path", type=str, default="work_dirs/groot_head")
     parser.add_argument(
         "--context-length", type=int, default=2048, help="max sequence length"
     )

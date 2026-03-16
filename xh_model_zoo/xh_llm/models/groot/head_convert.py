@@ -360,7 +360,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
             logger.info(f"{head_onnx_file} exists, skip export head model.")
 
         meta_info["onnx"] = str(Path(head_onnx_file).relative_to(work_dir))
-        head_golden_dir = "/data02/users/cc_work/golden/groot/head" # str(work_dir / "golden" / f"{prefix}")
+        head_golden_dir = str(work_dir / "golden" / f"{prefix}")
 
         if not Path(head_golden_dir).exists():
             logger.info(f"start export vision model golden............")
@@ -381,5 +381,5 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
             logger.info(f"{head_golden_dir} exists, skip export vision model golden.")
 
 
-        meta_info["decoder_golden_dir"] = str(Path(head_golden_dir))
-        json.dump(meta_info, open(work_dir / "meta_vision.json", "w"), indent=4)
+        # meta_info["decoder_golden_dir"] = str(Path(head_golden_dir))
+        # json.dump(meta_info, open(work_dir / "meta_vision.json", "w"), indent=4)

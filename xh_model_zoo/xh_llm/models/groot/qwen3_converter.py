@@ -235,12 +235,12 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         # for layer_idx in range(num_decoder_layers):
         #     input_names.append(f"past_value_cache_{layer_idx}")
 
-        input_emb = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/input_embeds.pt")
-        output_ori = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/outputs.pt", weights_only=False)
+        # input_emb = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/input_embeds.pt")
+        # output_ori = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/outputs.pt", weights_only=False)
         wraped_qwen_model.use_cache = False
 
         with torch.no_grad():
-            output = wraped_qwen_model(input_emb)
+            output = wraped_qwen_model(inputs_embeds)
 
         output_names = ["hidden_states"]
 
@@ -263,7 +263,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
             logger.info(f"Export Prefill model to {prefill_onnx_file}")
         
-        llm_golden_dir = f"/data02/users/cc_work/golden/groot/{model_name}" # str(work_dir / "golden" / f"{prefix}")
+        llm_golden_dir = str(work_dir / "golden" / f"{prefix}")
         if not Path(llm_golden_dir).exists():
             logger.info(f"start export vision model golden............")
             from xhquant.api import HMONNXGoldenInference

@@ -21,9 +21,9 @@ def main(args):
     print('Loading GR00T N1.6...')
     with torch.no_grad():
         policy = Gr00tPolicy(
-            model_path='/data02/datasets/GROOT-N1.6-3B',
+            model_path=args.model,
             embodiment_tag=EmbodimentTag('gr1'),
-            device='cuda',
+            device=args.device,
         )
         # policy.model.backbone.model.vision_model
         obs = {
@@ -46,14 +46,16 @@ def main(args):
 
         Groot_ConverterXH2a(config)._convert(
             policy.model.backbone.model.vision_model,
-            "work_dirs/groot",
+            args.output_path,
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="data/models/Qwen3-8B")
+    parser.add_argument("--model", type=str, default='/data02/datasets/GROOT-N1.6-3B')
+    parser.add_argument("--output_path", type=str, default="work_dirs/groot")
+    parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument(
         "--context-length", type=int, default=2048, help="max sequence length"
     )
