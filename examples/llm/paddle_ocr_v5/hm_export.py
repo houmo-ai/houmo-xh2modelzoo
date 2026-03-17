@@ -1,5 +1,3 @@
-from re import A
-from librosa import ex
 import torch
 from xhquant.api import (  # type: ignore # isort:skip
     Config,
@@ -20,8 +18,8 @@ import os
 from pathlib import Path
 import onnxruntime as ort
 import numpy as np
-import matplotlib.pyplot as plt
 from PIL import Image
+import ast
 
 def tensor_to_image(tensor, save_path="output.png"):
     """
@@ -64,13 +62,17 @@ def main(args):
     det_input = torch.randn(1, 3, 512, 896) 
 
     rec_onnx_path = args.onnx_model_path + "/rec.onnx"
-    rec_input = torch.randn(6, 3, 48, 320)
+    
+    # 解析 rec_shape 参数，支持字符串格式 "[6, 3, 48, 320]"
+    if isinstance(args.rec_shape, str):
+        rec_shape = ast.literal_eval(args.rec_shape)
+    else:
+        rec_shape = args.rec_shape
+    
+    rec_input = torch.randn(*rec_shape)
 
     quant_det_model_path = work_dirs / "hmquant_xh2_paddleocr_det.onnx"
     quant_rec_model_path = work_dirs / "hmquant_xh2_paddleocr_rec.onnx"
-
-    inp = np.load("/data01/home/xuchen/xh2/xh2_model_zoo/data/models/pp_ocrv5/input.npy")
-    det_input = torch.from_numpy(inp).to(device)
 
     if True:
         quanted_model = convert_onnx_to_hmonnx(
@@ -142,5 +144,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output_path", type=str, default="work_dirs/paddle_312")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--rec_shape", default="[6, 3, 48, 320]", help="rec shape, default is [3, 48, 320]")
     args = parser.parse_args()
     main(args)
