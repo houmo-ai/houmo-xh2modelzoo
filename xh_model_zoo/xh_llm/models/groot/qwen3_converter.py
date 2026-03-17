@@ -23,16 +23,10 @@ import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-
-<<<<<<< HEAD
-from sympy import false
-=======
->>>>>>> 3a89f49a2e5934e3d95675423f707fd020fcb9c1
 import torch
 import yaml
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, Qwen3ForCausalLM
 from xhquant.api import CacheTensor
-
 from ....datasets.preprocess.mix_search_preprocess import ms_data_preprocess
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
@@ -214,7 +208,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         mask = torch.ones((1, input_sequence_length) ).to(device).half() * -65504
         mask[0,:109] = 0
 
-        inputs = (
+        inputs = [
             inputs_embeds,
             # mask,
             # past_seq_length_t,
@@ -222,7 +216,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             # # position_ids,
             # past_key_caches,
             # past_value_caches,
-        )
+        ]
         input_names = [
             "inputs_embeds",
             # "mask",

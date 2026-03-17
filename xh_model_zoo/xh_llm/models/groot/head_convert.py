@@ -19,16 +19,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from pickle import TRUE
-from pyexpat import model
 import shutil
-import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Union
-
-from jwt import encode
 from numpy import dtype
 import onnx
 from regex import B
@@ -165,8 +160,8 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
             backbone_features = torch.rand(1, 256, 2048).to(self.device).half()
             state = torch.rand(1, 1, 128).to(self.device).half()
             timesteps_tensor = torch.tensor([0]).to(self.device)
-            actions = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/actions.pt").to(self.device)  # For testing with a fixed action trajectory
-            # actions = torch.rand(1, 50, 128).to(self.device).half()
+            # actions = torch.load("/data01/home/xuchen/xh2/xh2_model_zoo/work_dirs/actions.pt").to(self.device)  # For testing with a fixed action trajectory
+            actions = torch.rand(1, 50, 128).to(self.device).half()
             image_mask = torch.zeros(1, 256).to(self.device).to(torch.bool)
             image_mask[:, 26:109] = 1
             backbone_attention_mask = torch.ones(1, 256).to(self.device).to(torch.bool)

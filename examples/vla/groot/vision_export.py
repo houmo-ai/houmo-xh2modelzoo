@@ -43,6 +43,7 @@ def main(args):
         }
 
         config = Groot_ConvertConfig()
+        config.quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.quant_type)
 
         Groot_ConverterXH2a(config)._convert(
             policy.model.backbone.model.vision_model,
