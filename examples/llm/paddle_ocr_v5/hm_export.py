@@ -60,10 +60,10 @@ def main(args):
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type) # , ops=ops
     quant_config = create_quant_config(quant_scheme)
 
-    det_onnx_path = args.onnx_model_path + "/det.sim.onnx"
+    det_onnx_path = args.onnx_model_path + "/det.onnx"
     det_input = torch.randn(1, 3, 512, 896) 
 
-    rec_onnx_path = args.onnx_model_path + "/rec.sim.onnx"
+    rec_onnx_path = args.onnx_model_path + "/rec.onnx"
     rec_input = torch.randn(6, 3, 48, 320)
 
     quant_det_model_path = work_dirs / "hmquant_xh2_paddleocr_det.onnx"
@@ -100,7 +100,7 @@ def main(args):
 
 
 
-    if False:
+    if True:
         quanted_model = convert_onnx_to_hmonnx(
             rec_onnx_path,
             [rec_input],
@@ -132,7 +132,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--onnx_model_path", type=str, default="data/models/pp_ocrv5")
+    parser.add_argument("--onnx_model_path", type=str, default="data/models/ocr_onnx")
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
     parser.add_argument(
         "--quant_weight",
@@ -140,7 +140,7 @@ if __name__ == "__main__":
         default=None,
         help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
     )
-    parser.add_argument("--output_path", type=str, default="work_dirs/paddle")
+    parser.add_argument("--output_path", type=str, default="work_dirs/paddle_312")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
     main(args)
