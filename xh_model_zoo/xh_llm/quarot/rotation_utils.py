@@ -52,6 +52,10 @@ def bake_mean_into_conv(conv: torch.nn.Conv2d) -> None:
         conv.bias.data = conv.bias.data.to(conv_dtype)
 
 
+def bake_mean_into_emb(embedding: torch.nn.Embedding) -> None:
+    embedding.weight.data = embedding.weight.data - embedding.weight.data.mean(dim=1, keepdim=True)
+
+
 def _fuse_ln_lora_a(linear: torch.nn.Module, layernorm_weight: torch.Tensor) -> None:
     """Fuse layernorm weight into LoRA A matrix (input-side scaling)."""
     if not hasattr(linear, "weight_lora_a"):
@@ -181,6 +185,7 @@ def fuse_layer_norms(model, device=None, llm_rotate=True):
 
     elif model_type == model_utils.QWEN3_VL_MODEL or model_type==model_utils.QWEN3_VL_MOE_MODEL:
         bake_mean_into_conv(model.visual.patch_embed.proj)
+        bake_mean_into_emb(model.visual.pos_embed)
 
         for layer in model.visual.blocks:
             fuse_ln_linear(layer.norm1, [layer.attn.qkv])
