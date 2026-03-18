@@ -7,7 +7,18 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForVision2Seq, AutoProcessor
 
-from xhquant.api import Config, ConfigDict, get_root_logger, PrecisionMode, ptq_quantize, set_random_seed
+from xhquant.api import (
+    Config,
+    ConfigDict,
+    get_root_logger,
+    PrecisionMode,
+    ptq_quantize,
+    set_random_seed,
+    QuantScheme,
+    DeviceType,
+    create_quant_config,
+    convert_fx_model_to_quanted_model,
+)
 from xh_model_zoo.utils.time_profiler import  TimeProfiler
 from xh_model_zoo.xh_llm.models.builder import MODELS
 from xh_model_zoo.xh_llm.utils import decode_next_token
@@ -19,6 +30,7 @@ from xh_model_zoo.xh_llm.models.openvla import XHLlamaModel
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="/data01/home/she.gao/xh2modelzoo/examples/vla/openvla/config/openvla_llm.py")
+    parser.add_argument("--quant-type", type=str, default="w8a8_sefp")
     parser.add_argument("--batch", type=int, default=1)
     return parser.parse_args()
 
@@ -124,22 +136,29 @@ def main():
         "input_ids": text.input_ids.to(device),
         "past_seq_length": [0] * args.batch,
     }
+    inputs = xh_model.prepare_inputs_for_graph(data_batch)
 
-    # frontend
-    xh_model.convert_to_fronted_graph(data_batch)
-    xh_model.change_eval_type(EvalModelType.FRONTEND)
+    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.quant_type)
+    quant_config = ConfigDict(create_quant_config(quant_scheme))
+    xh_model._quanted_model = convert_fx_model_to_quanted_model(
+        xh_model._wrap_model, inputs, cfg.target_device, quant_config=quant_config
+    )
 
-    # quant
-    xh_model.convert_to_quant_graph(cfg.target_device)
-    xh_model.change_eval_type(EvalModelType.QUANTED_DISABLED)
+    # # frontend
+    # xh_model.convert_to_fronted_graph(data_batch)
+    # xh_model.change_eval_type(EvalModelType.FRONTEND)
+
+    # # quant
+    # xh_model.convert_to_quant_graph(cfg.target_device)
+    # xh_model.change_eval_type(EvalModelType.QUANTED_DISABLED)
 
     calib = xh_model.prepare_inputs(data_batch)
     flat = []
     for x in calib:
         flat.extend(x) if isinstance(x, (list, tuple)) else flat.append(x)
 
-    with TimeProfiler("PTQ Quantize", logger):
-        ptq_quantize(xh_model.quanted_model, [flat], PrecisionMode.ALIGNED, [exec_device])
+    # with TimeProfiler("PTQ Quantize", logger):
+    #     ptq_quantize(xh_model.quanted_model, [flat], PrecisionMode.ALIGNED, [exec_device])
 
     xh_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
 
