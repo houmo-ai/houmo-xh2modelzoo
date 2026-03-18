@@ -46,17 +46,18 @@ class cus_GROOT(Gr00tN1d6):
         state = action_input['state']
 
         # breakpoint()
+        batch_size = image_mask.shape[0]
 
         if image_mask.shape[1] < 256:
-            image_mask = torch.cat([image_mask, torch.zeros((5, 256 - image_mask.shape[1]), dtype=torch.bool, device=image_mask.device)], dim=1)
-            backbone_attention_mask = torch.cat([backbone_attention_mask, torch.zeros((5, 256 - backbone_attention_mask.shape[1]), dtype=torch.bool, device=backbone_attention_mask.device)], dim=1)
-            backbone_features = torch.cat([backbone_features, torch.zeros((5, 256 - backbone_features.shape[1], backbone_features.shape[-1]), dtype=backbone_features.dtype, device=backbone_features.device)], dim=1)
+            image_mask = torch.cat([image_mask, torch.zeros((batch_size, 256 - image_mask.shape[1]), dtype=torch.bool, device=image_mask.device)], dim=1)
+            backbone_attention_mask = torch.cat([backbone_attention_mask, torch.zeros((batch_size, 256 - backbone_attention_mask.shape[1]), dtype=torch.bool, device=backbone_attention_mask.device)], dim=1)
+            backbone_features = torch.cat([backbone_features, torch.zeros((batch_size, 256 - backbone_features.shape[1], backbone_features.shape[-1]), dtype=backbone_features.dtype, device=backbone_features.device)], dim=1)
 
         image_attention_mask= image_mask & backbone_attention_mask
         non_image_attention_mask= (~image_mask) & backbone_attention_mask
 
-        image_attn_reshape = image_attention_mask.repeat(32,1).view(5,32,1,256)
-        non_image_attn_reshape = non_image_attention_mask.repeat(32,1).view(5,32,1,256)
+        image_attn_reshape = image_attention_mask.repeat(32,1).view(batch_size,32,1,256)
+        non_image_attn_reshape = non_image_attention_mask.repeat(32,1).view(batch_size,32,1,256)
 
         image_attention_mask = torch.zeros_like(image_attn_reshape, dtype=torch.float16)
         image_attention_mask[image_attn_reshape == False] = -65504
@@ -67,7 +68,7 @@ class cus_GROOT(Gr00tN1d6):
         # backbone_features = []
         # state_features = []
         actions_list = []
-        for i in range(5):
+        for i in range(batch_size):
             backbone_feature, state_feature = self.new_network_pre(
                 backbone_features[i:i+1],
                 state[i:i+1],
