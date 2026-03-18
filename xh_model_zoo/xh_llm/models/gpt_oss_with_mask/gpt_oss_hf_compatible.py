@@ -26,7 +26,7 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, DynamicCache, GenerationMixin, GptOssForCausalLM
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_utils import no_init_weights
+from transformers.initialization import no_init_weights
 
 from .inference import GptOssWithMaskInference
 
@@ -49,7 +49,7 @@ def get_empty_hf_model(hf_model_dir, device_map="cpu", **kwargs) -> GptOssForCau
 
 class GptOssWithMaskHFCompatible(GptOssForCausalLM):
     def setup(self, llm_model: GptOssWithMaskInference, embed_tokens: torch.nn.Module):
-        self._prefill = False
+        self._is_prefill_phase = False
         self._past_seq_length = 0
         self._embed_tokens = embed_tokens
         self._llm_model = llm_model
@@ -217,39 +217,14 @@ class GptOssWithMaskHFCompatible(GptOssForCausalLM):
                 past_value_caches,
             )
 
-            # Debug: print output shapes
-            print(f"Step {i}: outputs type: {type(outputs)}")
             if isinstance(outputs, torch.Tensor):
-                print(f"Step {i}: outputs shape: {outputs.shape}")
                 all_outputs.append(outputs)
             else:
-                # This should not happen for GptOssWithMaskInference
-                print(f"Step {i}: outputs.logits shape: {outputs.logits.shape}")
                 all_outputs.append(outputs.logits)
 
         # Concatenate all outputs along sequence dimension
-        print(f"Number of outputs: {len(all_outputs)}")
         if all_outputs:
-            print(f"First output shape: {all_outputs[0].shape}")
-            print(f"Expected seq_length: {seq_length}")
-
-            # Check if we need to reshape the outputs
-            reshaped_outputs = []
-            for i, output in enumerate(all_outputs):
-                if output.shape[1] == 1:  # If output has only 1 token
-                    # Expand to match the expected sequence length for this step
-                    step_seq_length = min(input_sequence_length, seq_length - i * input_sequence_length)
-                    if step_seq_length > 1:
-                        # Repeat the single token output to match expected length
-                        output = output.expand(-1, step_seq_length, -1)
-                        print(f"Step {i}: expanded output shape: {output.shape}")
-                reshaped_outputs.append(output)
-
-            if isinstance(reshaped_outputs[0], torch.Tensor):
-                logits = torch.cat(reshaped_outputs, dim=1)  # Concatenate along seq_len dimension
-            else:
-                logits = torch.cat(reshaped_outputs, dim=1)
-            print(f"Final concatenated logits shape: {logits.shape}")
+            logits = torch.cat(all_outputs, dim=1)
         else:
             # Fallback: create dummy logits with correct shape
             batch_size = inputs_embeds.shape[0] if inputs_embeds is not None else 1
@@ -259,7 +234,6 @@ class GptOssWithMaskHFCompatible(GptOssForCausalLM):
                 dtype=inputs_embeds.dtype if inputs_embeds is not None else torch.float16,
                 device=inputs_embeds.device if inputs_embeds is not None else "cpu",
             )
-            print(f"Fallback logits shape: {logits.shape}")
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -281,11 +255,11 @@ class GptOssWithMaskHFCompatible(GptOssForCausalLM):
 
     @property
     def prefill(self):
-        return self._prefill
+        return self._is_prefill_phase
 
     @prefill.setter
     def prefill(self, prefill: bool):
-        self._prefill = prefill
+        self._is_prefill_phase = prefill
         if self._llm_model is not None and hasattr(self._llm_model, "set_phase_prefill"):
             self._llm_model.set_phase_prefill(prefill)
 

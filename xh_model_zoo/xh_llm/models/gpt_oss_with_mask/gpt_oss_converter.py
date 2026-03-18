@@ -89,12 +89,37 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
         self.output_dir: Optional[str] = None
 
     def load_hf_model(self, hf_model_dir: str, **kwargs):
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        # 参考 Qwen3MoeConverterXH2a 的实现：
-        # 这里只支持「非 HF 量化」的 GptOssForCausalLM 权重，量化权重通过外部 quant_weight 传入并融合。
-        if hasattr(config, "quantization_config"):
-            delattr(config, "quantization_config")
-        native_model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+        hf_config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+
+        # 如果用户指定了 rope_max_length，在加载模型前更新 HF config 的
+        # max_position_embeddings 和 rope_scaling.factor，
+        # 使 RotaryEmbedding 在 __init__ 时即使用正确的 inv_freq
+        rope_max_length = self.config.rope_max_length
+        if rope_max_length is not None:
+            logger = get_root_logger()
+            old_max_pos = getattr(hf_config, "max_position_embeddings", None)
+            if old_max_pos is not None and rope_max_length != old_max_pos:
+                hf_config.max_position_embeddings = rope_max_length
+                logger.info(
+                    f"Updated HF config max_position_embeddings: {old_max_pos} -> {rope_max_length}"
+                )
+            rope_scaling = getattr(hf_config, "rope_scaling", None)
+            if rope_scaling is not None and isinstance(rope_scaling, dict):
+                orig = rope_scaling.get("original_max_position_embeddings", None)
+                if orig is not None and orig > 0:
+                    new_factor = rope_max_length / orig
+                    old_factor = rope_scaling.get("factor", None)
+                    rope_scaling["factor"] = float(new_factor)
+                    hf_config.rope_scaling = rope_scaling
+                    logger.info(
+                        f"Updated HF config rope_scaling.factor: {old_factor} -> {new_factor} "
+                        f"(rope_max_length={rope_max_length} / original_max_position_embeddings={orig})"
+                    )
+
+        native_model = AutoModelForCausalLM.from_pretrained(
+            hf_model_dir, config=hf_config, **kwargs
+        )
+        native_model = self.dequantize_hf_model(native_model)
         assert isinstance(native_model, GptOssForCausalLM), (
             f"The model is not GptOssForCausalLM, but {type(native_model)}"
         )
@@ -111,6 +136,22 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
             hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
         )
         config.num_experts_per_tok = native_model.config.num_experts_per_tok
+
+        # 自动检测rope_max_length：优先使用用户配置，否则从HF config中推断
+        if config.rope_max_length is None:
+            hf_cfg = native_model.config
+            rope_max_length = getattr(hf_cfg, "max_position_embeddings", None)
+            if rope_max_length is not None:
+                config.rope_max_length = rope_max_length
+                logger.info(f"Auto-detected rope_max_length={config.rope_max_length} from HF config")
+
+        # 确保rope_max_length不小于context_length
+        if config.rope_max_length is not None and config.rope_max_length < config.context_length:
+            logger.warning(
+                f"rope_max_length({config.rope_max_length}) < context_length({config.context_length}), "
+                f"auto adjusting rope_max_length to {config.context_length}"
+            )
+            config.rope_max_length = config.context_length
 
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
@@ -183,6 +224,7 @@ class GptOssWithMaskConverterXH2a(HFTransfromersConverter):
                 ),
                 enable_rope=True,
                 num_experts_per_tok=config.num_experts_per_tok,
+                rope_max_length=config.rope_max_length,
             )
         )
 

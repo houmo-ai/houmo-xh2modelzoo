@@ -69,6 +69,11 @@ class _GptOssRotaryEmbedding(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         assert "dynamic" not in self.rope_type, f"{self.rope_type} is not supported in dynamic mode"
 
+        # 支持从cfg覆盖rope缓存长度（例如256k场景）
+        rope_max_length = cfg.get("rope_max_length", None) if cfg is not None else None
+        if rope_max_length is not None and rope_max_length > self.max_seq_len_cached:
+            self.max_seq_len_cached = rope_max_length
+
         # self.max_position_embeddings = max_position_embeddings
         # Build here to make `torch.jit.trace` work.
         self._setup_cos_sin_cache(seq_len=self.max_seq_len_cached, dtype=self.inv_freq.dtype)

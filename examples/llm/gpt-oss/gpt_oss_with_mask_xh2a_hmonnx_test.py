@@ -40,21 +40,10 @@ def main(args):
     batch_size = inference_engine.batch_size
     logger = get_root_logger()
     prompt = "你是谁？"
-    message = [
-        {"role": "user", "content": prompt},
-    ]
     device = inference_engine.device
     tokenizer = inference_engine.get_tokenizer(hf_model_path)
 
-    model_inputs = tokenizer.apply_chat_template(
-        message,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True,
-        reasoning_effort="low",  # Defaults to "medium", but also accepts "high" and "low"
-    ).to(device)
-
-    streamer = TextStreamer(tokenizer)
+    model_inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
     wraped_hf_model = GptOssWithMask_HFCompatible.to_hf_compatible(hf_model_path, inference_engine)
     auto_offload(wraped_hf_model, "XH2aQuantGptOssBlock")
@@ -65,11 +54,12 @@ def main(args):
     xhonnxruntime_config.verbose_progress = False
     with torch.no_grad():
         generated_ids = wraped_hf_model.generate(  # type: ignore
-                    **model_inputs,
-                    max_new_tokens=2048,
-                    temperature=0.0,
-                    do_sample=False,
-                    streamer=streamer,
+            **model_inputs,
+            max_new_tokens=16,
+            do_sample=False,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id,
+            streamer=TextStreamer(tokenizer, skip_prompt=True),
         )
     output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
     content = tokenizer.decode(output_ids, skip_special_tokens=True).strip("\n")
@@ -82,7 +72,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/gpt-oss-20b-XH2a-2k-w8a8h0_sefp/meta.json",
+        default="work_dirs/gpt-oss-20b-XH2a-8k-w8a8h0_sefp/meta.json",
         help="Path to meta.json file",
     )
     parser.add_argument("--hf-model", type=str, default="data/datasets/gpt-oss-20b", help="HuggingFace model path")
