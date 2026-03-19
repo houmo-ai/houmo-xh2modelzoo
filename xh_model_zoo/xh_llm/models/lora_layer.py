@@ -6,7 +6,6 @@ import torch.nn as nn
 from torch import Tensor
 from tqdm import tqdm
 from xhquant.api import FrontendGraph, get_xhquant_logger
-from xhquant.frontend.fx_transform.normalizer_transform import NormalizerTransform
 from xhquant.frontend.torchfx import xh_fx
 from xhquant.nn import FX_LEAF_MODULES
 
@@ -180,8 +179,4 @@ def apply_lora_to_linear(
         replace_linear_with_lora(fronted_model, node, lora_graph_module, lora_mask_node)
         fronted_model.cpu()
 
-    # 将新增的 call_function(add/mul) 规范化为 call_module，避免量化阶段报 Unsupported op。
-    normalizer = NormalizerTransform()
-    normalizer.graph_module = fronted_model
-    fronted_model = normalizer.run()
     return fronted_model
