@@ -39,42 +39,50 @@ def main(args):
     assert Path(hf_model_path).exists(), f"HF model path {hf_model_path} does not exist."
     batch_size = inference_engine.batch_size
     logger = get_root_logger()
+    # messages = [
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "你多大了？用中文回答。"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "中国首都是哪里？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "香港特别行政区是哪一年成立的？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "神舟五号是哪年发射的？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "中国第一个进入太空的是谁？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "人类第一个进入太空的是谁？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "人类是哪年实现载人登月的？"},
+    #     ],
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "中国第一颗卫星的名字是什么？"},
+    #     ],
+    # ]
+    # assert len(messages) >= batch_size
+    # messages = messages[:batch_size]
+    prompt = "声音调到80"
     messages = [
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "你多大了？用中文回答。"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "中国首都是哪里？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "香港特别行政区是哪一年成立的？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "神舟五号是哪年发射的？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "中国第一个进入太空的是谁？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "人类第一个进入太空的是谁？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "人类是哪年实现载人登月的？"},
-        ],
-        [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "中国第一颗卫星的名字是什么？"},
-        ],
+        {
+            "role": "system",
+            "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取。",
+        },
+        {"role": "user", "content": prompt},
     ]
-    assert len(messages) >= batch_size
-    messages = messages[:batch_size]
     # ids, text = inference_engine._forward(messages)
     # logger.info(f"{ids}, {text}")
     device = inference_engine.device
@@ -119,7 +127,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/Qwen3-8B-XH2a-2k-w8a8h1_sefp-lora/meta.json",
+        default="",
     )
     parser.add_argument("--hf-model", type=str)
     parser.add_argument("--device", type=str, default="cuda:0")
