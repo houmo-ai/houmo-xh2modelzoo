@@ -1,8 +1,8 @@
 # Copyright 2025 HOUMO AI
 #
-# File: model_export.py
+# File: text_encoder_export.py
 # Description:
-#   Example script: llm/bert/model_export.py
+#   Example script: llm/zimage/text_encoder_export.py
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,65 +18,74 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+# from diffusers import ZImagePipeline
 import torch
-from xh_model_zoo.xh_llm.models.bert.bert_converter import BertConverterXH2a
-from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger 
+from xh_model_zoo.xh_llm.models.groot.qwen3_convert_config import Qwen3LegacyConvertConfig
+# from xh_model_zoo.xh_llm.models.qwen_image.qwen2_5_vl_converter import Qwen2_5_VLConverterXH2a
+# from xh_model_zoo.xh_llm.models.qwen_image.pipeline_cus import cus_QwenImagePipeline
+from pathlib import Path
+from xh_model_zoo.xh_llm.models.groot.qwen3_converter import Qwen3LegacyConverterXH2a
 import argparse
-from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig, VisualConfig
+from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger 
+
+import torch
+from pathlib import Path
+import argparse
+from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, HMONNXGoldenInference, Config
+# from xh_model_zoo.xh_llm.models.groot.cus_groot import cus_GROOT
+import numpy as np
+from xh_model_zoo.xh_llm.models.groot.gr00t.policy.gr00t_policy import Gr00tPolicy
+from xh_model_zoo.xh_llm.models.groot.gr00t.data.embodiment_tags import EmbodimentTag
 
 def main(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForMaskedLM.from_pretrained(args.model)
-    model = model.to("cuda")
+    device = "cuda"
 
-    input_txt = "你好"
-    input_ids = tokenizer(
-        input_txt, return_tensors="pt", padding="max_length", max_length=args.context_length
-    ).input_ids
-
-    output = model(input_ids.cuda())
     target_device = DeviceType.XH2a
-
     quant_type = args.quant_type
-    # ops=dict(MatMul=dict(
-    #             act_scheme=dict(
-    #                 bits=8,
-    #                 fp_mode="sefp",
-    #             ),
-    #             act_schema_2=dict(
-    #                 bits=16,
-    #                 fp_mode="sefp",
-    #             ),))
 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type) # , ops=ops
 
-    config = Qwen2_5_VLConvertConfig(
-        batch_size=args.batch_size,
+    config = Qwen3LegacyConvertConfig(
+        batch_size=1,
         context_length=args.context_length,
+        input_sequence_length=args.input_sequence_length,
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
-        gptqmodel_cfg=args.use_gptqmodel,
-        max_pe_length=args.max_pe_length,
+        # mix_search=None,
     )
 
-    BertConverterXH2a(config)._convert(
-        model,
-        "work_dirs/bert",
-        tokenizer,
+    policy = Gr00tPolicy(
+        model_path=args.model,
+        embodiment_tag=EmbodimentTag.OXE_DROID,
+        device='cuda',
     )
-    # current_logits = output.logits[:, -1, :]
-    # probs = torch.softmax(current_logits, dim=-1)
-    # next_token = torch.argmax(probs, dim=-1).item()
-    # reply = tokenizer.decode(next_token)
-    # print(reply)
+
+    work_dir = Path(args.output_path)
+    work_dir.mkdir(exist_ok=True, parents=True)
+
+    Qwen3LegacyConverterXH2a(config)._convert(policy.model.backbone.model.language_model.model.half(), args.output_path)
+
+    # image = pipe(
+    #     prompt=prompt + positive_magic["en"],
+    #     negative_prompt=negative_prompt,
+    #     width=width,
+    #     height=height,
+    #     num_inference_steps=50,
+    #     true_cfg_scale=4.0,
+    #     generator=torch.Generator(device="cuda").manual_seed(42)
+    # ).images[0]
+
+    # image.save("example.png")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="/data02/users/cc_work/model312/BERT")
+    parser.add_argument("--model", type=str, default='/data02/datasets/GR00T-N1.6-DROID')
+    parser.add_argument("--output_path", type=str, default="work_dirs/groot_droid")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
-    parser.add_argument("--context-length", type=int, default=512, help="max sequence length")
+    parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
+    parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
     parser.add_argument("--max_pe_length", type=int, default=32768, help="max pe length")
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
     parser.add_argument("--image_max_size_h", type=int, default=448, help="image max size height")

@@ -50,7 +50,7 @@ from xhquant.api import (  # isort:skip
 from transformers.feature_extraction_utils import BatchFeature
 
 class Network_pre(nn.Module):
-    def __init__(self, encoder, action_encoder=None, position_embedding=None, vlln=None, device="cuda", state_encoder=None, action_decoder=None, dit=None):
+    def __init__(self, encoder, action_encoder=None, position_embedding=None, vlln=None, device="cuda", state_encoder=None, action_decoder=None, dit=None, tag_id=20):
         super().__init__()
         self.encoder = encoder
         self.action_encoder = action_encoder
@@ -64,6 +64,7 @@ class Network_pre(nn.Module):
         self.action_decoder = action_decoder.to(device)
         self.model = dit.to(device)
         self.action_horizon = 50
+        self.tag_id = tag_id
 
     def forward(self, backbone_features, state):
         # backbone_features  [1, 109, 2048]
@@ -73,7 +74,7 @@ class Network_pre(nn.Module):
         # [1,109]
         # [1,109]
         device = self.device
-        embodiment_id=torch.tensor([20], device=device)
+        embodiment_id=torch.tensor([self.tag_id], device=device)
 
         # features = self.encoder(backbone_output, action_input)
         backbone_features = self.vlln(backbone_features)
@@ -84,13 +85,11 @@ class Network_pre(nn.Module):
 
 
 class Netwokr(nn.Module):
-    def __init__(self, encoder, action_encoder=None, position_embedding=None, vlln=None, device="cuda", state_encoder=None, action_decoder=None, dit=None):
+    def __init__(self, encoder, action_encoder=None, position_embedding=None, vlln=None, device="cuda", state_encoder=None, action_decoder=None, dit=None, tag_id=20):
         super().__init__()
         self.encoder = encoder
         self.action_encoder = action_encoder
         self.position_embedding = position_embedding    
-        self.vlln = vlln
-        self.state_encoder = state_encoder
         self.device = device
         pos_ids = torch.arange(50, dtype=torch.long, device=device)
         self.pos_embs = self.position_embedding(pos_ids).unsqueeze(0).half()
@@ -98,6 +97,7 @@ class Netwokr(nn.Module):
         self.action_decoder = action_decoder.to(device)
         self.model = dit.to(device)
         self.action_horizon = 50
+        self.tag_id = tag_id
 
     def forward(self, backbone_features, state_features, timesteps_tensor=None, actions=None, image_mask=None, backbone_attention_mask=None):
         # backbone_features  [1, 109, 2048]
@@ -109,7 +109,7 @@ class Netwokr(nn.Module):
 
 
         device = self.device
-        embodiment_id=torch.tensor([20], device=device)
+        embodiment_id=torch.tensor([self.tag_id], device=device)
 
 
         # backbone_features = self.vlln(backbone_features)
@@ -119,7 +119,7 @@ class Netwokr(nn.Module):
 
 
         # Embed noised action trajectory.
-        action_features = self.action_encoder(actions, timesteps_tensor, torch.tensor([20], device=device, dtype=torch.float16))
+        action_features = self.action_encoder(actions, timesteps_tensor, torch.tensor([self.tag_id], device=device, dtype=torch.float16))
         action_features = action_features + self.pos_embs
 
         # Join vision, language, state and action embedding along sequence dimension.
@@ -151,7 +151,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
         self.wraped_llm_model = None
         self.device = device
 
-    def _convert(self, hf_model, output_dir: str, postprocess=None):
+    def _convert(self, hf_model, output_dir: str, postprocess=None, tag_id=20):
         logger = get_root_logger()
         config = self.config
 
@@ -170,7 +170,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
                 "image_mask": image_mask,
                 "backbone_attention_mask": backbone_attention_mask,
             }
-            embodiment_id = torch.tensor([20]).to(self.device)
+            embodiment_id = torch.tensor([tag_id]).to(self.device)
             action_inputs = {
                 "embodiment_id": embodiment_id,
                 "state": state,
@@ -209,6 +209,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
             state_encoder=native_model.state_encoder,
             action_decoder=native_model.action_decoder,
             dit=native_model.model,
+            tag_id=tag_id,
         ).to(self.device).half()
 
         new_network_pre = Network_pre(
@@ -220,6 +221,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
             state_encoder=native_model.state_encoder,
             action_decoder=native_model.action_decoder,
             dit=native_model.model,
+            tag_id=tag_id,
         ).to(self.device).half()
 
         with torch.no_grad():

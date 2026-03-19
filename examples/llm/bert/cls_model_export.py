@@ -27,8 +27,8 @@ from xh_model_zoo.xh_llm.models.qwen2_5_vl import Qwen2_5_VLConvertConfig, Visua
 from transformers import BertForSequenceClassification
 
 def main(args):
-    tokenizer = AutoTokenizer.from_pretrained("/data02/users/cc_work/model312/BERT")
-    model = BertForSequenceClassification.from_pretrained("/data02/users/cc_work/model312/BERT")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = BertForSequenceClassification.from_pretrained(args.model)
     model = model.to("cuda")
 
     input_txt = "受害者是几点死亡的，死亡的具体原因是谋杀"
@@ -75,7 +75,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default="/data02/users/cc_work/model312/BERT")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=512, help="max sequence length")
     parser.add_argument("--max_pe_length", type=int, default=32768, help="max pe length")

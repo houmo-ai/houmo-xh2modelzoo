@@ -18,61 +18,131 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+import os
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
 from xhquant.api import (
-    DeviceType,
     HMONNXGoldenInference,
-    HMONNXInference,
-    QuantScheme,
-    convert_onnx_to_hmonnx,
-    create_quant_config,
     get_root_logger,
     xhquant_init,
 )
-import onnxruntime as ort   
-from modelscope import AutoTokenizer, AutoModelForMaskedLM
-
-out_hmonnx_file = "work_dirs/bert/hmonnx/prefill/bert_ch-XH2a-0k-w8a8h1_sefp_prefill.onnx"
-device = "cuda"
-work_dirs = "work_dirs/bert"
-context_length = 256
-
-tokenizer = AutoTokenizer.from_pretrained("/data02/datasets/bert_chinese")
-native_model = AutoModelForMaskedLM.from_pretrained("/data02/datasets/bert_chinese")
-native_model = native_model.to("cuda")
 
 
-input_txt = "你好"
-input_ids = tokenizer(
-    input_txt, return_tensors="pt", padding="max_length", max_length=context_length
-).input_ids.cuda()
-output = native_model(input_ids)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="BERT Golden Inference Demo",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="/data02/datasets/bert_chinese",
+        help="Path to the pretrained BERT model",
+    )
+    parser.add_argument(
+        "--hmonnx_file",
+        type=str,
+        default="work_dirs/bert/hmonnx/prefill/bert_ch-XH2a-0k-w8a8h1_sefp_prefill.onnx",
+        help="Path to the HMONNX model file",
+    )
+    parser.add_argument(
+        "--work_dirs",
+        type=str,
+        default="work_dirs/bert",
+        help="Base directory for work files",
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=512,
+        help="Maximum context length for tokenization",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device to run inference on",
+    )
+    parser.add_argument(
+        "--input_text",
+        type=str,
+        default="你好",
+        help="Input text for BERT model",
+    )
+    parser.add_argument(
+        "--save_golden",
+        action="store_true",
+        help="Whether to save golden outputs",
+    )
+    return parser.parse_args()
 
-token_type_ids = torch.zeros((1,context_length), dtype=torch.long, device=device)
-token_type_embeddings = native_model.bert.embeddings.token_type_embeddings(token_type_ids)
 
-position_ids = torch.arange(context_length, dtype=torch.long, device=device).unsqueeze(0)
-position_embeddings = native_model.bert.embeddings.position_embeddings(position_ids)
+def main():
+    args = parse_args()
 
-atten_mask = torch.zeros((1,context_length), device=device)
+    os.makedirs(args.work_dirs, exist_ok=True)
 
-token_embedding = native_model.bert.embeddings.word_embeddings
-input_emb = token_embedding(input_ids)
+    xhquant_init()
+    logger = get_root_logger()
 
-inputs = [
-    input_emb.half().cuda(), 
-    token_type_embeddings.half().cuda(), 
-    position_embeddings.half().cuda(), 
-    atten_mask.half().cuda()
-]
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    native_model = AutoModelForMaskedLM.from_pretrained(args.model_path)
+    native_model = native_model.to(args.device)
 
-session = HMONNXGoldenInference(out_hmonnx_file)
-session.to(device)
-session.save_golden = False
-session.golden_dir = work_dirs + "/hmonnx/golden"
-session.step = 0
-hm_out = session(*inputs)
+    input_ids = tokenizer(
+        args.input_text,
+        return_tensors="pt",
+        padding="max_length",
+        max_length=args.context_length,
+    ).input_ids.to(args.device)
 
-print(torch.cosine_similarity(output.logits, hm_out))
+    with torch.no_grad():
+        output = native_model(input_ids)
+
+    token_type_ids = torch.zeros(
+        (1, args.context_length), dtype=torch.long, device=args.device
+    )
+    token_type_embeddings = native_model.bert.embeddings.token_type_embeddings(
+        token_type_ids
+    )
+
+    position_ids = torch.arange(
+        args.context_length, dtype=torch.long, device=args.device
+    ).unsqueeze(0)
+    position_embeddings = native_model.bert.embeddings.position_embeddings(
+        position_ids
+    )
+
+    atten_mask = torch.zeros((1, args.context_length), device=args.device)
+
+    token_embedding = native_model.bert.embeddings.word_embeddings
+    input_emb = token_embedding(input_ids)
+
+    inputs = [
+        input_emb.half().to(args.device),
+        token_type_embeddings.half().to(args.device),
+        position_embeddings.half().to(args.device),
+        atten_mask.half().to(args.device),
+    ]
+
+    session = HMONNXGoldenInference(args.hmonnx_file)
+    session.to(args.device)
+    session.save_golden = args.save_golden
+    session.golden_dir = os.path.join(args.work_dirs, "hmonnx/golden")
+    session.step = 0
+
+    with torch.no_grad():
+        hm_out = session(*inputs)
+
+    similarity = torch.cosine_similarity(output.logits, hm_out)
+    logger.info(f"Cosine similarity: {similarity.item():.6f}")
+
+    print(f"Cosine similarity: {similarity.item():.6f}")
+
+
+if __name__ == "__main__":
+    main()

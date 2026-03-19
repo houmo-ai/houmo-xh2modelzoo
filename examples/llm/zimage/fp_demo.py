@@ -26,7 +26,6 @@ from safetensors.torch import load_file, save_file
 # Use bfloat16 for optimal performance on supported GPUs
 pipe = ZImagePipeline.from_pretrained(
     "/data02/datasets/zimage",
-    torch_dtype=torch.float16,
     low_cpu_mem_usage=False,
 )
 pipe.to("cuda")
