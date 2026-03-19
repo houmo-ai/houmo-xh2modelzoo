@@ -68,6 +68,10 @@ class LLMConverter:
             from .models.qwen3_vl_moe import Qwen3_VL_MOEConverterXH2a
 
             converter_cls = Qwen3_VL_MOEConverterXH2a
+        elif architecture == "Qwen3OmniMoeForConditionalGeneration":
+            from .models.qwen3_omni import Qwen3OmniMoeConverterXH2a
+
+            converter_cls = Qwen3OmniMoeConverterXH2a
         elif architecture == "Qwen2ForCausalLM":
             if hasattr(config, "quantization_config"):
                 if config.quantization_config["quant_method"].lower() == "gptq":

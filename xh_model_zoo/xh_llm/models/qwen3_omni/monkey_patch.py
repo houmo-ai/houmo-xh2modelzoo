@@ -1,0 +1,360 @@
+
+from typing import Callable, Optional, Union
+import torch
+from torch import nn
+import torch.nn.functional as F
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeThinkerCausalLMOutputWithPast,
+    load_balancing_loss_func,
+)
+
+def get_audio_features(
+    self,
+    input_features: torch.FloatTensor,
+    feature_attention_mask: Optional[torch.LongTensor] = None,
+    audio_feature_lengths: Optional[torch.LongTensor] = None,
+):
+    if feature_attention_mask is not None:
+        audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+        input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+    else:
+        audio_feature_lengths = None
+
+    feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+
+    if not hasattr(self, "audio_n_window"): #加这一步是因为，audio_model被trace后，就会丢掉部分属性
+        self.audio_n_window = self.audio_tower.wrap_model.n_window
+        self.audio_n_window_infer = self.audio_tower.wrap_model.n_window_infer
+
+
+    # 因为wrap audio_encoder部分，需要将对输入做一些预处理
+    from xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+    aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
+    chunk_num = torch.ceil(feature_lens / (self.audio_n_window * 2)).long()
+
+    chunk_lengths = torch.tensor(
+        [self.audio_n_window * 2] * chunk_num.sum(),
+        dtype=torch.long,
+        device=feature_lens.device,
+    )
+    tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
+    chunk_lengths[tail_chunk_index] = feature_lens % (self.audio_n_window * 2)
+    chunk_lengths[chunk_lengths == 0] = self.audio_n_window * 2
+
+    chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
+    padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
+    feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
+    padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
+        [torch.ones(length, dtype=torch.bool, device=padded_feature.device) for length in feature_lens_after_cnn],
+        batch_first=True,
+        )
+    
+    cu_chunk_lens = [0]
+    window_aftercnn = padded_mask_after_cnn.shape[-1] * (self.audio_n_window_infer // (self.audio_n_window * 2))
+    for cnn_len in aftercnn_lens:
+        cu_chunk_lens += [window_aftercnn] * (cnn_len // window_aftercnn)
+        remainder = cnn_len % window_aftercnn
+        if remainder != 0:
+            cu_chunk_lens += [remainder]
+        cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
+
+    
+
+
+    audio_outputs = self.audio_tower(
+        padded_feature,
+        padded_mask_after_cnn,
+        cu_seqlens=cu_seqlens,
+    )
+
+    return audio_outputs
+
+def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None):
+    """
+    Encodes images into continuous embeddings that can be forwarded to the language model.
+
+    Args:
+        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
+            The tensors corresponding to the input images.
+        image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+            The temporal, height and width of feature shape of each image in LLM.
+    """
+    pixel_values = pixel_values.type(self.visual.dtype)
+    image_embeds = self.visual(pixel_values)
+    return image_embeds
+
+def Qwen3OmniMoeThinkerForConditionalGeneration_forward(
+    self,
+    input_ids=None,
+    input_features=None,
+    pixel_values=None,
+    hm_pixel_values=None,
+    pixel_values_videos=None,
+    image_grid_thw=None,
+    video_grid_thw=None,
+    attention_mask=None,
+    feature_attention_mask=None,
+    audio_feature_lengths=None,
+    position_ids=None,
+    past_key_values=None,
+    inputs_embeds=None,
+    rope_deltas=None,
+    labels=None,
+    use_cache=None,
+    output_router_logits: Optional[bool] = None,
+    use_audio_in_video=None,
+    cache_position=None,
+    video_second_per_grid=None,
+    **kwargs,
+) -> Union[tuple, Qwen3OmniMoeThinkerCausalLMOutputWithPast]:
+    r"""
+    image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+        The temporal, height and width of feature shape of each image in LLM.
+    video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+        The temporal, height and width of feature shape of each video in LLM.
+    feature_attention_mask (`torch.Tensor` of shape `(batch_size, feature_sequence_length)`, *optional*):
+        Mask to avoid performing attention on padding feature indices. Mask values selected in `[0, 1]`:
+
+        - 1 for tokens that are **not masked**,
+        - 0 for tokens that are **masked**.
+    audio_feature_lengths (`torch.LongTensor` of shape `(num_audios)`, *optional*):
+        The length of feature shape of each audio in LLM.
+    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
+        The rope index difference between sequence length and multimodal rope.
+    labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+        Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+        config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+        (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+    use_audio_in_video (`bool`, *optional*):
+        Whether or not use audio track in video, should same as the parameter in `process_audio_info`.
+    video_second_per_grid (`torch.LongTensor` of shape `(num_videos)`, *optional*):
+        Number of seconds per grid for each video, used for temporal feature mapping.
+
+    Example:
+
+    ```python
+    >>> from io import BytesIO
+    >>> from urllib.request import urlopen
+    >>> import librosa
+    >>> from qwen_vl_utils import process_vision_info
+    >>> from transformers import Qwen3OmniMoeProcessor, Qwen3OmniMoeThinkerForConditionalGeneration
+
+    >>> thinker = Qwen3OmniMoeThinkerForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+    >>> processor = Qwen3OmniMoeProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+
+    >>> conversations = [
+    >>>         {'role': 'system', 'content': 'You are a helpful voice chat bot, and please respond to me in a casual conversation manner using random voice.'},
+    >>>         {"role": "user", "content": [
+    >>>             {"type": "image", "image_url": "https://www.ilankelman.org/stopsigns/australia.jpg"},
+    >>>             {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2-Audio/audio/glass-breaking-151256.mp3"},
+    >>>         ]},
+    >>> ]
+
+    >>> text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    >>> audios = [ librosa.load(BytesIO(urlopen( conversations[1]['content'][1]['audio_url'] ).read()), sr=self.processor.feature_extractor.sampling_rate) ]
+    >>> images, videos = process_vision_info(conversations)
+    >>> inputs = processor(text=text, audios=audios, images=images, videos=videos, return_tensors="pt", padding=True)
+
+    >>> # Generate
+    >>> inputs['use_audio_in_video'] = `True` or `False`
+    >>> generation = thinker.generate(**inputs, max_new_tokens=2048)
+    >>> generate_ids = generation[:, inputs.input_ids.size(1):]
+
+    >>> response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    ```"""
+    output_router_logits = (
+        output_router_logits if output_router_logits is not None else self.config.text_config.output_router_logits
+    )
+
+    if inputs_embeds is None:
+        # 1. Extract the input embeddings
+        inputs_embeds = self.get_input_embeddings()(input_ids)
+
+    visual_embeds_multiscale = None
+    visual_pos_masks = None
+    # 2. Merge text , audios , image and video
+    if input_features is not None:
+        audio_features = self.get_audio_features(
+            input_features,
+            feature_attention_mask=feature_attention_mask,
+            audio_feature_lengths=audio_feature_lengths,
+        )
+        # Handle BaseModelOutputWithPooling or other model output objects
+        if not isinstance(audio_features, torch.Tensor):
+            if hasattr(audio_features, "last_hidden_state"):
+                audio_features = audio_features.last_hidden_state
+            elif hasattr(audio_features, "hidden_states"):
+                audio_features = audio_features.hidden_states
+            elif hasattr(audio_features, "pooler_output"):
+                audio_features = audio_features.pooler_output
+            else:
+                raise TypeError(f"Unexpected audio_features type: {type(audio_features)}")
+        audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
+        _, _, audio_mask = self.get_placeholder_mask(input_ids, inputs_embeds=inputs_embeds)
+        inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
+
+    if pixel_values is not None:
+        image_embeds, image_embeds_multiscale = self.get_image_features(hm_pixel_values, image_grid_thw)
+        # Handle BaseModelOutputWithPooling or other model output objects
+        if not isinstance(image_embeds, torch.Tensor):
+            if hasattr(image_embeds, 'last_hidden_state'):
+                image_embeds = image_embeds.last_hidden_state
+            elif hasattr(image_embeds, 'hidden_states'):
+                image_embeds = image_embeds.hidden_states
+            elif hasattr(image_embeds, 'pooler_output'):
+                image_embeds = image_embeds.pooler_output
+            else:
+                raise TypeError(f"Unexpected image_embeds type: {type(image_embeds)}")
+        image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        image_mask, _, _ = self.get_placeholder_mask(
+            input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+        )
+        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+        visual_pos_masks = image_mask[..., 0]
+        visual_embeds_multiscale = image_embeds_multiscale
+
+    if pixel_values_videos is not None:
+        video_embeds, video_embeds_multiscale = self.get_video_features(pixel_values_videos, video_grid_thw)
+        # Handle BaseModelOutputWithPooling or other model output objects
+        if not isinstance(video_embeds, torch.Tensor):
+            if hasattr(video_embeds, 'last_hidden_state'):
+                video_embeds = video_embeds.last_hidden_state
+            elif hasattr(video_embeds, 'hidden_states'):
+                video_embeds = video_embeds.hidden_states
+            elif hasattr(video_embeds, 'pooler_output'):
+                video_embeds = video_embeds.pooler_output
+            else:
+                raise TypeError(f"Unexpected video_embeds type: {type(video_embeds)}")
+        video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        _, video_mask, _ = self.get_placeholder_mask(
+            input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+        )
+        inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        if visual_embeds_multiscale is None:
+            visual_embeds_multiscale = video_embeds_multiscale
+            visual_pos_masks = video_mask[..., 0]
+        else:
+            image_mask_2d = image_mask[..., 0]
+            video_mask_2d = video_mask[..., 0]
+            visual_pos_masks = video_mask_2d | image_mask_2d
+            visual_embeds_multiscale_joint = ()
+            image_mask_joint = image_mask_2d[visual_pos_masks]
+            video_mask_joint = video_mask_2d[visual_pos_masks]
+            for img_embed, vid_embed in zip(visual_embeds_multiscale, video_embeds_multiscale):
+                embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1])
+                embed_joint[image_mask_joint, :] = img_embed
+                embed_joint[video_mask_joint, :] = vid_embed
+                visual_embeds_multiscale_joint = visual_embeds_multiscale_joint + (embed_joint,)
+            visual_embeds_multiscale = visual_embeds_multiscale_joint
+
+    if feature_attention_mask is not None:
+        audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+    else:
+        audio_feature_lengths = None
+
+    if attention_mask is not None and position_ids is None:
+        if (
+            cache_position is None
+            or (cache_position is not None and cache_position[0] == 0)
+            or self.rope_deltas is None
+        ):
+            delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
+            position_ids, rope_deltas = self.get_rope_index(
+                input_ids,
+                image_grid_thw,
+                video_grid_thw,
+                attention_mask,
+                use_audio_in_video,
+                audio_feature_lengths,
+                video_second_per_grid,
+            )
+            rope_deltas = rope_deltas - delta0
+            self.rope_deltas = rope_deltas
+        else:
+            batch_size, seq_length = input_ids.shape
+            delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
+            position_ids = torch.arange(seq_length, device=input_ids.device)
+            position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+            position_ids = position_ids.add(delta)
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+    outputs = self.model(
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_router_logits=output_router_logits,
+        cache_position=cache_position,
+        deepstack_visual_embeds=visual_embeds_multiscale,
+        visual_pos_masks=visual_pos_masks,
+        **kwargs,
+    )
+
+    hidden_states = outputs[0]
+    logits = self.lm_head(hidden_states)
+
+    loss = None
+    if labels is not None:
+        loss = self.loss_function(
+            logits=logits, labels=labels, vocab_size=self.config.get_text_config().vocab_size
+        )
+
+    aux_loss = None
+    if output_router_logits:
+        aux_loss = load_balancing_loss_func(
+            outputs.router_logits,
+            self.num_experts,
+            self.num_experts_per_tok,
+            attention_mask,
+        )
+        if labels is not None:
+            loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
+
+    return Qwen3OmniMoeThinkerCausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        aux_loss=aux_loss,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        past_key_values=outputs.past_key_values,
+        rope_deltas=self.rope_deltas,
+    )
+
+
+
+
+def replace_layer(model, old_class, new_class):
+    """
+    将模型中所有 old_class 的子模块替换成 new_class
+    并将权重参数安全转移。
+    """
+    for name, module in model.named_children():
+        # 如果当前子模块就是 old_class
+        if isinstance(module, old_class):
+
+            # 创建新的模块，参数可从旧模块继承
+            # 例如 RMSNorm 需要 dim, eps 等参数
+            # 这里假设构造函数兼容
+            new_module = new_class()
+
+            # 复制权重参数（如有）
+            new_state_dict = new_module.state_dict()
+            old_state_dict = module.state_dict()
+
+            for k in new_state_dict.keys():
+                if k in old_state_dict:
+                    new_state_dict[k] = old_state_dict[k]
+
+            new_module.load_state_dict(new_state_dict)
+
+            # 替换模块
+            setattr(model, name, new_module)
+
+        else:
+            # 递归处理子层
+            replace_layer(module, old_class, new_class)
+
+
