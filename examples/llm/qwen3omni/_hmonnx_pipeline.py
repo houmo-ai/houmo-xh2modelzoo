@@ -32,6 +32,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 _HMONNX_RUNTIME_FIX_CACHE: Dict[str, Path] = {}
 
 
+def _resolve_validation_device_map(device_map: str, logger=None) -> str:
+    if device_map != "auto":
+        return device_map
+    if torch.cuda.is_available():
+        resolved = "cuda:0"
+    else:
+        resolved = "cpu"
+    if logger is not None:
+        logger.info(f"validation device_map resolved from auto to {resolved}")
+    return resolved
+
+
 def _create_hmonnx_session(onnx_path: Path) -> HMONNXInference:
     try:
         return HMONNXInference(str(onnx_path))
@@ -537,7 +549,9 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
                 single_cu = torch.tensor([0, int(feature_lens_after_cnn[i])], dtype=torch.int32)
                 out_i = self._audio_hmonnx_session.forward(single_feature, single_cu)
                 out_i = _extract_primary_output(out_i)
-                all_outputs.append(_ensure_tensor(out_i, original_device, torch.float16))
+                out_i = _ensure_tensor(out_i, original_device, torch.float16)
+                out_i = out_i[: int(feature_lens_after_cnn[i])]
+                all_outputs.append(out_i)
             output = torch.cat(all_outputs, dim=0) if len(all_outputs) > 1 else all_outputs[0]
             return output
 
@@ -587,6 +601,7 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
     prefill_session = _create_hmonnx_session(_resolve_meta_path(talker_meta, "talker_prefill_onnx"))
     decode_session = _create_hmonnx_session(_resolve_meta_path(talker_meta, "talker_decode_onnx"))
     state = _make_cache_state(talker_meta["talker_kv_cache"])
+    static_prefill_len = int(talker_meta.get("talker_input_sequence_length", 0))
     original_forward = native_model.talker.forward
 
     def forward(self, *args, **kwargs):
@@ -598,10 +613,24 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
                 state["past_key_caches"] = _make_cache_state(talker_meta["talker_kv_cache"])["past_key_caches"]
                 state["past_value_caches"] = _make_cache_state(talker_meta["talker_kv_cache"])["past_value_caches"]
             session = prefill_session if seq_len > 1 else decode_session
+            shadow_inputs_embeds = inputs_embeds.detach().cpu().to(torch.float16)
+            shadow_seq_len = seq_len
+            if seq_len > 1 and static_prefill_len > 0:
+                if seq_len > static_prefill_len:
+                    raise ValueError(f"talker shadow seq_len {seq_len} exceeds exported static length {static_prefill_len}")
+                if seq_len < static_prefill_len:
+                    pad = torch.zeros(
+                        shadow_inputs_embeds.shape[0],
+                        static_prefill_len - seq_len,
+                        shadow_inputs_embeds.shape[2],
+                        dtype=shadow_inputs_embeds.dtype,
+                    )
+                    shadow_inputs_embeds = torch.cat([shadow_inputs_embeds, pad], dim=1)
+                    shadow_seq_len = static_prefill_len
             session.forward(
-                inputs_embeds.detach().cpu().to(torch.float16),
+                shadow_inputs_embeds,
                 torch.tensor([state["past_seq_length"]], dtype=torch.int32),
-                torch.tensor([seq_len], dtype=torch.int32),
+                torch.tensor([shadow_seq_len], dtype=torch.int32),
                 *state["past_key_caches"],
                 *state["past_value_caches"],
             )
@@ -632,6 +661,7 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
     prefill_session = _create_hmonnx_session(_resolve_meta_path(predictor_meta, "talker_prediction_prefill_onnx"))
     decode_session = _create_hmonnx_session(_resolve_meta_path(predictor_meta, "talker_prediction_decode_onnx"))
     state = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])
+    static_prefill_len = int(predictor_meta.get("talker_prediction_input_sequence_length", 0))
     original_forward = native_model.talker.code_predictor.forward
 
     def forward(self, *args, **kwargs):
@@ -643,10 +673,26 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
                 state["past_key_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])["past_key_caches"]
                 state["past_value_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])["past_value_caches"]
             session = prefill_session if seq_len > 1 else decode_session
+            shadow_inputs_embeds = inputs_embeds.detach().cpu().to(torch.float16)
+            shadow_seq_len = seq_len
+            if seq_len > 1 and static_prefill_len > 0:
+                if seq_len > static_prefill_len:
+                    raise ValueError(
+                        f"talker prediction shadow seq_len {seq_len} exceeds exported static length {static_prefill_len}"
+                    )
+                if seq_len < static_prefill_len:
+                    pad = torch.zeros(
+                        shadow_inputs_embeds.shape[0],
+                        static_prefill_len - seq_len,
+                        shadow_inputs_embeds.shape[2],
+                        dtype=shadow_inputs_embeds.dtype,
+                    )
+                    shadow_inputs_embeds = torch.cat([shadow_inputs_embeds, pad], dim=1)
+                    shadow_seq_len = static_prefill_len
             session.forward(
-                inputs_embeds.detach().cpu().to(torch.float16),
+                shadow_inputs_embeds,
                 torch.tensor([state["past_seq_length"]], dtype=torch.int32),
-                torch.tensor([seq_len], dtype=torch.int32),
+                torch.tensor([shadow_seq_len], dtype=torch.int32),
                 *state["past_key_caches"],
                 *state["past_value_caches"],
             )
@@ -726,6 +772,7 @@ def run_dialogue_validation(
     report_name: str = "dialogue_validation.json",
     output_prefix: str = "dialogue",
 ):
+    device_map = _resolve_validation_device_map(device_map, logger)
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
@@ -846,7 +893,9 @@ def _run_audio_encoder_hmonnx(session: HMONNXInference, audio_tower, input_featu
         single_cu = torch.tensor([0, int(feature_lens_after_cnn[i])], dtype=torch.int32)
         out_i = session.forward(single_feature, single_cu)
         out_i = _extract_primary_output(out_i)
-        all_outputs.append(_ensure_tensor(out_i, torch.device("cpu"), torch.float16))
+        out_i = _ensure_tensor(out_i, torch.device("cpu"), torch.float16)
+        out_i = out_i[: int(feature_lens_after_cnn[i])]
+        all_outputs.append(out_i)
     output = torch.cat(all_outputs, dim=0) if len(all_outputs) > 1 else all_outputs[0]
     return output
 
@@ -860,13 +909,15 @@ def run_text_hmonnx_chain_forward(
     vision_meta: Optional[Dict[str, Any]] = None,
     report_path: Optional[Path] = None,
     max_new_tokens: int = 256,
+    device_map: str = "auto",
 ):
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_map = _resolve_validation_device_map(device_map, logger)
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
-        device_map="auto",
+        device_map=device_map,
         attn_implementation="eager",
         trust_remote_code=True,
     )

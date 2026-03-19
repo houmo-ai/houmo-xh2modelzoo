@@ -80,10 +80,12 @@ def main(args):
             hf_model_path,
             text_meta,
             logger,
-            case="text",
+            case=chain_case,
             audio_meta=None,
             vision_meta=None,
             report_path=work_dir / "text_hmonnx_chain_report.json",
+            max_new_tokens=args.max_new_tokens,
+            device_map="auto",
         )
 
 
@@ -97,7 +99,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
     parser.add_argument("--quant-weight", type=str, default=None, help="path to quant weight (gptq/quarot)")
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--valid", default=True, help="validate exported text artifacts with HMONNX forward")
+    parser.add_argument("--valid", action="store_true", default=True, help="validate exported text artifacts with HMONNX forward")
+    parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(args)

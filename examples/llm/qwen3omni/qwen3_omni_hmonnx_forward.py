@@ -154,6 +154,7 @@ def main(args):
         audio_meta=artifacts.get("audio"),
         vision_meta=artifacts.get("vision"),
         max_new_tokens=max_new_tokens,
+        device_map=args.device_map,
     )
 
     if quick_mode:
@@ -180,6 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
     parser.add_argument("--case", type=str, default="multimodal", choices=["text", "vision", "audio", "multimodal"])
+    parser.add_argument("--device-map", type=str, default="auto", choices=["auto", "cpu", "cuda:0"])
     parser.add_argument("--quick", action="store_true", help="run only a fast text-chain sanity check and skip extra module forwards")
     parser.add_argument("--max-new-tokens", type=int, default=None, help="override generated token count for text-chain validation")
     parser.add_argument("--debug", action="store_true")

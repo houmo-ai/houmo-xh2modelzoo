@@ -31,7 +31,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _hmonnx_pipeline import apply_artifact_replacements, discover_artifacts, save_json, validate_golden_outputs
+from _hmonnx_pipeline import _ensure_hm_pixel_values, apply_artifact_replacements, discover_artifacts, save_json, validate_golden_outputs
 from xhquant.api import get_root_logger, set_random_seed, xhquant_init  # isort:skip
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference  # isort:skip
 
@@ -132,13 +132,14 @@ def main(args):
     golden_dir.mkdir(exist_ok=True, parents=True)
 
     # ---- 1. Load HF model ----
-    from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+    from xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe import Qwen3OmniMoeProcessor
 
     logger.info(f"Loading HF model from {hf_model_path}")
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         hf_model_path,
         torch_dtype=torch.float16,
-        device_map="auto",
+        device_map=args.device_map,
         attn_implementation="eager",
         trust_remote_code=True,
     )
@@ -215,8 +216,12 @@ def main(args):
         audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
         inputs = processor(
             text=text, audio=audios, images=images, videos=videos,
-            return_tensors="pt", padding=True, use_audio_in_video=True,
+            return_tensors="pt", padding=True,
+            seconds_per_chunk=2.0,
+            position_id_per_seconds=13,
+            use_audio_in_video=True,
         )
+        inputs = _ensure_hm_pixel_values(inputs)
         inputs = inputs.to(device).to(dtype)
 
         with torch.no_grad():
@@ -226,8 +231,10 @@ def main(args):
                 max_new_tokens=args.max_new_tokens,
             )
 
+        sequences = text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+
         decoded = processor.batch_decode(
-            text_ids.sequences[:, inputs["input_ids"].shape[1]:],
+            sequences[:, inputs["input_ids"].shape[1]:],
             skip_special_tokens=True, clean_up_tokenization_spaces=False,
         )
         logger.info(f"[{case_name}] Text: {decoded}")
@@ -247,7 +254,7 @@ def main(args):
         torch.save(
             {
                 "input_ids": inputs["input_ids"].cpu(),
-                "output_ids": text_ids.sequences.cpu(),
+                "output_ids": sequences.cpu(),
             },
             golden_dir / f"golden_{case_name}_ids.pt",
         )
@@ -286,6 +293,7 @@ if __name__ == "__main__":
     parser.add_argument("--hidden-projection-hmonnx", type=str, default=None, help="path to hidden_projection hmonnx")
     parser.add_argument("--text-projection-hmonnx", type=str, default=None, help="path to text_projection hmonnx")
     parser.add_argument("--auto-discover", action="store_true", help="auto load exported qwen3omni artifacts under work-dir")
+    parser.add_argument("--device-map", type=str, default="cuda:0", choices=["auto", "cpu", "cuda:0"])
 
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()

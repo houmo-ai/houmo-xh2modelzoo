@@ -84,10 +84,12 @@ def main(args):
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         args.model,
         dtype="auto",
-        device_map="auto",
+        device_map=args.device_map,
         attn_implementation="eager",
     )
     processor = Qwen3OmniMoeProcessor.from_pretrained(args.model)
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
 
     conversation, use_audio_in_video = build_conversation(args.case)
 
@@ -102,7 +104,7 @@ def main(args):
         padding=True,
         use_audio_in_video=use_audio_in_video,
     )
-    inputs = inputs.to(model.device).to(model.dtype)
+    inputs = inputs.to(device).to(dtype)
 
     torch.cuda.empty_cache()
 
@@ -114,8 +116,10 @@ def main(args):
         max_new_tokens=args.max_new_tokens,
     )
 
+    sequences = text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+
     output_text = processor.batch_decode(
-        text_ids.sequences[:, inputs["input_ids"].shape[1] :],
+        sequences[:, inputs["input_ids"].shape[1] :],
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
@@ -134,6 +138,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni/demo")
     parser.add_argument("--case", type=str, default="text", choices=["text", "vision", "audio", "multimodal"])
+    parser.add_argument("--device-map", type=str, default="cuda:0", choices=["auto", "cpu", "cuda:0"])
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
