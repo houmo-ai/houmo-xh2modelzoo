@@ -1,8 +1,6 @@
-# COCO8 dataset (first 8 images from COCO train2017) by Ultralytics
-# Documentation: https://docs.ultralytics.com/datasets/detect/coco8/
+# COCO8 dataset (first 8 images from COCO train2017)
 # Example usage: yolo train data=coco8.yaml
 # parent
-# ├── ultralytics
 # └── datasets
 #     └── coco8  ← downloads here (1 MB)
 

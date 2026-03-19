@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
-# Copyright FunASR (https://github.com/alibaba-damo-academy/FunASR). All Rights Reserved.
-#  MIT License  (https://opensource.org/licenses/MIT)
-# 原始路径：G:\Python39\Lib\site-packages\funasr\models\seaco_paraformer FunASR 1.2.6
 
 import inspect
 import os

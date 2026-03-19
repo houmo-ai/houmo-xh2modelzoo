@@ -1,5 +1,4 @@
 # coding=utf-8
-# Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 # Copyright 2025 HOUMO AI. All rights reserved.
 #
 # Modifications:

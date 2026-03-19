@@ -1,9 +1,5 @@
 # coding=utf-8
-# Copyright 2025 The OpenBMB Team. All rights reserved.
 # Copyright 2025 HOUMO AI. All rights reserved.
-#
-# Modifications:
-# - Portions of this file have been modified by HOUMO AI.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
