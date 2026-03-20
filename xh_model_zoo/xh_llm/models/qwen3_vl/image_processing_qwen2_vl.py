@@ -194,7 +194,9 @@ class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
                     data_format=data_format,
                     input_data_format=input_data_format,
                 )
-                hm_pixel_values.append(torch.from_numpy(hm_patches).unsqueeze(2).repeat(1, 1, self.temporal_patch_size, 1, 1))
+                hm_pixel_values.append(
+                    torch.from_numpy(hm_patches).unsqueeze(2).repeat(1, 1, self.temporal_patch_size, 1, 1)
+                )
                 pixel_values.extend(patches)
                 vision_grid_thws.append(image_grid_thw)
             pixel_values = torch.from_numpy(np.array(pixel_values))

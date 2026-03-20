@@ -168,29 +168,42 @@ class _Qwen3VLVisionAttention(DynamicModule):
             expanded_proj.bias.data.copy_(proj_bias)
             self.proj = expanded_proj
 
-    def forward(self, hidden_states, position_embeddings):
+    def forward(self, hidden_states, cu_seqlens, position_embeddings):
         batch, seq_length, _ = hidden_states.shape
-
-        q = self.q_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
-        k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
-        v = self.v_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
         cos, sin = position_embeddings
-        cos = cos.unsqueeze(0)
-        sin = sin.unsqueeze(0)
-        q, k = self.apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        sample_outputs = []
+        for batch_index in range(batch):
+            sample_hidden_states = hidden_states[batch_index : batch_index + 1]
+            sample_cos = cos.unsqueeze(0)
+            sample_sin = sin.unsqueeze(0)
+            sample_q = self.q_proj(sample_hidden_states).reshape(1, seq_length, self.num_heads, -1)
+            sample_k = self.k_proj(sample_hidden_states).reshape(1, seq_length, self.num_heads, -1)
+            sample_v = self.v_proj(sample_hidden_states).reshape(1, seq_length, self.num_heads, -1)
+            sample_q, sample_k = self.apply_rotary_pos_emb(sample_q, sample_k, sample_cos, sample_sin)
+            sample_q = sample_q.transpose(1, 2)
+            sample_k = sample_k.transpose(1, 2)
+            sample_v = sample_v.transpose(1, 2)
 
-        k = k.transpose(-2, -1)
-        q = q * self.kv_scale
-        dtype = q.dtype
-        attn_weights = torch.matmul(q, k).to(dtype)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
-        attn_output = torch.matmul(attn_weights, v)
+            chunk_outputs = []
+            start = 0
+            for length in lengths:
+                end = start + length
+                q_chunk = sample_q[:, :, start:end, :]
+                k_chunk = sample_k[:, :, start:end, :].transpose(-2, -1)
+                v_chunk = sample_v[:, :, start:end, :]
+                q_chunk = q_chunk * self.kv_scale
+                dtype = q_chunk.dtype
+                attn_weights = torch.matmul(q_chunk, k_chunk).to(dtype)
+                attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+                chunk_outputs.append(torch.matmul(attn_weights, v_chunk))
+                start = end
 
-        attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(batch, seq_length, -1)
+            sample_output = torch.cat(chunk_outputs, dim=2)
+            sample_output = sample_output.transpose(1, 2).reshape(1, seq_length, -1)
+            sample_outputs.append(sample_output)
+
+        attn_output = torch.cat(sample_outputs, dim=0)
         attn_output = self.proj(attn_output)
         return attn_output
 
@@ -205,9 +218,10 @@ class _Qwen3VLVisionBlock(DynamicModule):
     def _setup(self, cfg: ConfigDict):
         pass
 
-    def forward(self, hidden_states, position_embeddings):
+    def forward(self, hidden_states, cu_seqlens, position_embeddings):
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
@@ -257,9 +271,17 @@ class _Qwen3VLVisionPatchEmbed(DynamicModule):
         )
         self.proj1.weight.data.copy_(self.proj.weight[:, :, 0, :, :].contiguous())
         self.proj2.weight.data.copy_(self.proj.weight[:, :, 1, :, :].contiguous())
+        original_bias = self.proj.bias.data.clone() if self.proj.bias is not None else None
 
         weight_denorm(self.proj1)
         weight_denorm(self.proj2)
+
+        if original_bias is not None:
+            # Conv3d applies a single output-channel bias after accumulating both temporal slices.
+            # The wrapped implementation sums two Conv2d branches, so split the original bias evenly.
+            half_bias = (original_bias / 2).to(self.proj1.bias.dtype)
+            self.proj1.bias.data.add_(half_bias)
+            self.proj2.bias.data.add_(half_bias)
 
         self.proj1.to(self.proj.weight.device, dtype=self.proj.weight.dtype)
         self.proj2.to(self.proj.weight.device, dtype=self.proj.weight.dtype)
@@ -323,7 +345,11 @@ class _Qwen3VLVisionModel(DynamicModule):
 
         assert self.max_size_w % self.patch_size == 0, "max_size_w must be divisible by patch_size"
         assert self.max_size_h % self.patch_size == 0, "max_size_h must be divisible by patch_size"
-        cu_seqlens = torch.tensor([0, seq_length]).to(device)
+        cu_seqlens = torch.repeat_interleave(
+            torch.tensor([grid_size_h * grid_size_w], device=device, dtype=torch.int32),
+            repeats=grid_size_t,
+        ).cumsum(dim=0)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         self.register_buffer("cu_seqlens", cu_seqlens, persistent=False)
 
         grid_thw = torch.tensor([[grid_size_t, self.max_size_h // self.patch_size, self.max_size_w // self.patch_size]]).to(
@@ -362,7 +388,7 @@ class _Qwen3VLVisionModel(DynamicModule):
         # batch, seq_len, dim = hidden_states.size()
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(hidden_states, position_embeddings=position_embeddings)
+            hidden_states = blk(hidden_states, cu_seqlens=self.cu_seqlens, position_embeddings=position_embeddings)
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)

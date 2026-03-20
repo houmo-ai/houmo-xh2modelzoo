@@ -26,6 +26,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import Tensor
+from transformers.video_utils import VideoMetadata
 from xhquant.api import HMONNXGoldenInference, HMONNXInference
 from .postprocess import VLLMPresencePenaltyLogitsProcessor
 from .llm_onnx_model import LLMONNXModel
@@ -51,8 +52,8 @@ class Qwen3VLONNXModel(LLMONNXModel):
         decode,
         kv_cache,
         cache_len=2048,
-        image_size_w=1204,
-        image_size_h=1204,
+        image_size_w=448,
+        image_size_h=448,
         max_size_t=2,
         resize_v1 = True,
         presence_penalty = 0,
@@ -80,6 +81,46 @@ class Qwen3VLONNXModel(LLMONNXModel):
         self.resize_v1 = resize_v1
         self.presence_penalty = presence_penalty
         self.logits_processor = VLLMPresencePenaltyLogitsProcessor(presence_penalty, 0)
+
+    def _build_video_raw_clip(self, video_tensor: torch.Tensor) -> torch.Tensor:
+        if video_tensor.dim() != 4:
+            raise ValueError(f"Expected sampled video tensor with shape [T, C, H, W], but got {tuple(video_tensor.shape)}")
+
+        video_tensor = video_tensor.float()
+        target_t = self.max_size_t
+        if video_tensor.shape[0] != target_t:
+            if video_tensor.shape[0] > target_t:
+                indices = torch.linspace(0, video_tensor.shape[0] - 1, target_t).round().long()
+                video_tensor = video_tensor.index_select(0, indices)
+            else:
+                pad_count = target_t - video_tensor.shape[0]
+                pad_frames = video_tensor[-1:].repeat(pad_count, 1, 1, 1)
+                video_tensor = torch.cat([video_tensor, pad_frames], dim=0)
+
+        if video_tensor.shape[-2:] != (self.image_size_h, self.image_size_w):
+            video_tensor = F.interpolate(
+                video_tensor,
+                size=(self.image_size_h, self.image_size_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        return video_tensor.permute(1, 0, 2, 3).unsqueeze(0).contiguous()
+
+    def _build_sampled_video_metadata(self, video_tensor: torch.Tensor, sample_fps: float) -> list[VideoMetadata]:
+        num_frames = int(video_tensor.shape[0])
+        duration = None if sample_fps <= 0 else num_frames / sample_fps
+        return [
+            VideoMetadata(
+                total_num_frames=num_frames,
+                fps=sample_fps,
+                width=int(video_tensor.shape[-1]),
+                height=int(video_tensor.shape[-2]),
+                duration=duration,
+                video_backend="sampled_clip",
+                frames_indices=list(range(num_frames)),
+            )
+        ]
 
 
     def preprocess_visual(self, inputs):
@@ -157,6 +198,10 @@ class Qwen3VLONNXModel(LLMONNXModel):
             position_ids (`torch.LongTensor` of shape `(3, batch_size, sequence_length)`)
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
+        if video_grid_thw is not None:
+            video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+            video_grid_thw[:, 0] = 1
+
         spatial_merge_size = self.spatial_merge_size
         image_token_id = self.image_token_id
         video_token_id = self.video_token_id
@@ -277,10 +322,33 @@ class Qwen3VLONNXModel(LLMONNXModel):
 
         inputs_embeds = self.token_embedding.to(device)(input_ids.to(device))
 
+        def _normalize_visual_embeds(visual_embeds):
+            if visual_embeds is None:
+                return None
+            if visual_embeds.dim() == 3 and visual_embeds.shape[0] == 1:
+                return visual_embeds.squeeze(0)
+            return visual_embeds
+
+        def _normalize_deepstack_embeds(deepstack_embeds):
+            if deepstack_embeds is None:
+                return None
+            normalized = []
+            for deepstack_embed in deepstack_embeds:
+                if deepstack_embed.dim() == 3 and deepstack_embed.shape[0] == 1:
+                    normalized.append(deepstack_embed.squeeze(0))
+                else:
+                    normalized.append(deepstack_embed)
+            return normalized
+
         n_image_tokens = torch.sum(input_ids == self.image_token_id).item()
+        n_video_tokens = torch.sum(input_ids == self.video_token_id).item()
+
+        image_mask = None
+        video_mask = None
+
         if n_image_tokens > 0:
-            image_embeds = data["image_embeds"]
-            n_image_features = image_embeds.shape[1]
+            image_embeds = _normalize_visual_embeds(data["image_embeds"])
+            n_image_features = image_embeds.shape[0]
             if n_image_tokens != n_image_features:
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
@@ -294,27 +362,50 @@ class Qwen3VLONNXModel(LLMONNXModel):
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            deepstack_image_embeds = data["deepstack_image_embeds"]
-            new_deepstack_image_embeds = list()
-            for deepstack_image_embed in deepstack_image_embeds:
-                new_deepstack_image_embed = torch.zeros_like(inputs_embeds).to(deepstack_image_embed)
-                new_deepstack_image_embed = new_deepstack_image_embed.masked_scatter(image_mask.to(deepstack_image_embed.device), deepstack_image_embed)
-                new_deepstack_image_embeds.append(new_deepstack_image_embed)
-            deepstack_image_embed_0 = new_deepstack_image_embeds[0].to(self._exec_device)
-            deepstack_image_embed_1 = new_deepstack_image_embeds[1].to(self._exec_device)
-            deepstack_image_embed_2 = new_deepstack_image_embeds[2].to(self._exec_device)
-        else:
-            deepstack_image_embed_0 = torch.zeros_like(inputs_embeds).to(self._exec_device)
-            deepstack_image_embed_1 = torch.zeros_like(inputs_embeds).to(self._exec_device)
-            deepstack_image_embed_2 = torch.zeros_like(inputs_embeds).to(self._exec_device)
+        if n_video_tokens > 0:
+            video_embeds = _normalize_visual_embeds(data["video_embeds"])
+            n_video_features = video_embeds.shape[0]
+            if n_video_tokens != n_video_features:
+                raise ValueError(
+                    f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                )
+            video_mask = (
+                (input_ids == self.video_token_id)
+                .unsqueeze(-1)
+                .expand_as(inputs_embeds)
+                .to(inputs_embeds.device)
+            )
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        deepstack_image_embeds = _normalize_deepstack_embeds(data.get("deepstack_image_embeds"))
+        deepstack_video_embeds = _normalize_deepstack_embeds(data.get("deepstack_video_embeds"))
+        deepstack_outputs = []
+        for layer_index in range(3):
+            layer_embed = torch.zeros_like(inputs_embeds)
+            if image_mask is not None and deepstack_image_embeds is not None:
+                layer_embed = layer_embed.masked_scatter(
+                    image_mask.to(deepstack_image_embeds[layer_index].device),
+                    deepstack_image_embeds[layer_index],
+                )
+            if video_mask is not None and deepstack_video_embeds is not None:
+                layer_embed = layer_embed.masked_scatter(
+                    video_mask.to(deepstack_video_embeds[layer_index].device),
+                    deepstack_video_embeds[layer_index],
+                )
+            deepstack_outputs.append(layer_embed.to(self._exec_device))
+
+        deepstack_image_embed_0 = deepstack_outputs[0]
+        deepstack_image_embed_1 = deepstack_outputs[1]
+        deepstack_image_embed_2 = deepstack_outputs[2]
 
         past_seq_length = data["past_seq_length"]
         assert past_seq_length >= 0, "past_seq_length should be non-negative."
 
         if past_seq_length == 0:
             # prefill
-            image_grid_thw = data["image_grid_thw"]
-            video_grid_thw = None
+            image_grid_thw = data.get("image_grid_thw")
+            video_grid_thw = data.get("video_grid_thw")
             position_ids, rope_deltas = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)
             self.rope_deltas = rope_deltas
         else:
@@ -438,8 +529,8 @@ class Qwen3VLONNXModel(LLMONNXModel):
         )
         return output
 
-    def create_template(self, prompt, image_dir = None):
-        if image_dir is None:
+    def create_template(self, prompt, media_path=None, media_type="image"):
+        if media_path is None:
             messages = [
                 {
                     "role": "user",
@@ -449,41 +540,67 @@ class Qwen3VLONNXModel(LLMONNXModel):
                 }
             ]
         else:
+            media_key = "image" if media_type == "image" else "video"
+            media_content = {
+                "type": media_type,
+                media_key: media_path,
+            }
+            if media_type == "video":
+                media_content["nframes"] = self.max_size_t
+                media_content["resized_height"] = self.image_size_h
+                media_content["resized_width"] = self.image_size_w
             messages = [
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "image": image_dir,
-                        },
+                        media_content,
                         {"type": "text", "text": prompt},
                     ],
                 }
             ]
         return messages
 
-    def preprocess(self, prompt, image_dir, processor, cus_temp=False):
+    def preprocess(self, prompt, media_path, processor, cus_temp=False, media_type="image"):
         from qwen_vl_utils import process_vision_info
         if not cus_temp:    
-            messages = self.create_template(prompt, image_dir)
+            messages = self.create_template(prompt, media_path, media_type=media_type)
         else:
             messages = prompt
         print(messages)
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        if image_dir is not None:
+        if media_path is not None and media_type == "video":
+            image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+            sampled_video = video_inputs[0]
+            sampled_metadata = self._build_sampled_video_metadata(sampled_video, float(video_kwargs["fps"][0]))
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+                videos_kwargs={"video_metadata": sampled_metadata, "return_metadata": True},
+            )
+            inputs["hm_pixel_values"] = [self._build_video_raw_clip(sampled_video)]
+        elif media_path is not None:
             image_inputs, video_inputs = process_vision_info(messages, image_patch_size=self.patch_size)
+            inputs = processor(
+                text=[text],    
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
         else:
             image_inputs, video_inputs = None, None
-        inputs = processor(
-            text=[text],    
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
         return inputs
 
     def load_and_process_image(self, image_path):
@@ -527,20 +644,22 @@ class Qwen3VLONNXModel(LLMONNXModel):
         return image
 
     @torch.no_grad()
-    def chat(self, prompt, image_path, processor, logger, use_fast=False, do_sample=False, cus_temp=False):
+    def chat(self, prompt, media_path, processor, logger, use_fast=False, do_sample=False, cus_temp=False, media_type="image"):
         from tqdm import tqdm
 
-        if image_path is not None:
+        if media_path is not None and media_type == "image":
             if self.resize_v1:
-                pil_image = self.load_and_process_image(image_path)
+                media_input = self.load_and_process_image(media_path)
             else:
-                pil_image = self.load_and_process_image_v2(image_path)
+                media_input = self.load_and_process_image_v2(media_path)
+        elif media_path is not None:
+            media_input = media_path
         else:
-            pil_image = None
-        inputs = self.preprocess(prompt, pil_image, processor, cus_temp=cus_temp)
+            media_input = None
+        inputs = self.preprocess(prompt, media_input, processor, cus_temp=cus_temp, media_type=media_type)
         inputs = inputs.to(self.device)
 
-        if image_path is not None:
+        if media_path is not None:
             self.init_image_feature()
             self.to(self.device)
             self.set_exec_device(self._exec_device)
@@ -548,24 +667,29 @@ class Qwen3VLONNXModel(LLMONNXModel):
                 self.image_feature_session.initialize()
                 self.image_feature_session._session.to_fast_mode()
             visual_inputs = self.preprocess_visual(inputs)
-            image_features, deepstack_image_feature_0, deepstack_image_feature_1, deepstack_image_feature_2 = self.extract_image_features(visual_inputs)
+            visual_features, deepstack_feature_0, deepstack_feature_1, deepstack_feature_2 = self.extract_image_features(visual_inputs)
             self.release_image_feature()
         else:
-            image_features = None
-            deepstack_image_feature_0 = None
-            deepstack_image_feature_1 = None
-            deepstack_image_feature_2 = None
+            visual_features = None
+            deepstack_feature_0 = None
+            deepstack_feature_1 = None
+            deepstack_feature_2 = None
 
-        deepstack_image_features = (deepstack_image_feature_0, deepstack_image_feature_1, deepstack_image_feature_2)
+        deepstack_visual_features = (deepstack_feature_0, deepstack_feature_1, deepstack_feature_2)
         decoder_ids = list()
         
         data_prefill = {
             "input_ids": inputs["input_ids"],
-            "image_embeds": image_features,
-            "deepstack_image_embeds": deepstack_image_features,
             "past_seq_length": 0,
             "image_grid_thw": inputs.get("image_grid_thw", None),
+            "video_grid_thw": inputs.get("video_grid_thw", None),
         }
+        if media_type == "video":
+            data_prefill["video_embeds"] = visual_features
+            data_prefill["deepstack_video_embeds"] = deepstack_visual_features
+        else:
+            data_prefill["image_embeds"] = visual_features
+            data_prefill["deepstack_image_embeds"] = deepstack_visual_features
         
         input_ids = data_prefill["input_ids"].cuda()
 

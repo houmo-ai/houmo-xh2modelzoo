@@ -114,6 +114,10 @@ class Qwen3_VLDataPreprocess(nn.Module):
             position_ids (`torch.LongTensor` of shape `(3, batch_size, sequence_length)`)
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
+        if video_grid_thw is not None:
+            video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+            video_grid_thw[:, 0] = 1
+
         spatial_merge_size = self.spatial_merge_size
         image_token_id = self.image_token_id
         video_token_id = self.video_token_id
@@ -239,6 +243,11 @@ class Qwen3_VLDataPreprocess(nn.Module):
         deepstack_image_embed_2 = torch.zeros_like(inputs_embeds)
 
         n_image_tokens = (input_ids == self.image_token_id).sum().item()
+        n_video_tokens = (input_ids == self.video_token_id).sum().item()
+
+        image_mask = None
+        video_mask = None
+
         if n_image_tokens > 0:
             image_embeds = data["image_embeds"]
             n_image_features = image_embeds.shape[0]
@@ -246,23 +255,53 @@ class Qwen3_VLDataPreprocess(nn.Module):
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
                 )
-            image_mask = (
-                (input_ids == self.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            )
+            image_mask = (input_ids == self.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-            deepstack_image_embeds = data["deepstack_image_embeds"]
-            deepstack_image_embed_0 = deepstack_image_embed_0.masked_scatter(image_mask, deepstack_image_embeds[0])
-            deepstack_image_embed_1 = deepstack_image_embed_1.masked_scatter(image_mask, deepstack_image_embeds[1])
-            deepstack_image_embed_2 = deepstack_image_embed_2.masked_scatter(image_mask, deepstack_image_embeds[2])
+
+        if n_video_tokens > 0:
+            video_embeds = data["video_embeds"]
+            n_video_features = video_embeds.shape[0]
+            if n_video_tokens != n_video_features:
+                raise ValueError(
+                    f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                )
+            video_mask = (input_ids == self.video_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+        if n_image_tokens > 0 or n_video_tokens > 0:
+            deepstack_image_embeds = data.get("deepstack_image_embeds")
+            deepstack_video_embeds = data.get("deepstack_video_embeds")
+            if deepstack_image_embeds is None and deepstack_video_embeds is None:
+                raise ValueError("At least one of deepstack_image_embeds or deepstack_video_embeds must be provided when visual tokens exist.")
+
+            num_deepstack_layers = 0
+            if deepstack_image_embeds is not None:
+                num_deepstack_layers = len(deepstack_image_embeds)
+            elif deepstack_video_embeds is not None:
+                num_deepstack_layers = len(deepstack_video_embeds)
+
+            deepstack_outputs = []
+            for layer_index in range(num_deepstack_layers):
+                layer_embed = torch.zeros_like(inputs_embeds)
+                if image_mask is not None and deepstack_image_embeds is not None:
+                    layer_embed = layer_embed.masked_scatter(image_mask, deepstack_image_embeds[layer_index].to(layer_embed))
+                if video_mask is not None and deepstack_video_embeds is not None:
+                    layer_embed = layer_embed.masked_scatter(video_mask, deepstack_video_embeds[layer_index].to(layer_embed))
+                deepstack_outputs.append(layer_embed)
+
+            deepstack_image_embed_0 = deepstack_outputs[0]
+            deepstack_image_embed_1 = deepstack_outputs[1]
+            deepstack_image_embed_2 = deepstack_outputs[2]
 
         past_seq_length = data["past_seq_length"]
         assert past_seq_length >= 0, "past_seq_length should be non-negative."
 
         if past_seq_length == 0:
             # prefill
-            image_grid_thw = data["image_grid_thw"]
-            video_grid_thw = None
+            image_grid_thw = data.get("image_grid_thw")
+            video_grid_thw = data.get("video_grid_thw")
             position_ids, rope_deltas = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)
             self.rope_deltas = rope_deltas
         else:

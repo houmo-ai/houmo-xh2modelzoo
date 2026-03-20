@@ -30,8 +30,10 @@ from typing import Callable, List, Optional, Tuple, Union
 import onnx
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from qwen_vl_utils import process_vision_info
+from transformers.video_utils import VideoMetadata
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
@@ -243,8 +245,12 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         wraped_vision_model.cpu()
         
         hm_pixel_values = inputs["hm_pixel_values"][0].type(wraped_vision_model.dtype).to(wraped_vision_model.device)
-        if self.config.visual_config.image_max_size_t != 2:
-            hm_pixel_values = hm_pixel_values.repeat(1, 1, self.config.visual_config.image_max_size_t // 2, 1, 1)
+        target_t = self.config.visual_config.image_max_size_t
+        current_t = hm_pixel_values.shape[2]
+        if current_t != target_t:
+            if target_t % current_t != 0:
+                raise ValueError(f"Cannot align hm_pixel_values temporal length from {current_t} to target {target_t}")
+            hm_pixel_values = hm_pixel_values.repeat(1, 1, target_t // current_t, 1, 1)
 
         logger.info(f"start export vision model to onnx format............")
         
@@ -291,6 +297,108 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         with torch.no_grad():
             vision_model.forward(*input_args)
         logger.info(f"export vision model golden to {golden_dir}")
+
+    def _build_video_raw_clip(self, video_tensor: torch.Tensor, target_t: int, target_h: int, target_w: int) -> torch.Tensor:
+        if video_tensor.dim() != 4:
+            raise ValueError(f"Expected sampled video tensor with shape [T, C, H, W], but got {tuple(video_tensor.shape)}")
+
+        video_tensor = video_tensor.float()
+        if video_tensor.shape[0] != target_t:
+            if video_tensor.shape[0] > target_t:
+                indices = torch.linspace(0, video_tensor.shape[0] - 1, target_t).round().long()
+                video_tensor = video_tensor.index_select(0, indices)
+            else:
+                pad_count = target_t - video_tensor.shape[0]
+                pad_frames = video_tensor[-1:].repeat(pad_count, 1, 1, 1)
+                video_tensor = torch.cat([video_tensor, pad_frames], dim=0)
+
+        if video_tensor.shape[-2:] != (target_h, target_w):
+            video_tensor = F.interpolate(video_tensor, size=(target_h, target_w), mode="bilinear", align_corners=False)
+
+        return video_tensor.permute(1, 0, 2, 3).unsqueeze(0).contiguous()
+
+    def _build_sampled_video_metadata(self, video_tensor: torch.Tensor, sample_fps: float) -> list[VideoMetadata]:
+        num_frames = int(video_tensor.shape[0])
+        duration = None if sample_fps <= 0 else num_frames / sample_fps
+        return [
+            VideoMetadata(
+                total_num_frames=num_frames,
+                fps=sample_fps,
+                width=int(video_tensor.shape[-1]),
+                height=int(video_tensor.shape[-2]),
+                duration=duration,
+                video_backend="sampled_clip",
+                frames_indices=list(range(num_frames)),
+            )
+        ]
+
+    def _build_sample_multimodal_inputs(self, processor, wrap_cfg, config):
+        sample_video_path = getattr(config.visual_config, "sample_video_path", "")
+        if sample_video_path:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video",
+                            "video": sample_video_path,
+                            "nframes": wrap_cfg.visual.image_max_size_t,
+                            "resized_height": wrap_cfg.visual.image_max_size_h,
+                            "resized_width": wrap_cfg.visual.image_max_size_w,
+                        },
+                        {"type": "text", "text": "Describe this video."},
+                    ],
+                }
+            ]
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+            sampled_video = video_inputs[0]
+            sampled_metadata = self._build_sampled_video_metadata(
+                sampled_video,
+                sample_fps=float(video_kwargs["fps"][0]),
+            )
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+                videos_kwargs={"video_metadata": sampled_metadata, "return_metadata": True},
+            )
+            inputs["hm_pixel_values"] = [
+                self._build_video_raw_clip(
+                    sampled_video,
+                    target_t=wrap_cfg.visual.image_max_size_t,
+                    target_h=wrap_cfg.visual.image_max_size_h,
+                    target_w=wrap_cfg.visual.image_max_size_w,
+                )
+            ]
+            return messages, inputs
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": config.visual_config.sample_image_path,
+                        "resized_height": wrap_cfg.visual.image_max_size_h,
+                        "resized_width": wrap_cfg.visual.image_max_size_w,
+                    },
+                    {"type": "text", "text": "Describe this image."},
+                ],
+            }
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages, image_patch_size=wrap_cfg.visual.patch_size)
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        return messages, inputs
         
     def _convert(self, hf_model_path: str, output_dir: str):
         logger = get_root_logger()
@@ -309,7 +417,7 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
             
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
-        if resume_from is not None:
+        if resume_from:
             self.load_quant_weight(resume_from, native_model)
 
         lm_head = native_model.lm_head
@@ -392,28 +500,9 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         torch.save(token_embedding.cpu(), str(token_embedding_file))
         meta_info["token_embedding_file"] = str(token_embedding_file.relative_to(work_dir))
   
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": "data/images/qwen2_vl_demo.jpeg",
-                        "resized_height": wrap_cfg.visual.image_max_size_h,
-                        "resized_width": wrap_cfg.visual.image_max_size_w,
-                    },
-                    {"type": "text", "text": "Describe this image."},
-                ],
-            }
-        ]
-        
         from . import Qwen3VLProcessor
         
         processor = Qwen3VLProcessor.from_pretrained(hf_model_path)
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs = process_vision_info(messages, image_patch_size=wrap_cfg.visual.patch_size)
         
         Path(work_dir / "hmonnx").mkdir(exist_ok=True, parents=True)
         
@@ -430,28 +519,35 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         assert patch_size == 16, f"Only support patch size 16, but got {patch_size}"
         assert temporal_patch_size == 2, f"Only support temporal patch size 2, but got {temporal_patch_size}"
 
-        processor.image_processor.max_pixels = max(
-            image_max_size_w * image_max_size_h + 1, processor.image_processor.max_pixels
-        )
+        current_max_pixels = getattr(processor.image_processor, "max_pixels", None)
+        if current_max_pixels is None:
+            processor.image_processor.max_pixels = image_max_size_w * image_max_size_h + 1
+        else:
+            processor.image_processor.max_pixels = max(image_max_size_w * image_max_size_h + 1, current_max_pixels)
 
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
+        messages, inputs = self._build_sample_multimodal_inputs(processor, wrap_cfg, config)
         
         visual = native_model.visual
 
         execution_device = torch.device("cuda:0")
         visual.to(execution_device)
+        image_embeds = None
+        deepstack_image_embeds = None
+        video_embeds = None
+        deepstack_video_embeds = None
         with torch.no_grad():
-            image_embeds, deepstack_image_embeds = visual.forward_ori(
-                inputs["pixel_values"].to(execution_device), grid_thw=inputs["image_grid_thw"].to(execution_device)
-            )
-            image_embeds = image_embeds.cpu()
-            deepstack_image_embeds = [ds_vision.cpu() for ds_vision in deepstack_image_embeds]
+            if "pixel_values" in inputs:
+                image_embeds, deepstack_image_embeds = visual.forward_ori(
+                    inputs["pixel_values"].to(execution_device), grid_thw=inputs["image_grid_thw"].to(execution_device)
+                )
+                image_embeds = image_embeds.cpu()
+                deepstack_image_embeds = [ds_vision.cpu() for ds_vision in deepstack_image_embeds]
+            if "pixel_values_videos" in inputs:
+                video_embeds, deepstack_video_embeds = visual.forward_ori(
+                    inputs["pixel_values_videos"].to(execution_device), grid_thw=inputs["video_grid_thw"].to(execution_device)
+                )
+                video_embeds = video_embeds.cpu()
+                deepstack_video_embeds = [ds_vision.cpu() for ds_vision in deepstack_video_embeds]
             visual.cpu()
 
         if not Path(vision_onnx_file).exists():
@@ -486,11 +582,20 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         # Export LLM model, prefill
         data_prefill = {
             "input_ids": inputs["input_ids"],
-            "image_embeds": image_embeds.to(torch.float16),
-            "deepstack_image_embeds": [ds_vision.to(torch.float16) for ds_vision in deepstack_image_embeds],
             "past_seq_length": 0,
-            "image_grid_thw": inputs["image_grid_thw"],
         }
+        if image_embeds is not None:
+            data_prefill["image_embeds"] = image_embeds.to(torch.float16)
+            data_prefill["deepstack_image_embeds"] = [ds_vision.to(torch.float16) for ds_vision in deepstack_image_embeds]
+            data_prefill["image_grid_thw"] = inputs["image_grid_thw"]
+        else:
+            data_prefill["image_grid_thw"] = None
+        if video_embeds is not None:
+            data_prefill["video_embeds"] = video_embeds.to(torch.float16)
+            data_prefill["deepstack_video_embeds"] = [ds_vision.to(torch.float16) for ds_vision in deepstack_video_embeds]
+            data_prefill["video_grid_thw"] = inputs["video_grid_thw"]
+        else:
+            data_prefill["video_grid_thw"] = None
         
         input_sequence_length = wrap_cfg.input_sequence_length
 
@@ -584,7 +689,7 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
         prefill_golden_dir = str(work_dir / "golden" / f"{prefix}-llm-prefill")
 
         if not Path(prefill_golden_dir).exists():
-            logger.info(f"start export vision model golden............")
+            logger.info(f"start export prefill model golden............")
             from xhquant.api import HMONNXGoldenInference
 
             prefill_model = HMONNXGoldenInference(prefill_onnx_file)

@@ -53,6 +53,7 @@ def parse_arguments():
     parser.add_argument("--temporal_patch_size", type=int, default=2, help="temporal patch size")
     parser.add_argument("--patch_size", type=int, default=16, help="patch size")
     parser.add_argument("--image", type=str, default="data/images/qwen2_vl_demo.jpeg")
+    parser.add_argument("--video", type=str, default=None)
     parser.add_argument("--prompt", type=str, default="请用简洁优美的语言描述这张图片。")
     parser.add_argument("--resume", action="store_true", help="resume export golden")
     parser.add_argument("--use_fast", action="store_true", help="fast mode")
@@ -79,6 +80,7 @@ def main():
     patch_size = args.patch_size
     input_sequence_length = args.input_sequence_length
     image = args.image
+    video = args.video
     prompt = args.prompt
     resume = args.resume
     use_fast = args.use_fast
@@ -144,7 +146,9 @@ def main():
     xh_model.set_input_embeddings(token_embedding)
     xh_model.set_exec_device(exec_device)
 
-    xh_model.chat(prompt, image, processor, logger, use_fast=use_fast)
+    media_type = "video" if video else "image"
+    media_path = video if video else image
+    xh_model.chat(prompt, media_path, processor, logger, use_fast=use_fast, media_type=media_type)
 
 
 if __name__ == "__main__":

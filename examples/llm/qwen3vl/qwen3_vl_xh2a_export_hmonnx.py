@@ -158,6 +158,7 @@ def main(args):
             temporal_patch_size=args.temporal_patch_size,
             patch_size=args.patch_size,
             sample_image_path=args.sample_image_path,
+            sample_video_path=args.sample_video_path,
         ),
     )
 
@@ -194,6 +195,12 @@ if __name__ == "__main__":
         type=str,
         default="data/images/qwen2_vl_demo.jpeg",
         help="sample image path for generate golden",
+    )
+    parser.add_argument(
+        "--sample_video_path",
+        type=str,
+        default="",
+        help="sample video path for generate golden; if set, export path uses video sample with fixed nframes=image_max_size_t",
     )
     parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
     parser.add_argument(
