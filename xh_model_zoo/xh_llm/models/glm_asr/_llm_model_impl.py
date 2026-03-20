@@ -74,9 +74,11 @@ class _LlamaRotaryEmbedding(DynamicModule):
         cos, sin = self.forward(dummy_x, position_ids)
         cos = cos.to(device)
         sin = sin.to(device)
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
 
-        # cos/sin shape is (batch=1, seq_len, head_dim)
-        # Keep as is - this matches Llama's expected shape for broadcasting
+        # cos/sin shape: (1, 1, seq_len, head_dim) — 4D
+        # dim 1 = 1 broadcasts over num_heads when multiplied with query/key
         self.register_buffer("sin_cached", sin.to(dtype=dtype), persistent=False)
         self.register_buffer("cos_cached", cos.to(dtype=dtype), persistent=False)
 
@@ -333,9 +335,9 @@ class _LlamaModel(DynamicModule):
 
         self.slice._update_cfg = types.MethodType(_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
-        # cos/sin cache shape is (1, seq_len, head_dim), slice on dim 1
-        self.sin_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
-        self.cos_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
+        # cos/sin cache shape is (1, 1, seq_len, head_dim), slice on dim 2
+        self.sin_slice = xhnn.DynamicSlice([input_seq_len], [2], [1])
+        self.cos_slice = xhnn.DynamicSlice([input_seq_len], [2], [1])
 
         def _sin_cos_slice_update_cfg(self, cfg: Optional[Dict] = None):
             input_seq_len = cfg.input_sequence_length
