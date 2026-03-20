@@ -151,7 +151,7 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
         self.wraped_llm_model = None
         self.device = device
 
-    def _convert(self, hf_model, output_dir: str, postprocess=None, tag_id=20):
+    def _convert(self, hf_model, output_dir: str, postprocess=None, tag_id=20, temb=[0, 250, 500, 750]):
         logger = get_root_logger()
         config = self.config
 
@@ -193,6 +193,8 @@ class Groot_HEAD_ConverterXH2a(HFTransfromersConverter):
                 input_sequence_length=324,
                 use_cache=false,
                 max_sequence_length=888888,
+                tag_id=tag_id,
+                temb=temb,
             )
         )
 

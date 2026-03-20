@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from .gr00t.model.gr00t_n1d6.gr00t_n1d6 import Gr00tN1d6
 
+TEM_NUM = 8
+
 class cus_GROOT(Gr00tN1d6):
     def __init__(self, *args, **kwargs):
         pass
@@ -81,7 +83,7 @@ class cus_GROOT(Gr00tN1d6):
 
             actions = torch.randn( [1, 50, 128], device=backbone_features.device, dtype=torch.float16)
 
-            for t in [0, 1, 2, 3]:
+            for t in range(self.temb_num):
                 timesteps_tensor = torch.tensor([t], device=self.device, dtype=torch.int32)
                 actions = self.new_network(
                     backbone_feature,
@@ -106,6 +108,7 @@ class cus_GROOT(Gr00tN1d6):
         new_network_pre = None,
         new_network = None,
         meta_info = None,
+        temb_num = 4,
     ):
         """
         将改写后的模型转换为兼容 Hugging Face 的模型
@@ -115,6 +118,7 @@ class cus_GROOT(Gr00tN1d6):
         # hf_model.embed_tokens = hf_model.model.embed_tokens
         # del hf_model.text_encoder
         # del hf_model.lm_head
+        hf_model.temb_num = temb_num
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         

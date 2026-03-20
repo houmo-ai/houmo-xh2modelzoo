@@ -53,6 +53,7 @@ class cus_eagle3_inference(modeling_eagle3_vl.Eagle3_VLForConditionalGeneration)
         text_encoder = None,
         vision = None,
         meta_info = None,
+        fix_num_images = None,
     ):
         """
         将改写后的模型转换为兼容 Hugging Face 的模型
@@ -60,6 +61,9 @@ class cus_eagle3_inference(modeling_eagle3_vl.Eagle3_VLForConditionalGeneration)
         # if text_encoder is not None:
         hf_model.__class__ = cls
         hf_model.__setup__(text_encoder, vision)
+
+        if fix_num_images is not None:
+            hf_model.fix_num_images = fix_num_images
         # hf_model.embed_tokens = hf_model.model.embed_tokens
         # del hf_model.text_encoder
         # del hf_model.lm_head
@@ -156,7 +160,7 @@ class cus_eagle3_inference(modeling_eagle3_vl.Eagle3_VLForConditionalGeneration)
         input_embeds = self.language_model.get_input_embeddings()(input_ids)
         
         num_images = len(pixel_values)
-        
+
         if image_flags is not None:
             image_flags = image_flags.view(-1)
 
@@ -166,7 +170,7 @@ class cus_eagle3_inference(modeling_eagle3_vl.Eagle3_VLForConditionalGeneration)
         if True:
             vit_embeds = []
             for i in range(num_images):
-                vit_embeds.append(self.extract_feature([pixel_values[i]], image_flags)) # [1, 3, 252, 252] => 1,81,2048
+                vit_embeds.append( self.extract_feature([pixel_values[i]], image_flags)) # [1, 3, 252, 252] => 1,81,2048
             vit_embeds = torch.cat(vit_embeds, dim=0) # [num_images, 81, 2048]
         else:
             vit_embeds = self.extract_feature(pixel_values, image_flags) # [num_images, 81, 2048]
@@ -187,6 +191,11 @@ class cus_eagle3_inference(modeling_eagle3_vl.Eagle3_VLForConditionalGeneration)
         input_embeds = input_embeds.reshape(B, N, C)
 
         # breakpoint() # [5,121,2048]
+
+        if self.fix_num_images is not None:
+            num_images = self.fix_num_images
+        else:
+            num_images = len(pixel_values)
         
         outputs = []
         for i in range(num_images):

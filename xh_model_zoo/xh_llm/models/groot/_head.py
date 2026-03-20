@@ -59,6 +59,10 @@ from ..builder import XHLLM_TRACEABLE_MODULES
 
 from diffusers.models.activations import GELU
 
+TAG_ID = 20 # 16
+Temb = [0, 250, 500, 750]
+# Temb = [0, 125, 250, 375, 500, 625, 750, 875]
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         GELU: "GEGLU",
@@ -345,8 +349,12 @@ class _AlternateVLDiT(DynamicModule):
             return self.proj_out_2(hidden_states)
 
     def _setup(self, cfg: Optional[Dict] = None):
+        global Temb, TAG_ID
+        Temb = cfg['temb']
+        TAG_ID = cfg['tag_id']
+
         self.embed = []
-        for temb in [0, 250, 500, 750]:
+        for temb in Temb:
             tembed = torch.tensor([temb]).cuda()
             self.embed.append( self.timestep_encoder( tembed ) )
         
@@ -413,20 +421,24 @@ class _MultiEmbodimentActionEncoder(DynamicModule):
         return x    
     
     def _setup(self, cfg: Optional[Dict] = None):
-        self.w1_linear = nn.Linear(self.W1.W[20].shape[0],  self.W1.W[20].shape[1], bias=True)
-        self.w1_linear.weight.data = self.W1.W[20].transpose(0, 1).half()
-        self.w1_linear.bias.data = self.W1.b[20].half()
+        global Temb, TAG_ID
+        Temb = cfg['temb']
+        TAG_ID = cfg['tag_id']
 
-        self.w2_linear = nn.Linear(self.W2.W[20].shape[0],  self.W2.W[20].shape[1], bias=True)
-        self.w2_linear.weight.data = self.W2.W[20].transpose(0, 1).half()
-        self.w2_linear.bias.data = self.W2.b[20].half()
+        self.w1_linear = nn.Linear(self.W1.W[TAG_ID].shape[0],  self.W1.W[TAG_ID].shape[1], bias=True)
+        self.w1_linear.weight.data = self.W1.W[TAG_ID].transpose(0, 1).half()
+        self.w1_linear.bias.data = self.W1.b[TAG_ID].half()
 
-        self.w3_linear = nn.Linear(self.W3.W[20].shape[0],  self.W3.W[20].shape[1], bias=True)
-        self.w3_linear.weight.data = self.W3.W[20].transpose(0, 1).half()
-        self.w3_linear.bias.data = self.W3.b[20].half()
+        self.w2_linear = nn.Linear(self.W2.W[TAG_ID].shape[0],  self.W2.W[TAG_ID].shape[1], bias=True)
+        self.w2_linear.weight.data = self.W2.W[TAG_ID].transpose(0, 1).half()
+        self.w2_linear.bias.data = self.W2.b[TAG_ID].half()
+
+        self.w3_linear = nn.Linear(self.W3.W[TAG_ID].shape[0],  self.W3.W[TAG_ID].shape[1], bias=True)
+        self.w3_linear.weight.data = self.W3.W[TAG_ID].transpose(0, 1).half()
+        self.w3_linear.bias.data = self.W3.b[TAG_ID].half()
 
         self.embed = []
-        for temb in [0, 250, 500, 750]:
+        for temb in Temb:
             tembed = torch.tensor([temb]).unsqueeze(0).repeat(1, 50).cuda()
             self.embed.append( self.pos_encoding( tembed ).to(self.w3_linear.weight.dtype) )
         
@@ -463,13 +475,17 @@ class _CategorySpecificMLP(DynamicModule):
 
 
     def _setup(self, cfg: Optional[Dict] = None):
-        self.layer1_linear = nn.Linear(self.layer1.W[20].shape[0],  self.layer1.W[20].shape[1], bias=True)
-        self.layer1_linear.weight.data = self.layer1.W[20].transpose(0, 1)
-        self.layer1_linear.bias.data = self.layer1.b[20]
+        global Temb, TAG_ID
+        Temb = cfg['temb']
+        TAG_ID = cfg['tag_id']
+        
+        self.layer1_linear = nn.Linear(self.layer1.W[TAG_ID].shape[0],  self.layer1.W[TAG_ID].shape[1], bias=True)
+        self.layer1_linear.weight.data = self.layer1.W[TAG_ID].transpose(0, 1)
+        self.layer1_linear.bias.data = self.layer1.b[TAG_ID]
 
-        self.layer2_linear = nn.Linear(self.layer2.W[20].shape[0],  self.layer2.W[20].shape[1], bias=True)
-        self.layer2_linear.weight.data = self.layer2.W[20].transpose(0, 1)
-        self.layer2_linear.bias.data = self.layer2.b[20]
+        self.layer2_linear = nn.Linear(self.layer2.W[TAG_ID].shape[0],  self.layer2.W[TAG_ID].shape[1], bias=True)
+        self.layer2_linear.weight.data = self.layer2.W[TAG_ID].transpose(0, 1)
+        self.layer2_linear.bias.data = self.layer2.b[TAG_ID]
 
         # self.q_proj = nn.Linear(dim, dim, bias=True)
         # self.k_proj = nn.Linear(dim, dim, bias=True)

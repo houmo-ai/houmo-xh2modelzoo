@@ -42,12 +42,16 @@ def main(args):
         Groot_HEAD_ConverterXH2a(config)._convert(
             policy.model.action_head,
             args.output_path,
+            tag_id=args.tag,
+            temb=args.temb,
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument("--tag", type=int, default=16, help="tag id")
+    parser.add_argument("--temb", type=list, default=[0, 125, 250, 375, 500, 625, 750, 875], help="temb")
     parser.add_argument("--model", type=str, default='/data02/datasets/GR00T-N1.6-DROID')
     parser.add_argument("--output_path", type=str, default="work_dirs/groot_droid")
     parser.add_argument(
