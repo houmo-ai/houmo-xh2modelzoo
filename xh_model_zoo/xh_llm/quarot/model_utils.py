@@ -1,47 +1,61 @@
-# Copyright 2025 HOUMO AI
-#
-# File: model_utils.py
-# Description:
-#   Model type extraction utilities for QUAROT.
-#   This module provides functions for identifying and extracting
-#   model types for rotation-based quantization.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
 import logging
+from logging import config
+from math import e
 import os
 
 import psutil
 import torch
 import torch.nn as nn
 import transformers
+import xhquant_llm.models.qwen3_vl as qwen3_vl
+import xhquant_llm.models.qwen3moe_vl as qwen3_vl_moe
+# These flags disable using TensorFloat-32 tensor cores (to avoid numerical issues)
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+DEV = torch.device(
+    "cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
-from ..models.qwen3_vl import Qwen3VLForConditionalGeneration
-from ..models.qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
-from . import utils
+
+def cleanup_memory(verbose=True) -> None:
+    """Run GC and clear GPU memory."""
+    import gc
+    import inspect
+
+    caller_name = ""
+    try:
+        caller_name = f" (from {inspect.stack()[1].function})"
+    except (ValueError, KeyError):
+        pass
+
+    def total_reserved_mem() -> int:
+        return sum(torch.cuda.memory_reserved(device=i) for i in range(torch.cuda.device_count()))
+
+    memory_before = total_reserved_mem()
+
+    # gc.collect and empty cache are necessary to clean up GPU memory if the model was distributed
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        memory_after = total_reserved_mem()
+        if verbose:
+            logging.info(
+                f"GPU memory{caller_name}: {memory_before / (1024 ** 3):.2f} -> {memory_after / (1024 ** 3):.2f} GB"
+                f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
+            )
+
 
 OPT_MODEL = transformers.models.opt.modeling_opt.OPTForCausalLM
 OPT_LAYER = transformers.models.opt.modeling_opt.OPTDecoderLayer
 LLAMA_MODEL = transformers.models.llama.modeling_llama.LlamaForCausalLM
 LLAMA_LAYER = transformers.models.llama.modeling_llama.LlamaDecoderLayer
 QWEN_MODEL = transformers.models.qwen2.modeling_qwen2.Qwen2ForCausalLM
-QWEN3MOE_MODEL = transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeForCausalLM
 QWEN_LAYER = transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
-QWEN2_5_VL_MODEL = transformers.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration
 QWEN3_MODEL = transformers.Qwen3ForCausalLM
-QWEN3_VL_MODEL = (transformers.Qwen3VLForConditionalGeneration, Qwen3VLForConditionalGeneration)
-QWEN3_VL_MOE_MODEL = (transformers.Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeForConditionalGeneration)
+QWEN2_5_VL_MODEL = transformers.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration
+QWEN3_VL_MODEL = (transformers.Qwen3VLForConditionalGeneration, qwen3_vl.Qwen3VLForConditionalGeneration)
+QWEN3_VL_MOE_MODEL = (transformers.Qwen3VLMoeForConditionalGeneration, qwen3_vl_moe.Qwen3VLMoeForConditionalGeneration)
+GLM4V_MODEL = transformers.models.glm4v.Glm4vForConditionalGeneration
 
 
 def model_type_extractor(model):
@@ -51,8 +65,6 @@ def model_type_extractor(model):
         return OPT_MODEL
     elif isinstance(model, QWEN_MODEL):
         return QWEN_MODEL
-    elif isinstance(model, QWEN3MOE_MODEL):
-        return QWEN3MOE_MODEL
     elif isinstance(model, QWEN3_MODEL):
         return QWEN3_MODEL
     elif isinstance(model, QWEN2_5_VL_MODEL):
@@ -61,6 +73,8 @@ def model_type_extractor(model):
         return QWEN3_VL_MODEL
     elif isinstance(model, QWEN3_VL_MOE_MODEL):
         return QWEN3_VL_MOE_MODEL
+    elif isinstance(model, GLM4V_MODEL):
+        return GLM4V_MODEL
     else:
         raise ValueError(f"Unknown model type {model}")
 
@@ -98,7 +112,8 @@ def get_llama(model_name, hf_token):
         attn_implementation="eager",
     )
     model.seqlen = 2048
-    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info(
+        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -124,10 +139,32 @@ def get_qwen(model_name, hf_token, args):
     if args.tie_embed_head:
         import copy
 
-        model.lm_head.weight.data = copy.deepcopy(model.model.embed_tokens.weight.data)
+        model.lm_head.weight.data = copy.deepcopy(
+            model.model.embed_tokens.weight.data)
 
     model.seqlen = 2048
-    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info(
+        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    return model
+
+def get_glm4v(model_name, hf_token):
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    config = transformers.Glm4vConfig.from_pretrained(model_name)
+
+    model = transformers.Glm4ForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="cuda",
+        config=config,
+        trust_remote_code=True,
+        attn_implementation="eager",
+    )
+
+    model.seqlen = 2048
+    logging.info(
+        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -135,9 +172,11 @@ def get_opt(model_name):
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    model = transformers.OPTForCausalLM.from_pretrained(model_name, torch_dtype="auto", low_cpu_mem_usage=True)
+    model = transformers.OPTForCausalLM.from_pretrained(
+        model_name, torch_dtype="auto", low_cpu_mem_usage=True)
     model.seqlen = model.config.max_position_embeddings
-    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info(
+        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -148,6 +187,8 @@ def get_model(model_name, hf_token=None, args=None):
         return get_opt(model_name)
     elif "qwen" in model_name.lower():
         return get_qwen(model_name, hf_token, args)
+    elif "glm4v" in model_name.lower():
+        return get_glm4v(model_name, hf_token)
     else:
         raise ValueError(f"Unknown model {model_name}")
 
@@ -163,51 +204,41 @@ def get_model_type(model):
         model_type = QWEN3_MODEL
     elif isinstance(model, QWEN2_5_VL_MODEL):
         model_type = QWEN2_5_VL_MODEL
-    elif isinstance(model, QWEN3MOE_MODEL):
-        model_type = QWEN3MOE_MODEL
     elif isinstance(model, QWEN3_VL_MODEL):
         model_type = QWEN3_VL_MODEL
     elif isinstance(model, QWEN3_VL_MOE_MODEL):
         model_type = QWEN3_VL_MOE_MODEL
+    elif isinstance(model, GLM4V_MODEL):
+        model_type = GLM4V_MODEL
     else:
         raise ValueError(f"Unknown model type {model}")
     return model_type
 
 
 def get_embeddings(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL]:
         return [model.model.embed_tokens]
-    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL]:
-        return [model.model.language_model.embed_tokens]
     elif model_type == OPT_MODEL:
         return [model.model.decoder.embed_tokens, model.model.decoder.embed_positions]
+    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
+        return [model.language_model.embed_tokens]
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
 
 def get_transformer_layers(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL]:
         return [layer for layer in model.model.layers]
-    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL]:
-        return [layer for layer in model.model.language_model.layers]
     elif model_type == OPT_MODEL:
         return [layer for layer in model.model.decoder.layers]
+    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
+        return [layer for layer in model.language_model.layers]
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
 
 def get_lm_head(model, model_type):
-    if model_type in [
-        LLAMA_MODEL,
-        QWEN_MODEL,
-        QWEN3_MODEL,
-        QWEN2_5_VL_MODEL,
-        QWEN3MOE_MODEL,
-        QWEN3_VL_MODEL,
-        QWEN3_VL_MOE_MODEL,
-    ]:
-        return model.lm_head
-    elif model_type == OPT_MODEL:
+    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, OPT_MODEL, OPT_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
         return model.lm_head
     else:
         raise ValueError(f"Unknown model type {model_type}")
@@ -216,11 +247,12 @@ def get_lm_head(model, model_type):
 def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
-        assert isinstance(pre_head_layernorm, transformers.models.llama.modeling_llama.LlamaRMSNorm)
-    elif model_type in [QWEN_MODEL, QWEN3_MODEL, QWEN3MOE_MODEL]:
+        assert isinstance(pre_head_layernorm,
+                          transformers.models.llama.modeling_llama.LlamaRMSNorm)
+    elif model_type in (QWEN_MODEL, QWEN3_MODEL):
         pre_head_layernorm = model.model.norm
-    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL]:
-        pre_head_layernorm = model.model.language_model.norm
+    elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
+        pre_head_layernorm = model.language_model.norm
     elif model_type == OPT_MODEL:
         pre_head_layernorm = model.model.decoder.final_layer_norm
         assert pre_head_layernorm is not None
@@ -231,12 +263,7 @@ def get_pre_head_layernorm(model, model_type):
 
 def get_mlp_bottleneck_size(model):
     model_type = get_model_type(model)
-    if (
-        model_type == LLAMA_MODEL
-        or model_type == QWEN_MODEL
-        or model_type == QWEN3_MODEL
-        or model_type == QWEN3MOE_MODEL
-    ):
+    if model_type == LLAMA_MODEL or model_type == QWEN_MODEL or model_type == QWEN3_MODEL or model_type == GLM4V_MODEL:
         return model.config.intermediate_size
     elif model_type == OPT_MODEL:
         return model.config.ffn_dim
@@ -265,12 +292,24 @@ def replace_modules(
     for name, module in root.named_children():
         new_module = None
         if isinstance(module, type_to_replace):
+            first_tensor = next(
+                (p for p in module.parameters(recurse=False) if p is not None),
+                next((b for b in module.buffers(recurse=False)), None),
+            )
+            device = first_tensor.device if first_tensor is not None else None
+            dtype = first_tensor.dtype if first_tensor is not None else None
             if replace_layers:  # layernorm_fusion.replace_layers case where transformer layers are replaced
                 new_module = new_module_factory(module, int(name))
             else:  # layernorm_fusion.fuse_modules case where layernorms are fused
                 new_module = new_module_factory(module)
+            if device is not None:
+                to_kwargs = {"device": device}
+                if dtype is not None:
+                    to_kwargs["dtype"] = dtype
+                new_module = new_module.to(**to_kwargs)
         elif len(list(module.children())) > 0:
-            replace_modules(module, type_to_replace, new_module_factory, replace_layers)
+            replace_modules(module, type_to_replace,
+                            new_module_factory, replace_layers)
 
         if new_module is not None:
             setattr(root, name, new_module)
@@ -287,7 +326,7 @@ class RMSN(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.mean_dim = mean_dim
-        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.weight = torch.nn.Parameter(torch.ones(mean_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -347,12 +386,16 @@ def capture_layer_io(model_type, layer, layer_input):
         }
 
         for name in captured_inputs.keys():
-            module = getattr(layer.self_attn, name, None) or getattr(layer.mlp, name, None)
-            handles.append(module.register_forward_hook(hook_factory(name, captured_inputs, True)))
+            module = getattr(layer.self_attn, name, None) or getattr(
+                layer.mlp, name, None)
+            handles.append(module.register_forward_hook(
+                hook_factory(name, captured_inputs, True)))
 
         for name in captured_outputs.keys():
-            module = getattr(layer.self_attn, name, None) or getattr(layer.mlp, name, None)
-            handles.append(module.register_forward_hook(hook_factory(name, captured_outputs, False)))
+            module = getattr(layer.self_attn, name, None) or getattr(
+                layer.mlp, name, None)
+            handles.append(module.register_forward_hook(
+                hook_factory(name, captured_outputs, False)))
 
     elif model_type == OPT_MODEL:
         captured_inputs = {
@@ -366,28 +409,34 @@ def capture_layer_io(model_type, layer, layer_input):
         }
         for name in captured_inputs.keys():
             # In OPT, fc1 and fc2 are directly contained in OPTDecoderLayer
-            module = getattr(layer.self_attn, name, None) or getattr(layer, name, None)
-            handles.append(module.register_forward_hook(hook_factory(name, captured_inputs, True)))
+            module = getattr(layer.self_attn, name,
+                             None) or getattr(layer, name, None)
+            handles.append(module.register_forward_hook(
+                hook_factory(name, captured_inputs, True)))
 
         for name in captured_outputs.keys():
             # In OPT, fc1 and fc2 are directly contained in OPTDecoderLayer
-            module = getattr(layer.self_attn, name, None) or getattr(layer, name, None)
-            handles.append(module.register_forward_hook(hook_factory(name, captured_outputs, False)))
+            module = getattr(layer.self_attn, name,
+                             None) or getattr(layer, name, None)
+            handles.append(module.register_forward_hook(
+                hook_factory(name, captured_outputs, False)))
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
     # Process each sequence in the batch one by one to avoid OOM.
     for seq_idx in range(layer_input.shape[0]):
         # Extract the current sequence across all dimensions.
-        seq = layer_input[seq_idx : seq_idx + 1].to(utils.DEV)
+        seq = layer_input[seq_idx: seq_idx + 1].to(DEV)
         # Perform a forward pass for the current sequence.
         layer(seq)
 
     # After processing all sequences, concatenate the accumulated inputs for each sub-layer across the batch.
     for module_name in captured_inputs:
-        captured_inputs[module_name] = torch.cat(captured_inputs[module_name], dim=0)
+        captured_inputs[module_name] = torch.cat(
+            captured_inputs[module_name], dim=0)
     for module_name in captured_outputs:
-        captured_outputs[module_name] = torch.cat(captured_outputs[module_name], dim=0)
+        captured_outputs[module_name] = torch.cat(
+            captured_outputs[module_name], dim=0)
 
     # Cleanup.
     for h in handles:
@@ -427,11 +476,12 @@ def get_process_memory_info():
 
     Returns:
         dict: 包含以下内存信息：
-            - rss: 物理内存使用（GB）
-            - vms: 虚拟内存使用（GB）
+            - rss: 物理内存使用(GB)
+            - vms: 虚拟内存使用(GB)
     """
     process = psutil.Process()
     memory_info = process.memory_info()
 
     GB = 1024 * 1024 * 1024
-    return {"rss": round(memory_info.rss / GB, 2), "vms": round(memory_info.vms / GB, 2)}  # 物理内存  # 虚拟内存
+    # 物理内存  # 虚拟内存
+    return {"rss": round(memory_info.rss / GB, 2), "vms": round(memory_info.vms / GB, 2)}

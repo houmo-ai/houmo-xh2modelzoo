@@ -1,24 +1,3 @@
-# Copyright 2025 HOUMO AI
-#
-# File: quant_utils.py
-# Description:
-#   Quantization utility functions.
-#   This module provides utility functions for symmetric
-#   and asymmetric quantization.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
 import math
 
 import torch
@@ -303,6 +282,7 @@ class ActQuantWrapper(torch.nn.Module):
         return x
 
 
+
 def cal_loss(x, q, h):
     """
     计算加权误差损失。
@@ -312,6 +292,7 @@ def cal_loss(x, q, h):
     assert h.ndim == 2
     err = torch.matmul(torch.matmul(q - x, h), (q - x).t()).diag()
     return err
+
 
 class WeightQuantizer(torch.nn.Module):
     """From GPTQ Repo"""
@@ -344,7 +325,7 @@ class WeightQuantizer(torch.nn.Module):
         else:
             self.maxq = torch.tensor(2**bits - 1)
 
-    def find_params(self, x, H = None):
+    def find_params(self, x, H=None):
         if self.bits == 16:
             return
         dev = x.device
@@ -390,14 +371,13 @@ class WeightQuantizer(torch.nn.Module):
                     zero1 = torch.round(-xmin1 / scale1)
                     q = asym_quant_dequant(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
 
-                if H is not None:
-                    err = cal_loss(x, q, H)
-                else:
+                if H is None:
                     q -= x
                     q.abs_()
                     q.pow_(self.norm)
                     err = torch.sum(q, 1)
-                    
+                else:
+                    err = cal_loss(x, q, H)
                 tmp = err < best
                 if torch.any(tmp):
                     best[tmp] = err[tmp]

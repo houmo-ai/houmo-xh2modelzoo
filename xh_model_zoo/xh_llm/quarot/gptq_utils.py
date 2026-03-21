@@ -1,28 +1,8 @@
-# Copyright 2025 HOUMO AI
-#
-# File: gptq_utils.py
-# Description:
-#   GPTQ quantization utilities.
-#   This module provides GPTQ class for quantizing
-#   linear layers with rotation support.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
 import math
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
-
+from typing import Any, Dict, Optional, Union
+from packaging import version
 import torch
 import torch.nn as nn
 import tqdm
@@ -30,12 +10,12 @@ from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as safetensors_save_file
 
 from . import quant_utils, utils
-import torch.nn.functional as F
-
+from loguru import logger
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
+from transformers.activations import ACT2FN
 
-
+TORCH_GTE_28 = version.parse(torch.__version__).release >= version.Version('2.8').release
 class GPTQ:
     def __init__(self, layer):
         self.layer = layer
@@ -64,6 +44,38 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t())
 
+    @torch.inference_mode()
+    def hessian_inverse(self, H: torch.Tensor, damp_percent: float = 0.01):
+        damp = damp_percent
+        diag = torch.arange(self.columns, device=H.device)
+        mean = torch.mean(torch.diag(H))
+        while 0 < damp < 1:
+            try:
+                H2 = H.clone()
+                H2[diag, diag] += damp * mean
+                # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
+                H2 = torch.linalg.cholesky(H2)
+                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                del H, H2
+                break
+            except torch._C._LinAlgError as e:
+                if self.damp_auto_increment != 0:
+                    logger.warn(
+                        f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
+                    damp += self.damp_auto_increment
+                else:
+                    logger.warn(
+                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                    raise e
+
+        if not (0 < damp < 1):
+            logger.error(
+                f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
+            # raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
+            return None, 1.0
+
+        return Hinv, damp
+
     def fasterquant(
         self,
         blocksize=128,
@@ -76,12 +88,14 @@ class GPTQ:
         W = self.layer.weight.data.clone()
         W = W.float()
 
-        if not self.quantizer.ready():
-            self.quantizer.find_params(W)
-
         H = self.H
-        # del self.H
-        # torch.nan_to_num_(H, nan=0.)
+
+        if not self.quantizer.ready():
+            if use_hession_mse:
+                self.quantizer.find_params(W, H = H)
+            else:
+                self.quantizer.find_params(W)
+
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
@@ -92,7 +106,10 @@ class GPTQ:
             groups = []
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + groupsize)])
+                if use_hession_mse:
+                    quantizer.find_params(W[:, i : (i + groupsize)], H = H[(i):(i + groupsize), (i):(i + groupsize)])
+                else:
+                    quantizer.find_params(W[:, i : (i + groupsize)])
                 groups.append(quantizer)
 
         if actorder:
@@ -104,25 +121,8 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        mean = torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=self.dev)
-
-        while 0 < percdamp < 1:
-            try:
-                H2 = H.clone()
-                H2[diag, diag] += percdamp * mean
-                H2 = torch.linalg.cholesky(H2)
-                H2 = torch.cholesky_inverse(H2)
-                Hinv = torch.linalg.cholesky(H2, upper=True)
-                # del H, H2
-                break
-            except Exception as e:
-                percdamp += self.damp_auto_increment
-
-        if not (0 < percdamp < 1):
-            raise ValueError(f"Failed to find Hinv with percdamp {percdamp}")
-
-        # scales_list = []
+        Hinv, damp = self.hessian_inverse(H, percdamp)
+    
         W_int = torch.zeros_like(W)
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -142,7 +142,7 @@ class GPTQ:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
                             if use_hession_mse:
-                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)], H = self.H[(i1 + i) : (i1 + i + groupsize), (i1 + i) : (i1 + i + groupsize)])
+                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)], H = H[(i1 + i):(i1 + i + groupsize), (i1 + i):(i1 + i + groupsize)])
                             else:
                                 self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + groupsize)])
                     else:
@@ -210,11 +210,11 @@ def load_layer_cache(cache_file: str, layer: nn.Module) -> None:
     cache_state_dict = None
 
 
-def process_qwen2_5_vl_batch(batch, device, processor):
+def process_qwen3_vl_batch(batch, device, processor):
     from qwen_vl_utils import process_vision_info
 
     text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(batch)
+    image_inputs, video_inputs = process_vision_info(batch, image_patch_size=16)
     inputs = processor(
         text=[text],
         images=image_inputs,
@@ -275,6 +275,7 @@ class Qwen3VLMoeTextExperts_Linearized(nn.Module):
 
         return next_states
 
+
 @torch.no_grad()
 def gptq_fwrd(
     model: nn.Module,
@@ -293,13 +294,10 @@ def gptq_fwrd(
     device: Optional[torch.device] = None,
     ddevice: Optional[torch.device] = None,
     layers_cache_dir: Optional[str] = None,
-    is_qwen2_5_vl: bool = False,
-    processor=None,
-    tokenizer=None,
-    is_qwen3_vl=False,
-    is_moe=False,
-    use_hession_mse=False,
-    self_attn_weight = None
+    is_qwen3_vl: bool = False,
+    processor: Optional[Any] = None,
+    is_moe = False,
+    use_hession_mse = False,
 ) -> Dict[str, Any]:
     """
     From GPTQ repo
@@ -308,23 +306,18 @@ def gptq_fwrd(
     if device is None:
         device = utils.DEV
 
-    if is_qwen2_5_vl or is_qwen3_vl:
+    if is_qwen3_vl:
         use_cache = model.config.text_config.use_cache
         model.config.text_config.use_cache = False
         layers = model.model.language_model.layers
+        model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.to(device)
+        model.model.language_model.norm = model.model.language_model.norm.to(device)
+        model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.to(device)
+        model.model.visual.to(device)
     else:
         use_cache = model.config.use_cache
         model.config.use_cache = False
         layers = model.model.layers
-
-    if is_qwen2_5_vl or is_qwen3_vl:
-        model.model.visual = model.model.visual.to(device)
-
-    if is_qwen2_5_vl or is_qwen3_vl:
-        model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.to(device)
-        model.model.language_model.norm = model.model.language_model.norm.to(device)
-        model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.to(device)
-    else:
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.norm = model.model.norm.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
@@ -335,32 +328,37 @@ def gptq_fwrd(
 
     if ddevice is None:
         ddevice = torch.device("cpu")
+        # ddevice = device
     nsamples = len(dataloader)
-    if is_qwen2_5_vl or is_qwen3_vl:
+    if is_qwen3_vl:
         inps = list()
         attention_mask = list()
+        text_position_ids = list()
         position_ids = list()
         position_embeddings = list()
     else:
         inps = torch.zeros((nsamples, seqlen, model.config.hidden_size), dtype=dtype, device=ddevice)
+
     cache = {"i": 0, "attention_mask": None}
 
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
             self.module = module
-            if is_qwen2_5_vl:
-                self.attention_type = module.attention_type
-            if hasattr(self.module, "attention_type"):
-                self.attention_type = module.attention_type
+
+        def __getattr__(self, name):
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.module, name)
 
         def forward(self, inp, **kwargs):
-            if is_qwen2_5_vl or is_qwen3_vl:
+            if is_qwen3_vl:
                 inps.append(inp.to(ddevice))
                 attention_mask.append(kwargs["attention_mask"])
                 position_ids.append(kwargs["position_ids"])
                 position_embeddings.append(kwargs["position_embeddings"])
-            else:
+            else:       
                 inps[cache["i"]] = inp.to(ddevice)
                 cache["attention_mask"] = kwargs["attention_mask"]
                 cache["position_ids"] = kwargs["position_ids"]
@@ -375,23 +373,16 @@ def gptq_fwrd(
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            if is_qwen2_5_vl or is_qwen3_vl:
-                inputs = process_qwen2_5_vl_batch(batch, device, processor)
+            if is_qwen3_vl:
+                inputs = process_qwen3_vl_batch(batch, device, processor)
                 model.generate(**inputs, max_new_tokens=1)
             else:
-                if tokenizer is not None:
-                    texts = batch["text"]
-                    queries = [query for query in texts]
-                    inputs = tokenizer(queries, return_tensors="pt", truncation=True, max_length=seqlen,padding=True).to(device)
-                    inputs['input_ids'] =  F.pad(inputs['input_ids'],(0,seqlen-inputs['input_ids'].shape[1]))
-                    model(inputs['input_ids'])
-                else:
-                    model(batch[0].to(device))
+                model(batch[0].to(device))
         except ValueError:
             pass
-    
+
     layers[0] = layers[0].module.cpu()
-    if is_qwen2_5_vl or is_qwen3_vl:
+    if is_qwen3_vl:
         model.model.language_model.embed_tokens = model.model.language_model.embed_tokens.cpu()
         model.model.language_model.norm = model.model.language_model.norm.cpu()
         model.model.language_model.rotary_emb = model.model.language_model.rotary_emb.cpu()
@@ -402,7 +393,7 @@ def gptq_fwrd(
         model.model.rotary_emb = model.model.rotary_emb.cpu()
     torch.cuda.empty_cache()
 
-    if is_qwen2_5_vl or is_qwen3_vl:
+    if is_qwen3_vl:
         outs = list()
     else:
         outs = torch.zeros_like(inps)
@@ -445,8 +436,8 @@ def gptq_fwrd(
     inps_cache_file: Optional[str] = None
     if layers_cache_dir is not None:
         inps_cache_file = str(Path(layers_cache_dir) / f"inps.pt")
-        # if Path(inps_cache_file).exists():
-        #     inps = torch.load(inps_cache_file, map_location=inps.device, weights_only=True)
+        if Path(inps_cache_file).exists():
+            inps = torch.load(inps_cache_file, map_location=inps.device, weights_only=True)
 
     for i in range(len(layers)):
         print(f"\nLayer {i}:", flush=True, end=" ")
@@ -471,22 +462,20 @@ def gptq_fwrd(
             continue
         if is_moe:
             layers[i].mlp.experts = Qwen3VLMoeTextExperts_Linearized(layers[i].mlp.experts)
-        if is_qwen2_5_vl or is_qwen3_vl:
-            layer = layers[i].to(device=device, dtype=torch.float16) # use flash attention 2
+        if is_qwen3_vl:
+            layer = layers[i].to(device=device, dtype=torch.bfloat16) # use flash attention 2
         else:
             layer = layers[i].to(device=device, dtype=torch.float32)
-
         full = quant_utils.find_qlayers(layer, layers=[torch.nn.Linear])
-
         for names in sequential:
-            subset = {n: full[n.replace('.module', '', 1)] for n in names}
+            subset = {n: full[n.replace('.module', '', 1)]  for n in names}
             gptq: Dict[str, GPTQ] = {}
             for name in subset:
                 print(f"{name}", end="  ", flush=True)
                 layer_weight_bits = w_bits
                 layer_weight_sym = not (w_asym)
-                if self_attn_weight is not None and "self_attn" in name:
-                    layer_weight_bits = self_attn_weight
+                # if "self_attn" in name:
+                #     layer_weight_bits = 8
                 if "lm_head" in name:
                     layer_weight_bits = 16
                     continue
@@ -511,27 +500,16 @@ def gptq_fwrd(
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
 
-            if is_qwen2_5_vl or is_qwen3_vl:
+            if is_qwen3_vl:
                 outs = list()
             for j in range(nsamples):
-                if is_qwen2_5_vl:
-                    outs.append(
-                        layer(
-                            inps[j].to(device=device),
-                            attention_mask=attention_mask[j],
-                            position_ids=position_ids[j],
-                            position_embeddings=position_embeddings[j],
-                        )[0].to(device=ddevice, dtype=dtype)
-                    )
-                elif is_qwen3_vl:
-                    outs.append(
-                        layer(
-                            inps[j].to(device=device),
-                            attention_mask=attention_mask[j],
-                            position_ids=position_ids[j],
-                            position_embeddings=position_embeddings[j],
-                        ).to(device=ddevice, dtype=dtype)
-                    )
+                if is_qwen3_vl:
+                    outs.append(layer(
+                        inps[j].to(device=device),
+                        attention_mask=attention_mask[j],
+                        position_ids=position_ids[j],
+                        position_embeddings=position_embeddings[j],
+                    ).to(device=ddevice, dtype=dtype))
                 else:
                     outs[j] = layer(
                         inps[j].unsqueeze(0).to(device=device, dtype=torch.float32),
@@ -550,7 +528,7 @@ def gptq_fwrd(
                     groupsize=layer_w_groupsize,
                     actorder=act_order,
                     static_groups=False,
-                    use_hession_mse=use_hession_mse,
+                    use_hession_mse=use_hession_mse
                 )
 
                 quant_value = gptq[name].W_int
@@ -563,16 +541,9 @@ def gptq_fwrd(
 
         if True:
             for j in range(nsamples):
-                if is_qwen2_5_vl:
+                if is_qwen3_vl: 
                     outs[j] = layer(
-                        inps[j].to(device=device, dtype=torch.float16),
-                        attention_mask=attention_mask[j],
-                        position_ids=position_ids[j],
-                        position_embeddings=position_embeddings[j],
-                    )[0].to(device=ddevice, dtype=dtype)
-                elif is_qwen3_vl:
-                    outs[j] = layer(
-                        inps[j].to(device=device, dtype=torch.float16),
+                        inps[j].to(device=device),
                         attention_mask=attention_mask[j],
                         position_ids=position_ids[j],
                         position_embeddings=position_embeddings[j],
@@ -610,9 +581,9 @@ def gptq_fwrd(
             print(f"from cache: {head_layer_cache_file}")
         else:
             # Convert to module and move to CUDA
-            if is_qwen2_5_vl or is_qwen3_vl:
-                model.lm_head = model.lm_head.to(device=device, dtype=torch.float16)
-            else:
+            if is_qwen3_vl:
+                model.lm_head = model.lm_head.to(device=device, dtype=torch.bfloat16)
+            else:   
                 model.lm_head = model.lm_head.to(device=device, dtype=torch.float32)
             gptq = {}
             name = "lm_head"
@@ -631,8 +602,8 @@ def gptq_fwrd(
             handles = []
             handles.append(model.lm_head.register_forward_hook(add_batch("lm_head")))
             for j in range(nsamples):
-                if is_qwen2_5_vl or is_qwen3_vl:
-                    model.lm_head(inps[j].to(device=device, dtype=torch.float16))
+                if is_qwen3_vl:
+                    model.lm_head(inps[j].to(device=device))
                 else:
                     model.lm_head(inps[j].unsqueeze(0).to(device=device, dtype=torch.float32))
                 if torch.cuda.is_available():
@@ -647,7 +618,7 @@ def gptq_fwrd(
                 groupsize=layer_w_groupsize,
                 actorder=act_order,
                 static_groups=False,
-                use_hession_mse=False,
+                use_hession_mse=False
             )
 
             quant_value = gptq[name].W_int
