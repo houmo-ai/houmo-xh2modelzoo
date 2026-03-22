@@ -12,7 +12,7 @@ quant-weight : GPTQ、Quarot量化后的权重文件
 
 ## 导出HMONNX
 
-transformers库需要升级到4.51.0以上版本，否则会报错。
+transformers库需要升级到4.57.6以上版本，否则会报错。
 
 ## 客户模型
 
