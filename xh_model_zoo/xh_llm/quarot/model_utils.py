@@ -1,19 +1,18 @@
 import logging
-from logging import config
-from math import e
 import os
 
 import psutil
 import torch
 import torch.nn as nn
 import transformers
-import xhquant_llm.models.qwen3_vl as qwen3_vl
-import xhquant_llm.models.qwen3moe_vl as qwen3_vl_moe
+
+from ..models import qwen3_vl as qwen3_vl
+from ..models import qwen3_vl_moe as qwen3_vl_moe
+
 # These flags disable using TensorFloat-32 tensor cores (to avoid numerical issues)
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
-DEV = torch.device(
-    "cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+DEV = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 
 def cleanup_memory(verbose=True) -> None:
@@ -40,8 +39,8 @@ def cleanup_memory(verbose=True) -> None:
         memory_after = total_reserved_mem()
         if verbose:
             logging.info(
-                f"GPU memory{caller_name}: {memory_before / (1024 ** 3):.2f} -> {memory_after / (1024 ** 3):.2f} GB"
-                f" ({(memory_after - memory_before) / (1024 ** 3):.2f} GB)"
+                f"GPU memory{caller_name}: {memory_before / (1024**3):.2f} -> {memory_after / (1024**3):.2f} GB"
+                f" ({(memory_after - memory_before) / (1024**3):.2f} GB)"
             )
 
 
@@ -112,8 +111,7 @@ def get_llama(model_name, hf_token):
         attn_implementation="eager",
     )
     model.seqlen = 2048
-    logging.info(
-        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -139,13 +137,12 @@ def get_qwen(model_name, hf_token, args):
     if args.tie_embed_head:
         import copy
 
-        model.lm_head.weight.data = copy.deepcopy(
-            model.model.embed_tokens.weight.data)
+        model.lm_head.weight.data = copy.deepcopy(model.model.embed_tokens.weight.data)
 
     model.seqlen = 2048
-    logging.info(
-        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
+
 
 def get_glm4v(model_name, hf_token):
     torch.nn.init.kaiming_uniform_ = skip
@@ -163,8 +160,7 @@ def get_glm4v(model_name, hf_token):
     )
 
     model.seqlen = 2048
-    logging.info(
-        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -172,11 +168,9 @@ def get_opt(model_name):
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    model = transformers.OPTForCausalLM.from_pretrained(
-        model_name, torch_dtype="auto", low_cpu_mem_usage=True)
+    model = transformers.OPTForCausalLM.from_pretrained(model_name, torch_dtype="auto", low_cpu_mem_usage=True)
     model.seqlen = model.config.max_position_embeddings
-    logging.info(
-        "---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
+    logging.info("---> Loading {} Model with seq_len: {}".format(model_name, model.seqlen))
     return model
 
 
@@ -238,7 +232,17 @@ def get_transformer_layers(model, model_type):
 
 
 def get_lm_head(model, model_type):
-    if model_type in [LLAMA_MODEL, QWEN_MODEL, QWEN3_MODEL, QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, OPT_MODEL, OPT_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
+    if model_type in [
+        LLAMA_MODEL,
+        QWEN_MODEL,
+        QWEN3_MODEL,
+        QWEN2_5_VL_MODEL,
+        QWEN3_VL_MODEL,
+        OPT_MODEL,
+        OPT_MODEL,
+        QWEN3_VL_MOE_MODEL,
+        GLM4V_MODEL,
+    ]:
         return model.lm_head
     else:
         raise ValueError(f"Unknown model type {model_type}")
@@ -247,8 +251,7 @@ def get_lm_head(model, model_type):
 def get_pre_head_layernorm(model, model_type):
     if model_type == LLAMA_MODEL:
         pre_head_layernorm = model.model.norm
-        assert isinstance(pre_head_layernorm,
-                          transformers.models.llama.modeling_llama.LlamaRMSNorm)
+        assert isinstance(pre_head_layernorm, transformers.models.llama.modeling_llama.LlamaRMSNorm)
     elif model_type in (QWEN_MODEL, QWEN3_MODEL):
         pre_head_layernorm = model.model.norm
     elif model_type in [QWEN2_5_VL_MODEL, QWEN3_VL_MODEL, QWEN3_VL_MOE_MODEL, GLM4V_MODEL]:
@@ -308,8 +311,7 @@ def replace_modules(
                     to_kwargs["dtype"] = dtype
                 new_module = new_module.to(**to_kwargs)
         elif len(list(module.children())) > 0:
-            replace_modules(module, type_to_replace,
-                            new_module_factory, replace_layers)
+            replace_modules(module, type_to_replace, new_module_factory, replace_layers)
 
         if new_module is not None:
             setattr(root, name, new_module)
@@ -386,16 +388,12 @@ def capture_layer_io(model_type, layer, layer_input):
         }
 
         for name in captured_inputs.keys():
-            module = getattr(layer.self_attn, name, None) or getattr(
-                layer.mlp, name, None)
-            handles.append(module.register_forward_hook(
-                hook_factory(name, captured_inputs, True)))
+            module = getattr(layer.self_attn, name, None) or getattr(layer.mlp, name, None)
+            handles.append(module.register_forward_hook(hook_factory(name, captured_inputs, True)))
 
         for name in captured_outputs.keys():
-            module = getattr(layer.self_attn, name, None) or getattr(
-                layer.mlp, name, None)
-            handles.append(module.register_forward_hook(
-                hook_factory(name, captured_outputs, False)))
+            module = getattr(layer.self_attn, name, None) or getattr(layer.mlp, name, None)
+            handles.append(module.register_forward_hook(hook_factory(name, captured_outputs, False)))
 
     elif model_type == OPT_MODEL:
         captured_inputs = {
@@ -409,34 +407,28 @@ def capture_layer_io(model_type, layer, layer_input):
         }
         for name in captured_inputs.keys():
             # In OPT, fc1 and fc2 are directly contained in OPTDecoderLayer
-            module = getattr(layer.self_attn, name,
-                             None) or getattr(layer, name, None)
-            handles.append(module.register_forward_hook(
-                hook_factory(name, captured_inputs, True)))
+            module = getattr(layer.self_attn, name, None) or getattr(layer, name, None)
+            handles.append(module.register_forward_hook(hook_factory(name, captured_inputs, True)))
 
         for name in captured_outputs.keys():
             # In OPT, fc1 and fc2 are directly contained in OPTDecoderLayer
-            module = getattr(layer.self_attn, name,
-                             None) or getattr(layer, name, None)
-            handles.append(module.register_forward_hook(
-                hook_factory(name, captured_outputs, False)))
+            module = getattr(layer.self_attn, name, None) or getattr(layer, name, None)
+            handles.append(module.register_forward_hook(hook_factory(name, captured_outputs, False)))
     else:
         raise ValueError(f"Unknown model type {model_type}")
 
     # Process each sequence in the batch one by one to avoid OOM.
     for seq_idx in range(layer_input.shape[0]):
         # Extract the current sequence across all dimensions.
-        seq = layer_input[seq_idx: seq_idx + 1].to(DEV)
+        seq = layer_input[seq_idx : seq_idx + 1].to(DEV)
         # Perform a forward pass for the current sequence.
         layer(seq)
 
     # After processing all sequences, concatenate the accumulated inputs for each sub-layer across the batch.
     for module_name in captured_inputs:
-        captured_inputs[module_name] = torch.cat(
-            captured_inputs[module_name], dim=0)
+        captured_inputs[module_name] = torch.cat(captured_inputs[module_name], dim=0)
     for module_name in captured_outputs:
-        captured_outputs[module_name] = torch.cat(
-            captured_outputs[module_name], dim=0)
+        captured_outputs[module_name] = torch.cat(captured_outputs[module_name], dim=0)
 
     # Cleanup.
     for h in handles:
