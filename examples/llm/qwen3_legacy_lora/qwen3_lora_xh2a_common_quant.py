@@ -33,6 +33,7 @@ from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM
+from xhquant.api import set_random_seed, xhquant_init
 
 from xh_model_zoo.xh_llm.utils import load_gguf_checkpoint_for_lora
 
@@ -69,6 +70,8 @@ def main():
     out_dir = Path(args.out_dir)
     hf_model_dir = args.model
 
+    xhquant_init(None, False)
+    set_random_seed(args.seed)
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
     cfg_name = model_name
