@@ -1,4 +1,5 @@
 import os.path as osp
+import os
 import argparse
 import numpy as np
 import torch
@@ -16,7 +17,11 @@ MODEL_SIMPLIFY = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onn
 REFLECT_CONSTANT = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_reflect_replaced_constant.onnx"
 FINAL_ONNX = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_final.onnx"
 FINAL_ONNX_1 = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/hift_simplify_final_1.onnx"
-OUTPUT_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmonnx"
+OUTPUT_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmquant_xh2_fun_cosyvoice3_0.5B_2512_w8a8_20260320/hift/prefill"
+GOLDEN_DIR = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmquant_xh2_fun_cosyvoice3_0.5B_2512_w8a8_20260320/hift/prefill/step_0"
+
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+os.makedirs(GOLDEN_DIR, exist_ok=True)
 
 FIXED_DIMS = {
     "batch_size": 1,
@@ -316,6 +321,7 @@ def convert_hmonnx(model_path):
         QuantScheme,
         create_quant_config,
         DeviceType,
+        HMONNXGoldenInference,
     )
 
     inp = torch.randn(1, 80, 1024)
@@ -327,14 +333,26 @@ def convert_hmonnx(model_path):
     )
 
     config = create_quant_config(scheme)
+    prefix = f"hmquant_xh2_hift_w8a16_1024_20260320"
+    output_file = osp.join(OUTPUT_PATH, f"{prefix}.onnx")
 
-    convert_onnx_to_hmonnx(
-        model_path,
-        (inp,),
-        out_hmonnx_file=osp.join(OUTPUT_PATH, "hift_1024.onnx"),
-        device_type="XH2A",
-        quant_config=config,
-    )
+    if not osp.exists(output_file):
+        convert_onnx_to_hmonnx(
+            model_path,
+            (inp,),
+            out_hmonnx_file=output_file,
+            device_type="XH2A",
+            quant_config=config,
+        )
+    model = HMONNXGoldenInference(output_file)
+    model.save_golden = True
+    model.exec_device = torch.device("cuda:0")
+
+    inp = inp.to(torch.float16)
+    input_args = (inp,)
+    model.golden_dir = str(GOLDEN_DIR)
+    with torch.no_grad():
+        model.forward(*input_args)
 
 
 # ==============================

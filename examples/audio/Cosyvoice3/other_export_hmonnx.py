@@ -1,33 +1,72 @@
-
-from xhquant.api import convert_fx_model_to_hmonnx, convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
-
-import torch
+import os
 import os.path as osp
+import torch
 
-output_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmonnx"
+from xhquant.api import (
+    convert_onnx_to_hmonnx,
+    QuantScheme,
+    create_quant_config,
+    DeviceType,
+    HMONNXGoldenInference,
+)
 
-#llm_decoder
-model_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/llm_decoder.onnx"
+OUTPUT_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmquant_xh2_fun_cosyvoice3_0.5B_2512_w8a8_20260320"
 
-input = torch.randn(1, 896)
-quant_type = "w8a16h1_sefp"
-quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-quant_config = create_quant_config(quant_scheme)
-convert_onnx_to_hmonnx(model_path, (input,), out_hmonnx_file=osp.join(output_path,"llm_decoder.onnx"), device_type="XH2A", quant_config=quant_config)
+os.makedirs(OUTPUT_PATH, exist_ok=True)
 
-#spk_embed_affine_layer
-model_path_spk = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/spk_embed_affine_layer.onnx"
 
-input = torch.randn(1, 192)
-quant_type = "w8a16h1_sefp"
-quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-quant_config = create_quant_config(quant_scheme)
-convert_onnx_to_hmonnx(model_path_spk, (input,), out_hmonnx_file=osp.join(output_path,"spk.onnx"), device_type="XH2A", quant_config=quant_config)
+def build_quant_config():
+    quant_type = "w8a16h1_sefp"
+    quant_scheme = QuantScheme(
+        target_device=DeviceType.XH2a,
+        quant_type=quant_type
+    )
+    return create_quant_config(quant_scheme)
 
-#pre_lookahead_layer
-model_path_pre = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/pre_lookahead_layer.onnx"
-input = torch.randn(1, 1024, 80)
-quant_type = "w8a16h1_sefp"
-quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-quant_config = create_quant_config(quant_scheme)
-convert_onnx_to_hmonnx(model_path_pre, (input,), out_hmonnx_file=osp.join(output_path,"pre_lookahead_layer.onnx"), device_type="XH2A", quant_config=quant_config)
+def run_convert(model_path, dummy_inputs, output_name):
+    output_file = osp.join(OUTPUT_PATH, output_name)
+    os.makedirs(osp.dirname(output_file), exist_ok=True)
+    golden_dir = osp.join(osp.dirname(output_file), "step_0")
+    os.makedirs(golden_dir, exist_ok=True)
+
+    quant_config = build_quant_config()
+
+    # convert（存在判断）
+    if not osp.exists(output_file):
+        convert_onnx_to_hmonnx(
+            model_path,
+            dummy_inputs,
+            out_hmonnx_file=output_file,
+            device_type="XH2A",
+            quant_config=quant_config
+        )
+
+    # golden
+    model = HMONNXGoldenInference(output_file)
+    model.save_golden = True
+    model.exec_device = torch.device("cuda:0")
+    model.golden_dir = str(golden_dir)
+
+    fp16_inputs = tuple(x.to(torch.float16) for x in dummy_inputs)
+
+    with torch.no_grad():
+        model.forward(*fp16_inputs)
+
+def main():
+    # llm_decoder
+    model_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/llm_decoder.onnx"
+    input = torch.randn(1, 896)
+    run_convert(model_path, (input,), "llm_decoder/prefill/hmquant_xh2_llm_decoder_w8a16_896_20260320.onnx")
+
+    # spk_embed_affine_layer
+    model_path_spk = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/spk_embed_affine_layer.onnx"
+    input = torch.randn(1, 192)
+    run_convert(model_path_spk, (input,), "spk_embed_affine_layer/prefill/hmquant_xh2_spk_embed_affine_layer_w8a16_192_20260320.onnx")
+
+    # pre_lookahead_layer
+    model_path_pre = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/pre_lookahead_layer.onnx"
+    input = torch.randn(1, 1024, 80)
+    run_convert(model_path_pre, (input,), "pre_lookahead_layer/prefill/hmquant_xh2_pre_lookahead_layer_w8a16_1024_20260320.onnx")
+
+if __name__ == "__main__":
+    main()

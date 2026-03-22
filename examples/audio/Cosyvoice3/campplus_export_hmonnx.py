@@ -1,56 +1,132 @@
-
-import onnx
-import torch
-import onnxsim
-import onnxruntime as ort
-import numpy as np
+import os
 import os.path as osp
+import numpy as np
+import torch
+import onnx
+import onnxruntime as ort
+import onnxsim
 
-model_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/campplus.onnx"
-model_path_simplify = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/campplus_simplify.onnx"
-output_path = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmonnx"
+from xhquant.api import (
+   convert_onnx_to_hmonnx,
+   QuantScheme,
+   create_quant_config,
+   DeviceType,
+   HMONNXGoldenInference,
+)
 
-#fix shape
-fixed_d = {
-   'batch_size': 1,
-   'sequence_length' : 1000,
+# ======================
+# 路径配置
+# ======================
+MODEL_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/campplus.onnx"
+MODEL_SIMPLIFIED_PATH = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/onnx/campplus_simplify.onnx"
+OUTPUT_DIR = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmquant_xh2_fun_cosyvoice3_0.5B_2512_w8a8_20260320/campplus/prefill"
+GOLDEN_DIR = "/data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/hmquant_xh2_fun_cosyvoice3_0.5B_2512_w8a8_20260320/campplus/prefill/step_0"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(GOLDEN_DIR, exist_ok=True)
+
+# ======================
+# 固定 shape
+# ======================
+FIXED_DIMS = {
+   "batch_size": 1,
+   "sequence_length": 1000,
 }
 
-# 加载模型
-model = onnx.load(model_path)
-providers = ['CPUExecutionProvider']  # 替换为 ['CUDAExecutionProvider'] 启用 GPU
-session = ort.InferenceSession(model_path, providers=providers)
-print("模型输入节点:")
-for input_node in session.get_inputs():
-   print(f"  {input_node.name}: {input_node.type}, 形状: {input_node.shape}")
-print("模型输出节点:")
-for output_node in session.get_outputs():
-   print(f"  {output_node.name}: {output_node.type}, 形状: {output_node.shape}")
+# ======================
+# 打印 ONNX IO 信息
+# ======================
+def inspect_onnx(model_path):
+   session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
 
-# 修改输入节点的shape（将符号维度替换为固定值）
-for input_node in model.graph.input:
-   dims = [d.dim_value if d.dim_value != 0 else d.dim_param for d in input_node.type.tensor_type.shape.dim]
-   # 根据fixed_dims替换符号维度
-   new_dims = []
-   for dim in dims:
-      if dim in fixed_d:
-            new_dims.append(fixed_d[dim])  # 替换为固定值
-      else:
-            # 如果是数字维度（如80），保持不变
-            new_dims.append(dim if isinstance(dim, int) else 0)  # 0表示动态，这里应避免
+   print("模型输入节点:")
+   for inp in session.get_inputs():
+      print(f"  {inp.name}: {inp.type}, shape={inp.shape}")
+
+   print("模型输出节点:")
+   for out in session.get_outputs():
+      print(f"  {out.name}: {out.type}, shape={out.shape}")
+
+
+# ======================
+# 固定输入 shape
+# ======================
+def fix_input_shape(model, fixed_dims):
+   for input_node in model.graph.input:
+      dims = []
+      for d in input_node.type.tensor_type.shape.dim:
+         if d.dim_value > 0:
+               dims.append(d.dim_value)
+         else:
+               dims.append(d.dim_param)
+
+      new_dims = []
+      for dim in dims:
+         if dim in fixed_dims:
+               new_dims.append(fixed_dims[dim])
+         elif isinstance(dim, int):
+               new_dims.append(dim)
+         else:
+               raise ValueError(f"未处理的动态维度: {dim}")
+
+      input_node.type.tensor_type.shape.dim.clear()
+      for val in new_dims:
+         input_node.type.tensor_type.shape.dim.add(dim_value=val)
+
+   return model
+
+
+# ======================
+# 主流程
+# ======================
+def main():
+   os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+   # 1. 查看模型 IO
+   inspect_onnx(MODEL_PATH)
+
+   # 2. 加载并固定 shape
+   model = onnx.load(MODEL_PATH)
+   model = fix_input_shape(model, FIXED_DIMS)
+
+   # 3. simplify
+   model_simplified, _ = onnxsim.simplify(model)
+   onnx.save(model_simplified, MODEL_SIMPLIFIED_PATH)
+
+   # 4. 构造输入
+   dummy_input = torch.randn(1, 1000, 80)
+
+   # 5. 量化配置
+   quant_type = "w8a16_sefp"
+   quant_scheme = QuantScheme(
+      target_device=DeviceType.XH2a,
+      quant_type=quant_type,
+   )
+   quant_config = create_quant_config(quant_scheme)
+
+   # 6. 转换 hmonnx
+   prefix = f"hmquant_xh2_campplus_w8a16_1000_20260320"
+   output_file = osp.join(OUTPUT_DIR, f"{prefix}.onnx")
+
+   if not osp.exists(output_file):
+      convert_onnx_to_hmonnx(
+         MODEL_SIMPLIFIED_PATH,
+         (dummy_input,),
+         out_hmonnx_file=output_file,
+         device_type="XH2A",
+         quant_config=quant_config,
+      )
    
-   # 更新输入节点的shape
-   input_node.type.tensor_type.shape.dim.clear()
-   for dim_val in new_dims:
-      input_node.type.tensor_type.shape.dim.add(dim_value=dim_val)
+   model = HMONNXGoldenInference(output_file)
+   model.save_golden = True
+   model.exec_device = torch.device("cuda:0")
 
-slimmed_model, _ = onnxsim.simplify(model)
-onnx.save(slimmed_model, model_path_simplify)
+   dummy_input = dummy_input.to(torch.float16)
+   input_args = (dummy_input,)
+   model.golden_dir = str(GOLDEN_DIR)
+   with torch.no_grad():
+      model.forward(*input_args)
 
-#convert hmonnx
-from xhquant.api import convert_fx_model_to_hmonnx, convert_onnx_to_hmonnx, QuantScheme, create_quant_config, DeviceType
-input = torch.randn(1, 1000, 80)
-quant_type = "w8a16_sefp"
-quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-quant_config = create_quant_config(quant_scheme)
-convert_onnx_to_hmonnx(model_path_simplify, (input,), out_hmonnx_file=osp.join(output_path,"campplus_1000.onnx"), device_type="XH2A", quant_config=quant_config)
+
+if __name__ == "__main__":
+   main()
