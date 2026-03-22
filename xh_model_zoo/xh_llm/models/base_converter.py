@@ -308,7 +308,8 @@ class HFTransfromersConverter(BaseConverter):
 
         for k in unexpect_state_dict:
             paths = k.split(".")
-            if paths[-1] == "quant_weight":
+            buffer_attr_name = paths[-1]
+            if buffer_attr_name in ["quant_weight"]:
                 submodule_name = ".".join(paths[:-1])
                 submodule = native_hf_model.get_submodule(submodule_name)
                 # submodule = get_submodule(native_model, k)
@@ -321,6 +322,13 @@ class HFTransfromersConverter(BaseConverter):
                     v = v.to(torch.float32)
                 submodule.register_buffer("quant_weight", v, persistent=False)
                 logger.debug(f"add quant_weight to {submodule_name}")
+            elif buffer_attr_name in ["weight_lora_a", "weight_lora_b", "lora_scale"]:
+                v = state_dict[k]
+                submodule_name = ".".join(paths[:-1])
+                submodule = native_hf_model.get_submodule(submodule_name)
+
+                submodule.register_buffer(buffer_attr_name, v, persistent=False)
+                logger.info(f"add {buffer_attr_name} to {submodule_name}")
             else:
                 logger.warning(f"ignore unexpect state dict: {k}")
             state_dict.pop(k)

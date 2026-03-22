@@ -61,23 +61,25 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="data/models/Qwen3-8B")
+    parser.add_argument(
+        "--model", type=str, default="/data01/nfs_shared/customer_models/kylin_qwen3-8b-lora/Qwen3-8B-kylin-rotate"
+    )
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
-    parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type, default is w8a8")
+    parser.add_argument("--quant-type", default="w16a16h1_sefp", help="quant type, default is w8a8")
     parser.add_argument("--mix_search", type=str, default=None, help="mix search settings")
     parser.add_argument("--num_logits_to_keep", type=int, default=1, help="not for test ppl")
     parser.add_argument(
         "--quant-weight",
         type=str,
-        default=None,
+        default="work_dirs/Qwen3-8B-kylin-rotate_quarot/quarot-state-dict.safetensors",
         help="quant weight path, for example: gptq or quarot, if empty, use w8a8",
     )
     parser.add_argument(
         "--lora-checkpoint",
         type=str,
-        default=None,
-        help="work_dirs/Qwen3-8B-test.gguf",
+        default="/data01/nfs_shared/customer_models/kylin_qwen3-8b-lora/lora_sq_intent_fp32_v1.0.1_20260123.gguf",
+        help="lora checkpoint path, should be in gguf format, and should contain the LoRA weights",
     )
     args = parser.parse_args()
     main(args)

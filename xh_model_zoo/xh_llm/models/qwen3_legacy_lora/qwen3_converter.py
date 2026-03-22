@@ -264,23 +264,28 @@ class Qwen3LegacyLoRAConverterXH2a(HFTransfromersConverter):
         native_model = self.get_hf_model(
             hf_model_path, trust_remote_code=True, torch_dtype=torch.float16, device_map="cpu"
         )
-        resume_from = self.config.quant_weight
 
         # 融合GPTQ权重
         resume_from = self.config.quant_weight
         if resume_from is not None:
             self.load_quant_weight(resume_from, native_model)
-
-        # load lora权重
         lora_checkpoint = self.config.lora_checkpoint
-        assert lora_checkpoint is not None, "lora_checkpoint must be provided when use_lora is True"
-        lora_params = load_gguf_checkpoint_for_lora(lora_checkpoint, return_tensors=True, model_to_load=native_model)
-        lora_scale = lora_params.get("adapter.lora.alpha", None)
+        lora_scale = None
+        if hasattr(native_model, "lora_scale"):
+            lora_scale = native_model.lora_scale.item()
+        else:
+            # load lora权重
 
-        for name, param in lora_params["tensors"].items():
-            module_path, _, buffer_name = name.rpartition(".")
-            m = native_model.get_submodule(module_path)
-            m.register_buffer(buffer_name, param)
+            assert lora_checkpoint is not None, "lora_checkpoint must be provided when use_lora is True"
+            lora_params = load_gguf_checkpoint_for_lora(
+                lora_checkpoint, return_tensors=True, model_to_load=native_model
+            )
+            lora_scale = lora_params.get("adapter.lora.alpha", None)
+
+            for name, param in lora_params["tensors"].items():
+                module_path, _, buffer_name = name.rpartition(".")
+                m = native_model.get_submodule(module_path)
+                m.register_buffer(buffer_name, param)
 
         lm_head = native_model.lm_head
         if not hasattr(lm_head, "quant_weight"):

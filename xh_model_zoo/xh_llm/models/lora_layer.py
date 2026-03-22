@@ -5,6 +5,7 @@ import torch.fx as fx
 import torch.nn as nn
 from torch import Tensor
 from tqdm import tqdm
+
 from xhquant.api import FrontendGraph, get_xhquant_logger
 from xhquant.frontend.torchfx import xh_fx
 from xhquant.nn import FX_LEAF_MODULES
@@ -24,6 +25,9 @@ class LoRALayer(nn.Module):
         assert r == r_check, "Rank dimension mismatch"
 
         self.scaling = scaling / r if scaling is not None else None
+        if self.scaling is not None and isinstance(self.scaling, torch.Tensor):
+            self.scaling = self.scaling.item()
+
         linear_device = linear.weight.device
         linear_dtype = linear.weight.dtype
 
@@ -37,7 +41,7 @@ class LoRALayer(nn.Module):
         # Frontend Graph 的 Linear 权重可能是 non-leaf Tensor，deepcopy 会报错。
         # 这里按 Linear 结构重新建层并拷贝参数，避免 deepcopy 依赖。
         if isinstance(linear, nn.Linear):
-            self.linear = LoRALinear(
+            self.linear = nn.Linear(
                 linear.in_features,
                 linear.out_features,
                 bias=linear.bias is not None,
@@ -179,4 +183,8 @@ def apply_lora_to_linear(
         replace_linear_with_lora(fronted_model, node, lora_graph_module, lora_mask_node)
         fronted_model.cpu()
 
+    # 将新增的 call_function(add/mul) 规范化为 call_module，避免量化阶段报 Unsupported op。
+    # normalizer = NormalizerTransform()
+    # normalizer.graph_module = fronted_model
+    # fronted_model = normalizer.run()
     return fronted_model

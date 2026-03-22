@@ -75,51 +75,90 @@ def main(args):
     # ]
     # assert len(messages) >= batch_size
     # messages = messages[:batch_size]
-    prompt = "声音调到80"
-    messages = [
-        {
-            "role": "system",
-            "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取。",
-        },
-        {"role": "user", "content": prompt},
+
+    messages_all = [
+        [
+            {
+                "role": "system",
+                "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取。",
+            },
+            {"role": "user", "content": "声音调到80"},
+        ],
+        [
+            {
+                "role": "system",
+                "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取，若用户输入为没有意义的字符串或已有标签不符合用户意图，则将意图标签识别为其他，语言请保持与用户输入一致。",
+            },
+            {
+                "role": "user",
+                "content": "打开设置",
+            },
+        ],
+        [
+            {
+                "role": "system",
+                "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取，若用户输入为没有意义的字符串或已有标签不符合用户意图，则将意图标签识别为其他，语言请保持与用户输入一致。",
+            },
+            {
+                "role": "user",
+                "content": "休眠",
+            },
+        ],
+        [
+            {
+                "role": "system",
+                "content": "你是一个AIPC的意图识别助理，你的任务是按照KYLIN_INTENT_DETECT的要求，结合上下文对话记录和用户输入进行意图识别和槽位信息抽取，若用户输入为没有意义的字符串或已有标签不符合用户意图，则将意图标签识别为其他，语言请保持与用户输入一致。",
+            },
+            {
+                "role": "user",
+                "content": "打开浏览器",
+            },
+        ],
     ]
     # ids, text = inference_engine._forward(messages)
     # logger.info(f"{ids}, {text}")
+
     device = inference_engine.device
     tokenizer = inference_engine.tokenizer
-    texts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
-
-    model_inputs = tokenizer(texts, padding=True, return_tensors="pt").to(device)
-
-    wraped_hf_model = Qwen3LegacyLoRAHFCompatible.to_hf_compatible(hf_model_path, inference_engine)
-    wraped_hf_model.eval()  # type: ignore
-    wraped_hf_model.to(device)  # type: ignore
-    streamer = TextStreamer(tokenizer)
-    xhonnxruntime_config.disable_progress = True
-    xhonnxruntime_config.verbose_progress = False
-    with torch.no_grad():
-        generated_ids = wraped_hf_model.generate(  # type: ignore
-            **model_inputs, max_new_tokens=32768, streamer=streamer, do_sample=True, pad_token_id=tokenizer.eos_token_id
+    for messages in messages_all:
+        texts = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            # enable_thinking=False,
         )
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
 
-    # parsing thinking content
-    try:
-        # rindex finding 151668 (</think>)
-        index = len(output_ids) - output_ids[::-1].index(151668)
-    except ValueError:
-        index = 0
+        model_inputs = tokenizer(texts, padding=True, return_tensors="pt").to(device)
 
-    thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+        wraped_hf_model = Qwen3LegacyLoRAHFCompatible.to_hf_compatible(hf_model_path, inference_engine)
+        wraped_hf_model.eval()  # type: ignore
+        wraped_hf_model.to(device)  # type: ignore
+        streamer = TextStreamer(tokenizer)
+        xhonnxruntime_config.disable_progress = True
+        xhonnxruntime_config.verbose_progress = False
+        with torch.no_grad():
+            generated_ids = wraped_hf_model.generate(  # type: ignore
+                **model_inputs,
+                max_new_tokens=32768,
+                streamer=streamer,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
 
-    logger.info(f"thinking content:{thinking_content}")
-    logger.info(f"content:{content}")
+        # parsing thinking content
+        try:
+            # rindex finding 151668 (</think>)
+            index = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            index = 0
+
+        thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+        content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+
+        logger.info(f"thinking content:{thinking_content}")
+        logger.info(f"{texts}")
+        logger.info(f"content:{content}")
 
 
 if __name__ == "__main__":
