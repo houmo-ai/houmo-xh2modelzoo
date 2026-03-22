@@ -23,7 +23,7 @@ from pathlib import Path
 
 import torch
 from transformers import TextStreamer
-from xhquant.api import get_root_logger, xhquant_init
+from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 from xhquant.xhonnxruntime import config as xhonnxruntime_config
 
 from xh_model_zoo.xh_llm.models.qwen3_legacy_lora import Qwen3LegacyLoRAHFCompatible, Qwen3LegacyLoRAInference
@@ -39,7 +39,7 @@ def main(args):
     assert Path(hf_model_path).exists(), f"HF model path {hf_model_path} does not exist."
 
     logger = get_root_logger()
-
+    set_random_seed(args.seed)
     messages_all = [
         [
             {
@@ -79,7 +79,7 @@ def main(args):
             },
         ],
     ]
-     
+
     device = inference_engine.device
     tokenizer = inference_engine.tokenizer
     for messages in messages_all:
