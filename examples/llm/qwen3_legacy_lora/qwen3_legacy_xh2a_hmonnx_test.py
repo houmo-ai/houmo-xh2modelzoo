@@ -37,44 +37,8 @@ def main(args):
     if hf_model_path is None:
         hf_model_path = args.hf_model
     assert Path(hf_model_path).exists(), f"HF model path {hf_model_path} does not exist."
-    batch_size = inference_engine.batch_size
+
     logger = get_root_logger()
-    # messages = [
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "你多大了？用中文回答。"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "中国首都是哪里？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "香港特别行政区是哪一年成立的？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "神舟五号是哪年发射的？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "中国第一个进入太空的是谁？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "人类第一个进入太空的是谁？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "人类是哪年实现载人登月的？"},
-    #     ],
-    #     [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "中国第一颗卫星的名字是什么？"},
-    #     ],
-    # ]
-    # assert len(messages) >= batch_size
-    # messages = messages[:batch_size]
 
     messages_all = [
         [
@@ -115,9 +79,7 @@ def main(args):
             },
         ],
     ]
-    # ids, text = inference_engine._forward(messages)
-    # logger.info(f"{ids}, {text}")
-
+     
     device = inference_engine.device
     tokenizer = inference_engine.tokenizer
     for messages in messages_all:
@@ -139,7 +101,7 @@ def main(args):
         with torch.no_grad():
             generated_ids = wraped_hf_model.generate(  # type: ignore
                 **model_inputs,
-                max_new_tokens=32768,
+                max_new_tokens=512,
                 streamer=streamer,
                 do_sample=True,
                 pad_token_id=tokenizer.eos_token_id,
