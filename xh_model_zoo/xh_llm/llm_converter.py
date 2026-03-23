@@ -36,7 +36,10 @@ class LLMConverter:
     def from_pretrained(
         pretrained_model_path: str, architecture: Optional[str], convert_config: BaseConvertConfig, out_dir: str
     ):
-        config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
+        if architecture == "Qwen3VLForConditionalGeneration_SpiritVLA":
+            pass
+        else:
+            config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
         if architecture is None:
             architectures = config.architectures
             if architectures is None:
@@ -68,6 +71,10 @@ class LLMConverter:
             from .models.qwen3_vl_moe import Qwen3_VL_MOEConverterXH2a
 
             converter_cls = Qwen3_VL_MOEConverterXH2a
+        elif architecture == "Qwen3VLForConditionalGeneration_SpiritVLA":
+            from .models.spirit_vla import Qwen3_VLConverterXH2a
+
+            converter_cls = Qwen3_VLConverterXH2a
         elif architecture == "Qwen3OmniMoeForConditionalGeneration":
             from .models.qwen3_omni import Qwen3OmniMoeConverterXH2a
 
