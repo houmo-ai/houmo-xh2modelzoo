@@ -135,5 +135,6 @@ if __name__ == "__main__":
     parser.add_argument("--execution_device", type=str, default="cuda:0", help="execution device, default is cuda:0")
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--fast", action="store_true", help="run in fast mode")
+    parser.add_argument("--seed", type=int, default=1024)
     args = parser.parse_args()
     main(args)
