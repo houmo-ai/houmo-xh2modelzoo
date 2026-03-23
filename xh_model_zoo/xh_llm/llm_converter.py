@@ -102,6 +102,14 @@ class LLMConverter:
             from .models.qwen3_legacy import Qwen3LegacyConverterXH2a
 
             converter_cls = Qwen3LegacyConverterXH2a
+        elif architecture == "Qwen3ForCausalLM_legacy_DM0":
+            from .models.dm0 import Qwen3LegacyConverterXH2a_LLM
+
+            converter_cls = Qwen3LegacyConverterXH2a_LLM
+        elif architecture == "Qwen3ForCausalLM_legacy_DM0_Expert":
+            from .models.dm0 import Qwen3LegacyConverterXH2a_Expert
+
+            converter_cls = Qwen3LegacyConverterXH2a_Expert
         elif architecture == "Qwen3ForCausalLM":
             if hasattr(config, "quantization_config"):
                 if config.quantization_config["quant_method"].lower() == "awq":
