@@ -301,7 +301,7 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
     def _convert(self, hf_model_path: str, output_dir: str):
         logger = get_root_logger()
         config = self.config
-        pretrin_model_path = "/data01/home/she.gao/.cache/huggingface/hub/models--Qwen--Qwen3-VL-4B-Instruct/snapshots/ebb281ec70b05090aa6165b016eac8ec08e71b17"
+        pretrin_model_path = config.pretrin_model_path
         
         native_model = Qwen3VLForConditionalGeneration.from_pretrained(pretrin_model_path)
         if native_model.config.tie_word_embeddings:
@@ -412,7 +412,7 @@ class Qwen3_VLConverterXH2a(HFTransfromersConverter):
                 "content": [
                     {
                         "type": "image",
-                        "image": "/data01/home/she.gao/xh2modelzoo/data/images/qwen2_vl_demo.jpeg",
+                        "image": config.image_path,
                         "resized_height": wrap_cfg.visual.image_max_size_h,
                         "resized_width": wrap_cfg.visual.image_max_size_w,
                     },

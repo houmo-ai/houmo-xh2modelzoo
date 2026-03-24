@@ -45,3 +45,5 @@ class Qwen3_VLConvertConfig(LLMConvertConfig):
     gptqmodel_cfg: str = field(default_factory=str)
     quant_weight: str = field(default_factory=str)
     max_pe_length: int = 32768
+    image_path: str = field(default_factory=str)
+    pretrin_model_path: str = field(default_factory=str)

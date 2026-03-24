@@ -147,6 +147,8 @@ def main(args):
         quant_weight=args.quant_weight,
         gptqmodel_cfg=args.use_gptqmodel,
         max_pe_length=args.max_pe_length,
+        image_path=args.image_path,
+        pretrin_model_path=args.pretrin_model_path,
         visual_config=VisualConfig(
             image_max_size_h=args.image_max_size_h,
             image_max_size_w=args.image_max_size_w,
@@ -192,6 +194,8 @@ if __name__ == "__main__":
         help="sample image path for generate golden",
     )
     parser.add_argument("--use_gptqmodel", action="store_true", help="use gptqmodel quanted model")
+    parser.add_argument("--image_path", default="/data01/home/she.gao/xh2modelzoo/data/images/qwen2_vl_demo.jpeg", help="image path for export vision")
+    parser.add_argument("--pretrin_model_path", default="/data01/home/she.gao/.cache/huggingface/hub/models--Qwen--Qwen3-VL-4B-Instruct/snapshots/ebb281ec70b05090aa6165b016eac8ec08e71b17", help="model path for Qwen3-VL-4B-Instruct")
     parser.add_argument(
         "--quant_weight",
         type=str,
