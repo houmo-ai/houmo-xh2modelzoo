@@ -254,6 +254,14 @@ def _vp_matmul_8x8(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return (a.unsqueeze(-1) * b.unsqueeze(-3)).sum(-2)
 
 
+def _vp_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Generic VP matmul implemented as broadcast mul + reduce-sum.
+
+    Equivalent to a @ b for inputs shaped (..., m, k) and (..., k, n).
+    """
+    return (a.unsqueeze(-1) * b.unsqueeze(-3)).sum(-2)
+
+
 def _neumann_8x8(block: torch.Tensor, eye_8: torch.Tensor) -> torch.Tensor:
     """Compute (I - block)^{-1} for 8x8 strictly lower triangular blocks.
 
@@ -327,12 +335,12 @@ def parallel_chunk_inverse_block(
 
         # A[s:s+8, 0:s] @ R_upper → off-diagonal contribution
         # shapes: (BHN, 8, s) @ (BHN, s, s) → (BHN, 8, s)
-        T = torch.matmul(flat[:, s:s + b, :s], R_upper)
+        T = _vp_matmul(flat[:, s:s + b, :s], R_upper)
 
         # off_diag = diag_inv[I] @ T
         # shapes: (BHN, 8, 8) @ (BHN, 8, s) → (BHN, 8, s)
         diag_inv_I = diag_invs_all[:, I]  # (BHN, 8, 8)
-        off_diag = torch.matmul(diag_inv_I, T)  # (BHN, 8, s)
+        off_diag = _vp_matmul(diag_inv_I, T)  # (BHN, 8, s)
 
         # Extend R_upper from (BHN, s, s) to (BHN, s+8, s+8)
         # Old rows get 8 zero-columns appended on the right via Pad
@@ -841,16 +849,8 @@ def _copy_defused_expert_weights_to_moeblock(moeblock: MoeBlock, experts, device
         for expert_idx, expert in enumerate(experts):
             for linear_name in ("gate_proj", "up_proj", "down_proj"):
                 linear = getattr(expert, linear_name)
-                # For GPTQ quantized layers (e.g. TorchQuantLinear), .weight
-                # returns a metadata shim without .data; use dequantize_weight().
-                # dequantize_weight() returns (in_features, out_features) while
-                # MoeBlock/F.linear expects (out_features, in_features), so transpose.
-                if hasattr(linear, "dequantize_weight"):
-                    weight_data = linear.dequantize_weight().t().to(device)
-                else:
-                    weight_data = linear.weight.data.to(device)
                 getattr(moeblock, f"expert_{linear_name}_weight")[expert_idx].copy_(
-                    weight_data
+                    linear.weight.data.to(device)
                 )
 
                 quant_weight = getattr(linear, "quant_weight", None)

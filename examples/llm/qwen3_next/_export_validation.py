@@ -343,6 +343,21 @@ def _build_isolated_validation_model(cfg, dtype: torch.dtype, logger, stage_name
 def _release_isolated_validation_model(qwen3_next_model):
     if qwen3_next_model is None:
         return
+    from xhquant.xhonnxruntime import AutoOffloadGraphModel
+
+    # Remove AutoOffloadGraphModel wrappers and move sub-models to CPU
+    # (_frontend_model / _quanted_model are NOT registered submodules,
+    #  so parent .to("cpu") won't reach them)
+    for attr in ("_frontend_model", "_quanted_model"):
+        sub = getattr(qwen3_next_model, attr, None)
+        if sub is None:
+            continue
+        if AutoOffloadGraphModel.is_auto_offload_model(sub):
+            AutoOffloadGraphModel.remove_auto_offload_model(sub)
+        sub.to("cpu")
+    qwen3_next_model.set_exec_device(torch.device("cpu"))
+    qwen3_next_model.to("cpu")
+
     qwen3_next_model.release_exported_model()
     qwen3_next_model.release_quanted_model()
     qwen3_next_model.release_frontend_model()
@@ -358,7 +373,10 @@ def _prepare_isolated_stage_model(
     gpu_device: torch.device,
     stage_eval_type,
     trace_batch,
+    logger,
 ):
+    from xhquant.xhonnxruntime import AutoOffloadGraphModel
+
     qwen3_next_model.set_exec_device(torch.device("cpu"))
     qwen3_next_model.to("cpu")
 
@@ -366,6 +384,11 @@ def _prepare_isolated_stage_model(
         qwen3_next_model.convert_to_fronted_graph(trace_batch, release_wraped_model=False)
         qwen3_next_model.change_eval_type(EvalModelType.FRONTEND)
         qwen3_next_model.to(dtype)
+        validation_max_memory = _build_gpu_only_validation_graph_max_memory(logger)
+        qwen3_next_model._frontend_model = AutoOffloadGraphModel.from_graph_model(
+            qwen3_next_model._frontend_model, max_memory=validation_max_memory,
+        )
+        qwen3_next_model.set_exec_device(gpu_device)
         return
 
     if stage_eval_type != EvalModelType.QUANTED_ALIGNED:
@@ -381,10 +404,18 @@ def _prepare_isolated_stage_model(
         [gpu_device],
         auto_release_unused_parameters=True,
     )
+    # ptq_quantize puts weights on GPU; move back to CPU so GPU is clean
+    # before AutoOffloadGraphModel distributes across GPUs
+    qwen3_next_model._quanted_model.to("cpu")
+    cleanup_memory()
+
     qwen3_next_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
-    # XH2a quantized kernels only support fp16
-    qwen3_next_model.to(torch.float16)
-    qwen3_next_model.set_exec_device(torch.device("cpu"))
+    qwen3_next_model.to(dtype)
+    validation_max_memory = _build_gpu_only_validation_graph_max_memory(logger)
+    qwen3_next_model._quanted_model = AutoOffloadGraphModel.from_graph_model(
+        qwen3_next_model._quanted_model, max_memory=validation_max_memory,
+    )
+    qwen3_next_model.set_exec_device(gpu_device)
 
 
 @torch.no_grad()
@@ -536,6 +567,7 @@ def _generate_full_output_with_isolated_instances(
             gpu_device=gpu_device,
             stage_eval_type=stage_eval_type,
             trace_batch=prefill_batch,
+            logger=logger,
         )
 
         prefill_out = prefill_model.test_step(prefill_batch)
@@ -546,6 +578,8 @@ def _generate_full_output_with_isolated_instances(
         state_snapshot = _capture_generation_state(prefill_model)
     finally:
         _release_isolated_validation_model(prefill_model)
+        prefill_model = None
+        cleanup_memory()
 
     eos_token_id = tokenizer.eos_token_id
     if eos_token_id is not None and generated_ids[-1] == eos_token_id:
@@ -570,6 +604,7 @@ def _generate_full_output_with_isolated_instances(
             gpu_device=gpu_device,
             stage_eval_type=stage_eval_type,
             trace_batch=decode_trace_batch,
+            logger=logger,
         )
         _restore_generation_state(decode_model, state_snapshot)
 
@@ -719,107 +754,121 @@ def run_conversion_validation(
         if hf_generated_ids is not None:
             _log_full_output_comparison("HF", hf_generated_ids, "Wrap", wrap_generated_ids, tokenizer, logger)
 
+    # ── Wrap(pad) vs Frontend(pad) — CPU trace, GPU inference (following qwen3.5) ──
+    from xhquant.xhonnxruntime import AutoOffloadGraphModel
+
     _de_offload_wrap_model(qwen3_next_model, logger)
     qwen3_next_model.set_exec_device(torch.device("cpu"))
     qwen3_next_model.reset_kvcache()
-    qwen3_next_model.set_linear_attention_mode("chunk")
     qwen3_next_model.set_input_sequence_length(input_sequence_length)
-    original_graph_max_memory = _set_validation_graph_auto_offload_max_memory(qwen3_next_model, logger)
     data_batch_pad_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data_batch_pad.items()}
-    try:
-        qwen3_next_model.convert_to_fronted_graph(data_batch_pad_cpu, release_wraped_model=False)
-        qwen3_next_model.change_eval_type(EvalModelType.FRONTEND)
-        qwen3_next_model.to(dtype)
-        frontend_out = qwen3_next_model.test_step(data_batch_pad_cpu)
-        frontend_logits = frontend_out.logits.detach().cpu()
-        del frontend_out
+    validation_max_memory = _build_gpu_only_validation_graph_max_memory(logger)
+    qwen3_next_model.convert_to_fronted_graph(data_batch_pad_cpu, release_wraped_model=True)
+    qwen3_next_model.change_eval_type(EvalModelType.FRONTEND)
+    qwen3_next_model.to(dtype)
+    # Load frontend model to GPU(s) for inference
+    qwen3_next_model._frontend_model = AutoOffloadGraphModel.from_graph_model(
+        qwen3_next_model._frontend_model, max_memory=validation_max_memory,
+    )
+    qwen3_next_model.set_exec_device(gpu_device)
+    data_batch_pad_gpu = {
+        k: v.to(gpu_device) if isinstance(v, torch.Tensor) else v
+        for k, v in data_batch_pad_cpu.items()
+    }
+    frontend_out = qwen3_next_model.test_step(data_batch_pad_gpu)
+    frontend_logits = frontend_out.logits.detach().cpu()
+    del frontend_out
 
-        diff_wrap_frontend = _max_abs_diff(wrap_pad_logits, frontend_logits, valid_len, args.num_logits_to_keep)
-        logger.info(f"Wrap(pad) vs Frontend(pad) max abs error: {diff_wrap_frontend:.6e}")
+    diff_wrap_frontend = _max_abs_diff(wrap_pad_logits, frontend_logits, valid_len, args.num_logits_to_keep)
+    logger.info(f"Wrap(pad) vs Frontend(pad) max abs error: {diff_wrap_frontend:.6e}")
 
-        qwen3_next_model.reset_kvcache()
-        from xhquant.xhonnxruntime import AutoOffloadGraphModel
+    # ── Frontend(pad) vs Quant(pad) — CPU quant, GPU inference (following qwen3.5) ──
+    qwen3_next_model.reset_kvcache()
+    frontend_model = qwen3_next_model._frontend_model
+    if AutoOffloadGraphModel.is_auto_offload_model(frontend_model):
+        AutoOffloadGraphModel.remove_auto_offload_model(frontend_model)
+    qwen3_next_model._frontend_model = frontend_model
+    qwen3_next_model.set_exec_device(torch.device("cpu"))
+    qwen3_next_model.to("cpu")
+    qwen3_next_model.set_input_sequence_length(input_sequence_length)
+    cleanup_memory()
 
-        frontend_model = qwen3_next_model._frontend_model
-        if AutoOffloadGraphModel.is_auto_offload_model(frontend_model):
-            AutoOffloadGraphModel.remove_auto_offload_model(frontend_model)
-        qwen3_next_model._frontend_model = frontend_model
+    qwen3_next_model.convert_to_quant_graph(cfg.target_device)
+    calib_data = _flatten_inputs(qwen3_next_model.prepare_inputs_for_graph(data_batch_pad_cpu))
+    ptq_quantize(
+        qwen3_next_model.quanted_model,
+        [calib_data],
+        PrecisionMode.ALIGNED,
+        [gpu_device],
+        auto_release_unused_parameters=True,
+    )
+    qwen3_next_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
+    qwen3_next_model.to(dtype)
+    # Load quant model to GPU(s) for inference
+    qwen3_next_model._quanted_model = AutoOffloadGraphModel.from_graph_model(
+        qwen3_next_model._quanted_model, max_memory=validation_max_memory,
+    )
+    qwen3_next_model.set_exec_device(gpu_device)
+    quant_out = qwen3_next_model.test_step(data_batch_pad_gpu)
+    quant_logits = quant_out.logits.detach().cpu()
+    del quant_out
+
+    diff_frontend_quant = _max_abs_diff(frontend_logits, quant_logits, valid_len, args.num_logits_to_keep)
+    logger.info(f"Frontend(pad) vs Quant(pad) max abs error: {diff_frontend_quant:.6e}")
+
+    if compare_full_output and compare_max_new_tokens > 0:
+        logger.info("Releasing main validation graphs before isolated full-output comparison")
+        # Must remove AutoOffloadGraphModel wrappers and move to CPU before releasing,
+        # otherwise GPU tensors won't be freed.
+        for attr in ("_frontend_model", "_quanted_model"):
+            sub = getattr(qwen3_next_model, attr, None)
+            if sub is not None:
+                if AutoOffloadGraphModel.is_auto_offload_model(sub):
+                    AutoOffloadGraphModel.remove_auto_offload_model(sub)
+                sub.to("cpu")
+        qwen3_next_model.set_exec_device(torch.device("cpu"))
         qwen3_next_model.to("cpu")
-        qwen3_next_model.set_linear_attention_mode("chunk")
-        qwen3_next_model.set_input_sequence_length(input_sequence_length)
+        qwen3_next_model.change_eval_type(EvalModelType.NONE)
+        qwen3_next_model.release_quanted_model()
+        qwen3_next_model.release_frontend_model()
+        qwen3_next_model.release_wraped_model()
         cleanup_memory()
 
-        qwen3_next_model.convert_to_quant_graph(cfg.target_device)
-        calib_data = _flatten_inputs(qwen3_next_model.prepare_inputs_for_graph(data_batch_pad_cpu))
-        ptq_quantize(
-            qwen3_next_model.quanted_model,
-            [calib_data],
-            PrecisionMode.ALIGNED,
-            [gpu_device],
-            auto_release_unused_parameters=True,
+        frontend_generated_ids = _generate_full_output_with_isolated_instances(
+            cfg=cfg,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+            valid_len=valid_len,
+            input_sequence_length=input_sequence_length,
+            dtype=dtype,
+            gpu_device=gpu_device,
+            max_new_tokens=compare_max_new_tokens,
+            stage_eval_type=EvalModelType.FRONTEND,
+            stage_name="frontend",
+            logger=logger,
         )
-        qwen3_next_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
-        # XH2a quantized kernels (e.g. RMSNorm) only support fp16, so always use
-        # float16 for the quant stage regardless of the original model dtype.
-        quant_dtype = torch.float16
-        qwen3_next_model.to(quant_dtype)
-        qwen3_next_model.set_exec_device(torch.device("cpu"))
-        data_batch_pad_cpu_fp16 = {
-            k: v.to(quant_dtype) if isinstance(v, torch.Tensor) and v.is_floating_point() else v
-            for k, v in data_batch_pad_cpu.items()
-        }
-        quant_out = qwen3_next_model.test_step(data_batch_pad_cpu_fp16)
-        quant_logits = quant_out.logits.detach().cpu()
-        del quant_out, data_batch_pad_cpu_fp16
+        _log_stage_output("frontend traced model output", frontend_generated_ids, tokenizer, logger)
+        if wrap_generated_ids is not None:
+            _log_full_output_comparison("Wrap", wrap_generated_ids, "Frontend", frontend_generated_ids, tokenizer, logger)
 
-        diff_frontend_quant = _max_abs_diff(frontend_logits, quant_logits, valid_len, args.num_logits_to_keep)
-        logger.info(f"Frontend(pad) vs Quant(pad) max abs error: {diff_frontend_quant:.6e}")
-
-        if compare_full_output and compare_max_new_tokens > 0:
-            logger.info("Releasing main validation graphs before isolated full-output comparison")
-            qwen3_next_model.change_eval_type(EvalModelType.NONE)
-            qwen3_next_model.release_quanted_model()
-            qwen3_next_model.release_frontend_model()
-            qwen3_next_model.release_wraped_model()
-            cleanup_memory()
-
-            frontend_generated_ids = _generate_full_output_with_isolated_instances(
-                cfg=cfg,
-                tokenizer=tokenizer,
-                input_ids=input_ids,
-                valid_len=valid_len,
-                input_sequence_length=input_sequence_length,
-                dtype=dtype,
-                gpu_device=gpu_device,
-                max_new_tokens=compare_max_new_tokens,
-                stage_eval_type=EvalModelType.FRONTEND,
-                stage_name="frontend",
-                logger=logger,
-            )
-            _log_stage_output("frontend traced model output", frontend_generated_ids, tokenizer, logger)
-            if wrap_generated_ids is not None:
-                _log_full_output_comparison("Wrap", wrap_generated_ids, "Frontend", frontend_generated_ids, tokenizer, logger)
-
-            quant_generated_ids = _generate_full_output_with_isolated_instances(
-                cfg=cfg,
-                tokenizer=tokenizer,
-                input_ids=input_ids,
-                valid_len=valid_len,
-                input_sequence_length=input_sequence_length,
-                dtype=dtype,
-                gpu_device=gpu_device,
-                max_new_tokens=compare_max_new_tokens,
-                stage_eval_type=EvalModelType.QUANTED_ALIGNED,
-                stage_name="quant",
-                logger=logger,
-            )
-            _log_stage_output("quanted (aligned) model output", quant_generated_ids, tokenizer, logger)
-            _log_full_output_comparison("Frontend", frontend_generated_ids, "Quant", quant_generated_ids, tokenizer, logger)
-        else:
-            frontend_next = frontend_logits[:, -1, :].argmax(dim=-1).view(1, 1)
-            quant_next = quant_logits[:, -1, :].argmax(dim=-1).view(1, 1)
-            _log_stage_output("frontend traced model output", frontend_next, tokenizer, logger)
-            _log_stage_output("quanted (aligned) model output", quant_next, tokenizer, logger)
-            qwen3_next_model.release_wraped_model()
-    finally:
-        _restore_validation_graph_auto_offload_max_memory(qwen3_next_model, original_graph_max_memory)
+        quant_generated_ids = _generate_full_output_with_isolated_instances(
+            cfg=cfg,
+            tokenizer=tokenizer,
+            input_ids=input_ids,
+            valid_len=valid_len,
+            input_sequence_length=input_sequence_length,
+            dtype=dtype,
+            gpu_device=gpu_device,
+            max_new_tokens=compare_max_new_tokens,
+            stage_eval_type=EvalModelType.QUANTED_ALIGNED,
+            stage_name="quant",
+            logger=logger,
+        )
+        _log_stage_output("quanted (aligned) model output", quant_generated_ids, tokenizer, logger)
+        _log_full_output_comparison("Frontend", frontend_generated_ids, "Quant", quant_generated_ids, tokenizer, logger)
+    else:
+        frontend_next = frontend_logits[:, -1, :].argmax(dim=-1).view(1, 1)
+        quant_next = quant_logits[:, -1, :].argmax(dim=-1).view(1, 1)
+        _log_stage_output("frontend traced model output", frontend_next, tokenizer, logger)
+        _log_stage_output("quanted (aligned) model output", quant_next, tokenizer, logger)
+        qwen3_next_model.release_wraped_model()
