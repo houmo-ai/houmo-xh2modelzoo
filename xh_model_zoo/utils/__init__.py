@@ -20,6 +20,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 from .device_dtype_mixin import DeviceDtypeMixin
+from .gpu_utils import print_gpu_info
 from .memory_tracker import MemoryTracker
 from .time_profiler import TimeProfiler, time_profiler
 
@@ -32,4 +33,5 @@ __all__ = [
     "DeviceDtypeMixin",
     "get_root_logger",
     "xh2modelzoo_init_logger",
+    "print_gpu_info",
 ]

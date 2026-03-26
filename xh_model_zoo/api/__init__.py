@@ -27,6 +27,7 @@ from xhquant.api import xhquant_init
 from xhquant.utils.version_utils import digit_version
 from xh_model_zoo.utils.config import Config, ConfigDict
 from ..utils.logger import get_root_logger, xhquant_llm_init_logger
+from ..xh_llm.models.eval_model_type import EvalModelType
 
 
 def xhquant_llm_init(log_file=None, debug=False, file_mode="w"):
@@ -49,8 +50,10 @@ def xhquant_llm_init(log_file=None, debug=False, file_mode="w"):
 __all__ = [
     "Config",
     "ConfigDict",
+    "EvalModelType",
     "xhquant_llm_init",
     "get_root_logger",
+    "decode_next_token",
 ]
 
 
