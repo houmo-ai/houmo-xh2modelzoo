@@ -243,9 +243,12 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
         delattr(self, "g_idx")
     weight = weight.t()
     quant_weight = quant_weight.t()
-    self.register_parameter("weight", nn.Parameter(weight))
-    self.register_buffer("quant_weight", quant_weight)
     self.__class__ = nn.Linear
+    self._parameters.pop("weight", None)
+    self._parameters["weight"] = nn.Parameter(weight)
+    self._buffers["quant_weight"] = quant_weight
+    self.in_features = weight.shape[1]
+    self.out_features = weight.shape[0]
 
 
 class LLMBaseModel(BaseModel):
@@ -359,16 +362,72 @@ class LLMBaseModel(BaseModel):
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model
 
+    @staticmethod
+    def _detect_gptq_quant_linear_cls(hf_model: nn.Module):
+        """Detect GPTQ quantized linear class from model modules.
+
+        Used when hf_quantizer is not available (e.g. GPTQModel-loaded models).
+        """
+        from transformers.utils import is_gptqmodel_available
+
+        try:
+            from transformers.utils import is_auto_gptq_available
+        except ImportError:
+            is_auto_gptq_available = lambda: False  # noqa: E731
+
+        candidate_classes = []
+        if is_gptqmodel_available():
+            from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
+            candidate_classes.append(TorchQuantLinear)
+            try:
+                from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+
+                candidate_classes.append(TorchFusedQuantLinear)
+            except Exception:
+                pass
+            from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+
+            candidate_classes.append(MarlinQuantLinear)
+
+        if is_auto_gptq_available():
+            from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
+
+            candidate_classes.append(GeneralQuantLinear)
+
+        for _name, module in hf_model.named_modules():
+            for cls in candidate_classes:
+                if isinstance(module, cls):
+                    return type(module)
+
+        raise RuntimeError(
+            f"Could not detect GPTQ quantized linear class from model modules. "
+            f"Checked: {[c.__name__ for c in candidate_classes]}"
+        )
+
     def _dequantize_gptq_hf_model(self, native_hf_model: nn.Module) -> nn.Module:
         hf_model = native_hf_model
         assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
-        hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        from transformers.utils import is_gptqmodel_available
+
+        try:
+            from transformers.utils import is_auto_gptq_available
+        except ImportError:
+            is_auto_gptq_available = lambda: False  # noqa: E731
 
         converter: Optional[Callable] = None
 
-        QuantLinear = hf_quantizer.optimum_quantizer.quant_linear  # type: ignore
+        # Get the quantized linear class: prefer hf_quantizer if available,
+        # otherwise detect from model modules (GPTQModel-loaded models
+        # don't set hf_quantizer on the model).
+        QuantLinear = None
+        if hasattr(hf_model, "hf_quantizer"):
+            hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
+            QuantLinear = hf_quantizer.optimum_quantizer.quant_linear  # type: ignore
+        else:
+            QuantLinear = self._detect_gptq_quant_linear_cls(hf_model)
+
         if is_auto_gptq_available():
             from auto_gptq.nn_modules.qlinear.qlinear_cuda import (
                 QuantLinear as GeneralQuantLinear,
@@ -409,7 +468,9 @@ class LLMBaseModel(BaseModel):
             except Exception:
                 pass
 
-            if QuantLinear in torch_linear_cls:
+            if QuantLinear in torch_linear_cls or (
+                isinstance(QuantLinear, type) and issubclass(QuantLinear, tuple(torch_linear_cls))
+            ):
                 converter = gptqmodel_torch_qlinear_converter
             elif QuantLinear is MarlinQuantLinear:
                 converter = None

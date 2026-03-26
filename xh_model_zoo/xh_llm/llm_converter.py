@@ -140,6 +140,14 @@ class LLMConverter:
                 from .models._qwen3 import Qwen3ConverterXH2a
 
                 converter_cls = Qwen3ConverterXH2a
+        elif architecture == "Qwen3NextForCausalLM":
+            from .models.qwen3_next import Qwen3NextConverterXH2a
+
+            converter_cls = Qwen3NextConverterXH2a
+        elif architecture in ("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"):
+            from .models.qwen3_5 import Qwen3_5ConverterXH2a
+
+            converter_cls = Qwen3_5ConverterXH2a
         elif architecture == "Qwen3MoeForCausalLM":
             from .models.qwen3moe import Qwen3MoeConverterXH2a
 

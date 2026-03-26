@@ -18,10 +18,10 @@ DTYPE_MAP = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Qwen3Next HF baseline demo",
+        description="Qwen3.5 HF baseline demo",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model", type=str, default="weights/Qwen3-Next-80B-A3B-Instruct")
+    parser.add_argument("--model", type=str, default="weights/Qwen3.5-27B")
     parser.add_argument("--prompt", type=str, default="请用中文简要介绍一下混合线性注意力模型。")
     parser.add_argument("--system-prompt", type=str, default="You are a helpful assistant.")
     parser.add_argument("--dtype", type=str, default="bf16", choices=sorted(DTYPE_MAP.keys()))
