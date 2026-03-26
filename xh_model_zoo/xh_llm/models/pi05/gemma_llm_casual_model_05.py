@@ -132,13 +132,13 @@ class XHGemma05CLLMModel(LLMBaseModel):
         else:
             # attention_mask = torch.zeros((1, 8, 50, 1024), dtype=torch.bfloat16, device=device)
             attention_mask = torch.full(
-                (1, 1, 50, 1024),
+                (1, 1, self.input_sequence_length, 1024),
                 torch.finfo(torch.float16).min,
                 dtype=torch.float16,
                 device=device,
             )
 
-            attention_mask[..., :50] = 0.0
+            attention_mask[..., :self.input_sequence_length] = 0.0
 
         # inputs_embeds = torch.load("/data01/home/she.gao/lerobot/suffix_embs.pt").to(torch.float32)
         # cond = torch.load("/data01/home/she.gao/xhquant_llm/examples/cond.pt")
