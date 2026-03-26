@@ -22,10 +22,14 @@ from .qwen3_5_convert_config import Qwen3_5ConvertConfig
 from .qwen3_5_converter import Qwen3_5ConverterXH2a
 from .qwen3_5_llm_model import XHQwen3_5Model
 from .qwen3_5_onnx_model import Qwen3_5ONNXModel
+from .processing_qwen3_5 import Qwen3_5Processor
+from .qwen3_5_vision_model import XHQwen3_5VisionModel
 
 __all__ = [
     "Qwen3_5ConvertConfig",
     "Qwen3_5ConverterXH2a",
     "XHQwen3_5Model",
     "Qwen3_5ONNXModel",
+    "Qwen3_5Processor",
+    "XHQwen3_5VisionModel",
 ]

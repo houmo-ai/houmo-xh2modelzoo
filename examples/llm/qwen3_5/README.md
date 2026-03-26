@@ -1,68 +1,35 @@
-# Qwen3.5-27B XH2a 量化导出与推理
+# Qwen3.5 XH2a 导出与推理
 
-Qwen3.5 是阿里巴巴通义千问系列的混合线性注意力大语言模型，本目录提供完整的 XH2a 量化导出、精度验证、Golden 生成及 HMONNX 推理脚本。
+Qwen3.5 目录当前已经支持两条链路：
 
-## 模型架构
-
-| 属性 | 值 |
-|------|-----|
-| Architecture | `Qwen3_5ForConditionalGeneration` / `Qwen3_5ForCausalLM` |
-| 参数量 | 27B |
-| 层数 | 64（16 full_attention + 48 linear_attention） |
-| hidden_size | 5120 |
-| num_heads / num_kv_heads | 24 / 4 |
-| head_dim | 256 |
-| intermediate_size | 17408 |
-| 位置编码 | M-RoPE（time/height/width），partial_rotary_factor=0.25 |
-| 全注意力层 | Gated Full Attention（每 4 层一个） |
-| 线性注意力层 | GatedDeltaNet（独立 qkv/z/b/a 投影） |
-
-## 支持的权重格式
-
-| 来源 | 权重路径 | 量化方案 | 说明 |
-|------|---------|---------|------|
-| 官方 BF16 | `weights/Qwen3.5-27B` | w8a8h1_sefp | 权重 8-bit，激活 8-bit |
-| GPTQ 4-bit | `weights/Qwen3.5-27B-GPTQModel-self-generated-4bit-hessian-mse` | w4a8h0_ssfp | 权重 4-bit，激活 8-bit |
+1. 纯 LLM 的 XH2a 量化导出、Golden 生成与 HMONNX 推理
+2. Vision 编码器的 ONNX/HMONNX 导出，以及 Vision HMONNX + LLM HMONNX 的 VL 联合推理
 
 ## 环境依赖
 
+推荐使用 `xhquant` 环境，并在仓库根目录执行：
+
 ```bash
 conda activate xhquant
-# transformers >= 5.2.0, torch >= 2.8.0
+export PYTHONPATH=./
 ```
 
-## 目录结构
+## 支持情况
 
-```
-examples/llm/qwen3_5/
-├── README.md                            # 本文档
-├── qwen3_5_xh2a_export_hmonnx.py       # 量化导出主脚本（验证 + ONNX 导出 + Golden）
-├── qwen3_5_xh2a_demo.py                # HMONNX 推理 Demo（单轮/多轮对话）
-├── qwen3_5_xh2a_hmonnx_test.py         # HMONNX 推理 Benchmark
-├── _export_validation.py                # 多阶段精度验证工具
-├── _runtime.py                          # HMONNX 运行时加载工具
-├── common.py                            # 公共工具函数
-├── demo.py                              # HF 原生推理 Demo（基线对比用）
-└── 模型迁移适配.md                       # 迁移需求文档
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| LLM 导出 | 已支持 | 支持 Qwen3.5 LLM 的 ONNX/HMONNX 导出与 Golden 生成 |
+| Vision 导出 | 已支持 | 支持 Qwen3.5 vision encoder 的 ONNX/HMONNX 导出 |
+| VL 联合推理 Demo | 已支持 | 支持 Vision HMONNX + LLM HMONNX 联合推理 |
 
-configs/qwen3_5/
-└── qwen3_5_27b_xh2a.py                 # XH2a 导出配置
+## LLM 导出
 
-xh_model_zoo/xh_llm/models/qwen3_5/
-├── __init__.py                          # 模块导出
-├── _model.py                            # Wrap 模块注册（从 xhquant_llm 移植）
-├── qwen3_5_convert_config.py            # 转换配置数据类
-├── qwen3_5_converter.py                 # LLMConverter 实现
-├── qwen3_5_llm_model.py                 # XHQwen3_5Model 模型包装
-└── qwen3_5_onnx_model.py               # HMONNX 推理包装
-```
-
-## 导出命令
-
-### BF16 → w8a8（含验证 + Golden）
+### BF16 到 XH2a
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,6,7 conda run -n xhquant python \
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
   examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config configs/qwen3_5/qwen3_5_27b_xh2a.py \
   --hf_model_dir weights/Qwen3.5-27B \
@@ -72,10 +39,12 @@ CUDA_VISIBLE_DEVICES=0,6,7 conda run -n xhquant python \
   --work_dir work_dirs/qwen3_5_27b_bf16_export
 ```
 
-### GPTQ → w4a8（含验证 + Golden）
+### GPTQ 到 XH2a
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,6,7 conda run -n xhquant python \
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
   examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config configs/qwen3_5/qwen3_5_27b_xh2a.py \
   --hf_model_dir weights/Qwen3.5-27B-GPTQModel-self-generated-4bit-hessian-mse \
@@ -85,45 +54,43 @@ CUDA_VISIBLE_DEVICES=0,6,7 conda run -n xhquant python \
   --work_dir work_dirs/qwen3_5_27b_gptq_export
 ```
 
-### 仅生成 Golden（复用已有 ONNX）
+## Vision 导出
+
+Qwen3.5 Vision 当前使用独立脚本导出 vision encoder。下面这条命令已经在当前仓真实跑通。
+
+### 9B Vision HMONNX 导出
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,6,7 conda run -n xhquant python \
-  examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
-  --config configs/qwen3_5/qwen3_5_27b_xh2a.py \
-  --hf_model_dir weights/Qwen3.5-27B \
-  --dtype fp16 \
-  --golden_only \
-  --existing_work_dir work_dirs/qwen3_5_27b_bf16_export \
-  --work_dir work_dirs/qwen3_5_27b_bf16_export
+export PYTHONPATH=./
+export LD_LIBRARY_PATH=:/data01/home/chenzx/project/houmoquantool/hmquant/ops/build/lib.linux-x86_64-cpython-38/:$LD_LIBRARY_PATH
+export CUDA_VISIBLE_DEVICES=0
+python \
+  examples/llm/qwen3_5/qwen3_5_vision_xh2a_export_hmonnx.py \
+  --config configs/qwen3_5/qwen3_5_instruct_vision_config.py \
+  --hf_model_dir /data02/datasets/Qwen3.5-9B-rotated-fp/ \
+  --model_type 9B
 ```
 
-## 精度验证流程
-
-`--valid` 启用多阶段逐层对比（prefill 首字 + 64-token decode）：
-
-```
-HF 原始模型
-  ↓ 对比
-Wrap 模型（注册 XHTrace 模块后的等价模型）
-  ↓ 对比
-Frontend 图（TorchFX trace 后的计算图）
-  ↓ 对比
-Quant 图（PTQ 量化后的计算图）
-  ↓ 导出
-ONNX 模型（prefill + decode 两张图）
-```
-
-每个阶段对比：
-- **Prefill 首字 logits**：max abs error
-- **64-token decode 全输出**：token-level exact_match + text exact_match
-
-## HMONNX 推理
-
-### Demo（单轮对话）
+默认产物位置：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n xhquant python \
+work_dirs/qwen3_5_9B/qwen3_5_instruct_vision_config_1_2_448_448_use_gptq_model_False_Qwen3/
+```
+
+关键产物：
+
+- `onnx/visual_1.onnx`
+- `vision/qwen3_5_instruct_vision_config.onnx`
+- `vision/qwen3_5_9B_vision_448_448`
+
+## LLM HMONNX 推理
+
+### 单轮文本 Demo
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
   examples/llm/qwen3_5/qwen3_5_xh2a_demo.py \
   --config work_dirs/qwen3_5_27b_bf16_export/meta.json \
   --prompt "你好呀，你是谁，中文回答" \
@@ -131,20 +98,12 @@ CUDA_VISIBLE_DEVICES=0 conda run -n xhquant python \
   --dtype fp16
 ```
 
-### Demo（交互多轮对话）
-
-```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n xhquant python \
-  examples/llm/qwen3_5/qwen3_5_xh2a_demo.py \
-  --config work_dirs/qwen3_5_27b_bf16_export/meta.json \
-  --interactive \
-  --dtype fp16
-```
-
 ### Benchmark 测试
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n xhquant python \
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
   examples/llm/qwen3_5/qwen3_5_xh2a_hmonnx_test.py \
   --config work_dirs/qwen3_5_27b_bf16_export/meta.json \
   --prompt "请用中文简要介绍一下混合线性注意力模型。" \
@@ -154,47 +113,175 @@ CUDA_VISIBLE_DEVICES=0 conda run -n xhquant python \
   --dtype fp16
 ```
 
-## 导出产物
+## VL Demo 使用方式
 
-```
-work_dirs/qwen3_5_27b_bf16_export/
-├── meta.json                            # 模型元信息（HMONNX 加载入口）
-├── export_meta_info.json                # 导出过程元信息
-├── token_embedding.pt                   # Token Embedding 权重
-├── hf_config/                           # HF 模型配置文件
-├── prefill_onnx/                        # Prefill ONNX 模型
-│   └── qwen3_5_27b_xh2a_prefill.onnx
-├── decode_onnx/                         # Decode ONNX 模型
-│   └── qwen3_5_27b_xh2a_decode.onnx
-└── hmquant_xh2_qwen3_5_27b_w8_a8_256_2k_YYYYMMDD/  # Golden 发布目录
-    ├── golden_meta_info.json
-    ├── quant_embedding.pt
-    ├── prefill/                         # Prefill ONNX + Golden（233 outputs/step）
-    │   ├── *_prefill_with_act.onnx
-    │   ├── *_prefill_external_data/
-    │   └── step_0/
-    └── decode/                          # Decode ONNX + Golden（234 outputs/step）
-        ├── *_decode_with_act.onnx
-        ├── *_decode_external_data/
-        └── step_0/
+`qwen3_5_vl_hmonnx_demo.py` 用于把 Vision HMONNX 与 LLM HMONNX 串起来做图文联合推理。
+
+当前默认组合为：
+
+- Vision HMONNX：当前仓导出的 qwen3.5 9B vision 模型
+- LLM HMONNX：`/data01/home/chenzx/project/xhquant_llm/work_dirs/qwen3_5/hmquant_xh2_qwen3.5_9b_w4_a8_256_2k_448_20260324_Qwen3.5-9B-quarot-gptq-4bit-mse24-hessian_20260324_103723/export_meta_info.json`
+
+### 直接使用默认参数运行
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
+  examples/llm/qwen3_5/qwen3_5_vl_hmonnx_demo.py
 ```
 
-## Cache 结构
+### 指定图片和问题
 
-| Cache 类型 | 层数 | Shape | 说明 |
-|-----------|------|-------|------|
-| KV Cache（全注意力层） | 16 | `[1, 4, 2048, 256]` | batch × kv_heads × context_len × head_dim |
-| Conv Cache（线性注意力层） | 48 | `[1, 10240, 4]` | 短卷积状态 |
-| Recurrent State（线性注意力层） | 48 | `[1, 48, 128, 128]` | GatedDeltaNet 循环状态 |
+```bash
+export PYTHONPATH=./
+export LD_LIBRARY_PATH=:/data01/home/chenzx/project/houmoquantool/hmquant/ops/build/lib.linux-x86_64-cpython-38/:$LD_LIBRARY_PATH
+export CUDA_VISIBLE_DEVICES=0
+python \
+  examples/llm/qwen3_5/qwen3_5_vl_hmonnx_demo.py \
+  --image-path data/images/qwen2_vl_demo.jpeg \
+  --prompt "描述这张照片" \
+  --max-new-tokens 64
+```
+
+### 显式指定 Vision 和 LLM 产物
+
+```bash
+export PYTHONPATH=./
+export LD_LIBRARY_PATH=:/data01/home/chenzx/project/houmoquantool/hmquant/ops/build/lib.linux-x86_64-cpython-38/:$LD_LIBRARY_PATH
+export CUDA_VISIBLE_DEVICES=0
+python \
+  examples/llm/qwen3_5/qwen3_5_vl_hmonnx_demo.py \
+  --model-config /data01/home/chenzx/project/xhquant_llm/work_dirs/qwen3_5/hmquant_xh2_qwen3.5_9b_w4_a8_256_2k_448_20260324_Qwen3.5-9B-quarot-gptq-4bit-mse24-hessian_20260324_103723/export_meta_info.json \
+  --vision-onnx /data01/home/chenzx/project/xh2modelzoo/work_dirs/qwen3_5_9B/qwen3_5_instruct_vision_config_1_2_448_448_use_gptq_model_False_Qwen3/vision/qwen3_5_instruct_vision_config.onnx \
+  --image-path data/images/qwen2_vl_demo.jpeg \
+  --prompt "描述这张照片"
+```
+
+## 使GPTQModel用优化量化精度
+
+如果希望使用 GPTQModel 对 Qwen3.5 做更高精度的量化，并且让当前仓的 Vision 导出和 LLM 量化保持同一套旋转逻辑，推荐先在 GPTQModel 仓中完成旋转与量化，再回到当前仓做导出与推理。
+
+建议先确保 GPTQModel 已经拉取到 `aeb3864e` 之后的代码，再执行下面流程。
+
+### 第一步：先对 Qwen3.5 VL 做旋转，给 Vision 导出准备对齐后的 FP 模型
+
+这一步的目的，是把 Qwen3.5 的 LLM 旋转逻辑和 Vision 侧输出投影对齐，得到可直接用于当前仓 Vision 导出的旋转后 FP 模型。
+
+推荐命令：
+
+```bash
+cd gptqmodel
+
+export CUDA_VISIBLE_DEVICES=0
+python examples/quantization/examples/example_qwen35_vl_rotate_fp.py \
+  --model /data02/datasets/Qwen3.5-9B \
+  --out /data02/datasets/Qwen3.5-9B-rotated-fp \
+  --llm-rotation hadamard \
+  --vision-rotation last \
+  --device cuda:0 \
+  --validate
+```
+
+说明：
+
+1. `--llm-rotation hadamard` 指定 LLM 旋转模式，后续 LLM 量化建议保持同样的旋转配置。
+2. `--vision-rotation last` 做最后输出投影对齐，也可以改为 `full`，表示整个vision都做对应的旋转。
+3. 这一步输出的 `/data02/datasets/Qwen3.5-9B-rotated-fp`，就是当前仓 Vision 导出脚本可直接使用的 `--hf_model_dir`。
+
+完成后，可以在当前仓直接执行：
+
+```bash
+cd xh2modelzoo
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python examples/llm/qwen3_5/qwen3_5_vision_xh2a_export_hmonnx.py \
+  --config configs/qwen3_5/qwen3_5_instruct_vision_config.py \
+  --hf_model_dir /data02/datasets/Qwen3.5-9B-rotated-fp/ \
+  --model_type 9B
+```
+
+### 第二步：使用 GPTQModel 对 Qwen3.5 Dense LLM 做 rotate + GPTQ
+
+`example_qwen35dense.py` 支持在量化前先做旋转，再执行 GPTQ 量化。为了和上面的 Vision 旋转链路保持一致，建议 LLM 继续使用相同的旋转模式，比如 `hadamard`。
+
+默认校准集可以直接使用 wikitext2，也就是 wiki，不需要额外准备数据；如果你有业务相关的校准集，也可以通过 `--calibration-jsonl` 替换。
+
+#### 使用默认 wiki 校准集
+
+```bash
+cd ./gptqmodel
+
+export CUDA_VISIBLE_DEVICES=0
+python examples/quantization/examples/example_qwen35dense.py \
+  --model /data02/datasets/Qwen3.5-9B \
+  --out /data02/datasets/Qwen3.5-9B-quarot-gptq-4bit-mse24-hessian \
+  --bits 4 \
+  --group-size 64 \
+  --rotation hadamard \
+  --nsamples 256 \
+  --seqlen 1024 \
+  --mse 2.4 \
+  --hessian-mse \
+  --device cuda:0
+```
+
+说明：
+
+1. 脚本默认使用 `wikitext-2-raw-v1` 作为校准集来源，可以把它理解成默认 wiki 校准方案。
+2. `--rotation hadamard` 表示量化前先做 QuaRot 旋转。
+3. `--hessian-mse` 和 `--mse 2.4` 用于量化误差优化，是当前 Qwen3.5 GPTQ 常用配置。
+
+#### 使用自定义 JSONL 校准集
+
+如果需要替换成自己的校准集，可以准备 JSONL 文件，每行一个 `{\"text\": ...}` 记录，再执行：
+
+```bash
+cd gptqmodel
+
+export CUDA_VISIBLE_DEVICES=0
+python examples/quantization/examples/example_qwen35dense.py \
+  --model /data02/datasets/Qwen3.5-9B \
+  --out /data02/datasets/Qwen3.5-9B-quarot-gptq-4bit-mse24-hessian \
+  --bits 4 \
+  --group-size 64 \
+  --rotation hadamard \
+  --nsamples 256 \
+  --mse 2.4 \
+  --hessian-mse \
+  --calibration-jsonl /path/to/calibration.jsonl \
+  --calibration-text-key text \
+  --device cuda:0
+```
+
+校准集建议：
+
+1. 没有特别需求时，默认直接使用 wiki 即可。
+2. 如果业务场景比较明确，可以优先使用和业务分布接近的中英文混合文本、对话或代码数据。
+3. 常用起点是 `nsamples=256`、`seqlen=1024`，如果资源允许可以继续增加。
+
+### 推荐的整体使用顺序
+
+如果目标是让当前仓的 Vision 导出与 LLM GPTQ 结果尽量保持同一套旋转思路，建议按下面顺序操作：
+
+1. 在 GPTQModel 中先运行 `example_qwen35_vl_rotate_fp.py`，得到旋转后的 FP 模型目录。
+2. 在当前仓中使用这个旋转后的 FP 模型目录执行 Vision 导出。
+3. 在 GPTQModel 中使用 `example_qwen35dense.py` 做 LLM 的 `rotate + GPTQ` 量化。
+4. 再把生成出的 LLM `export_meta_info.json` 和当前仓导出的 Vision HMONNX 一起喂给 `qwen3_5_vl_hmonnx_demo.py` 做联合推理。
+
+### 额外提醒
+
+1. `example_qwen35_vl_rotate_fp.py` 和 `example_qwen35dense.py` 最好使用一致的旋转模式，通常推荐都用 `hadamard`。
+2. 如果 Vision 侧使用的是旋转后的 FP 模型，而 LLM 侧使用的是 GPTQModel 产出的量化模型，至少要保证两边来自同一个 Qwen3.5 基座，并且旋转逻辑一致。
+3. 在使用 GPTQModel 前，建议先确认仓库代码已经包含 `aeb3864e` 之后的修复，否则 Qwen3.5 相关旋转与量化功能可能不完整。
+
 
 ## 注意事项
 
-1. **M-RoPE**：Qwen3.5 使用 Multi-modal RoPE（time/height/width 三组位置 ID），纯文本推理时三组相同（均为 `arange(0, seq_len)`）。
-2. **RoPE 在线/离线计算**：通过 `support_long_context_over_fp16_limit` 参数控制：
-   - **`False`（默认，在线）**：每次 forward 从 position_ids + inv_freq 实时计算 cos/sin，无需预分配缓存，支持任意序列长度。
-   - **`True`（离线/预缓存）**：启动时预计算 `max_pe_length` 长度的 cos/sin cache，用索引查表，适用于 position_id 可能超过 FP16 上限（65504）的场景。
-   - 导出时可通过 `--support_long_context_over_fp16_limit` 切换到离线模式。
-3. **Vision 部分**：当前仅支持 LLM 部分，Vision 编码器迁移后续补充。
-4. **GPTQ 自动检测**：导出脚本自动检测 GPTQ 权重并将 `w_schema.bits` 从 8 覆盖为 4。
-5. **GPU 需求**：27B 模型导出需要 3 张 A100 80GB（通过 `device_map='auto'` 自动分配）。验证阶段自动选择空闲最大的 GPU。
-6. **Prefill/Decode 分离**：混合注意力模型的 Prefill（chunk 模式）和 Decode（recurrent 模式）使用不同的计算图，分别导出。
+1. Qwen3.5 当前已经支持 LLM 与 Vision 两部分的独立导出，也已经支持 VL 联合推理 demo。
+2. VL demo 依赖两套产物同时存在：一套是 LLM 的 `export_meta_info.json`，另一套是 Vision 的 `.onnx` HMONNX 文件，二者需要来自同一模型家族并保持 tokenizer / processor 对齐。
+3. Qwen3.5 使用 M-RoPE，VL 场景下会同时使用 time、height、width 三组位置编码；demo 中已经按 vision token 布局生成对应位置索引。
+4. 运行 Vision 导出或 VL demo 时，建议始终显式设置 `PYTHONPATH=./`；如果缺少 hmquant 动态库路径，`xhquant` GPU 扩展可能加载失败。
+5. Vision 导出当前默认使用 `448 x 448` 输入分辨率、`patch_size=16`、`temporal_patch_size=2`，如果修改这些参数，Vision 产物与 VL demo 的输入配置也要保持一致。
+6. LLM 的 Prefill 和 Decode 是两张独立图，Vision HMONNX 只负责生成图像特征，最终由 VL demo 将图像特征散射回文本 token embedding 后再调用 LLM HMONNX。
