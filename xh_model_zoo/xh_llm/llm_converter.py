@@ -208,6 +208,14 @@ class LLMConverter:
             from .models.fm9g import FM9GConverterXH2a
 
             converter_cls = FM9GConverterXH2a
+        elif architecture == "Qwen3_5MoeForConditionalGeneration":
+            from .models.qwen3_5_moe import Qwen3_5MoeConverterXH2a
+
+            converter_cls = Qwen3_5MoeConverterXH2a
+        elif architecture == "Qwen3_5MoeForCausalLM":
+            from .models.qwen3_5_moe import Qwen3_5MoeConverterXH2a
+
+            converter_cls = Qwen3_5MoeConverterXH2a
 
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
