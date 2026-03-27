@@ -54,6 +54,22 @@ python \
   --work_dir work_dirs/qwen3_5_27b_gptq_export
 ```
 
+### 长上下文导出说明
+
+如果需要支持超过 `64K` 的上下文长度，需要在导出时额外增加 `--support_long_context_over_fp16_limit` 参数，例如：
+
+```bash
+python \
+  examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  ... \
+  --support_long_context_over_fp16_limit
+```
+
+说明：
+
+1. 这个参数需要在导出阶段开启，生成的产物才会支持超过 `64K` 的上下文。
+2. 开启后会带来一定性能下降，通常大约增加 `10ms` 左右的耗时。
+
 ## Vision 导出
 
 Qwen3.5 Vision 当前使用独立脚本导出 vision encoder。下面这条命令已经在当前仓真实跑通。
