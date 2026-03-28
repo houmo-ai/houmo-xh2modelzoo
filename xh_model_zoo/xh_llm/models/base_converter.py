@@ -396,55 +396,128 @@ class HFTransfromersConverter(BaseConverter):
 
     def _dequantize_gptq_hf_model(self, native_hf_model: nn.Module):
         hf_model = native_hf_model
-        assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
-        hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        try:
+            from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        except ImportError:
+            # Newer transformers versions removed these helpers; provide simple fallbacks.
+            def is_auto_gptq_available() -> bool:  # type: ignore[misc]
+                try:
+                    import auto_gptq  # noqa: F401
+                    return True
+                except ImportError:
+                    return False
+
+            def is_gptqmodel_available() -> bool:  # type: ignore[misc]
+                try:
+                    import gptqmodel  # noqa: F401
+                    return True
+                except ImportError:
+                    return False
 
         converter: Optional[Callable] = None
+        QuantLinear = None
 
-        QuantLinear = hf_quantizer.optimum_quantizer.quant_linear  # type: ignore
-        if is_auto_gptq_available():
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as Exllamav2QuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
+        # Try to get QuantLinear class from hf_quantizer if available
+        hf_quantizer = getattr(hf_model, "hf_quantizer", None)
+        if hf_quantizer is not None and hasattr(hf_quantizer, "optimum_quantizer"):
+            QuantLinear = getattr(hf_quantizer.optimum_quantizer, "quant_linear", None)
 
-            if QuantLinear is GeneralQuantLinear:
-                converter = general_qlinear_converter
-            elif QuantLinear is CudaOldQuantLinear:
-                converter = qlinear_cuda_old_converter
-            elif QuantLinear is ExllamaQuantLinear:
-                converter = None
-            elif QuantLinear is Exllamav2QuantLinear:
-                converter = None
-            elif QuantLinear is MarlinQuantLinear:
-                converter = None
+        if QuantLinear is not None:
+            if is_auto_gptq_available():
+                from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
+                from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
+                from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
+                from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as Exllamav2QuantLinear
+                from auto_gptq.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
 
-        if is_gptqmodel_available():
-            from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-            from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+                if QuantLinear is GeneralQuantLinear:
+                    converter = general_qlinear_converter
+                elif QuantLinear is CudaOldQuantLinear:
+                    converter = qlinear_cuda_old_converter
+                elif QuantLinear is ExllamaQuantLinear:
+                    converter = None
+                elif QuantLinear is Exllamav2QuantLinear:
+                    converter = None
+                elif QuantLinear is MarlinQuantLinear:
+                    converter = None
 
-            torch_linear_cls = [TorchQuantLinear]
-            try:
-                from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+            if is_gptqmodel_available():
+                from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+                from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 
-                torch_linear_cls.append(TorchFusedQuantLinear)
-            except Exception:
-                pass
+                torch_linear_cls = [TorchQuantLinear]
+                try:
+                    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 
-            if QuantLinear in torch_linear_cls:
-                converter = gptqmodel_torch_qlinear_converter
-            elif QuantLinear is MarlinQuantLinear:
-                converter = None
+                    torch_linear_cls.append(TorchFusedQuantLinear)
+                except Exception:
+                    pass
 
-        assert converter is not None, f"Not implemented for {QuantLinear} yet"
+                if QuantLinear in torch_linear_cls:
+                    converter = gptqmodel_torch_qlinear_converter
+                elif QuantLinear is MarlinQuantLinear:
+                    converter = None
 
-        dequant_linears = []
-        for name, module in hf_model.named_modules():  # type: ignore
-            if isinstance(module, QuantLinear):
-                dequant_linears.append((name, module))
+            assert converter is not None, f"Not implemented for {QuantLinear} yet"
+
+            dequant_linears = []
+            for name, module in hf_model.named_modules():  # type: ignore
+                if isinstance(module, QuantLinear):
+                    dequant_linears.append((name, module))
+        else:
+            # hf_quantizer not available (e.g., gptqmodel cleared it during loading).
+            # Detect GPTQ QuantLinear modules by scanning for characteristic attributes.
+            if is_gptqmodel_available():
+                from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
+                torch_linear_cls = [TorchQuantLinear]
+                try:
+                    from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+
+                    torch_linear_cls.append(TorchFusedQuantLinear)
+                except Exception:
+                    pass
+
+                dequant_linears = []
+                for name, module in hf_model.named_modules():
+                    if type(module) in torch_linear_cls:
+                        dequant_linears.append((name, module))
+                        if converter is None:
+                            converter = gptqmodel_torch_qlinear_converter
+
+            if converter is None and is_auto_gptq_available():
+                from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
+                from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
+
+                dequant_linears = []
+                for name, module in hf_model.named_modules():
+                    if isinstance(module, GeneralQuantLinear):
+                        dequant_linears.append((name, module))
+                        converter = general_qlinear_converter
+                    elif isinstance(module, CudaOldQuantLinear):
+                        dequant_linears.append((name, module))
+                        converter = qlinear_cuda_old_converter
+
+            if converter is None:
+                # Last resort: scan by characteristic GPTQ attributes (qweight + scales + qzeros)
+                dequant_linears = []
+                for name, module in hf_model.named_modules():
+                    if (
+                        hasattr(module, "qweight")
+                        and hasattr(module, "scales")
+                        and hasattr(module, "qzeros")
+                        and hasattr(module, "bits")
+                    ):
+                        dequant_linears.append((name, module))
+                if dequant_linears:
+                    converter = gptqmodel_torch_qlinear_converter
+
+            assert converter is not None, (
+                "Could not find any GPTQ QuantLinear modules in model. "
+                "Make sure the model is a GPTQ-quantized model."
+            )
+
         pbar = tqdm(dequant_linears, desc="Dequantizing GPTQ model")
         for name, module in pbar:
             pbar.set_description(f"Dequantizing GPTQ: {name}")
@@ -527,24 +600,42 @@ class HFTransfromersConverter(BaseConverter):
         return hf_model
 
     def dequantize_hf_model(self, native_hf_model: nn.Module):
-        if (
-            not hasattr(native_hf_model.config, "quantization_config")
-            or native_hf_model.config.quantization_config is None
-        ):
-            return native_hf_model
+        qc = getattr(native_hf_model.config, "quantization_config", None)
 
-        hf_model = native_hf_model
-        if hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ:
-            hf_model = self._dequantize_awq_hf_model(hf_model)
-        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ:
-            hf_model = self._dequantize_gptq_hf_model(hf_model)
-        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.COMPRESSED_TENSORS:
-            hf_model = self._dequantize_compressed_tensors_hf_model(hf_model)
-        else:
-            raise NotImplementedError(
-                f"Dequantize not implemented for quantization method: {hf_model.config.quantization_config.quant_method}"
-            )
-        return hf_model
+        if qc is not None:
+            # Handle both dict (raw config) and object (parsed GPTQConfig etc.)
+            if isinstance(qc, dict):
+                quant_method = qc.get("quant_method", None)
+                quant_method_str = str(quant_method).lower() if quant_method is not None else None
+            else:
+                quant_method = getattr(qc, "quant_method", None)
+                quant_method_str = str(quant_method).lower() if quant_method is not None else None
+
+            if quant_method_str is not None:
+                if "gptq" in quant_method_str:
+                    return self._dequantize_gptq_hf_model(native_hf_model)
+                elif quant_method == QuantizationMethod.AWQ or "awq" in quant_method_str:
+                    return self._dequantize_awq_hf_model(native_hf_model)
+                elif (
+                    quant_method == QuantizationMethod.COMPRESSED_TENSORS
+                    or "compressed_tensors" in quant_method_str
+                ):
+                    return self._dequantize_compressed_tensors_hf_model(native_hf_model)
+                else:
+                    raise NotImplementedError(
+                        f"Dequantize not implemented for quantization method: {quant_method}"
+                    )
+
+        # quantization_config is None or has no quant_method.
+        # Scan for GPTQ QuantLinear modules that gptqmodel may have left after clearing the config.
+        has_quant_linears = any(
+            hasattr(m, "qweight") and hasattr(m, "scales") and hasattr(m, "bits")
+            for _, m in native_hf_model.named_modules()
+        )
+        if has_quant_linears:
+            return self._dequantize_gptq_hf_model(native_hf_model)
+
+        return native_hf_model
 
     def get_hf_model(self, hf_model_dir: str, **kwargs) -> Any:
         native_hf_model = self.load_hf_model(hf_model_dir, **kwargs)

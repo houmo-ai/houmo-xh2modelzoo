@@ -138,12 +138,8 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
         past_conv_caches = self._llm_model.past_conv_caches
         past_recurrent_states = self._llm_model.past_recurrent_states
 
-        # Move to correct device if needed
-        if past_conv_caches and past_conv_caches[0].device != device:
-            self._llm_model.past_conv_caches = [t.to(device) for t in past_conv_caches]
-        if past_recurrent_states and past_recurrent_states[0].device != device:
-            self._llm_model.past_recurrent_states = [t.to(device) for t in past_recurrent_states]
-
+        # Device placement is handled inside _forward() via HMONNXInference's
+        # to_device() calls, so we do NOT pre-move the caches here.
         return self._llm_model.past_conv_caches, self._llm_model.past_recurrent_states
 
     def forward(
@@ -185,6 +181,10 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
                 device=inputs_embeds.device,
             )
 
+        # Determine phase BEFORE any computation so we dispatch to the correct ONNX.
+        is_prefill = self._is_prefill_phase
+        self._llm_model.set_phase_prefill(is_prefill)
+
         past_seq_length = torch.tensor([self._past_seq_length], dtype=torch.int32, device=inputs_embeds.device)
         seq_length = inputs_embeds.shape[1] if input_ids is None else input_ids.shape[-1]
         current_input_length = torch.tensor([seq_length], dtype=torch.int32, device=inputs_embeds.device)
@@ -193,22 +193,54 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
         past_value_caches = self._llm_model.past_value_caches
         past_conv_caches, past_recurrent_states = self._prepare_linear_state_caches(inputs_embeds.device)
 
-        net_input_seq_len = self._llm_model.get_input_sequence_length()
-        steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
-
-        # Pad embeds to multiple of net_input_seq_len
-        padding_len = steps * net_input_seq_len - seq_length
-        if padding_len > 0:
-            padding_embeds = self._embed_tokens(
-                torch.zeros(inputs_embeds.shape[0], padding_len, dtype=torch.long, device=inputs_embeds.device)
+        if not is_prefill:
+            # --- Decode phase: ISL=1, no padding, use decode ONNX ---
+            device = inputs_embeds.device
+            mask_dtype = inputs_embeds.dtype
+            time_pos = (torch.tensor([self._past_seq_length], dtype=torch.int32, device=device)
+                        .view(1, 1).expand(inputs_embeds.shape[0], -1).contiguous())
+            hight_pos = time_pos
+            width_pos = time_pos
+            lin_mask = torch.ones(inputs_embeds.shape[0], 1, dtype=mask_dtype, device=device)
+            out = self._llm_model._forward(
+                inputs_embeds,
+                time_pos, hight_pos, width_pos,
+                past_seq_length, current_input_length,
+                lin_mask,
+                past_key_caches, past_value_caches,
+                past_conv_caches, past_recurrent_states,
             )
-            inputs_embeds = torch.cat([inputs_embeds, padding_embeds], dim=1)
+            logits = out if isinstance(out, torch.Tensor) else (out[0] if isinstance(out, tuple) else out.logits)
+        else:
+            # --- Prefill phase: pad to ISL, use prefill ONNX (chunked for long prompts) ---
+            net_input_seq_len = self._llm_model.get_input_sequence_length()
+            steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
 
-        padded_seq_len = inputs_embeds.shape[1]
-        # position_ids must be int32 to match ONNX model signature
-        position_ids = torch.arange(padded_seq_len, device=inputs_embeds.device, dtype=torch.int32).view(1, -1).expand(inputs_embeds.shape[0], -1)
+            # Pad embeds to multiple of net_input_seq_len
+            padding_len = steps * net_input_seq_len - seq_length
+            if padding_len > 0:
+                padding_embeds = self._embed_tokens(
+                    torch.zeros(inputs_embeds.shape[0], padding_len, dtype=torch.long, device=inputs_embeds.device)
+                )
+                inputs_embeds = torch.cat([inputs_embeds, padding_embeds], dim=1)
 
-        try:
+            padded_seq_len = inputs_embeds.shape[1]
+            device = inputs_embeds.device
+            mask_dtype = inputs_embeds.dtype
+
+            # Build position IDs: real positions + repeat last position for padding
+            # (matches reference prepare_inputs: last_pos.expand(pad_len))
+            real_pos = torch.arange(
+                self._past_seq_length, self._past_seq_length + seq_length,
+                dtype=torch.int32, device=device,
+            )
+            if padding_len > 0:
+                last_pos = real_pos[-1:].expand(padding_len)
+                full_pos = torch.cat([real_pos, last_pos])
+            else:
+                full_pos = real_pos
+            position_ids = full_pos.view(1, -1).expand(inputs_embeds.shape[0], -1)
+
             if steps > 1:
                 all_logits = []
                 for i in tqdm(range(steps)):
@@ -217,21 +249,15 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
                     sub_embeds = inputs_embeds[:, start:end, :]
                     sub_past_seq_length = past_seq_length + start
                     actual_len = min(end, seq_length) - start
-                    sub_current_input_length = torch.tensor([actual_len], dtype=torch.int32, device=inputs_embeds.device)
+                    sub_current_input_length = torch.tensor([actual_len], dtype=torch.int32, device=device)
 
-                    sub_pos = position_ids[:, start:end] + self._past_seq_length
+                    sub_pos = position_ids[:, start:end]
                     time_pos = sub_pos
                     hight_pos = sub_pos
                     width_pos = sub_pos
 
-                    mask_dtype = inputs_embeds.dtype
-                    if actual_len < net_input_seq_len:
-                        lin_mask = torch.cat([
-                            torch.ones(actual_len, device=inputs_embeds.device, dtype=mask_dtype),
-                            torch.zeros(net_input_seq_len - actual_len, device=inputs_embeds.device, dtype=mask_dtype),
-                        ]).unsqueeze(0)
-                    else:
-                        lin_mask = torch.ones(net_input_seq_len, device=inputs_embeds.device, dtype=mask_dtype).unsqueeze(0)
+                    # Always use all-ones lin_mask (matches reference generate())
+                    lin_mask = torch.ones(1, net_input_seq_len, dtype=mask_dtype, device=device)
 
                     self._llm_model.set_input_sequence_length(int(sub_current_input_length.item()))
                     out = self._llm_model._forward(
@@ -246,17 +272,11 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
 
                 logits = torch.cat(all_logits, dim=1)
             else:
-                time_pos = position_ids + self._past_seq_length
-                hight_pos = position_ids + self._past_seq_length
-                width_pos = position_ids + self._past_seq_length
-                mask_dtype = inputs_embeds.dtype
-                if seq_length < net_input_seq_len:
-                    lin_mask = torch.cat([
-                        torch.ones(seq_length, device=inputs_embeds.device, dtype=mask_dtype),
-                        torch.zeros(net_input_seq_len - seq_length, device=inputs_embeds.device, dtype=mask_dtype),
-                    ]).unsqueeze(0)
-                else:
-                    lin_mask = torch.ones(net_input_seq_len, device=inputs_embeds.device, dtype=mask_dtype).unsqueeze(0)
+                time_pos = position_ids
+                hight_pos = position_ids
+                width_pos = position_ids
+                # Always use all-ones lin_mask (matches reference generate())
+                lin_mask = torch.ones(1, net_input_seq_len, dtype=mask_dtype, device=device)
 
                 out = self._llm_model._forward(
                     inputs_embeds,
@@ -267,8 +287,9 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
                     past_conv_caches, past_recurrent_states,
                 )
                 logits = out if isinstance(out, torch.Tensor) else (out[0] if isinstance(out, tuple) else out.logits)
-        finally:
-            pass
+
+            # Switch to decode for all subsequent calls
+            self._is_prefill_phase = False
 
         logits = logits[:, :seq_length, :]
 
@@ -367,6 +388,7 @@ class Qwen3_5MoeHFCompatible(Qwen3_5MoeForConditionalGeneration):
     def generate(self, *args, **kwargs):
         self._is_prefill_phase = True
         self._past_seq_length = 0
+        self._llm_model.set_phase_prefill(True)  # reset to prefill ONNX
         self._xh_orig_forward = self.forward
         self.forward = self._sample_forward
         try:

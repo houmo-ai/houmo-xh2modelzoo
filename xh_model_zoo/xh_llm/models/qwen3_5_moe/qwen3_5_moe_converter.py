@@ -94,13 +94,71 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         self.config = config
         self.hf_model_path: Optional[str] = None
 
+    @staticmethod
+    def _is_gptqmodel_checkpoint(hf_model_dir: str) -> bool:
+        """Detect gptqmodel-format checkpoints (checkpoint_format == 'gptq' in config)."""
+        cfg_path = Path(hf_model_dir) / "config.json"
+        if not cfg_path.exists():
+            return False
+        try:
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            qc = cfg.get("quantization_config", {})
+            return isinstance(qc, dict) and qc.get("checkpoint_format") == "gptq"
+        except Exception:
+            return False
+
     def load_hf_model(self, hf_model_dir: str, **kwargs):
-        native_model = AutoModelForCausalLM.from_pretrained(
-            hf_model_dir,
-            trust_remote_code=True,
-            **kwargs,
-        )
-        native_model = self.dequantize_hf_model(native_model)
+        logger = get_root_logger()
+
+        if self._is_gptqmodel_checkpoint(hf_model_dir):
+            # gptqmodel-format GPTQ checkpoints store weights as packed qweight/scales/qzeros.
+            # AutoModelForCausalLM.from_pretrained() treats those as UNEXPECTED keys and
+            # leaves Linear weights uninitialized, producing garbage outputs.
+            # GPTQModel.load() properly unpacks and dequantizes back to float16 nn.Linear.
+            try:
+                from gptqmodel import GPTQModel  # type: ignore
+
+                logger.info(
+                    f"Detected gptqmodel checkpoint; using GPTQModel.load() for dequantization: {hf_model_dir}"
+                )
+                torch_dtype = kwargs.get("torch_dtype", torch.float16)
+                qmodel = GPTQModel.load(
+                    hf_model_dir,
+                    device="cpu",
+                    dtype=torch_dtype,
+                )
+                # GPTQModel.load() wraps the HF model in a BaseQModel; extract the inner model.
+                # The inner model is the properly dequantized PreTrainedModel (nn.Linear weights).
+                from gptqmodel.models.base import BaseQModel  # type: ignore
+
+                if isinstance(qmodel, BaseQModel):
+                    native_model = qmodel.model
+                    logger.info(f"Extracted inner HF model: {type(native_model).__name__}")
+                else:
+                    native_model = qmodel
+                # Clear quantization metadata so downstream dequantize_hf_model() is a no-op.
+                if hasattr(native_model, "config"):
+                    native_model.config.quantization_config = None
+                    if hasattr(native_model.config, "quantization_method"):
+                        native_model.config.quantization_method = None
+                    if hasattr(native_model, "quantization_method"):
+                        native_model.quantization_method = None
+            except ImportError:
+                logger.warning("gptqmodel not available; falling back to AutoModelForCausalLM")
+                native_model = AutoModelForCausalLM.from_pretrained(
+                    hf_model_dir,
+                    trust_remote_code=True,
+                    **kwargs,
+                )
+                native_model = self.dequantize_hf_model(native_model)
+        else:
+            native_model = AutoModelForCausalLM.from_pretrained(
+                hf_model_dir,
+                trust_remote_code=True,
+                **kwargs,
+            )
+            native_model = self.dequantize_hf_model(native_model)
         assert isinstance(native_model, (Qwen3_5MoeForConditionalGeneration, Qwen3_5MoeForCausalLM)), (
             f"Expected Qwen3_5MoeForConditionalGeneration or Qwen3_5MoeForCausalLM, got {type(native_model)}"
         )
@@ -377,8 +435,37 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             layers=linear_cache_meta,
         )
 
-        # Build inputs with M-RoPE position IDs
-        input_ids_t = torch.randint(0, 1000, (self.config.batch_size, input_sequence_length), dtype=torch.long)
+        # Build calibration input_ids: use real text if tokenizer is available
+        # (essential for W4A8 quantization — random tokens give wrong activation scales).
+        try:
+            from transformers import AutoTokenizer as _AutoTokenizer
+
+            _tok = _AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
+            _calib_text = (
+                "The Qwen3.5-MoE model is a large language model based on the Mixture-of-Experts "
+                "architecture. It combines dense attention layers with sparse MoE feed-forward blocks. "
+                "Each token is routed to a small subset of experts, reducing compute cost while "
+                "maintaining high model capacity. The model supports both Chinese and English. "
+                "这是一个基于专家混合架构的大语言模型，支持中英双语，并具备强大的推理能力。"
+            )
+            _enc = _tok(
+                _calib_text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=input_sequence_length,
+            )
+            raw_ids = _enc["input_ids"][0]
+            seq_actual = raw_ids.shape[0]
+            if seq_actual < input_sequence_length:
+                # Repeat + truncate to fill the window
+                repeat_times = (input_sequence_length + seq_actual - 1) // seq_actual
+                raw_ids = raw_ids.repeat(repeat_times)[:input_sequence_length]
+            else:
+                raw_ids = raw_ids[:input_sequence_length]
+            input_ids_t = raw_ids.unsqueeze(0).expand(self.config.batch_size, -1)
+            del _tok, _calib_text, _enc, raw_ids, seq_actual
+        except Exception:
+            input_ids_t = torch.randint(0, 1000, (self.config.batch_size, input_sequence_length), dtype=torch.long)
         inputs_embeds = token_embedding(input_ids_t)
         past_seq_length_t = torch.zeros(self.config.batch_size, dtype=torch.int32)
         current_input_length_t = torch.full(

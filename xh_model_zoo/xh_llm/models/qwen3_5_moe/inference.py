@@ -45,7 +45,7 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
     def __init__(
         self,
         model_config_file: str,
-        fast_mode: bool = True,
+        fast_mode: bool = False,  # fast mode has known bugs for this model (MoE shape, RMSNorm force_fp32)
         device: str = "cuda",
         execution_device: str = "cuda",
     ):
@@ -265,6 +265,18 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
             )
             if isinstance(self.decode_session, GoldenMixin):
                 self.decode_session.update_step()
+
+        # The ONNX outputs: (logits, conv_cache_out_0..N-1, recurrent_state_out_0..M-1)
+        # We must propagate the updated linear-attention states back into the
+        # CacheTensor objects so that the next forward call sees correct state.
+        if isinstance(out, tuple) and len(out) > 1:
+            n_conv = len(past_conv_caches)
+            n_rec = len(past_recurrent_states)
+            for i in range(n_conv):
+                past_conv_caches[i].data = out[1 + i].detach()
+            for i in range(n_rec):
+                past_recurrent_states[i].data = out[1 + n_conv + i].detach()
+            return out[0]
         return out
 
     def forward(
@@ -329,7 +341,8 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
             past_key_caches, past_value_caches,
             past_conv_caches, past_recurrent_states,
         )
-        next_token_id, _ = decode_next_token(self.tokenizer, prefill_logits)
+        logits_t = prefill_logits[0] if isinstance(prefill_logits, (tuple, list)) else prefill_logits
+        next_token_id, _ = decode_next_token(self.tokenizer, logits_t)
 
         # ----- Decode loop -----
         generated_ids = next_token_id.cpu().tolist()[0]  # list of token ids
@@ -360,7 +373,8 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
                     past_key_caches, past_value_caches,
                     past_conv_caches, past_recurrent_states,
                 )
-                tok_id, _ = decode_next_token(self.tokenizer, decode_logits)
+                decode_logits_t = decode_logits[0] if isinstance(decode_logits, (tuple, list)) else decode_logits
+                tok_id, _ = decode_next_token(self.tokenizer, decode_logits_t)
                 next_id = tok_id.cpu().item() if tok_id.numel() == 1 else tok_id.cpu().tolist()[0][0]
                 generated_ids.append(next_id)
                 past_len += 1
@@ -395,11 +409,23 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
         self.set_phase_prefill(True)
         all_logits: list[torch.Tensor] = []
 
+        # Save linear-attention cache state so we can restore it after each
+        # stateless chunk (each chunk uses past_seq_length=0 and must start
+        # from the same zero-initialised state).
+        saved_conv = [c.data.clone() for c in self.past_conv_caches]
+        saved_rec = [r.data.clone() for r in self.past_recurrent_states]
+
         pos = 0
         while pos < seq_len:
             chunk_end = min(pos + isl, seq_len)
             chunk_len = chunk_end - pos
             chunk = input_ids[:, pos:chunk_end]
+
+            # Reset linear caches to the saved (zero-init) state before each chunk.
+            for i, c in enumerate(self.past_conv_caches):
+                c.data = saved_conv[i].clone()
+            for i, r in enumerate(self.past_recurrent_states):
+                r.data = saved_rec[i].clone()
 
             data = {"input_ids": chunk, "past_seq_length": 0}
             (
@@ -420,8 +446,19 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
             )
             logits = out[0] if isinstance(out, (tuple, list)) else out
             if logits is None:
+                # Restore caches before returning
+                for i, c in enumerate(self.past_conv_caches):
+                    c.data = saved_conv[i]
+                for i, r in enumerate(self.past_recurrent_states):
+                    r.data = saved_rec[i]
                 return None
             all_logits.append(logits[:, :chunk_len, :])
             pos = chunk_end
+
+        # Restore linear cache state to what it was before prefill_only().
+        for i, c in enumerate(self.past_conv_caches):
+            c.data = saved_conv[i]
+        for i, r in enumerate(self.past_recurrent_states):
+            r.data = saved_rec[i]
 
         return torch.cat(all_logits, dim=1) if all_logits else None
