@@ -41,6 +41,7 @@ from accelerate.utils import get_balanced_memory
 from xh_model_zoo.api import Config, get_root_logger, xhquant_llm_init
 from xh_model_zoo.utils import MemoryTracker, TimeProfiler
 from xh_model_zoo.xh_llm.models.builder import MODELS
+from xh_model_zoo.xh_llm.models.qwen3_5 import Qwen3_5Processor
 from xh_model_zoo.xh_llm.models.qwen3_5_moe import XHQwen3_5MoeVisionModel
 
 
@@ -100,8 +101,7 @@ def _de_dispatch_to_cpu(model):
 
 
 def _build_processor(hf_model_dir):
-    from transformers import AutoProcessor
-    return AutoProcessor.from_pretrained(hf_model_dir, trust_remote_code=True)
+    return Qwen3_5Processor.from_pretrained(hf_model_dir)
 
 
 def _prepare_inputs(hf_model_dir, args):
