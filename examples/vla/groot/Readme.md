@@ -101,3 +101,18 @@ python examples/vla/groot/dataset.py
 1. 修改脚本中的硬编码路径。
 2. 依次运行 `vision_export.py`、`text_encoder_export.py`、`head_export.py`。
 3. 运行 `hm_demo.py` 验证端到端推理。
+
+## 7. 没有cuda运行 hmdemo 环境需要修改的地方
+1. GR00T-N1.6-DROID/config.json   67 行    "use_flash_attention": false,
+2. gr00t/model/modules/nvidia/Eagle-Block2A-2B-v2/config.json  2 行   "_attn_implementation": "eager",
+3. xh_model_zoo/xh_llm/models/groot/gr00t/policy/gr00t_policy.py 
+   * 96行 修改 model = AutoModel.from_pretrained(model_dir, attn_implementation="eager", device_map="meta")
+   * 注释 98行 # model.to(device=device, dtype=dtype)
+4. gr00t/model/modules/eagle_backbone.py   
+	* 43~45 行注释             
+		# assert use_flash_attention, (
+        #     "nvidia/Eagle-Block2A-2B-v2 requires flash attention by default"
+        # )
+	* 49 行替换 
+		# self.model = AutoModel.from_config(config, trust_remote_code=True)
+		self.model = Eagle3_VLForConditionalGeneration(config)
