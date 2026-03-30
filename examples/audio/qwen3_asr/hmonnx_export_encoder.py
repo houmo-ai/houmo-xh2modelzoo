@@ -26,6 +26,7 @@ from xhquant.api import (
     ptq_quantize,
     to_frontend_graph,
     to_quant_graph,
+    get_root_logger
 )
 
 from onnx import TensorProto, helper, numpy_helper
@@ -33,6 +34,7 @@ from onnx import TensorProto, helper, numpy_helper
 from xhquant.api.ptq_export_hmonnx import (
     convert_quanted_model_to_hmonnx,
 )
+
 from xhquant.common.types import PrecisionMode
 from xhquant.core.datatype_mapping import TORCH_DTYPE_TO_FAKE_DTYPE
 from xhquant.frontend.convert import to_frontend_graph
@@ -184,6 +186,51 @@ def change_onnx_initializer_type(
             raise RuntimeError(f"保存模型失败：\n主方案：{e}\n临时目录方案：{e2}")
 
 
+def find_less_int32_initializers_to_fp16(
+    model_path: str,
+    node_name_hint: str = "node_less_2",
+):
+    model_path = os.path.abspath(model_path)
+    model = onnx.load(model_path)
+
+    init_dtype_map = {init.name: init.data_type for init in model.graph.initializer}
+
+    type_map = {}
+    for vi in list(model.graph.input) + list(model.graph.value_info) + list(model.graph.output):
+        try:
+            type_map[vi.name] = vi.type.tensor_type.elem_type
+        except Exception:
+            continue
+
+    candidates = []
+    for node in model.graph.node:
+        if node.op_type == node_name_hint or node.name == node_name_hint or node_name_hint in (node.name or ""):
+            candidates.append(node)
+
+    if not candidates:
+        for node in model.graph.node:
+            if node.op_type == "Less":
+                candidates.append(node)
+
+    targets = set()
+    for node in candidates:
+        if len(node.input) < 2:
+            continue
+        for idx, in_name in enumerate(node.input):
+            if init_dtype_map.get(in_name) != TensorProto.INT32:
+                continue
+            other_name = None
+            for j, n in enumerate(node.input):
+                if j != idx:
+                    other_name = n
+                    break
+            other_dtype = init_dtype_map.get(other_name, type_map.get(other_name))
+            if other_dtype in (TensorProto.FLOAT16, TensorProto.FLOAT, TensorProto.DOUBLE) or other_dtype is None:
+                targets.add(in_name)
+    print(f"找到 {len(targets)} 个需要转换的 initializer：{targets}，分别是 {', '.join(targets)}")
+    return sorted(targets)
+
+
 def main(args):
     target_device = "XH2a"
     model_dir = os.path.normpath(args.model)
@@ -197,6 +244,8 @@ def main(args):
     model.thinker.audio_tower.eval()
     # DEVICE = torch.device("cpu")
     # model.to(DEVICE)
+    
+    logger = get_root_logger()
 
     model.config.forced_decoder_ids = None
     model.config._attn_implementation = "eager"
@@ -206,11 +255,6 @@ def main(args):
 
     work_dir = Path("work_dirs") / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
-
-    # head_dim = model.thinker.model.layers[0].self_attn.head_dim
-    # num_heads = model.thinker.model.layers[0].self_attn.config.num_attention_heads
-    # num_key_value_heads = model.thinker.model.layers[0].self_attn.config.num_key_value_heads
-    # embed_dim = model.thinker.model.layers[0].self_attn.config.hidden_size
     
     head_dim = cfg.thinker_config.text_config.head_dim
     num_heads = cfg.thinker_config.text_config.num_attention_heads
@@ -219,8 +263,10 @@ def main(args):
     num_decode_layers = cfg.thinker_config.text_config.num_hidden_layers
 
     max_source_positions = cfg.thinker_config.audio_config.max_source_positions
+    # 手动设置的固定音频长度，用于在导出 ONNX/HMONNX 时固定 Encoder 的输入时间维度 T
+    max_audio_length = int(args.max_audio_length)
     
-    meta_info = {}
+    meta_info = {}  
     meta_info_file = work_dir / "meta_info.json"
     if meta_info_file.exists():
         with open(meta_info_file, "r", encoding="utf-8") as f:
@@ -249,10 +295,14 @@ def main(args):
     golden_path = encoder_work_dir / "hmonnx/golden"
     meta_info["encoder"] = str(hmonnx_file.relative_to(work_dir))
     num_mel_bins = model.config.thinker_config.audio_config.num_mel_bins
+    # 记录导出所用的关键维度参数，便于下游核对与复现
+    meta_info["model_cfg"]["num_mel_bins"] = num_mel_bins
+    meta_info["model_cfg"]["fixed_max_audio_length"] = max_audio_length
     
-    # 固定在 T=3000 seq_lens
-    input_features = torch.randn(1, 128, 3000).to(model.device).to(model.dtype)
-    feature_lens = torch.tensor([3000], dtype=torch.int32).to(model.device)
+    # 使用手动指定的 max_audio_length 固定 Encoder 输入的时间维度 T，同时使用配置中的 mel 维度
+    input_features = torch.randn(1, num_mel_bins, max_audio_length).to(model.device).to(model.dtype)
+    # 对应的长度张量需要与 T 保持一致，以确保导出后的图输入形状固定
+    feature_lens = torch.tensor([max_audio_length], dtype=torch.int32).to(model.device)
     
     # 1. 导出onnx
     if not Path(onnx_file).exists():
@@ -319,12 +369,20 @@ def main(args):
             output_names=output_names,
         )
 
-        change_onnx_initializer_type(
-            input_model_path=hmonnx_file,
-            output_model_path=hmonnx_file,
-            target_initializer_name="_constant_48_output_0_",
-            new_data_type=TensorProto.FLOAT16,
+        target_inits = find_less_int32_initializers_to_fp16(
+            str(hmonnx_file),
+            node_name_hint="node_less_2",
         )
+        if len(target_inits) == 0:
+            print("⚠️ 未找到需要转换为 FP16 的 node_less_2/Less INT32 initializer，跳过 dtype 修复")
+        else:
+            for init_name in target_inits:
+                change_onnx_initializer_type(
+                    input_model_path=hmonnx_file,
+                    output_model_path=hmonnx_file,
+                    target_initializer_name=init_name,
+                    new_data_type=TensorProto.FLOAT16,
+                )
 
 
     # 生成golden
@@ -338,7 +396,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-1.7B/"))
+    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-0.6B/"))
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument(
         "--quant-type", default="w8a8_sefp", help="quant type, default is w8a8"
@@ -346,7 +404,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gen_golden", action="store_true", help="generate golden data"
     )
+    parser.add_argument(
+        "--max_audio_length",
+        type=int,
+        default=1500,
+        help="手动固定 Encoder 输入的时间维度 T"
+    )
     args = parser.parse_args()
     main(args)
 
-# python hmonnx_export_encoder.py --model ~/models/Qwen/Qwen3-ASR-0.6B/ --quant-type w8a8_sefp
+# python hmonnx_export_encoder.py --model ~/models/Qwen/Qwen3-ASR-0.6B/ --quant-type w8a8_sefp --max_audio_length 1500

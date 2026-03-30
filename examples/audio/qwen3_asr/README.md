@@ -12,6 +12,7 @@ pip install onnx-ir==0.1.14
 pip install onnx==1.16.2
 pip install onnxscript==0.5.7
 ```
+
 2. 导出 HMONNX
 
     1. 导出方法：
@@ -20,6 +21,7 @@ pip install onnxscript==0.5.7
     2. demo：
         `python hmonnx_demo.py` 推理脚本。
 
+    > 注意： `max_audio_length`  参数指定导出时限制最大音频长度，大致可认为 100=1s,即 --max_audio_length=1500，导出后的 encoder/prefill/decoder 以及推理 demo 最大音频限制在 15 秒。
 
 3. 其他
-    核心依赖文件：`xh2modelzoo/xh_model_zoo/xh_llm/models/qwen3_asr`
+    依赖文件：`xh2modelzoo/xh_model_zoo/xh_llm/models/qwen3_asr`

@@ -60,6 +60,18 @@ def xhmodel_export_onnx(
     onnx_file = xh_model.to_export_onnx(data_batch, onnx_output_dir, cfg_name)[0]
     return onnx_file
 
+# 辅助函数
+def _get_feat_extract_output_lengths(input_lengths):
+    """
+    Computes the output length of the convolutional layers and the output length of the audio encoder
+    """
+    # 8 = [100, ... 100]
+    input_lengths_leave = input_lengths % 100 # [0, 0, ..., 0]
+    feat_lengths = (input_lengths_leave - 1) // 2 + 1 # 0
+    output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+    # output_lengths: tensor([13, 13, 13, 13, 13, 13, 13, 13], device='cuda:0')
+    return output_lengths
+
 def main(args):
 
     # ============================================================ 配置与初始化 ============================================================ # 
@@ -180,24 +192,27 @@ def main(args):
     hidden_size = text_config.hidden_size
     
     # ============================================================ 音频文本预处理与特征融合 ============================================================ # 
-
+    max_audio_length = args.max_audio_length
+    embed_lengths = _get_feat_extract_output_lengths(max_audio_length)
+    text_embed_lengths = embed_lengths + 21
+    
     tokenizer = processor.tokenizer
         
-    final_inputs_embeds = torch.randn((1, 411, hidden_size), device=device, dtype=torch.float16)
+    final_inputs_embeds = torch.randn((1, text_embed_lengths, hidden_size), device=device, dtype=torch.float16)
     print(f"final_inputs_embeds.shape: {final_inputs_embeds.shape}")
     
     # ============================================================ 构造输入 ============================================================ # 
 
     seq_len = final_inputs_embeds.shape[1]
-    # 补全第二维度到 411
-    final_inputs_embeds = torch.cat([final_inputs_embeds, torch.zeros((1, 411 - seq_len, final_inputs_embeds.shape[2]), dtype=torch.float16, device=device)], dim=1)
+    # 补全第二维度到 text_embed_lengths
+    final_inputs_embeds = torch.cat([final_inputs_embeds, torch.zeros((1, text_embed_lengths - seq_len, final_inputs_embeds.shape[2]), dtype=torch.float16, device=device)], dim=1)
 
     data_batch = {
         "input_embeds": final_inputs_embeds.half(),
         "past_seq_length": [0]
     }
 
-    # xh_model.set_input_sequence_length(1)
+    xh_model.set_input_sequence_length(text_embed_lengths)
     
     with torch.no_grad():
         outs = xh_model.test_step(data_batch)
@@ -244,18 +259,14 @@ def main(args):
 
     xh_model = xh_model.to("cpu")
     # full_seq_len = final_inputs_embeds.shape[1]
-    full_seq_len = 411
+    full_seq_len = text_embed_lengths
+    print(f"full_seq_len: {full_seq_len}")
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
     work_dir = Path("work_dirs") / cfg_name
     work_dir.mkdir(exist_ok=True, parents=True)
-
-    # prefill_onnx_dir = work_dir / "Prefill"
-    # decode_onnx_dir = work_dir / "Decoder"
-    # prefill_onnx_dir.mkdir(exist_ok=True, parents=True)
-    # decode_onnx_dir.mkdir(exist_ok=True, parents=True)
     
     # export_cfg 展开 past_key_cache 和 past_value_cache 的输入，变成多个输入，方便后续对齐
     num_hidden_layers = 28
@@ -265,8 +276,6 @@ def main(args):
     input_names = base_inputs + key_names + value_names
     xh_model.export_cfg = ConfigDict(dict(input_names=input_names, output_names=["last_hidden_state"]))
     
-
-    xh_model.set_input_sequence_length(full_seq_len)
 
     prefill_onnx_file = xhmodel_export_onnx(
         xh_model,
@@ -367,7 +376,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-1.7B/"))
+    parser.add_argument("--model", type=str, default=os.path.expanduser("~/models/Qwen/Qwen3-ASR-0.6B/"))
     parser.add_argument(
         "--config",
         type=str,
@@ -376,5 +385,13 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type")
     parser.add_argument("--gen_golden", action="store_true", help="generate golden data")
+    parser.add_argument(
+        "--max_audio_length",
+        type=int,
+        default=1500,
+        help="手动固定 Encoder 输入的时间维度 T，并通过 _get_feat_extract_output_lengths 计算出嵌入后维度"
+    )
     args = parser.parse_args()
     main(args)
+    
+# python hmonnx_export_prefill_decode.py --model ~/models/Qwen/Qwen3-ASR-0.6B/ --max_audio_length 1500
