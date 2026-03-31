@@ -21,7 +21,7 @@ dependencies = [
   "pillow",
   "pexpect",
   "onnx-graphsurgeon",
-  "onnxsim (>=0.4.36, <0.5.0)",
+  "onnxsim (>=0.6.2, <0.7.0)",
   "cython",
   "einops",
   "safetensors",
@@ -67,11 +67,11 @@ description = "Quanted Model Zoo toolkit for XH2a."
 name = "xhmodel_zoo"
 readme = "README.md"
 requires-python = "~=3.12"
-version = "0.9.0"
+version = "1.0.0"
 
 [tool.poetry]
 package-mode = true
-packages = [{include = "xh_model_zoo"}]
+packages = [{include = "xh_model_zoo"}, {include = "xhmodel_merak"}]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
@@ -129,11 +129,20 @@ url = "https://download.pytorch.org/whl/cu128"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["xh_model_zoo*"]
+include = ["xh_model_zoo*", "xhmodel_merak*"]
 where = ["."]
 
 [tool.setuptools.package-data]
 xh_model_zoo = [
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.json",
+  "**/*.txt",
+  "**/*.so",
+  "**/*.pt",
+  "**/*.bin",
+]
+xhmodel_merak = [
   "**/*.yaml",
   "**/*.yml",
   "**/*.json",
