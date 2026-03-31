@@ -1,0 +1,47 @@
+# Ruff configuration - Google Python Style Guide
+line-length = 120
+
+[format]
+# Google style doesn't mandate quote style, but prefer consistency
+quote-style = "double"
+# Use spaces for indentation (4 spaces)
+indent-style = "space"
+# Respect magic trailing comma for multi-line constructs
+skip-magic-trailing-comma = false
+
+[lint]
+# Enable rules aligned with Google Python Style Guide
+select = [
+  "E", # pycodestyle errors
+  "F", # Pyflakes
+  "I", # isort (import sorting)
+  "N", # pep8-naming  # "UP", # pyupgrade
+  "B", # flake8-bugbear
+  # "C90", # mccabe (complexity)
+  # "D", # pydocstyle (docstrings)
+]
+
+ignore = [
+  "D203", # one-blank-line-before-class (conflicts with D211)
+  "D213", # multi-line-summary-second-line (conflicts with D212)
+  "N812", # Allow common aliases like `torch.nn.functional as F`
+  "N806",
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"] # Allow unused imports in __init__.py
+"tests/**" = ["D"] # Don't require docstrings in tests
+
+[lint.isort]
+# Google style: group imports by standard library, third-party, local
+force-single-line = false
+known-first-party = ["xhquant_llm", "xhquant"]
+lines-after-imports = 2
+
+[lint.pydocstyle]
+# Use Google-style docstrings
+convention = "google"
+
+# [lint.mccabe]
+# # Maximum cyclomatic complexity (Google recommends keeping functions simple)
+# max-complexity = 10
