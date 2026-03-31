@@ -200,7 +200,7 @@ class Llama_HFCompatible(LlamaForCausalLM):
                 hf_model.__class__ = cls
                 hf_model.__setup__(llm_model)
             # hf_model.embed_tokens = hf_model.model.embed_tokens
-            del hf_model.model
+            # del hf_model.model
             del hf_model.lm_head
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
