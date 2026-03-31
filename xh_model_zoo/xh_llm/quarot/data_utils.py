@@ -127,7 +127,7 @@ def get_ptb_new(nsamples, seed, seqlen, model, hf_token, eval_mode=False, cache_
 
 
 def get_vllm_custom_data(nsamples, seed, seqlen, model, hf_token, data_files, eval_mode=False, cache_dir=None):
-    from xhquant_llm.datasets import VLLMCustomDataset
+    from xh_model_zoo.datasets import VLLMCustomDataset
     import numpy as np
 
     dataset = VLLMCustomDataset(data_files=data_files)
