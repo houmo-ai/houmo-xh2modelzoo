@@ -41,23 +41,26 @@ from transformers.utils import (
 )
 
 user_home = os.path.expanduser("~")
-target_path = os.path.join(
-    user_home,
-    ".cache/huggingface/modules/transformers_modules/Eagle-Block2A-2B-v2"
-)
-sys.path.append(target_path) # modeling.py
+target_path = os.path.join(user_home, ".cache/huggingface/modules/transformers_modules/Eagle-Block2A-2B-v2")
+sys.path.append(target_path)  # modeling.py
 
 # eagle3_full_module_name = "transformers_modules.Eagle-Block2A-2B-v2.modeling_eagle3_vl"
 # modeling_eagle3_vl = importlib.import_module(eagle3_full_module_name)
 
 siglip2_full_module_name = "transformers_modules.Eagle-Block2A-2B-v2.modeling_siglip2"
 modeling_siglip2 = importlib.import_module(siglip2_full_module_name)
+from . import modeling_siglip2 as local_modeling_siglip2
 
 NewModel = modeling_siglip2.Siglip2VisionModel
 NewTransformer = modeling_siglip2.Siglip2VisionTransformer
 NewEncoder = modeling_siglip2.Siglip2Encoder
 NewEncoderLayer = modeling_siglip2.Siglip2EncoderLayer
 NewAttention = modeling_siglip2.Siglip2Attention
+LocalModel = local_modeling_siglip2.Siglip2VisionModel
+LocalTransformer = local_modeling_siglip2.Siglip2VisionTransformer
+LocalEncoder = local_modeling_siglip2.Siglip2Encoder
+LocalEncoderLayer = local_modeling_siglip2.Siglip2EncoderLayer
+LocalAttention = local_modeling_siglip2.Siglip2Attention
 
 
 from xhquant import nn as xhnn
@@ -79,6 +82,7 @@ class Siglip2VisionOutput(ModelOutput):
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         NewAttention: "NewAttention",
+        LocalAttention: "LocalAttention",
     }
 )
 class _NewAttention(DynamicModule):
@@ -151,7 +155,7 @@ class _NewAttention(DynamicModule):
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
-        query_states = query_states 
+        query_states = query_states
 
         # query_states [bsz, self.num_key_value_heads, seq_len, self.head_dim]
 
@@ -171,8 +175,7 @@ class _NewAttention(DynamicModule):
         attn_weights = torch.matmul(query_states, key_states) * self.kv_scale  # [4, 28, 256, 128], [4, 28, 128, 32768]
         # attn_weights = self.key_group_broadcast_matmul(query_states, key_states)
         # attn_weights = torch.matmul(query_states, key_states) / math.sqrt(self.head_dim) #fp16下会出现nan
-        
-        
+
         # attn_weights: Optional[Tensor] = self.masked_softmax(attn_weights, past_seq_length)
 
         # attn_weights = self.maskedadd(attn_weights, attention_mask)
@@ -184,8 +187,7 @@ class _NewAttention(DynamicModule):
         attn_output = self.out_proj(attn_output)
 
         # return attn_output, attn_weights, past_key_value
-        return attn_output, None, None   
-
+        return attn_output, None, None
 
     def _setup(self, cfg: Optional[Dict] = None):
         self.enable_rope = cfg.get("enable_rope", True)
@@ -209,7 +211,6 @@ class _NewAttention(DynamicModule):
         max_sequence_length = cfg.max_sequence_length
         self.max_sequence_length = max_sequence_length
         input_seq_len = cfg.input_sequence_length
-        
 
         # weight = self.qkv_proj.weight.data.clone()
         # bias = self.qkv_proj.bias.data.clone()
@@ -240,7 +241,7 @@ class _NewAttention(DynamicModule):
             self.k_cache = None
             self.v_cache = None
 
-        _kv_scale = 1 / math.sqrt(self.head_dim) # 72
+        _kv_scale = 1 / math.sqrt(self.head_dim)  # 72
         self.kv_scale = _kv_scale
         # self.register_buffer("kv_scale", torch.tensor(_kv_scale, dtype=torch.float16), persistent=False)
         # self.register_parameter(
@@ -252,13 +253,14 @@ class _NewAttention(DynamicModule):
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         NewEncoderLayer: "Siglip2EncoderLayer",
+        LocalEncoderLayer: "LocalSiglip2EncoderLayer",
     }
 )
 class _NewLayer(DynamicModule):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask = None,
+        attention_mask=None,
         # past_seq_length: Optional[Tensor] = None,
         # current_input_length: Optional[Tensor] = None,
         # position_ids: Optional[torch.LongTensor] = None,
@@ -288,8 +290,7 @@ class _NewLayer(DynamicModule):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-        residual = hidden_states # 20.7344
-
+        residual = hidden_states  # 20.7344
 
         # Self Attention
         hidden_states = self.layer_norm1(hidden_states)
@@ -315,10 +316,10 @@ class _NewLayer(DynamicModule):
         return self
 
 
-
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         NewEncoder: "Siglip2Encoder",
+        LocalEncoder: "LocalSiglip2Encoder",
     }
 )
 class _NewEncoder(DynamicModule):
@@ -329,7 +330,7 @@ class _NewEncoder(DynamicModule):
         output_hidden_states: Optional[bool] = None,
         win_meta_list: Optional[List[Dict]] = None,
         spatial_shapes: Optional[torch.Tensor] = None,
-        attention_mask= None,
+        attention_mask=None,
     ):
 
         hidden_states = inputs_embeds
@@ -364,7 +365,6 @@ class _NewEncoder(DynamicModule):
             # break
             if self.only_first_block:
                 break
-
 
         return hidden_states
 
@@ -421,6 +421,7 @@ class _NewEncoder(DynamicModule):
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         NewTransformer: "Siglip2VisionTransformer",
+        LocalTransformer: "LocalSiglip2VisionTransformer",
     }
 )
 class _NewTransformer(DynamicModule):
@@ -440,7 +441,7 @@ class _NewTransformer(DynamicModule):
         # )
 
         # windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = self.embeddings(pixel_values)
-        
+
         encoder_outputs = self.encoder(
             inputs_embeds=windows_tensor,
             output_attentions=False,
@@ -460,6 +461,7 @@ class _NewTransformer(DynamicModule):
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         NewModel: "Siglip2VisionModel",
+        LocalModel: "LocalSiglip2VisionModel",
     }
 )
 class _NewModel(DynamicModule):

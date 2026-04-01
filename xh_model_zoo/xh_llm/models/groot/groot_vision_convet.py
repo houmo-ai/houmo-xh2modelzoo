@@ -33,7 +33,12 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
-from xhquant.api import convert_fx_model_to_quanted_model, convert_onnx_to_hmonnx, convert_quanted_model_to_hmonnx, convert_dynamo_model_to_quanted_model
+from xhquant.api import (
+    convert_fx_model_to_quanted_model,
+    convert_onnx_to_hmonnx,
+    convert_quanted_model_to_hmonnx,
+    convert_dynamo_model_to_quanted_model,
+)
 from xhquant.utils.onnxsim_large_model.simplify_large_onnx import simplify_large_onnx
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
@@ -64,7 +69,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
         logger = get_root_logger()
         config = self.config
 
-        native_model = hf_model
+        native_model = hf_model.to(self.device)
 
         with torch.no_grad():
             torch.manual_seed(42)
@@ -72,6 +77,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
             outoput_ori = native_model([vision_input])
 
         from ._vision_model import register_wrap_modules as vision_register_wrap_modules  # noqa: F401
+
         vision_register_wrap_modules()
 
         wrap_cfg = Config(
@@ -91,7 +97,9 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
 
         with torch.no_grad():
             # vision_input = torch.rand(1, 3, 252, 252).to(self.device)
-            windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings([vision_input])
+            windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings(
+                [vision_input]
+            )
             outoput_hm = wraped_llm_model(windows_tensor)
             outoput_hm = outoput_hm[:, reverse_mapping, :]
 
@@ -104,7 +112,6 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
         work_dir = Path(output_dir)
         self.work_dir = output_dir
         quant_config = ConfigDict(quant_config)
-
 
         meta_info = dict(
             create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -121,28 +128,27 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
         # latent = torch.rand(1, 3, 252, 252).to(self.device)
 
         with torch.no_grad():
-            windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings([vision_input])
+            windows_tensor, win_meta_list, spatial_shapes, reverse_mapping = hf_model.vision_model.embeddings(
+                [vision_input]
+            )
             # last_hidden_state = last_hidden_state[:, reverse_mapping, :]
 
         windows_tensor = torch.rand(1, 324, 1152).to(self.device).half()
         target_device = self.config.quant_scheme.target_device
         input_names = ["windows_tensor"]
-        inputs = [windows_tensor,]
- 
+        inputs = [
+            windows_tensor,
+        ]
+
         onnx_output_names = ["output_latent"]
         vison_onnx_file = str(work_dir / "hmonnx" / f"{prefix}.onnx")
         quant_graph_model = None
         wraped_llm_model = wraped_llm_model.to(self.device)
         if not Path(vison_onnx_file).exists():
             logger.info("********************* start export vision model *********************")
-            
 
-            quant_graph_model = convert_fx_model_to_quanted_model(
-                wraped_llm_model, inputs, target_device, quant_config
-            )
-            convert_quanted_model_to_hmonnx(
-                quant_graph_model, inputs, vison_onnx_file, input_names, onnx_output_names
-            )
+            quant_graph_model = convert_fx_model_to_quanted_model(wraped_llm_model, inputs, target_device, quant_config)
+            convert_quanted_model_to_hmonnx(quant_graph_model, inputs, vison_onnx_file, input_names, onnx_output_names)
         else:
             logger.info(f"{vison_onnx_file} exists, skip export vision model.")
 
@@ -155,7 +161,7 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
 
             vae_model = HMONNXGoldenInference(vison_onnx_file)
             vae_model.save_golden = True
-            vae_model.exec_device = torch.device("cuda:0")
+            vae_model.exec_device = torch.device(self.device)
 
             Path(vison_golden_dir).mkdir(exist_ok=True, parents=True)
             vae_model.golden_dir = str(vison_golden_dir)
@@ -166,7 +172,6 @@ class Groot_ConverterXH2a(HFTransfromersConverter):
             logger.info(f"Export vision model golden to {vison_golden_dir}")
         else:
             logger.info(f"{vison_golden_dir} exists, skip export vision model golden.")
-
 
         # meta_info["decoder_golden_dir"] = str(Path(vison_golden_dir))
         # json.dump(meta_info, open(work_dir / "meta_vision.json", "w"), indent=4)
