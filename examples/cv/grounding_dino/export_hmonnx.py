@@ -3,7 +3,10 @@
 
 import argparse
 from pathlib import Path
+
+import onnx
 import torch
+from onnx import TensorProto
 from xhquant.api import (
     DeviceType,
     HMONNXGoldenInference,
@@ -14,34 +17,93 @@ from xhquant.api import (
     xhquant_init,
 )
 
-def get_dummy_inputs(device="cpu", dtype_img=torch.float32):
-    """
-    构造 Grounding DINO 需要的 5 个固定输入
-    Shape 必须与导出时 static_800x800.onnx 保持一致
-    """
-    # 1. Image: [1, 3, 800, 800]
-    img = torch.randn(1, 3, 800, 1200, dtype=dtype_img, device=device)
-    
-    # 2. Text Inputs: 固定长度 256
-    seq_len = 256
-    # 模拟随机的 input_ids (Bert Vocab size ~30522)
-    input_ids = torch.randint(0, 30522, (1, seq_len), dtype=torch.int32, device=device)
-    # attention_mask 全 1
-    
-    attention_mask = torch.ones((1, seq_len), dtype=torch.int32, device=device)
-    # position_ids: 0, 1, 2, ... 255
-    position_ids = torch.arange(seq_len, dtype=torch.int32, device=device).unsqueeze(0)
-    # token_type_ids 全 0
-    token_type_ids = torch.zeros((1, seq_len), dtype=torch.int32, device=device)
-    
-    # 返回列表，顺序必须与 ONNX 导出时的 input_names 一致
-    return [img, input_ids, attention_mask,token_type_ids]
+DEFAULT_DIM_BY_NAME = {
+    "image": [1, 3, 800, 1200],
+    "input_ids": [1, 256],
+    "attention_mask": [1, 256],
+    "position_ids": [1, 256],
+    "token_type_ids": [1, 256],
+}
+
+
+def _tensorproto_to_torch_dtype(elem_type: int) -> torch.dtype:
+    mapping = {
+        TensorProto.FLOAT: torch.float32,
+        TensorProto.FLOAT16: torch.float16,
+        TensorProto.INT64: torch.int64,
+        TensorProto.INT32: torch.int32,
+        TensorProto.BOOL: torch.bool,
+    }
+    if elem_type not in mapping:
+        raise ValueError(f"Unsupported ONNX input dtype: {TensorProto.DataType.Name(elem_type)}")
+    return mapping[elem_type]
+
+
+def _resolve_dim(dim, fallback: int) -> int:
+    if dim.dim_value > 0:
+        return dim.dim_value
+    return fallback
+
+
+def load_onnx_io_spec(onnx_file: str):
+    model = onnx.load(onnx_file)
+    initializer_names = {initializer.name for initializer in model.graph.initializer}
+    input_specs = []
+    for input_info in model.graph.input:
+        if input_info.name in initializer_names:
+            continue
+
+        default_shape = DEFAULT_DIM_BY_NAME.get(input_info.name, [1])
+        shape = [
+            _resolve_dim(dim, default_shape[idx] if idx < len(default_shape) else 1)
+            for idx, dim in enumerate(input_info.type.tensor_type.shape.dim)
+        ]
+        input_specs.append(
+            {
+                "name": input_info.name,
+                "shape": shape,
+                "dtype": _tensorproto_to_torch_dtype(input_info.type.tensor_type.elem_type),
+            }
+        )
+
+    output_names = [output.name for output in model.graph.output]
+    return input_specs, output_names
+
+
+def build_dummy_input(spec, device="cpu", dtype_img=torch.float32):
+    name = spec["name"]
+    shape = spec["shape"]
+    dtype = spec["dtype"]
+
+    if name == "image":
+        return torch.randn(*shape, dtype=dtype_img if dtype.is_floating_point else dtype, device=device)
+    if name == "input_ids":
+        return torch.randint(0, 30522, shape, dtype=dtype, device=device)
+    if name == "attention_mask":
+        return torch.ones(shape, dtype=dtype, device=device)
+    if name == "position_ids":
+        seq_len = shape[-1]
+        return torch.arange(seq_len, dtype=dtype, device=device).unsqueeze(0).expand(*shape)
+    if name == "token_type_ids":
+        return torch.zeros(shape, dtype=dtype, device=device)
+    if dtype == torch.bool:
+        return torch.zeros(shape, dtype=dtype, device=device)
+    if dtype.is_floating_point:
+        return torch.randn(*shape, dtype=dtype, device=device)
+    return torch.zeros(shape, dtype=dtype, device=device)
+
+
+def get_dummy_inputs(onnx_file: str, device="cpu", dtype_img=torch.float32):
+    input_specs, output_names = load_onnx_io_spec(onnx_file)
+    dummy_inputs = [build_dummy_input(spec, device=device, dtype_img=dtype_img) for spec in input_specs]
+    input_names = [spec["name"] for spec in input_specs]
+    return dummy_inputs, input_names, output_names
 
 def main(args):
     # 1. 路径设置
     onnx_file = args.onnx
     onnx_name = Path(onnx_file).stem
-    work_dirs = Path("work_dirs") / onnx_name
+    work_dirs = Path("work_dirs_v2") / onnx_name
     work_dirs.mkdir(exist_ok=True, parents=True)
     
     target_device = DeviceType.XH2a
@@ -58,8 +120,12 @@ def main(args):
     quant_config = create_quant_config(quant_scheme)
 
     # 4. 准备转换用的输入 (FP32)
-    # 注意：这里生成的 dummy inputs 用于校准/Tracing，通常使用 FP32
-    convert_inputs = get_dummy_inputs(device="cpu", dtype_img=torch.float32)
+    # 注意：这里生成的 dummy inputs 用于校准/Tracing，图像保持 FP32，文本输入跟随 ONNX 实际 dtype
+    convert_inputs, input_names, output_names = get_dummy_inputs(
+        onnx_file,
+        device=args.device,#"cpu",
+        dtype_img=torch.float32,
+    )
 
     print(f"Starting conversion for {onnx_file}...")
     
@@ -70,9 +136,8 @@ def main(args):
         DeviceType.XH2a,
         out_hmonnx_file_str,
         quant_config=quant_config,
-        # 这里的名字必须和 export_onnx_final.py 里指定的 input_names 完全一致
-        input_names=["image", "input_ids", "attention_mask", "token_type_ids"],
-        output_names=["pred_logits", "pred_boxes"],
+        input_names=input_names,
+        output_names=output_names,
     )
     
     logger = get_root_logger()
@@ -100,6 +165,7 @@ if __name__ == "__main__":
         "--onnx", type=str, default="/data01/home/chenzx/project/xh2modelzoo/GroundingDINO/outputs/groundingdino.onnx"
     )
     parser.add_argument("--debug", action="store_true", help="debug mode")
+    parser.add_argument("--device", type=str, default="cpu", help="device for conversion and inference")
     parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type")
     args = parser.parse_args()
     main(args)

@@ -10,7 +10,7 @@ import argparse
 from xhquant.api import HMONNXGoldenInference
 
 
-def preprocess_image(image_path, target_w, target_h, device):
+def preprocess_image(image_path, target_w, target_h, device, dtype=torch.float32):
     print(f"[-] Preprocessing Image: Target ({target_w}x{target_h})")
     
     original_image = Image.open(image_path).convert("RGB")
@@ -29,12 +29,10 @@ def preprocess_image(image_path, target_w, target_h, device):
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     
-    img_tensor = transform(image_padded).to(device)
+    img_tensor = transform(image_padded).to(device=device, dtype=dtype)
     
     if len(img_tensor.shape) == 3:
         img_tensor = img_tensor.unsqueeze(0)
-        
-    img_tensor = img_tensor.half() if device == "cuda" else img_tensor.float()
     
     ratio_info = {
         "scale": scale,
@@ -76,6 +74,46 @@ def preprocess_text(prompt, max_len=256,device='cuda'):
         token_type_ids.to(torch.int32), 
         text_token_mask
     )
+
+
+def get_session_input_infos(session):
+    if hasattr(session, "initialize"):
+        session.initialize()
+    if hasattr(session, "inputs"):
+        return list(session.inputs)
+    if hasattr(session, "_session") and session._session is not None and hasattr(session._session, "inputs"):
+        return list(session._session.inputs)
+    raise AttributeError("Unable to read input metadata from HMONNX session")
+
+
+def prepare_session_inputs(session, named_inputs, device):
+    input_infos = get_session_input_infos(session)
+    prepared_inputs = []
+    available_names = sorted(named_inputs)
+
+    for input_info in input_infos:
+        input_name = input_info.name
+        if input_name not in named_inputs:
+            raise KeyError(
+                f"Missing required input '{input_name}'. Available prepared inputs: {available_names}"
+            )
+
+        value = named_inputs[input_name]
+        if not isinstance(value, torch.Tensor):
+            value = torch.as_tensor(value)
+
+        if value.dtype != input_info.dtype:
+            value = value.to(dtype=input_info.dtype)
+        value = value.to(device)
+
+        if tuple(value.shape) != tuple(input_info.shape):
+            raise ValueError(
+                f"Input {input_name} shape mismatch, expected {tuple(input_info.shape)}, got {tuple(value.shape)}"
+            )
+
+        prepared_inputs.append(value)
+
+    return prepared_inputs, input_infos
 
 
 def post_process(pred_logits, pred_boxes, ratio_info, img_w_model, img_h_model, box_threshold):
@@ -163,25 +201,36 @@ def main():
     session.save_golden = True
     session.golden_dir = Path(args.output_dir) / "golden_debug"
     session.step = 0
+
+    input_infos = get_session_input_infos(session)
+    input_specs = {info.name: info for info in input_infos}
+    image_dtype = input_specs.get("image").dtype if "image" in input_specs else torch.float32
     
     print(">>>  数据预处理...")
-    img_tensor, orig_img, ratio_info = preprocess_image(args.image_path, args.target_w, args.target_h, args.device)
+    img_tensor, orig_img, ratio_info = preprocess_image(
+        args.image_path,
+        args.target_w,
+        args.target_h,
+        args.device,
+        dtype=image_dtype,
+    )
     input_ids, attn_mask, pos_ids, token_type_ids, text_token_mask = preprocess_text(args.text_prompt, args.text_len, args.device)
+
+    named_inputs = {
+        "image": img_tensor,
+        "input_ids": input_ids,
+        "attention_mask": attn_mask,
+        "position_ids": pos_ids,
+        "token_type_ids": token_type_ids,
+        "text_token_mask": text_token_mask,
+    }
+    inference_inputs, input_infos = prepare_session_inputs(session, named_inputs, args.device)
     
-    # 组装输入 (根据你导出的参数顺序)
-    # 如果导出时只有 input_ids 和 mask，请注释掉其他的
-    inference_inputs = [
-        img_tensor,      # (1, 3, 800, 1200)
-        input_ids,       # (1, 256)
-        attn_mask,       # (1, 256)
-        # pos_ids,         # (1, 256)
-        token_type_ids,  # (1, 256)
-        # text_token_mask  # (1, 256)
-    ]
-    
-    print("\n[DEBUG] Input Shapes:")
-    for i, t in enumerate(inference_inputs):
-        print(f"  Input[{i}]: {t.shape}")
+    print("\n[DEBUG] Input Specs:")
+    for input_info, tensor in zip(input_infos, inference_inputs, strict=True):
+        print(
+            f"  {input_info.name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, expected_dtype={input_info.dtype}"
+        )
 
     print("\n>>> 执行推理 (Golden Inference)...")
     outputs = session(*inference_inputs)
