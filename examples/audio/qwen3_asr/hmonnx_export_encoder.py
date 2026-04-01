@@ -265,6 +265,15 @@ def main(args):
     max_source_positions = cfg.thinker_config.audio_config.max_source_positions
     # 手动设置的固定音频长度，用于在导出 ONNX/HMONNX 时固定 Encoder 的输入时间维度 T
     max_audio_length = int(args.max_audio_length)
+    model.thinker.audio_tower.config.fixed_max_audio_length = max_audio_length
+    try:
+        model.config.thinker_config.audio_config.fixed_max_audio_length = max_audio_length
+    except Exception:
+        pass
+    try:
+        cfg.thinker_config.audio_config.fixed_max_audio_length = max_audio_length
+    except Exception:
+        pass
     
     meta_info = {}  
     meta_info_file = work_dir / "meta_info.json"

@@ -451,9 +451,16 @@ class Qwen3ASRAudioAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.num_key_value_groups = 1  # needed for eager attention
         self.config = config
-        
-        # 固定输入 3000 => 固定 chunk=3000//100=30，每 chunk CNN 后固定 13
-        self.static_total_tokens = (3000 // (config.n_window * 2)) * 13  # =390
+
+        fixed_max_audio_length = int(getattr(config, "fixed_max_audio_length", 3000))
+        window_size = config.n_window * 2
+        if fixed_max_audio_length % window_size != 0:
+            raise ValueError(
+                f"fixed_max_audio_length must be divisible by (n_window*2). "
+                f"Got fixed_max_audio_length={fixed_max_audio_length}, n_window={config.n_window}."
+            )
+
+        self.static_total_tokens = (fixed_max_audio_length // window_size) * 13
         self.static_max_seqlen = 13
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
@@ -752,7 +759,12 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
         valid_len = aftercnn_lens.to(torch.int64).view(-1)[0]
         
         window_size = self.n_window * 2              # 100
-        T_fixed = 3000
+        T_fixed = int(getattr(self.config, "fixed_max_audio_length", 3000))
+        if T_fixed % window_size != 0:
+            raise ValueError(
+                f"fixed_max_audio_length must be divisible by (n_window*2). "
+                f"Got fixed_max_audio_length={T_fixed}, n_window={self.n_window}."
+            )
         total_chunks = T_fixed // window_size        # 30
         t_after_per_chunk = 13                       # 固定：100 -> 13
         total_tokens = total_chunks * t_after_per_chunk  # 390
@@ -785,9 +797,9 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
 
         # 可选但建议：再补零到固定 T_fixed（确保 reshape 安全且补的全是0）
         if T_valid < T_fixed:
-            input_features = F.pad(input_features, (0, 0, 0, T_fixed - T_valid))  # pad time dim to 3000
+            input_features = F.pad(input_features, (0, 0, 0, T_fixed - T_valid))
         else:
-            input_features = input_features[:, :T_fixed, :]  # 超过也裁到3000，保持你固定策略
+            input_features = input_features[:, :T_fixed, :]
                 
 
         # 4) chunk to (15,1,128,100) —— 这里 reshape 的目标 shape 全是常量
