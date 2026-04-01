@@ -28,7 +28,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _hmonnx_pipeline import run_dialogue_validation, save_json
+from _hmonnx_pipeline import (
+    _build_safe_validation_max_memory,
+    _patch_inputs_embeds_generation_device,
+    _patch_runtime_device_property,
+    _resolve_validation_device_map,
+    run_dialogue_validation,
+    save_json,
+)
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -63,6 +70,38 @@ except ImportError:
                 elif tp == "video":
                     videos.append(item.get("video"))
         return audios, images, videos
+
+
+def _load_native_model_for_capture(hf_model_path: str, logger):
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+
+    device_map = _resolve_validation_device_map("auto", logger)
+    max_memory = None
+    if device_map == "auto":
+        max_memory = _build_safe_validation_max_memory(logger)
+
+    load_kwargs = dict(
+        torch_dtype=torch.float16,
+        device_map=device_map,
+        attn_implementation="eager",
+        trust_remote_code=True,
+    )
+    if max_memory is not None:
+        load_kwargs["max_memory"] = max_memory
+
+    logger.info(
+        f"Loading HF model from {hf_model_path} for talker export with device_map={device_map}"
+    )
+    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        hf_model_path,
+        **load_kwargs,
+    )
+    native_model.eval()
+    _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
+    _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
+    if hasattr(native_model, "code2wav"):
+        _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
+    return native_model
 
 def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture talker.forward inputs, or load from cache."""
@@ -135,6 +174,31 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
     return captured
 
 
+def _run_talker_dialogue_validation(
+    hf_model_path: str,
+    work_dir: Path,
+    logger,
+    meta_info,
+    meta_file: Path,
+    max_new_tokens: int,
+    talker_max_new_tokens: int,
+):
+    dialogue_artifacts = {
+        "talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
+    }
+    return run_dialogue_validation(
+        hf_model_path,
+        work_dir,
+        logger,
+        case="multimodal",
+        max_new_tokens=max_new_tokens,
+        talker_max_new_tokens=talker_max_new_tokens,
+        artifacts=dialogue_artifacts,
+        report_name="talker_dialogue_validation.json",
+        output_prefix="talker_dialogue",
+    )
+
+
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -186,15 +250,7 @@ def main(args):
         # ---- 1. Load full HF model ----
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
-        logger.info(f"Loading HF model from {hf_model_path}")
-        native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-            hf_model_path,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            attn_implementation="eager",
-            trust_remote_code=True,
-        )
-        native_model.eval()
+        native_model = _load_native_model_for_capture(hf_model_path, logger)
         processor = Qwen3OmniMoeProcessor.from_pretrained(hf_model_path)
 
         device = next(native_model.parameters()).device
@@ -332,19 +388,15 @@ def main(args):
             output_d = output_d[0]
         logger.info(f"Talker decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
 
-        dialogue_artifacts = {
-            "talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
-        }
         try:
-            run_dialogue_validation(
+            _run_talker_dialogue_validation(
                 hf_model_path,
                 work_dir,
                 logger,
-                case="multimodal",
+                meta_info,
+                meta_file,
                 max_new_tokens=args.max_new_tokens,
-                artifacts=dialogue_artifacts,
-                report_name="talker_dialogue_validation.json",
-                output_prefix="talker_dialogue",
+                talker_max_new_tokens=args.talker_max_new_tokens,
             )
         except RuntimeError as e:
             logger.warning(f"Talker dialogue validation skipped due to runtime error: {e}")
@@ -359,6 +411,12 @@ if __name__ == "__main__":
     parser.add_argument("--valid", action="store_true", default=True, help="validate exported HMONNX")
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--talker-max-new-tokens",
+        type=int,
+        default=16,
+        help="cap talker audio tokens during dialogue validation",
+    )
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(args)

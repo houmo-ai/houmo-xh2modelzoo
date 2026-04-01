@@ -30,18 +30,180 @@ HMONNXInference.__init__ = _hmonnx_init_cuda_exec
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _HMONNX_RUNTIME_FIX_CACHE: Dict[str, Path] = {}
+_GIB = 1024**3
+
+
+def _pick_best_validation_single_gpu(logger=None) -> Optional[str]:
+    if not torch.cuda.is_available():
+        return None
+
+    best_gpu_idx = None
+    best_free_bytes = -1
+    debug_entries = []
+
+    for gpu_idx in range(torch.cuda.device_count()):
+        free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_idx)
+        min_required_bytes = max(40 * _GIB, int(total_bytes * 0.9))
+        debug_entries.append(
+            f"cuda:{gpu_idx}: free={_format_bytes_as_gib_str(free_bytes)}, "
+            f"required={_format_bytes_as_gib_str(min_required_bytes)}"
+        )
+        if free_bytes < min_required_bytes:
+            continue
+        if free_bytes > best_free_bytes:
+            best_gpu_idx = gpu_idx
+            best_free_bytes = free_bytes
+
+    if logger is not None:
+        logger.info("validation single-gpu candidates: " + "; ".join(debug_entries))
+
+    if best_gpu_idx is None:
+        return None
+    return f"cuda:{best_gpu_idx}"
 
 
 def _resolve_validation_device_map(device_map: str, logger=None) -> str:
     if device_map != "auto":
         return device_map
-    if torch.cuda.is_available():
-        resolved = "cuda:0"
-    else:
+    if not torch.cuda.is_available():
         resolved = "cpu"
+    else:
+        resolved = _pick_best_validation_single_gpu(logger) or "auto"
     if logger is not None:
         logger.info(f"validation device_map resolved from auto to {resolved}")
     return resolved
+
+
+def _format_bytes_as_gib_str(num_bytes: int) -> str:
+    gib = max(num_bytes, 0) / _GIB
+    return f"{gib:.1f}GiB"
+
+
+def _build_safe_validation_max_memory(logger=None) -> Optional[Dict[Any, str]]:
+    if not torch.cuda.is_available():
+        return None
+
+    reserve_bytes = 8 * _GIB
+    min_free_bytes = 12 * _GIB
+    max_memory: Dict[Any, str] = {}
+    debug_entries = []
+
+    for gpu_idx in range(torch.cuda.device_count()):
+        free_bytes, _ = torch.cuda.mem_get_info(gpu_idx)
+        if free_bytes < min_free_bytes:
+            debug_entries.append(f"cuda:{gpu_idx}: skipped free={_format_bytes_as_gib_str(free_bytes)}")
+            continue
+
+        planner_bytes = free_bytes - reserve_bytes
+        if planner_bytes < min_free_bytes:
+            planner_bytes = int(free_bytes * 0.9)
+        if planner_bytes <= 0:
+            debug_entries.append(f"cuda:{gpu_idx}: skipped after reserve free={_format_bytes_as_gib_str(free_bytes)}")
+            continue
+
+        max_memory[gpu_idx] = _format_bytes_as_gib_str(planner_bytes)
+        debug_entries.append(
+            f"cuda:{gpu_idx}: planner={max_memory[gpu_idx]}, free={_format_bytes_as_gib_str(free_bytes)}"
+        )
+
+    try:
+        import psutil
+
+        cpu_available = psutil.virtual_memory().available
+        cpu_budget = max(cpu_available - 16 * _GIB, 32 * _GIB)
+        max_memory["cpu"] = _format_bytes_as_gib_str(cpu_budget)
+    except Exception:
+        max_memory["cpu"] = "64.0GiB"
+
+    if logger is not None:
+        logger.info("validation max_memory: " + "; ".join(debug_entries + [f"cpu: planner={max_memory['cpu']}"]))
+
+    return max_memory
+
+
+def _build_inputs_embeds_input_ids(model_kwargs: Optional[Dict[str, Any]]) -> Optional[torch.Tensor]:
+    if not model_kwargs:
+        return None
+
+    inputs_embeds = model_kwargs.get("inputs_embeds")
+    if not isinstance(inputs_embeds, torch.Tensor):
+        return None
+
+    batch_size = 1
+    for value in model_kwargs.values():
+        if isinstance(value, torch.Tensor):
+            batch_size = int(value.shape[0])
+            break
+
+    return torch.ones((batch_size, 0), dtype=torch.long, device=inputs_embeds.device)
+
+
+def _patch_inputs_embeds_generation_device(module, module_name: str, logger=None):
+    if getattr(module, "_xh_inputs_embeds_generation_device_patched", False):
+        return
+
+    original = getattr(module, "_maybe_initialize_input_ids_for_generation", None)
+    if not callable(original):
+        return
+
+    def patched(self, inputs=None, bos_token_id=None, model_kwargs=None):
+        generated_input_ids = None
+        if inputs is None:
+            generated_input_ids = _build_inputs_embeds_input_ids(model_kwargs)
+        if generated_input_ids is not None:
+            return generated_input_ids
+        return original(inputs, bos_token_id, model_kwargs)
+
+    module._maybe_initialize_input_ids_for_generation = types.MethodType(patched, module)
+    module._xh_inputs_embeds_generation_device_patched = True
+    if logger is not None:
+        logger.info(f"patched inputs_embeds generation device for {module_name}")
+
+
+def _resolve_runtime_execution_device(module) -> torch.device:
+    hook = getattr(module, "_hf_hook", None)
+    execution_device = getattr(hook, "execution_device", None)
+    if execution_device is not None:
+        device = torch.device(execution_device)
+        if device.type != "meta":
+            return device
+
+    for parameter in module.parameters():
+        if parameter.device.type != "meta":
+            return parameter.device
+
+    for buffer in module.buffers():
+        if buffer.device.type != "meta":
+            return buffer.device
+
+    hf_device_map = getattr(module, "hf_device_map", None)
+    if isinstance(hf_device_map, dict):
+        for mapped_device in hf_device_map.values():
+            if mapped_device in (None, "disk"):
+                continue
+            try:
+                candidate = torch.device(mapped_device)
+            except (TypeError, RuntimeError, ValueError):
+                continue
+            if candidate.type != "meta":
+                return candidate
+
+    raise RuntimeError(f"Cannot resolve a concrete runtime device for {module.__class__.__name__}")
+
+
+def _patch_runtime_device_property(module, module_name: str, logger=None):
+    if getattr(module, "_xh_runtime_device_property_patched", False):
+        return
+
+    patched_cls = type(
+        f"{module.__class__.__name__}XHRuntimeDevicePatched",
+        (module.__class__,),
+        {"device": property(lambda self: _resolve_runtime_execution_device(self))},
+    )
+    module.__class__ = patched_cls
+    module._xh_runtime_device_property_patched = True
+    if logger is not None:
+        logger.info(f"patched runtime device property for {module_name}")
 
 
 def _create_hmonnx_session(onnx_path: Path) -> HMONNXInference:
@@ -768,19 +930,34 @@ def run_dialogue_validation(
     case: str,
     max_new_tokens: int = 64,
     device_map: str = "auto",
+    max_memory: Optional[Dict[Any, str]] = None,
     artifacts: Optional[Dict[str, Dict[str, Any]]] = None,
     report_name: str = "dialogue_validation.json",
     output_prefix: str = "dialogue",
+    talker_max_new_tokens: Optional[int] = None,
 ):
     device_map = _resolve_validation_device_map(device_map, logger)
-    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        model_path,
+    if device_map == "auto" and max_memory is None:
+        max_memory = _build_safe_validation_max_memory(logger)
+
+    load_kwargs = dict(
         torch_dtype=torch.float16,
         device_map=device_map,
         attn_implementation="eager",
         trust_remote_code=True,
     )
+    if max_memory is not None:
+        load_kwargs["max_memory"] = max_memory
+
+    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        model_path,
+        **load_kwargs,
+    )
     native_model.eval()
+    _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
+    _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
+    if hasattr(native_model, "code2wav"):
+        _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
 
     if artifacts:
@@ -813,20 +990,22 @@ def run_dialogue_validation(
     inputs = inputs.to(device).to(dtype)
 
     try:
+        generate_kwargs = dict(
+            **inputs,
+            speaker="Ethan",
+            thinker_return_dict_in_generate=True,
+            use_audio_in_video=use_audio_in_video,
+            max_new_tokens=max_new_tokens,
+        )
+        if talker_max_new_tokens is not None:
+            generate_kwargs["talker_max_new_tokens"] = talker_max_new_tokens
         with torch.no_grad():
-            print(f"[DEBUG] Calling generate with inputs keys: {inputs.keys()}")
-            text_ids, audio = native_model.generate(
-                **inputs,
-                speaker="Ethan",
-                thinker_return_dict_in_generate=True,
-                use_audio_in_video=use_audio_in_video,
-                max_new_tokens=max_new_tokens,
-            )
-        print(f"[DEBUG] Generate returned: text_ids type={type(text_ids)}, audio type={type(audio)}")
+            text_ids, audio = native_model.generate(**generate_kwargs)
     except Exception as e:
         import traceback
-        print(f"[ERROR] Generate failed: {e}")
-        print(f"[ERROR] Full traceback:\n{traceback.format_exc()}")
+        if logger is not None:
+            logger.warning(f"dialogue validation generate failed: {e}")
+            logger.warning(traceback.format_exc())
         raise
 
     sequences = text_ids.sequences if hasattr(text_ids, 'sequences') else text_ids
