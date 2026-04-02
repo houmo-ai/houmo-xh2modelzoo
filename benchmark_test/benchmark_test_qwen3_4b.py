@@ -133,9 +133,9 @@ def test_qwen2(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit: in
 
     # ========================== eval model ==========================
     model_file = os.path.join(current_dir, "examples/llm/qwen3_legacy/qwen3_legacy_eval.py")
-    meta_path = os.path.join(current_dir, "work_dirs/Qwen3-4B-XH2a-2k-w8a8h1_sefp/meta.json")
-    hf_model_path = os.path.join(current_dir, "work_dirs/Qwen3-4B-XH2a-2k-w8a8h1_sefp/")
-    eval_ppl_path = os.path.join(current_dir, "work_dirs/Qwen3-4B-XH2a-2k-w8a8h1_sefp/eval_ppl.txt")
+    meta_path = os.path.join(current_dir, "work_dirs/qwen3-0.6b-1layers-XH2a-2k-w8a8h1_sefp/meta.json")
+    hf_model_path = os.path.join(current_dir, "work_dirs/qwen3-0.6b-1layers-XH2a-2k-w8a8h1_sefp/")
+    eval_ppl_path = os.path.join(current_dir, "work_dirs/qwen3-0.6b-1layers-XH2a-2k-w8a8h1_sefp/eval_ppl.txt")
     command = [
         sys.executable,  # 使用当前Python解释器，避免环境不一致
         model_file,  # 注意：你原命令里多了一个.py后缀，需修正
