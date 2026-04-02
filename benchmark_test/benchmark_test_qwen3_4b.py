@@ -97,7 +97,7 @@ def test_qwen2(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit: in
 
     # ========================== 检查并下载模型 ==========================
     model_path = "work_dirs/fp_model/qwen3-0.6b-1layers"
-    download_url = "http://10.10.1.53:8082/artifactory/model_zoo2/fp_models/qwen3_0.6b-1layers.tar.gz"
+    download_url = "http://10.10.1.53:8082/artifactory/model_zoo2/fp_models/qwen3_0.6b-1layers.tar.gz/qwen3-0.6b-1layers.tar.gz"
     
     check_and_download_model(model_path, download_url)
 
