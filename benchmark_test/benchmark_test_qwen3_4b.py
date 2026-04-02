@@ -96,8 +96,8 @@ def test_qwen2(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit: in
     model_file = os.path.join(current_dir, "examples/llm/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py")
 
     # ========================== 检查并下载模型 ==========================
-    model_path = "work_dirs/fp_model/qwen3-0.6b-gptq"
-    download_url = "http://10.10.1.53:8082/artifactory/model_zoo2/model_zoo2/fp_models/qwen3_0.6b.tar.gz"
+    model_path = "work_dirs/fp_model/qwen3-0.6b-1layers"
+    download_url = "http://10.10.1.53:8082/artifactory/model_zoo2/fp_models/qwen3_0.6b-1layers.tar.gz"
     
     check_and_download_model(model_path, download_url)
 
@@ -110,7 +110,7 @@ def test_qwen2(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit: in
         command = [
             sys.executable,  # 使用当前Python解释器，避免环境不一致
             model_file,  # 注意：你原命令里多了一个.py后缀，需修正
-            "--model", "work_dirs/fp_model/qwen3-0.6b-gptq",
+            "--model", "work_dirs/fp_model/qwen3-0.6b-1layers",
             "--context-length", "2048",
             "--input-sequence-length", "2048",
             "--quant-type", "w8a8h1_sefp",
