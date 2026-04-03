@@ -17,13 +17,13 @@
 替换相应的模型路径即可。
 
 ```bash
-python openvla_export_vision_xh2a_libero.py
+python openvla_vit_export_hmonnx.py
 ```
 
 #### 2. 导出 llm 部分hmonnx
 
 ```bash
-python openvla_export_llm_xh2a_libero.py
+python openvla_llm_export_hmonnx.py
 ```
 
 

@@ -60,7 +60,6 @@ class LLAMAHMONNXModel(LLMONNXModel):
         self.input_sequence_length = input_sequence_length
 
     def prepare_inputs(self, data: Union[dict, tuple, list]):
-        self._exec_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device = self._exec_device
         self.token_embedding.to(device)
 
@@ -103,11 +102,14 @@ class LLAMAHMONNXModel(LLMONNXModel):
             past_key_caches.append(getattr(self, f"past_k_cache_{i}"))
             past_value_caches.append(getattr(self, f"past_v_cache_{i}"))
 
+        attention_mask = data["attention_mask"]
+
         return (
             inputs_embeds.to(torch.float16).to(device),
             past_seq_length.to(device),
             current_input_length,
             position_ids.to(device),
+            attention_mask.to(device),
             past_key_caches,
             past_value_caches,
         )
@@ -118,24 +120,25 @@ class LLAMAHMONNXModel(LLMONNXModel):
         past_seq_length: Tensor,
         current_input_length: Tensor,
         position_ids: Tensor,
+        attention_mask: Tensor,
         past_key_caches: List,
         past_value_caches: List,
     ):
         if self._phase_prefill:
-            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._device = torch.device("cuda")
             self.prefill_session.to(self.device)
             out = self.prefill_session(
                 inputs_embeds.to(self.device),
                 past_seq_length.to(self.device),
                 current_input_length.to(self.device),
                 position_ids.to(dtype=torch.int32).to(self.device),
+                attention_mask.to(self.device),
                 *past_key_caches,
                 *past_value_caches,
             )
             # self.prefill_session.update_step()
             return out
         else:
-            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.decode_session.to(self.device)
             out = self.decode_session(
                 inputs_embeds.to(self.device),
