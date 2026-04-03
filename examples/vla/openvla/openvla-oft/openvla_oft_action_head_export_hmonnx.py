@@ -13,7 +13,7 @@ Usage:
     python openvla_oft_action_head_export_hmonnx.py --type diffusion --hidden-dim 4096 --action-dim 7 --output action_head_diffusion.onnx --hmonnx action_head_diffusion_hm.onnx
 
     # Export from pretrained checkpoint
-    python openvla_oft_action_head_export_hmonnx.py --type l1 --checkpoint /path/to/action_head.pt --output action_head_l1.onnx --hmonnx action_head_l1_hm.onnx
+    python openvla_oft_action_head_export_hmonnx.py --type l1 --checkpoint /data01/home/she.gao/.cache/huggingface/hub/models--moojink--openvla-7b-oft-finetuned-libero-spatial/snapshots/6d0231af0e48c5985f1ff86908f4674b84bc049b/action_head--150000_checkpoint.pt --output action_head_l1.onnx --hmonnx action_head_l1_hm.onnx
 """
 
 import argparse
@@ -35,7 +35,9 @@ from xhquant.api import convert_onnx_to_hmonnx, HMONNXGoldenInference, QuantSche
 
 # Add parent directory to path for imports
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add path to prismatic module (in openvla-oft repository)
+sys.path.insert(0, str(Path(__file__).parent.parent))  # For local prismatic if exists
+sys.path.insert(0, '/data01/home/she.gao/openvla-oft')  # Main openvla-oft repository
 
 from prismatic.models.action_heads import L1RegressionActionHead, DiffusionActionHead
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
@@ -102,17 +104,17 @@ def export_l1_action_head(
         state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
-        
+
         # Map checkpoint keys to wrapper keys
+        # Checkpoint: "module.model.xxx" -> Wrapper: "model.model.xxx"
         new_state_dict = {}
         for key, value in state_dict.items():
-            if key.startswith('model.'):
-                new_state_dict[key] = value
-            else:
-                new_state_dict['model.' + key] = value
-        
+            if key.startswith('module.'):
+                key = 'model.' + key[7:]  # Replace 'module.' with 'model.'
+            new_state_dict[key] = value
+
         model.load_state_dict(new_state_dict, strict=False)
-    
+
     model = model.to(dtype).eval()
     
     # Create dummy input
@@ -213,20 +215,18 @@ def export_diffusion_action_head(
         state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
-        
+
         # Map checkpoint keys to wrapper keys
-        # Checkpoint keys are like: "noise_predictor.mlp_resnet.xxx"
+        # Checkpoint format: "module.noise_predictor.xxx" (from DDP/DataParallel)
+        # Wrapper expects: "noise_predictor.xxx"
+        # Solution: Simply remove 'module.' prefix
         new_state_dict = {}
         for key, value in state_dict.items():
-            if key.startswith('noise_predictor.'):
-                # Already has noise_predictor prefix, use directly
-                new_state_dict[key] = value
-            elif 'mlp_resnet' in key or 'layer_norm' in key:
-                # Keys like "mlp_resnet.xxx" -> "noise_predictor.mlp_resnet.xxx"
-                new_state_dict['noise_predictor.' + key] = value
-            else:
-                new_state_dict[key] = value
-        
+            # Remove 'module.' prefix if present (from DDP/DataParallel)
+            if key.startswith('module.'):
+                key = key[7:]  # Remove 'module.' prefix, keep the rest
+            new_state_dict[key] = value
+
         missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
         if missing:
             print(f"  ⚠ Missing keys: {missing}")
