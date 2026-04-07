@@ -28,6 +28,7 @@ from torch import Tensor
 from transformers import AutoConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+
 try:
     from transformers.modeling_utils import no_init_weights
 except ImportError:
@@ -102,8 +103,9 @@ class XHQwen3NextModel(LLMBaseModel):
         # requires transformers >= 5.3.0 and silently fails on older versions,
         # causing expert weights to not load from the GPTQ checkpoint.
         try:
-            from defuser.modeling.unfused_moe.qwen3_next import LinearQwen3NextSparseMoeBlock
             import transformers.models.qwen3_next.modeling_qwen3_next as _qwen3_next_mod
+            from defuser.modeling.unfused_moe.qwen3_next import LinearQwen3NextSparseMoeBlock
+
             _qwen3_next_mod.Qwen3NextSparseMoeBlock = LinearQwen3NextSparseMoeBlock
         except ImportError:
             pass

@@ -1,12 +1,37 @@
 import copy
-from typing import Any
+from typing import Any, cast
 
+import torch
 from transformers import AutoModelForCausalLM
 
+from xhquant.core import CacheTensor
+
 from ...builder import register_llm_model
+from ...kv_cache_mixin import KVCacheMixin
 from ...text_llm_model import TextLLMModel, TextLLMModelConfig
+from ...types import KVCacheConfig
 from .spark import IPTForCausalLM
 from .spark_moe_hmonnx_inference import XHSparkMoeHMONNXModel
+
+
+class _MLAKVCacheMixin(KVCacheMixin):
+    """KVCacheMixin variant that supports separate k/v cache shapes for absorbed MLA."""
+
+    def __init__(self, kv_cache_config: KVCacheConfig, v_cache_shape: list[int]):
+        super().__init__(kv_cache_config)
+        self._v_cache_shape = v_cache_shape
+
+    def prepare_kv_cache(self):
+        if not self.use_cache:
+            return
+        if self.kvcache_config.num_layers <= 0:
+            return
+        k_shape = self.kvcache_config.kv_cache_shape
+        v_shape = self._v_cache_shape
+        cache_dtype = self.kvcache_config.cache_torch_dtype
+        for _i in range(self.kvcache_config.num_layers):
+            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(k_shape, dtype=cache_dtype)))
+            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(v_shape, dtype=cache_dtype)))
 
 
 class XHSparkModeModelConfig(TextLLMModelConfig):
@@ -49,15 +74,22 @@ class XHSparkModeModel(TextLLMModel):
 
             layer0_attn = llm_model.transformer.layers[0].attention
             if llm_model.config.apply_mla:
-                # MLA: K cache uses qk_head_dim, V cache uses v_head_dim
-                # Use qk_head_dim for the base cache shape
-                self.kvcache_config.kv_cache_shape = [
+                # Absorbed MLA: k cache stores rope vectors, v cache stores latent vectors
+                k_cache_shape = [
                     1,
-                    llm_model.config.num_attention_heads,
+                    1,
                     self.config.context_max_length,
-                    layer0_attn.qk_head_dim,
+                    layer0_attn.qk_rope_head_dim,
                 ]
-                self._mla_v_head_dim = layer0_attn.v_head_dim
+                v_cache_shape = [
+                    1,
+                    1,
+                    self.config.context_max_length,
+                    layer0_attn.kv_lora_rank,
+                ]
+                self.kvcache_config.kv_cache_shape = k_cache_shape
+                # Replace the default mixin with MLA-aware variant
+                self._kvcache_mixin = _MLAKVCacheMixin(self.kvcache_config, v_cache_shape)
             else:
                 self.kvcache_config.kv_cache_shape = [
                     1,
@@ -65,3 +97,10 @@ class XHSparkModeModel(TextLLMModel):
                     self.config.context_max_length,
                     layer0_attn.head_dim,
                 ]
+
+    @classmethod
+    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        hf_model = super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
+        hf_model = cast(IPTForCausalLM, hf_model)
+        hf_model.unfuse_experts(use_padding_expert=False)
+        return hf_model

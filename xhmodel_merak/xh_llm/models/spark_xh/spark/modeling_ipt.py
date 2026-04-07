@@ -507,6 +507,7 @@ class IPTMoE(nn.Module):
         self.config = config
         self.grouped_gemm = config.grouped_gemm
         self.clamp_input_value = 0
+        self.num_experts = (config.num_routed_experts - config.num_shared_experts) * config.num_groups
         if hasattr(config, "clamp_training"):
             clamp_training_cfg = config.clamp_training
             self.clamp_input_value = clamp_training_cfg["clamp_input_value"]
@@ -882,7 +883,9 @@ class IPTMLAttention(nn.Module):
         q_pe = q_pe.to(origin_dtype)
         k_pe = k_pe.to(origin_dtype)
 
-        k_pe = k_pe.expand(*k_nope.shape[:-1], -1)
+        # k_pe = k_pe.expand(*k_nope.shape[:-1], -1)
+        # k_pe = k_pe.expand(batch_size, self.self.num_heads, -1, -1)
+        k_pe = torch.repeat_interleave(k_pe, repeats=self.num_heads, dim=1)
 
         query_states = torch.cat((q_nope, q_pe), dim=-1)
         key_states = torch.cat((k_nope, k_pe), dim=-1)
@@ -1007,16 +1010,25 @@ class IPTDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-
+        
         hidden_states = (residual.float() + hidden_states.float()).to(orig_dtype)
 
         # Fully Connected
         residual = hidden_states
-
+        assert routing_map is None, (
+            "Routing map is not supported for the attention layer and should only be passed to the MLP. Please make sure to only pass the routing map in the `routing_maps` argument of the decoder and not in `position_embeddings` or other arguments."
+        )
         hidden_states = self.final_layer_norm(hidden_states)
         # hidden_states = self.mlp(hidden_states)
         # MLP forward with optional routing_map
-        if hasattr(self.mlp, "forward") and "routing_map" in self.mlp.forward.__code__.co_varnames:
+        has_route_map = False
+        if routing_map is not None and hasattr(self.mlp, "forward"):
+            mlp_forward = self.mlp.forward
+            if hasattr(mlp_forward, "__wrapped__"):
+                mlp_forward = self.mlp.forward.__wrapped__
+            if "routing_map" in mlp_forward.__code__.co_varnames:
+                has_route_map = True
+        if has_route_map:
             hidden_states = self.mlp(hidden_states, routing_map=routing_map)
         else:
             hidden_states = self.mlp(hidden_states)
@@ -1401,7 +1413,23 @@ class IPTModel(IPTPreTrainedModel):
                 experts = nn.ModuleList(
                     [IPTMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(num_routed_experts)]
                 )
+                experts_fc1_weights = layer.mlp.routed_experts.fc1_weights
+                experts_fc2_weights = layer.mlp.routed_experts.fc2_weights
+                # experts_fc1_weights = layer.mlp.routed_experts.fc1_weights.permute(0, 2, 1)
+                # experts_fc2_weights = layer.mlp.routed_experts.fc2_weights.permute(0, 2, 1)
+                for idx in range(num_routed_experts):
+                    experts[idx].to(device=experts_fc1_weights.device, dtype=experts_fc1_weights.dtype)
+                    group_id = idx // num_routed_experts_per_group
+                    # global_idx = group_id * num_experts_per_group
+                    expert_offset = idx % num_routed_experts_per_group
+                    global_idx = group_id * num_experts_per_group + expert_offset
+                    experts[idx].fc1.weight.data.copy_(experts_fc1_weights[global_idx].data)
+                    experts[idx].fc2.weight.data.copy_(experts_fc2_weights[global_idx].data)
+                layer.mlp.routed_experts = experts
+                layer.mlp.grouped_gemm = False
+                assert num_shared_experts_per_group == 1, "unfusing currently only supports 1 shared expert per group"
 
+                """
                 experts_fc1_weights = layer.mlp.routed_experts.fc1_weights.permute(0, 2, 1)
                 experts_fc2_weights = layer.mlp.routed_experts.fc2_weights.permute(0, 2, 1)
                 for idx in range(num_routed_experts):
@@ -1444,6 +1472,7 @@ class IPTModel(IPTPreTrainedModel):
                 layer.mlp.grouped_gemm = False
                 layer.mlp.shared_experts = shared_experts
                 layer.mlp.router = router
+                """
 
     def _unfuse_padding_experts(self):
         print("unfuse padding here")

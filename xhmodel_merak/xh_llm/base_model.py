@@ -71,7 +71,7 @@ class XHBaseModel(DeviceMixin):
         self._quanted_model: XHQuantedGraph | None = None
         self._exported_model: XHExportedGraph | None = None
         self.hf_compatible_model: nn.Module | None = None
-
+        self.enable_hf_compatible: bool = False
         self.interactive_mode = True
         self._dtype = torch.float16
         self._device = "cpu"
@@ -884,6 +884,7 @@ class XHBaseModel(DeviceMixin):
         return self.get_compatible_model(self.hf_model_dir)
 
     ### 模型推理
+    
     def prepare_for_inference(self, *args, **kwargs):
         for _, sub_model in self._models.items():
             sub_model.prepare_for_inference()
@@ -933,8 +934,43 @@ class XHBaseModel(DeviceMixin):
         self._data_processor.to(self.device, self.dtype)
         return self._data_processor
 
-    def __call__(self, *args, **kwargs):
-        raise RuntimeError("Direct call is not allowed for BaseModel, please use generate method for inference.")
+    def __call__(self, *args, **kwargs) -> Any:
+        infer_model = None
+        if self._state == LLMModelState.NONE:
+            raise RuntimeError("Model is not ready for generation, please set state to fronted or quanted.")
+        # if self._state in [LLMModelState.EAGER_FAST, LLMModelState.EAGER_ALIGNED]:
+        #     infer_model = self._wrap_model
+        # else:
+        #     if self.enable_hf_compatible:
+        #         if self.hf_compatible_model is None:
+        #             hf_model = self.get_empty_hf_model(self.hf_model_dir)
+        #             # 从类中直接获取函数，避免自动绑定 self
+        #             hf_compatible_model = type(self).build_hf_compatible_model(hf_model, self)
+        #             assert isinstance(hf_compatible_model, self.get_hf_model_cls())
+        #             hf_compatible_model.to(device=self.device, dtype=self.dtype)
+        #             self.hf_compatible_model = hf_compatible_model
+        #         infer_model = self.hf_compatible_model
+        #     else:
+        #         infer_model = self._inference_model
+        # assert infer_model is not None
+        # kwargs["use_cache"] = self.config.use_cache
+        # out = infer_model.forward(*args, **kwargs)
+        assert self._inference_model is not None, (
+            "Inference model is not prepared, please call prepare_for_inference first."
+        )
+        if self.enable_hf_compatible:
+            if self.hf_compatible_model is None:
+                hf_model = self.get_empty_hf_model(self.hf_model_dir)
+                # 从类中直接获取函数，避免自动绑定 self
+                hf_compatible_model = type(self).build_hf_compatible_model(hf_model, self)
+                assert isinstance(hf_compatible_model, self.get_hf_model_cls())
+                hf_compatible_model.to(device=self.device, dtype=self.dtype)
+                self.hf_compatible_model = hf_compatible_model
+            infer_model = self.hf_compatible_model
+        else:
+            infer_model = self
+        out = infer_model.forward(*args, **kwargs)
+        return out
 
     def forward(self, *args, **kwargs):
         raise RuntimeError("Direct call is not allowed for BaseModel, please use generate method for inference.")

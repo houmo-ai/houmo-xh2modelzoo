@@ -11,7 +11,7 @@
 ## 安装
 
 ```bash
-pip install -e . 
+pip install -v -e . 
 或者 uv pip install -e . --link-mode=copy
 ```
 

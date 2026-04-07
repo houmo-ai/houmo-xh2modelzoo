@@ -20,7 +20,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import math
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 import torch.nn as nn
@@ -41,12 +41,21 @@ from .modeling_qwen3_vl import (  # apply_rotary_pos_emb_vision,; PatchEmbed,; V
 )
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLVisionAttentionBase(DynamicModule, Qwen3VLVisionAttention):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLVisionAttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLVisionAttention: "Qwen3VLVisionAttention",
     }
 )
-class _Qwen3VLVisionAttention(DynamicModule):
+class _Qwen3VLVisionAttention(_Qwen3VLVisionAttentionBase):
     def apply_rotary_pos_emb(
         self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -196,12 +205,21 @@ class _Qwen3VLVisionAttention(DynamicModule):
         return attn_output
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLVisionBlockBase(DynamicModule, Qwen3VLVisionBlock):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLVisionBlockBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLVisionBlock: "Qwen3VLVisionBlock",
     }
 )
-class _Qwen3VLVisionBlock(DynamicModule):
+class _Qwen3VLVisionBlock(_Qwen3VLVisionBlockBase):
     @torch.no_grad()
     def _setup(self, cfg: ConfigDict):
         pass
@@ -225,12 +243,21 @@ def weight_denorm(
     conv2d.bias = nn.Parameter(bias_data)
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLVisionPatchEmbedBase(DynamicModule, Qwen3VLVisionPatchEmbed):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLVisionPatchEmbedBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLVisionPatchEmbed: "Qwen3VLVisionPatchEmbed",
     }
 )
-class _Qwen3VLVisionPatchEmbed(DynamicModule):
+class _Qwen3VLVisionPatchEmbed(_Qwen3VLVisionPatchEmbedBase):
     @torch.no_grad()
     def _setup(self, cfg: ConfigDict):
         self.only_first_block = False
@@ -287,12 +314,21 @@ class _Qwen3VLVisionPatchEmbed(DynamicModule):
         return hidden_states
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLVisionPatchMergerBase(DynamicModule, Qwen3VLVisionPatchMerger):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLVisionPatchMergerBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLVisionPatchMerger: "Qwen3VLVisionPatchMerger",
     }
 )
-class _Qwen3VLVisionPatchMerger(DynamicModule):
+class _Qwen3VLVisionPatchMerger(_Qwen3VLVisionPatchMergerBase):
     def _setup(self, cfg: ConfigDict):
         pass
 
@@ -305,12 +341,21 @@ class _Qwen3VLVisionPatchMerger(DynamicModule):
         return x
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLVisionModelBase(DynamicModule, Qwen3VLVisionModel):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLVisionModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLVisionModel: "Qwen3VLVisionModel",
     }
 )
-class _Qwen3VLVisionModel(DynamicModule):
+class _Qwen3VLVisionModel(_Qwen3VLVisionModelBase):
     @torch.no_grad()
     def _setup(self, cfg: ConfigDict):
         self.only_first_block = False

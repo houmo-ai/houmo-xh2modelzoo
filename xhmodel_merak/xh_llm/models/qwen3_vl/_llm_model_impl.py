@@ -23,7 +23,7 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -47,8 +47,17 @@ from .modeling_qwen3_vl import (
 )
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLTextRMSNormBase(DynamicModule, Qwen3VLTextRMSNorm):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLTextRMSNormBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3VLTextRMSNorm: "Qwen3VLTextRMSNorm"})
-class _Qwen3VLTextRMSNorm(DynamicModule):
+class _Qwen3VLTextRMSNorm(_Qwen3VLTextRMSNormBase):
     def forward(self, hidden_states):
         return self.norm(hidden_states)
 
@@ -59,12 +68,21 @@ class _Qwen3VLTextRMSNorm(DynamicModule):
         return self
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLTextRotaryEmbeddingBase(DynamicModule, Qwen3VLTextRotaryEmbedding):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLTextRotaryEmbeddingBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLTextRotaryEmbedding: "Qwen3VLTextRotaryEmbedding",
     }
 )
-class _Qwen3VLTextRotaryEmbedding(DynamicModule):
+class _Qwen3VLTextRotaryEmbedding(_Qwen3VLTextRotaryEmbeddingBase):
     def _setup(self, cfg: ConfigDict):
         max_pe_length = cfg.max_pe_length
         # self.max_position_embeddings = max_position_embeddings
@@ -98,8 +116,17 @@ class _Qwen3VLTextRotaryEmbedding(DynamicModule):
         )
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLTextAttentionBase(DynamicModule, Qwen3VLTextAttention):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLTextAttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3VLTextAttention: "Qwen3VLTextAttention"})
-class _Qwen3VLTextAttention(DynamicModule):
+class _Qwen3VLTextAttention(_Qwen3VLTextAttentionBase):
     def _setup(self, cfg: ConfigDict):
         if not hasattr(self, "num_key_value_heads"):
             self.num_key_value_heads = self.config.num_key_value_heads
@@ -213,8 +240,17 @@ class _Qwen3VLTextAttention(DynamicModule):
         return attn_output, None, None
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLTextDecoderLayerBase(DynamicModule, Qwen3VLTextDecoderLayer):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLTextDecoderLayerBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3VLTextDecoderLayer: "Qwen3VLTextDecoderLayer"})
-class _Qwen3VLTextDecoderLayer(DynamicModule):
+class _Qwen3VLTextDecoderLayer(_Qwen3VLTextDecoderLayerBase):
     def _setup(self, cfg: ConfigDict):
         pass
 
@@ -249,12 +285,21 @@ class _Qwen3VLTextDecoderLayer(DynamicModule):
         return hidden_states
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLTextModelBase(DynamicModule, Qwen3VLTextModel):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLTextModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLTextModel: "Qwen3VLTextModel",
     }
 )
-class _Qwen3VLTextModel(DynamicModule):
+class _Qwen3VLTextModel(_Qwen3VLTextModelBase):
     def _setup_cos_sin_embeding(self):
         cos = self.rotary_emb.cos_cached.squeeze(1)
         sin = self.rotary_emb.sin_cached.squeeze(1)
@@ -415,12 +460,21 @@ class _Qwen3VLTextModel(DynamicModule):
         )
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLModelBase(DynamicModule, Qwen3VLModel):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLModel: "Qwen3VLModel",
     }
 )
-class _Qwen3VLModel(DynamicModule):
+class _Qwen3VLModel(_Qwen3VLModelBase):
     def _setup(self, cfg: ConfigDict):
         self.cfg = cfg
         del self.visual
@@ -455,12 +509,21 @@ class _Qwen3VLModel(DynamicModule):
         return outputs
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3VLForConditionalGenerationBase(DynamicModule, Qwen3VLForConditionalGeneration):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3VLForConditionalGenerationBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3VLForConditionalGeneration: "Qwen3VLForConditionalGeneration",
     }
 )
-class _Qwen3VLForConditionalGeneration(DynamicModule):
+class _Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGenerationBase):
     def _setup(self, cfg: ConfigDict):
         self.cfg = cfg
 

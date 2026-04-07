@@ -2,7 +2,7 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -16,7 +16,9 @@ from xhquant.utils.registry import DynamicModule
 
 from ...register import XHLLM_TRACEABLE_MODULES
 from .spark.modeling_ipt import (
+    IPTMLP,
     IPTAttention,
+    IPTDecoder,
     IPTDecoderLayer,
     IPTForCausalLM,
     IPTMLAttention,
@@ -30,8 +32,17 @@ from .spark.modeling_ipt import (
 # ---------------------------------------------------------------------------
 # IPTRMSNorm → xhquant RMSNorm
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTRMSNormBase(DynamicModule, IPTRMSNorm):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTRMSNormBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTRMSNorm: "IPTRMSNorm"})
-class _IPTRMSNorm(DynamicModule):
+class _IPTRMSNorm(_IPTRMSNormBase):
     def forward(self, hidden_states):
         return self.norm(hidden_states)
 
@@ -45,8 +56,17 @@ class _IPTRMSNorm(DynamicModule):
 # ---------------------------------------------------------------------------
 # IPTRotaryEmbedding → precomputed cos/sin cache
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTRotaryEmbeddingBase(DynamicModule, IPTRotaryEmbedding):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTRotaryEmbeddingBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTRotaryEmbedding: "IPTRotaryEmbedding"})
-class _IPTRotaryEmbedding(DynamicModule):
+class _IPTRotaryEmbedding(_IPTRotaryEmbeddingBase):
     def _setup(self, cfg: dict | None = None):
         assert "dynamic" not in self.rope_type, f"{self.rope_type} is not supported"
         max_seq_len = cfg.context_max_length
@@ -95,10 +115,68 @@ class _IPTRotaryEmbedding(DynamicModule):
 
 
 # ---------------------------------------------------------------------------
+# IPTMLP (fused gate/up dense MLP)
+# ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTMLPBase(DynamicModule, IPTMLP):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTMLPBase = DynamicModule
+
+
+@XHLLM_TRACEABLE_MODULES.register_module({IPTMLP: "IPTMLP"})
+class _IPTMLP(_IPTMLPBase):
+    def forward(self, x: Tensor):
+        if self.clamp_input_value > 0:
+            x = torch.clamp_(x, -self.clamp_input_value, self.clamp_input_value)
+        intermediate_parallel = self.fc1(x)
+
+        intermediate_parallel1, intermediate_parallel2 = torch.chunk(intermediate_parallel, 2, dim=-1)
+        intermediate_parallel1 = intermediate_parallel1.squeeze(-1)
+        intermediate_parallel2 = intermediate_parallel2.squeeze(-1)
+        intermediate_parallel1 = self.act_fn(intermediate_parallel1)
+        intermediate_parallel = intermediate_parallel1 * intermediate_parallel2
+
+        # if self.clamp_input_value > 0:
+        #     intermediate_parallel = torch.clamp_(intermediate_parallel, -self.clamp_input_value, self.clamp_input_value)
+        output = self.fc2(intermediate_parallel)
+        return output
+        # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        # return down_proj
+
+    def _setup(self, cfg: dict | None = None):
+        # self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        # self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        # self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        # self.gate_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        # self.up_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        # self.down_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        # with torch.no_grad():
+        #     self.gate_proj.weight.copy_(self.fc1.weight.data[: self.intermediate_size, :])
+        #     self.up_proj.weight.copy_(self.fc1.weight.data[self.intermediate_size :, :])
+        #     self.down_proj.weight.copy_(self.fc2.weight.data)
+        # del self.fc1
+        # del self.fc2
+
+        return self
+
+
+# ---------------------------------------------------------------------------
 # IPTAttention (standard MHA with fused QKV projection)
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTAttentionBase(DynamicModule, IPTAttention):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTAttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTAttention: "IPTAttention"})
-class _IPTAttention(DynamicModule):
+class _IPTAttention(_IPTAttentionBase):
     def rotate_half(self, x: Tensor):
         x1 = self.slice_1(x)
         x2 = self.slice_2(x)
@@ -210,8 +288,17 @@ class _IPTAttention(DynamicModule):
 # ---------------------------------------------------------------------------
 # IPTMLAttention (Multi-head Latent Attention)
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTMLAttentionBase(DynamicModule, IPTMLAttention):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTMLAttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTMLAttention: "IPTMLAttention"})
-class _IPTMLAttention(DynamicModule):
+class _IPTMLAttention(_IPTMLAttentionBase):
     def rotate_half(self, x: Tensor):
         x1 = self.slice_rope_1(x)
         x2 = self.slice_rope_2(x)
@@ -237,60 +324,50 @@ class _IPTMLAttention(DynamicModule):
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         batch_size, seq_length, _ = hidden_states.shape
 
-        # Q path
+        # Q path (absorbed: q_rope_proj for RoPE part, q_absorbed_proj for content in latent space)
         if self.apply_q_lora:
-            q_states = self.q_down_layernorm(self.q_down_proj(hidden_states))
-            q_states = self.q_up_proj(q_states)
+            inp = self.q_down_layernorm(self.q_down_proj(hidden_states))
         else:
-            q_states = self.q_up_proj(hidden_states)
+            inp = hidden_states
 
-        q_states = q_states.view(batch_size, seq_length, self.num_heads, self.qk_head_dim).transpose(1, 2)
-        q_nope = self.slice_q_nope(q_states)
-        q_pe = self.slice_q_pe(q_states)
+        q_pe = self.q_rope_proj(inp).view(batch_size, seq_length, self.num_heads, self.qk_rope_head_dim)
+        q_content = self.q_absorbed_proj(inp).view(batch_size, seq_length, self.num_heads, self.kv_lora_rank)
 
-        # Compressed KV path
-        compressed_kv = self.kv_down_proj_with_mqa(hidden_states)
-        kv_a = self.slice_kv_a(compressed_kv)
-        k_pe = self.slice_k_pe(compressed_kv)
+        # KV path (latent space — no kv_up_proj at runtime)
+        k_latent = self.kv_down_layernorm(self.kv_a_proj_latent(hidden_states))
+        k_rot = self.kv_a_proj_rope(hidden_states).view(batch_size, 1, seq_length, self.qk_rope_head_dim)
 
-        kv_a = self.kv_down_layernorm(kv_a)
-        kv_full = self.kv_up_proj(kv_a)
-        kv_full = kv_full.view(
-            batch_size, seq_length, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        ).transpose(1, 2)
-        k_nope = self.slice_k_nope(kv_full)
-        value_states = self.slice_v(kv_full)
-
-        k_pe = k_pe.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
-
-        # RoPE on rope-part only (in float32 per original implementation)
+        # RoPE in float32 (per original implementation)
+        q_pe = q_pe.transpose(1, 2)
         cos, sin = position_embeddings
         origin_dtype = q_pe.dtype
         q_pe = q_pe.float()
-        k_pe = k_pe.float()
-        q_pe, k_pe = self.apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        k_rot = k_rot.float()
+        q_pe, k_rot = self.apply_rotary_pos_emb(q_pe, k_rot, cos, sin)
         q_pe = q_pe.to(origin_dtype)
-        k_pe = k_pe.to(origin_dtype)
+        k_rot = k_rot.to(origin_dtype)
+        q_pe = q_pe.transpose(1, 2)
 
-        k_pe = k_pe.expand(-1, self.num_heads, -1, -1)
-
-        # Assemble full query / key
-        query_states = torch.cat((q_nope, q_pe), dim=-1)
-        key_states = torch.cat((k_nope, k_pe), dim=-1)
-
-        # KV cache
+        # KV cache (extremely compact: 1 head, latent/rope dims only)
         if self.use_cache:
-            key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
-            value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
+            k_rot = self.k_cache(k_rot, past_seq_length, current_input_length, past_k_cache)
+            k_rot = k_rot.squeeze(1)
 
-        # Attention: Q @ K^T * scale → softmax → @ V
-        query_states = query_states * self._scaling
-        key_states_t = key_states.transpose(2, 3)
-        attn_weights = torch.matmul(query_states, key_states_t)
+            k_latent = k_latent.unsqueeze(1)
+            k_latent = self.v_cache(k_latent, past_seq_length, current_input_length, past_v_cache)
+            k_latent = k_latent.squeeze(1)
+
+        # Attention with broadcast MQA (head dim=1 broadcasts against num_heads)
+        query_states = torch.cat((q_content, q_pe), dim=-1).transpose(1, 2) * self._scaling
+        key_states = torch.cat((k_latent, k_rot), dim=-1).unsqueeze(1).transpose(2, 3)
+        attn_weights = torch.matmul(query_states, key_states)
         attn_weights = self.masked_softmax(attn_weights, past_seq_length)
+
+        value_states = k_latent.unsqueeze(1)
         attn_output = torch.matmul(attn_weights, value_states)
+
         attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape(batch_size, seq_length, self.num_heads * self.v_head_dim)
+        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, None, None
 
@@ -306,18 +383,6 @@ class _IPTMLAttention(DynamicModule):
         self.slice_rope_1 = xhnn.Slice([0], [self.qk_rope_head_dim // 2], [3], [1])
         self.slice_rope_2 = xhnn.Slice([self.qk_rope_head_dim // 2], [sys.maxsize], [3], [1])
 
-        # Slices for q → nope / pe split
-        self.slice_q_nope = xhnn.Slice([0], [self.qk_nope_head_dim], [3], [1])
-        self.slice_q_pe = xhnn.Slice([self.qk_nope_head_dim], [sys.maxsize], [3], [1])
-
-        # Slices for compressed_kv → kv_a / k_pe split
-        self.slice_kv_a = xhnn.Slice([0], [self.kv_lora_rank], [2], [1])
-        self.slice_k_pe = xhnn.Slice([self.kv_lora_rank], [sys.maxsize], [2], [1])
-
-        # Slices for decompressed kv → k_nope / value split
-        self.slice_k_nope = xhnn.Slice([0], [self.qk_nope_head_dim], [3], [1])
-        self.slice_v = xhnn.Slice([self.qk_nope_head_dim], [sys.maxsize], [3], [1])
-
         self.masked_softmax = MaskedSoftmax(dim=-1)
         self.use_cache = cfg.use_cache
 
@@ -328,6 +393,91 @@ class _IPTMLAttention(DynamicModule):
 
         self._scaling = self.scaling
 
+        # ====================================================================
+        # Weight absorption: fuse kv_up_proj (W_UK / W_UV) into Q and O paths
+        # ====================================================================
+        with torch.no_grad():
+            device = self.kv_up_proj.weight.device
+            weight_dtype = self.kv_up_proj.weight.dtype
+            fusion_dtype = torch.float32
+
+            # ------------------------------------------------------------------
+            # Step 1: Split kv_down_proj_with_mqa → kv_a_proj_latent + kv_a_proj_rope
+            # ------------------------------------------------------------------
+            W_KV_down = self.kv_down_proj_with_mqa.weight
+            has_kv_bias = self.kv_down_proj_with_mqa.bias is not None
+            hidden_size = W_KV_down.shape[1]
+            split_idx = self.kv_lora_rank
+
+            self.kv_a_proj_latent = nn.Linear(hidden_size, self.kv_lora_rank, bias=has_kv_bias)
+            self.kv_a_proj_latent.weight = nn.Parameter(W_KV_down[:split_idx, :].contiguous().to(dtype=weight_dtype))
+            if has_kv_bias:
+                self.kv_a_proj_latent.bias = nn.Parameter(
+                    self.kv_down_proj_with_mqa.bias[:split_idx].contiguous().to(dtype=weight_dtype)
+                )
+
+            self.kv_a_proj_rope = nn.Linear(hidden_size, self.qk_rope_head_dim, bias=has_kv_bias)
+            self.kv_a_proj_rope.weight = nn.Parameter(W_KV_down[split_idx:, :].contiguous().to(dtype=weight_dtype))
+            if has_kv_bias:
+                self.kv_a_proj_rope.bias = nn.Parameter(
+                    self.kv_down_proj_with_mqa.bias[split_idx:].contiguous().to(dtype=weight_dtype)
+                )
+
+            # ------------------------------------------------------------------
+            # Step 2: Decompose kv_up_proj → W_UK + W_UV
+            # ------------------------------------------------------------------
+            W_Up = self.kv_up_proj.weight.to(device=device, dtype=fusion_dtype)
+            D_latent = W_Up.shape[1]  # kv_lora_rank
+
+            W_Up_view = W_Up.view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, D_latent)
+            W_UK = W_Up_view[:, : self.qk_nope_head_dim, :].clone()
+            W_UV = W_Up_view[:, self.qk_nope_head_dim :, :].clone()
+
+            # ------------------------------------------------------------------
+            # Step 3: Fuse W_UK into Q → q_rope_proj + q_absorbed_proj
+            # ------------------------------------------------------------------
+            W_Q_all = self.q_up_proj.weight.to(device=device, dtype=fusion_dtype)
+            D_in = W_Q_all.shape[1]  # hidden_size or q_lora_rank
+
+            W_Q_view = W_Q_all.view(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, D_in)
+            W_Q_nope = W_Q_view[:, : self.qk_nope_head_dim, :]
+            W_Q_rope = W_Q_view[:, self.qk_nope_head_dim :, :]
+
+            # q_rope_proj: [num_heads * qk_rope_head_dim, D_in]
+            W_Q_rope_flat = W_Q_rope.reshape(-1, D_in).contiguous()
+            self.q_rope_proj = nn.Linear(D_in, self.num_heads * self.qk_rope_head_dim, bias=False)
+            self.q_rope_proj.weight = nn.Parameter(W_Q_rope_flat.to(device=device, dtype=weight_dtype))
+
+            # q_absorbed_proj: einsum("hni, hnc -> hci", W_Q_nope, W_UK)
+            W_Q_absorbed = torch.einsum("hni, hnc -> hci", W_Q_nope, W_UK)
+            W_Q_absorbed_flat = W_Q_absorbed.reshape(-1, D_in).contiguous()
+            self.q_absorbed_proj = nn.Linear(D_in, self.num_heads * self.kv_lora_rank, bias=False)
+            self.q_absorbed_proj.weight = nn.Parameter(W_Q_absorbed_flat.to(device=device, dtype=weight_dtype))
+
+            # ------------------------------------------------------------------
+            # Step 4: Fuse W_UV into o_proj
+            # ------------------------------------------------------------------
+            W_O = self.o_proj.weight.to(device=device, dtype=fusion_dtype)
+            W_O_view = W_O.view(hidden_size, self.num_heads, self.v_head_dim)
+
+            W_Fused_VO = torch.einsum("xhd, hdc -> xhc", W_O_view, W_UV)
+            new_in_features = self.num_heads * self.kv_lora_rank
+            W_Fused_flat = W_Fused_VO.reshape(hidden_size, new_in_features).contiguous()
+
+            has_o_bias = self.o_proj.bias is not None
+            old_o_bias = self.o_proj.bias
+            self.o_proj = nn.Linear(new_in_features, hidden_size, bias=has_o_bias)
+            self.o_proj.weight = nn.Parameter(W_Fused_flat.to(device=device, dtype=weight_dtype))
+            if has_o_bias:
+                self.o_proj.bias = old_o_bias.to(device=device, dtype=weight_dtype) if old_o_bias is not None else None
+
+            # ------------------------------------------------------------------
+            # Step 5: Delete old layers
+            # ------------------------------------------------------------------
+            del self.q_up_proj
+            del self.kv_up_proj
+            del self.kv_down_proj_with_mqa
+
         # Alias for compatibility with text_llm_model cache shape detection
         self.head_dim = self.qk_head_dim
         return self
@@ -336,106 +486,193 @@ class _IPTMLAttention(DynamicModule):
 # ---------------------------------------------------------------------------
 # IPTMoE → MoeBlock with pre-computed grouped sigmoid routing
 # ---------------------------------------------------------------------------
-@XHLLM_TRACEABLE_MODULES.register_module({IPTMoE: "IPTMoE"})
-class _IPTMoE(DynamicModule):
-    def forward(self, hidden_states, routing_map=None):
-        batch_size, seq_length, hidden_dim = hidden_states.shape
+if TYPE_CHECKING:
 
-        # Shared expert (always active)
-        shared_output = None
-        if self.shared_experts is not None:
+    class _IPTMoEBase(DynamicModule, IPTMoE):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTMoEBase = DynamicModule
+
+
+@XHLLM_TRACEABLE_MODULES.register_module({IPTMoE: "IPTMoE"})
+class _IPTMoE(_IPTMoEBase):
+    def _moe(self, hidden_states, topk_indices, topk_weights):
+        pass
+
+    def _router(self, hidden_states, routing_map):
+        hidden_states = hidden_states.float()
+        logits = self.router.gating(hidden_states)
+        logits = logits.view(-1, self.router.num_groups, self.router.num_experts)
+
+        num_tokens, num_groups, num_experts_per_group = logits.shape
+        scores = logits.sigmoid()  # [num_tokens, groups, num_routed_experts_per_group]
+        if (self.router.e_score_correction_bias != 0).any():
+            raise AssertionError(
+                "e_score_correction_bias is not supported in the current implementation. Please set `e_score_correction_bias=0` in the configuration to disable the score correction bias and compute the routing scores directly from the gating logits without any correction."
+            )
+            scores_for_choice = scores.view(num_tokens, -1) + self.router.e_score_correction_bias.unsqueeze(
+                0
+            )  # [num_tokens, groups * num_routed_experts_per_group]
+            scores_for_choice = scores_for_choice.view_as(scores)  # [num_tokens, groups, num_routed_experts_per_group]
+
+            _, topk_indices = torch.topk(
+                scores_for_choice, k=self.router.top_k, dim=-1, sorted=False
+            )  # [num_tokens, groups, topk]
+            topk_probs = scores.gather(-1, topk_indices)
+        else:
+            topk_probs, topk_indices = torch.topk(
+                scores, k=self.router.top_k, dim=-1, sorted=False
+            )  # [num_tokens, groups, topk]
+        if self.router.top_k > 1:
+            if self.router.calc_denominator_cross_groups:
+                raise AssertionError(
+                    "Cross-group denominator calculation is not supported in the current implementation. Please set `calc_denominator_cross_groups=False` in the configuration to compute the denominator separately for each group."
+                )
+                denominator = topk_probs.view(topk_probs.size(0), -1)
+                denominator = denominator.sum(dim=-1, keepdim=True) + 1e-20
+                denominator = denominator.unsqueeze(-1)
+            else:
+                denominator = topk_probs.sum(dim=-1, keepdim=True) + 1e-20
+            topk_probs = topk_probs / denominator
+        # topk_probs = topk_probs * self.router.routed_scaling_factor
+
+        topk_mask = torch.zeros(logits.shape, dtype=torch.int32, device=logits.device).scatter(-1, topk_indices, 1)
+        tokens_per_expert = topk_mask.sum(dim=0)
+        assert num_groups == 1, (
+            "Multiple groups are not supported in the current implementation. Please set `num_groups=1` in the configuration to use a single group of experts and compute the routing weights accordingly."
+        )
+        head_incre = (
+            torch.arange(num_groups, dtype=topk_indices.dtype, device=topk_indices.device) * num_experts_per_group
+        ).view(1, -1, 1)
+        topk_indices = (topk_indices + head_incre).view(num_tokens, -1)
+        topk_probs = topk_probs.view(num_tokens, -1)
+        tokens_per_expert = tokens_per_expert.view(-1)
+        tokens_per_expert = tokens_per_expert.cpu().to(torch.long)
+
+        return topk_probs.to(torch.float32), topk_indices, tokens_per_expert
+
+    def forward(self, hidden_states, routing_map=None):
+        orig_shape = hidden_states.shape
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # if routing_map is not None:
+        #     # print('0000000000000000000000000000')
+        #     # 检查一下routing map的尺寸是否相符
+        #     rp_batch_size, rp_sequence, rp_expert_num = routing_map.shape
+
+        #     assert rp_batch_size == batch_size, (
+        #         f"[spark_routing_model] Shape mismatch: routing_map.shape={routing_map.shape} but hidden_states.shape={hidden_states.shape}"
+        #     )
+        #     assert rp_sequence == sequence_length, (
+        #         f"[spark_routing_model] Shape mismatch: routing_map.shape={routing_map.shape} but hidden_states.shape={hidden_states.shape}"
+        #     )
+        #     assert rp_expert_num == self.config.num_experts_per_tok, (
+        #         f"[spark_routing_model] Expert number mismatch: rp_expert_num={rp_expert_num} but top_k={self.config.num_experts_per_tok}"
+        #     )
+        assert routing_map is None, (
+            "Routing map is not supported for the attention layer and should only be passed to the MLP. Please make sure to only pass the routing map in the `routing_maps` argument of the decoder and not in `position_embeddings` or other arguments."
+        )
+
+        if self.shared_experts:
             shared_output = self.shared_experts(hidden_states)
 
-        # Routing
-        hidden_flat = hidden_states.view(-1, hidden_dim)
-        routing_weights = self._compute_routing_weights(hidden_flat)
+        if self.grouped_gemm:
+            raise AssertionError(
+                "Grouped GEMM is not supported in the current implementation. Please set `grouped_gemm=False` in the configuration to use the standard MoE forward pass with pre-computed routing weights."
+            )
+            probs, indices, tokens_per_expert = self.router(hidden_states, routing_map)
+            hidden_states = self.grouped_moe(hidden_states, indices, probs, tokens_per_expert).view(*orig_shape)
+        else:
+            # probs, indices, tokens_per_expert = self._router(hidden_states, routing_map)
+            # hidden_states = self.moe(hidden_states, indices, probs).view(*orig_shape)
+            hidden_states = hidden_states
+            logits = self.router.gating(hidden_states)
+            logits = logits.view(-1, self.router.num_groups, self.num_experts)
 
-        # Expert dispatch via MoeBlock
-        moe_output = self._moeblock(hidden_flat, routing_weights)
-        if isinstance(moe_output, tuple):
-            moe_output = moe_output[0]
+            num_tokens, num_groups, num_experts_per_group = logits.shape
+            routing_weights = logits.sigmoid()  # [num_tokens, groups, num_routed_experts_per_group]
+            routing_weights = routing_weights.view(batch_size, sequence_length, self.num_experts)
+            routing_weights = routing_weights.to(hidden_states.dtype)
+            hidden_states = self.moeblock(hidden_states, routing_weights, fast_mode=False)
+            hidden_states = hidden_states * self.router.routed_scaling_factor
 
-        hidden_states = moe_output.view(batch_size, seq_length, hidden_dim)
-
-        if shared_output is not None:
+        if self.shared_experts:
             hidden_states = hidden_states + shared_output
 
         return hidden_states
 
-    def _compute_routing_weights(self, hidden_flat: Tensor) -> Tensor:
-        """Compute dense routing weights using IPT's grouped sigmoid routing."""
-        num_tokens = hidden_flat.shape[0]
-        device = hidden_flat.device
-
-        logits = self._router_gating(hidden_flat.float())
-        logits = logits.view(num_tokens, self._num_groups, self._num_experts_per_group)
-        scores = logits.sigmoid()
-
-        # Top-k selection per group with score correction bias
-        scores_for_choice = scores.view(num_tokens, -1) + self._e_score_correction_bias.to(device)
-        scores_for_choice = scores_for_choice.view(num_tokens, self._num_groups, self._num_experts_per_group)
-        _, topk_indices = torch.topk(scores_for_choice, k=self._top_k, dim=-1)
-
-        # Gather actual sigmoid scores for selected experts
-        topk_probs = scores.gather(-1, topk_indices)
-
-        # Normalize probabilities
-        if self._top_k > 1:
-            if self._calc_denominator_cross_groups:
-                denom = topk_probs.view(num_tokens, -1).sum(dim=-1, keepdim=True).unsqueeze(-1) + 1e-20
-            else:
-                denom = topk_probs.sum(dim=-1, keepdim=True) + 1e-20
-            topk_probs = topk_probs / denom
-        topk_probs = topk_probs * self._routed_scaling_factor
-
-        # Flatten indices with group offset and create dense routing weights
-        head_incre = self._head_incre.to(device)
-        flat_indices = (topk_indices + head_incre.view(1, -1, 1)).view(num_tokens, -1)
-        flat_probs = topk_probs.view(num_tokens, -1)
-
-        total_experts = self._num_groups * self._num_experts_per_group
-        routing_weights = torch.zeros(num_tokens, total_experts, device=device, dtype=flat_probs.dtype)
-        routing_weights.scatter_(1, flat_indices, flat_probs)
-
-        return routing_weights
-
     def _setup(self, cfg: dict | None = None):
-        router = self.router
+        assert self.grouped_gemm is False, (
+            "Grouped GEMM is not supported in the current implementation. Please set `grouped_gemm=False` in the configuration to use the standard MoE forward pass with pre-computed routing weights."
+        )
+        has_expert_modules = True
+        has_gate_quant = has_expert_modules and all(
+            hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
+            for expert in self.routed_experts
+        )
+        has_up_quant = has_expert_modules and all(
+            hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
+            for expert in self.routed_experts
+        )
+        has_down_quant = has_expert_modules and all(
+            hasattr(expert.fc2, "quant_weight") and expert.fc2.quant_weight is not None
+            for expert in self.routed_experts
+        )
+        self.moeblock = MoeBlock(
+            self.config.hidden_act, self.config.num_experts_per_tok, normalize_routing_weights=True
+        )
 
-        self._num_groups = router.num_groups
-        self._num_experts_per_group = router.num_experts
-        self._top_k = router.top_k
-        self._calc_denominator_cross_groups = router.calc_denominator_cross_groups
-        self._routed_scaling_factor = router.routed_scaling_factor
-        self._e_score_correction_bias = router.e_score_correction_bias
-        self._router_gating = router.gating
+        expert_modules = [expert for expert in self.routed_experts]
+        gate_proj_weights = []
+        gate_proj_biases = []
+        up_proj_weights = []
+        up_proj_biases = []
+        down_proj_weights = []
+        down_proj_biases = []
 
-        self._head_incre = torch.arange(self._num_groups, dtype=torch.long) * self._num_experts_per_group
+        with torch.no_grad():
+            for expert in expert_modules:
+                gate_proj_weight = expert.fc1.weight.data[: expert.intermediate_size, :].unsqueeze(0)
+                up_proj_weight = expert.fc1.weight.data[expert.intermediate_size :, :].unsqueeze(0)
+                down_proj_weight = expert.fc2.weight.data.unsqueeze(0)
+                gate_proj_weights.append(gate_proj_weight)
+                up_proj_weights.append(up_proj_weight)
+                down_proj_weights.append(down_proj_weight)
 
-        total_top_k = self._top_k * self._num_groups
+                if expert.fc1.bias is not None:
+                    gate_proj_bias = expert.fc1.bias.data[: expert.intermediate_size].unsqueeze(0)
+                    up_proj_bias = expert.fc1.bias.data[expert.intermediate_size :].unsqueeze(0)
+                    gate_proj_biases.append(gate_proj_bias)
+                    up_proj_biases.append(up_proj_bias)
+                if expert.fc2.bias is not None:
+                    down_proj_bias = expert.fc2.bias.data.unsqueeze(0)
+                    down_proj_biases.append(down_proj_bias)
 
-        # Extract and stack expert weights
-        if self.grouped_gemm:
-            fc1_weights = self.routed_experts.fc1_weights.data
-            fc2_weights = self.routed_experts.fc2_weights.data
+        gate_proj_weight = torch.cat(gate_proj_weights, dim=0).contiguous()
+        up_proj_weight = torch.cat(up_proj_weights, dim=0).contiguous()
+        down_proj_weight = torch.cat(down_proj_weights, dim=0).contiguous()
+
+        self.moeblock.expert_gate_proj_weight = nn.Parameter(gate_proj_weight)
+        self.moeblock.expert_up_proj_weight = nn.Parameter(up_proj_weight)
+        self.moeblock.expert_down_proj_weight = nn.Parameter(down_proj_weight)
+
+        if len(gate_proj_biases) > 0:
+            self.moeblock.expert_gate_proj_bias = nn.Parameter(torch.cat(gate_proj_biases, dim=0))
         else:
-            fc1_weights = torch.stack([exp.fc1.weight.data for exp in self.routed_experts])
-            fc2_weights = torch.stack([exp.fc2.weight.data for exp in self.routed_experts])
+            self.moeblock.expert_gate_proj_bias = None
 
-        inter_size = fc1_weights.shape[1] // 2
+        if len(up_proj_biases) > 0:
+            self.moeblock.expert_up_proj_bias = nn.Parameter(torch.cat(up_proj_biases, dim=0))
+        else:
+            self.moeblock.expert_up_proj_bias = None
 
-        # Create MoeBlock: gelu(gate_proj(x)) * up_proj(x) → down_proj
-        self._moeblock = MoeBlock("gelu", total_top_k, False)
-        self._moeblock.expert_gate_proj_weight = nn.Parameter(fc1_weights[:, :inter_size, :].contiguous())
-        self._moeblock.expert_up_proj_weight = nn.Parameter(fc1_weights[:, inter_size:, :].contiguous())
-        self._moeblock.expert_down_proj_weight = nn.Parameter(fc2_weights.contiguous())
-        self._moeblock.expert_gate_proj_bias = None
+        if len(down_proj_biases) > 0:
+            self.moeblock.expert_down_proj_bias = nn.Parameter(torch.cat(down_proj_biases, dim=0))
+        else:
+            self.moeblock.expert_down_proj_bias = None
 
-        # Clean up original modules
-        del self.routed_experts
-        del self.router
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # del self.routed_experts
+        # torch.cuda.empty_cache()
 
         return self
 
@@ -443,8 +680,17 @@ class _IPTMoE(DynamicModule):
 # ---------------------------------------------------------------------------
 # IPTDecoderLayer
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTDecoderLayerBase(DynamicModule, IPTDecoderLayer):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTDecoderLayerBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTDecoderLayer: "IPTDecoderLayer"})
-class _IPTDecoderLayer(DynamicModule):
+class _IPTDecoderLayer(_IPTDecoderLayerBase):
     def graph_forward(
         self,
         hidden_states: torch.Tensor,
@@ -455,7 +701,7 @@ class _IPTDecoderLayer(DynamicModule):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
-        orig_dtype = hidden_states.dtype
+
         residual = hidden_states
         hidden_states = self.layer_norm(hidden_states)
 
@@ -468,13 +714,13 @@ class _IPTDecoderLayer(DynamicModule):
             past_v_cache=past_v_cache,
             position_embeddings=position_embeddings,
         )
-        hidden_states = (residual.float() + hidden_states.float()).to(orig_dtype)
+        hidden_states = residual + hidden_states
 
         # Feed-forward (dense MLP or MoE)
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = (residual.float() + hidden_states.float()).to(orig_dtype)
+        hidden_states = residual + hidden_states
 
         return (hidden_states,)
 
@@ -485,25 +731,29 @@ class _IPTDecoderLayer(DynamicModule):
 
 
 # ---------------------------------------------------------------------------
-# IPTModel
+# _IPTDecoder
 # ---------------------------------------------------------------------------
-@XHLLM_TRACEABLE_MODULES.register_module({IPTModel: "IPTModel"})
-class _IPTModel(DynamicModule):
+if TYPE_CHECKING:
+
+    class _IPTDecoderBase(DynamicModule, IPTDecoder):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTDecoderBase = DynamicModule
+
+
+@XHLLM_TRACEABLE_MODULES.register_module({IPTDecoder: "IPTDecoder"})
+class _IPTDecoder(_IPTDecoderBase):
     def graph_forward(
         self,
-        inputs_embeds: torch.FloatTensor | None = None,
+        hidden_states: torch.FloatTensor | None = None,
         past_seq_length: Tensor | None = None,
         current_input_length: Tensor | None = None,
         past_key_cache: list[Tensor] | None = None,
         past_value_cache: list[Tensor] | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> Tensor:
-        hidden_states = inputs_embeds
-
-        cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
-        sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
-        position_embeddings = (cos, sin)
-
-        for idx, decoder_layer in enumerate(self.transformer.layers):
+        for idx, decoder_layer in enumerate(self.layers):
             if self.use_cache:
                 _past_k_cache = past_key_cache[idx]
                 _past_v_cache = past_value_cache[idx]
@@ -527,7 +777,70 @@ class _IPTModel(DynamicModule):
         if self.num_logits_to_keep != 0:
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
 
-        hidden_states = self.transformer.layernorm(hidden_states)
+        hidden_states = self.layernorm(hidden_states)
+        return hidden_states
+
+    def _setup(self, cfg: dict | None = None):
+        self.only_first_block = cfg.get("only_first_block", False)
+        self.max_layers = 1 if self.only_first_block else -1
+        if "max_layers" in cfg:
+            self.max_layers = cfg.max_layers
+        self.use_cache = cfg.use_cache
+        self.num_logits_to_keep = cfg.num_logits_to_keep
+        assert self.num_logits_to_keep in [0, 1]
+
+        input_sequence_length = cfg.input_sequence_length
+
+        self.llm_gather = xhnn.BatchGather(1)
+        self.llm_gather.update_offset_indices(1, input_sequence_length)
+
+        def _llm_gather_update_cfg(self: xhnn.BatchGather, cfg: Optional[dict] = None):
+            input_seq_len = cfg.input_sequence_length
+            batch_size = cfg.get("batch_size", 1)
+            self.update_offset_indices(batch_size, input_seq_len)
+
+        self.llm_gather._update_cfg = types.MethodType(_llm_gather_update_cfg, self.llm_gather)
+
+        # self.use_cache = cfg.use_cache
+
+
+# ---------------------------------------------------------------------------
+# IPTModel
+# ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTModelBase(DynamicModule, IPTModel):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTModelBase = DynamicModule
+
+
+@XHLLM_TRACEABLE_MODULES.register_module({IPTModel: "IPTModel"})
+class _IPTModel(_IPTModelBase):
+    def graph_forward(
+        self,
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_seq_length: Tensor | None = None,
+        current_input_length: Tensor | None = None,
+        past_key_cache: list[Tensor] | None = None,
+        past_value_cache: list[Tensor] | None = None,
+    ) -> Tensor:
+        hidden_states = inputs_embeds
+
+        cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
+        sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
+        position_embeddings = (cos, sin)
+
+        hidden_states = self.transformer(
+            hidden_states,
+            current_input_length=current_input_length,
+            past_seq_length=past_seq_length,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            position_embeddings=position_embeddings,
+        )
+
         return hidden_states
 
     def _setup_cos_sin_embedding(self):
@@ -539,34 +852,7 @@ class _IPTModel(DynamicModule):
             get_root_logger().warning("Cosine/sine caches are not set. Positional embeddings may be incorrect.")
 
     def _setup(self, cfg: dict | None = None):
-        self.only_first_block = cfg.get("only_first_block", False)
-        self.max_layers = 1 if self.only_first_block else -1
-        if "max_layers" in cfg:
-            self.max_layers = cfg.max_layers
-
-        self.num_logits_to_keep = cfg.num_logits_to_keep
-        assert self.num_logits_to_keep in [0, 1]
-
         input_sequence_length = cfg.input_sequence_length
-
-        self.slice = xhnn.Slice([0], [input_sequence_length], [1], [1])
-        self.llm_gather = xhnn.BatchGather(1)
-        self.llm_gather.update_offset_indices(1, input_sequence_length)
-
-        def _llm_gather_update_cfg(self: xhnn.BatchGather, cfg: Optional[dict] = None):
-            input_seq_len = cfg.input_sequence_length
-            batch_size = cfg.get("batch_size", 1)
-            self.update_offset_indices(batch_size, input_seq_len)
-
-        self.llm_gather._update_cfg = types.MethodType(_llm_gather_update_cfg, self.llm_gather)
-
-        def _slice_update_cfg(self, cfg: Optional[dict] = None):
-            input_seq_len = cfg.input_sequence_length
-            self.ends = [input_seq_len]
-
-        self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
-
-        self.use_cache = cfg.use_cache
 
         self.sin_slice = xhnn.DynamicSlice([input_sequence_length], [2], [1])
         self.cos_slice = xhnn.DynamicSlice([input_sequence_length], [2], [1])
@@ -577,10 +863,6 @@ class _IPTModel(DynamicModule):
 
         self.sin_slice._update_cfg = types.MethodType(_sin_cos_slice_update_cfg, self.sin_slice)
         self.cos_slice._update_cfg = types.MethodType(_sin_cos_slice_update_cfg, self.cos_slice)
-
-        # Create aliases expected by text_llm_model._wraped_post
-        self.layers = self.transformer.layers
-        self.norm = self.transformer.layernorm
 
         if not hasattr(self.rotary_emb, "cos_cached"):
             self.rotary_emb.setup_after_callback = self._setup_cos_sin_embedding
@@ -593,8 +875,17 @@ class _IPTModel(DynamicModule):
 # ---------------------------------------------------------------------------
 # IPTForCausalLM
 # ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+
+    class _IPTForCausalLMBase(DynamicModule, IPTForCausalLM):  # type: ignore[misc]
+        ...
+
+else:
+    _IPTForCausalLMBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module({IPTForCausalLM: "IPTForCausalLM"})
-class _IPTForCausalLM(DynamicModule):
+class _IPTForCausalLM(_IPTForCausalLMBase):
     def graph_forward(
         self,
         inputs_embeds: Tensor | None = None,

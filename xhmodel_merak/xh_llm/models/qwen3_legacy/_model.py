@@ -2,7 +2,7 @@ import math
 import sys
 import types
 from copy import deepcopy
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -26,12 +26,21 @@ from xhquant.utils.registry import DynamicModule
 from ...register import XHLLM_TRACEABLE_MODULES
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3RotaryEmbeddingBase(DynamicModule, Qwen3RotaryEmbedding):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3RotaryEmbeddingBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3RotaryEmbedding: "Qwen3RotaryEmbedding",
     }
 )
-class _Qwen3RotaryEmbedding(DynamicModule):
+class _Qwen3RotaryEmbedding(_Qwen3RotaryEmbeddingBase):
     def _setup(self, cfg: dict | None = None):
         assert "dynamic" not in self.rope_type, f"{self.rope_type} is not supported in dynamic mode"
         max_seq_len = cfg.context_max_length
@@ -126,12 +135,21 @@ class _Qwen3RotaryEmbedding(DynamicModule):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3AttentionBase(DynamicModule, Qwen3Attention):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3AttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3Attention: "Qwen3Attention",
     }
 )
-class _Qwen3Attention(DynamicModule):
+class _Qwen3Attention(_Qwen3AttentionBase):
     def rotate_half(self, x: Tensor):
         """Rotates half the hidden dims of the input."""
         # x1 = x[..., : x.shape[-1] // 2]
@@ -288,12 +306,21 @@ class _Qwen3Attention(DynamicModule):
         return self
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3DecoderLayerBase(DynamicModule, Qwen3DecoderLayer):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3DecoderLayerBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3DecoderLayer: "Qwen3DecoderLayer",
     }
 )
-class _Qwen3DecoderLayer(DynamicModule):
+class _Qwen3DecoderLayer(_Qwen3DecoderLayerBase):
     def graph_forward(
         self,
         hidden_states: torch.Tensor,
@@ -358,12 +385,21 @@ class _Qwen3DecoderLayer(DynamicModule):
         return self
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3RMSNormBase(DynamicModule, Qwen3RMSNorm):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3RMSNormBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3RMSNorm: "Qwen3RMSNorm",
     }
 )
-class _Qwen3RMSNorm(DynamicModule):
+class _Qwen3RMSNorm(_Qwen3RMSNormBase):
     def forward(self, hidden_states):
         return self.norm(hidden_states)
 
@@ -374,12 +410,21 @@ class _Qwen3RMSNorm(DynamicModule):
         return self
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3ModelBase(DynamicModule, Qwen3Model):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3ModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3Model: "Qwen3Model",
     }
 )
-class _Qwen3Model(DynamicModule):
+class _Qwen3Model(_Qwen3ModelBase):
     def graph_forward(
         self,
         # position_ids: torch.LongTensor | None = None,
@@ -510,12 +555,21 @@ class _Qwen3Model(DynamicModule):
         return self
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3ForCausalLMBase(DynamicModule, Qwen3ForCausalLM):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3ForCausalLMBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
         Qwen3ForCausalLM: "Qwen3ForCausalLM",
     }
 )
-class _Qwen3ForCausalLM(DynamicModule):
+class _Qwen3ForCausalLM(_Qwen3ForCausalLMBase):
     def graph_forward(
         self,
         # position_ids: Tensor | None = None,

@@ -461,32 +461,14 @@ class BaseLLMModel(XHBaseModel):
     def get_tf_processor(self):
         return XHLLMModelProcessor.from_pretraind(self.hf_model_dir)
 
-    def __call__(self, *args, **kwargs) -> Any:
-        infer_model = None
-        if self._state == LLMModelState.NONE:
-            raise RuntimeError("Model is not ready for generation, please set state to fronted or quanted.")
-        elif self._state in [LLMModelState.EAGER_FAST, LLMModelState.EAGER_ALIGNED]:
-            infer_model = self._wrap_model
-        else:
-            if self.hf_compatible_model is None:
-                hf_model = self.get_empty_hf_model(self.hf_model_dir)
-                # 从类中直接获取函数，避免自动绑定 self
-                hf_compatible_model = type(self).build_hf_compatible_model(hf_model, self)
-                assert isinstance(hf_compatible_model, self.get_hf_model_cls())
-                hf_compatible_model.to(device=self.device, dtype=self.dtype)
-                self.hf_compatible_model = hf_compatible_model
-            infer_model = self.hf_compatible_model
-        assert infer_model is not None
-        kwargs["use_cache"] = self.config.use_cache
-        out = infer_model.forward(*args, **kwargs)
-        return out
-
     @classmethod
     def _get_hf_model_for_compatible(cls, hf_model_dir=None):
         return cls.get_empty_hf_model(hf_model_dir)
 
     def generate(self, *args, **kwargs):
         infer_model = None
+        old_enable_hf_compatible = self.enable_hf_compatible
+        self.enable_hf_compatible = True
         if self._state == LLMModelState.NONE:
             raise RuntimeError("Model is not ready for generation, please set state to fronted or quanted.")
         elif self._state in [LLMModelState.EAGER_FAST, LLMModelState.EAGER_ALIGNED]:
@@ -503,6 +485,7 @@ class BaseLLMModel(XHBaseModel):
             infer_model = self.hf_compatible_model
         assert infer_model is not None
         out = infer_model.generate(*args, **kwargs)
+        self.enable_hf_compatible = old_enable_hf_compatible
         return out
 
     def update_cfg(self, cfg: ConfigDict | None):

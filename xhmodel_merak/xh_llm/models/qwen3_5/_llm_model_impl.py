@@ -10,7 +10,7 @@ Combines:
 import importlib
 import math
 import types
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -558,8 +558,17 @@ def _compute_qwen3_5_rotary_cache(
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5TextRMSNormBase(DynamicModule, Qwen3_5RMSNorm):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5TextRMSNormBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5RMSNorm, "Qwen3_5RMSNorm"))
-class _Qwen3_5TextRMSNorm(DynamicModule):  # noqa: N801
+class _Qwen3_5TextRMSNorm(_Qwen3_5TextRMSNormBase):  # noqa: N801
     """Wrap Qwen3_5RMSNorm.
 
     Qwen3.5 uses ``(1 + weight)`` style normalization (weight init = 0).
@@ -582,8 +591,17 @@ if FusedRMSNormGated is not None:
     _rms_norm_gated_registry[FusedRMSNormGated] = "FusedRMSNormGated"
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5RMSNormGatedBase(DynamicModule, Qwen3_5RMSNormGated):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5RMSNormGatedBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_rms_norm_gated_registry)
-class _Qwen3_5RMSNormGated(DynamicModule):  # noqa: N801
+class _Qwen3_5RMSNormGated(_Qwen3_5RMSNormGatedBase):  # noqa: N801
     """Wrap Qwen3_5RMSNormGated / FusedRMSNormGated used inside GatedDeltaNet.
 
     Original forward: ``silu(gate) * x → norm → scale(weight+1)``.
@@ -611,8 +629,17 @@ class _Qwen3_5RMSNormGated(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5TextRotaryEmbeddingBase(DynamicModule, Qwen3_5TextRotaryEmbedding):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5TextRotaryEmbeddingBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5TextRotaryEmbedding, "Qwen3_5TextRotaryEmbedding"))
-class _Qwen3_5TextRotaryEmbedding(DynamicModule):  # noqa: N801
+class _Qwen3_5TextRotaryEmbedding(_Qwen3_5TextRotaryEmbeddingBase):  # noqa: N801
     """Pre-compute cos/sin cache for M-RoPE.
 
     Unlike the HF model which applies interleaved mrope at forward time,
@@ -662,8 +689,17 @@ class _Qwen3_5TextRotaryEmbedding(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5TextAttentionBase(DynamicModule, Qwen3_5Attention):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5TextAttentionBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5Attention, "Qwen3_5Attention"))
-class _Qwen3_5TextAttention(DynamicModule):  # noqa: N801
+class _Qwen3_5TextAttention(_Qwen3_5TextAttentionBase):  # noqa: N801
     """Qwen3.5 full attention with gating mechanism.
 
     q_proj outputs ``query + gate`` (2× heads), attention result is
@@ -800,8 +836,17 @@ class _Qwen3_5TextAttention(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5GatedDeltaNetBase(DynamicModule, Qwen3_5GatedDeltaNet):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5GatedDeltaNetBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5GatedDeltaNet, "Qwen3_5GatedDeltaNet"))
-class _Qwen3_5GatedDeltaNet(DynamicModule):  # noqa: N801
+class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
     """Qwen3.5 GatedDeltaNet linear attention wrapper.
 
     Key difference from Qwen3Next: Qwen3.5 uses **separate** projections
@@ -1074,8 +1119,17 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5DecoderLayerBase(DynamicModule, Qwen3_5DecoderLayer):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5DecoderLayerBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5DecoderLayer, "Qwen3_5DecoderLayer"))
-class _Qwen3_5DecoderLayer(DynamicModule):  # noqa: N801
+class _Qwen3_5DecoderLayer(_Qwen3_5DecoderLayerBase):  # noqa: N801
     """Dispatches between linear_attention and full_attention layers."""
 
     def forward(
@@ -1133,8 +1187,17 @@ class _Qwen3_5DecoderLayer(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5TextModelBase(DynamicModule, Qwen3_5TextModel):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5TextModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5TextModel, "Qwen3_5TextModel"))
-class _Qwen3_5TextModel(DynamicModule):  # noqa: N801
+class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
     """Qwen3.5 TextModel with M-RoPE interleaved position encoding.
 
     Position encoding approach (from Qwen3VL adaptation):
@@ -1421,8 +1484,17 @@ class _Qwen3_5TextModel(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5ModelBase(DynamicModule, Qwen3_5Model):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5ModelBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5Model, "Qwen3_5Model"))
-class _Qwen3_5Model(DynamicModule):  # noqa: N801
+class _Qwen3_5Model(_Qwen3_5ModelBase):  # noqa: N801
     """Wrapper for Qwen3_5Model. Deletes visual module for LLM-only export."""
 
     def _setup(self, cfg):
@@ -1464,10 +1536,19 @@ class _Qwen3_5Model(DynamicModule):  # noqa: N801
 # ============================================================================
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5ForConditionalGenerationBase(DynamicModule, Qwen3_5ForConditionalGeneration):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5ForConditionalGenerationBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(
     _with_hf_alias(Qwen3_5ForConditionalGeneration, "Qwen3_5ForConditionalGeneration")
 )
-class _Qwen3_5ForConditionalGeneration(DynamicModule):  # noqa: N801
+class _Qwen3_5ForConditionalGeneration(_Qwen3_5ForConditionalGenerationBase):  # noqa: N801
     """Top-level wrapper. Calls language_model.forward() directly, adds lm_head."""
 
     def _setup(self, cfg):
@@ -1504,8 +1585,17 @@ class _Qwen3_5ForConditionalGeneration(DynamicModule):  # noqa: N801
         return logits, conv_cache_out_list, recurrent_state_out_list
 
 
+if TYPE_CHECKING:
+
+    class _Qwen3_5ForCausalLMBase(DynamicModule, Qwen3_5ForCausalLM):  # type: ignore[misc]
+        ...
+
+else:
+    _Qwen3_5ForCausalLMBase = DynamicModule
+
+
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5ForCausalLM, "Qwen3_5ForCausalLM"))
-class _Qwen3_5ForCausalLM(DynamicModule):  # noqa: N801
+class _Qwen3_5ForCausalLM(_Qwen3_5ForCausalLMBase):  # noqa: N801
     """Top-level wrapper for text-only Qwen3.5 models."""
 
     def _setup(self, cfg):

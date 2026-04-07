@@ -85,6 +85,7 @@ class LLMInferenceContextManager(KVCacheContextManager):
     def __enter__(self):
         super().__enter__()
         self._model.prepare_for_inference()
+        return self._model
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
