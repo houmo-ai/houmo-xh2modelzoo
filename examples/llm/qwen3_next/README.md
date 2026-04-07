@@ -50,6 +50,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 python \
   examples/llm/qwen3_next/qwen3_next_xh2a_export_hmonnx.py \
   --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse \
+  --work_dir work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse-20260330 \
   --valid \
   --golden \
   --golden_multi_gpu
@@ -62,9 +63,11 @@ export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 python \
   examples/llm/qwen3_next/qwen3_next_xh2a_export_hmonnx.py \
-  --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct \
+  --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse \
+  --work_dir work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse-20260327 \
   --golden \
-  --golden_multi_gpu
+  --golden_multi_gpu \
+  --package_release
 ```
 
 ### 关键参数说明
@@ -117,9 +120,10 @@ export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 python \
   examples/llm/qwen3_next/qwen3_next_xh2a_demo.py \
-  --config work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct/meta.json \
+  --config work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse-20260330/export_meta_info.json \
   --prompt "你好，请介绍一下你自己" \
-  --max-new-tokens 256
+  --max-new-tokens 256 \
+  --resource-tight-mode
 ```
 
 ### Benchmark 测试
@@ -129,7 +133,7 @@ export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4
 python \
   examples/llm/qwen3_next/qwen3_next_xh2a_hmonnx_test.py \
-  --config work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct/meta.json \
+  --config work_dirs/qwen3_next_80b_a3b_instruct/qwen3_next_80b_a3b_instruct_xh2a_Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse-20260327/export_meta_info.json \
   --prompt "你好，请介绍一下你自己" \
   --max-new-tokens 32 \
   --resource-tight-mode
