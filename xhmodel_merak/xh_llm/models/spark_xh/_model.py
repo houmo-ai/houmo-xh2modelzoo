@@ -129,36 +129,42 @@ else:
 @XHLLM_TRACEABLE_MODULES.register_module({IPTMLP: "IPTMLP"})
 class _IPTMLP(_IPTMLPBase):
     def forward(self, x: Tensor):
-        if self.clamp_input_value > 0:
-            x = torch.clamp_(x, -self.clamp_input_value, self.clamp_input_value)
-        intermediate_parallel = self.fc1(x)
-
-        intermediate_parallel1, intermediate_parallel2 = torch.chunk(intermediate_parallel, 2, dim=-1)
-        intermediate_parallel1 = intermediate_parallel1.squeeze(-1)
-        intermediate_parallel2 = intermediate_parallel2.squeeze(-1)
-        intermediate_parallel1 = self.act_fn(intermediate_parallel1)
-        intermediate_parallel = intermediate_parallel1 * intermediate_parallel2
-
         # if self.clamp_input_value > 0:
-        #     intermediate_parallel = torch.clamp_(intermediate_parallel, -self.clamp_input_value, self.clamp_input_value)
-        output = self.fc2(intermediate_parallel)
-        return output
-        # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        # return down_proj
+        #     x = torch.clamp_(x, -self.clamp_input_value, self.clamp_input_value)
+        # intermediate_parallel = self.fc1(x)
+
+        # intermediate_parallel1, intermediate_parallel2 = torch.chunk(intermediate_parallel, 2, dim=-1)
+        # intermediate_parallel1 = intermediate_parallel1.squeeze(-1)
+        # intermediate_parallel2 = intermediate_parallel2.squeeze(-1)
+        # intermediate_parallel1 = self.act_fn(intermediate_parallel1)
+        # intermediate_parallel = intermediate_parallel1 * intermediate_parallel2
+
+        # # if self.clamp_input_value > 0:
+        # #     intermediate_parallel = torch.clamp_(intermediate_parallel, -self.clamp_input_value, self.clamp_input_value)
+        # output = self.fc2(intermediate_parallel)
+        # return output
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
 
     def _setup(self, cfg: dict | None = None):
-        # self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        # self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        # self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        # self.gate_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        # self.up_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        # self.down_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        # with torch.no_grad():
-        #     self.gate_proj.weight.copy_(self.fc1.weight.data[: self.intermediate_size, :])
-        #     self.up_proj.weight.copy_(self.fc1.weight.data[self.intermediate_size :, :])
-        #     self.down_proj.weight.copy_(self.fc2.weight.data)
-        # del self.fc1
-        # del self.fc2
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.fc1.bias is not None)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.fc1.bias is not None)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.fc2.bias is not None)
+        self.gate_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        self.up_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        self.down_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
+        with torch.no_grad():
+            self.gate_proj.weight.copy_(self.fc1.weight.data[: self.intermediate_size, :])
+            self.up_proj.weight.copy_(self.fc1.weight.data[self.intermediate_size :, :])
+            self.down_proj.weight.copy_(self.fc2.weight.data)
+            if self.fc1.bias is not None:
+                self.gate_proj.bias.copy_(self.fc1.bias.data[: self.intermediate_size])
+                self.up_proj.bias.copy_(self.fc1.bias.data[self.intermediate_size :])
+            if self.fc2.bias is not None:
+                self.down_proj.bias.copy_(self.fc2.bias.data)
+
+        del self.fc1
+        del self.fc2
 
         return self
 
@@ -593,7 +599,7 @@ class _IPTMoE(_IPTMoEBase):
             routing_weights = logits.sigmoid()  # [num_tokens, groups, num_routed_experts_per_group]
             routing_weights = routing_weights.view(batch_size, sequence_length, self.num_experts)
             routing_weights = routing_weights.to(hidden_states.dtype)
-            hidden_states = self.moeblock(hidden_states, routing_weights, fast_mode=False)
+            hidden_states = self.moeblock(hidden_states, routing_weights)
             hidden_states = hidden_states * self.router.routed_scaling_factor
 
         if self.shared_experts:
@@ -632,19 +638,31 @@ class _IPTMoE(_IPTMoEBase):
 
         with torch.no_grad():
             for expert in expert_modules:
-                gate_proj_weight = expert.fc1.weight.data[: expert.intermediate_size, :].unsqueeze(0)
-                up_proj_weight = expert.fc1.weight.data[expert.intermediate_size :, :].unsqueeze(0)
-                down_proj_weight = expert.fc2.weight.data.unsqueeze(0)
+                if hasattr(expert, "fc1"):
+                    gate_proj_weight = expert.fc1.weight.data[: expert.intermediate_size, :].unsqueeze(0)
+                    up_proj_weight = expert.fc1.weight.data[expert.intermediate_size :, :].unsqueeze(0)
+                    down_proj_weight = expert.fc2.weight.data.unsqueeze(0)
+                else:
+                    gate_proj_weight = expert.gate_proj.weight.data.unsqueeze(0)
+                    up_proj_weight = expert.up_proj.weight.data.unsqueeze(0)
+                    down_proj_weight = expert.down_proj.weight.data.unsqueeze(0)
+
                 gate_proj_weights.append(gate_proj_weight)
                 up_proj_weights.append(up_proj_weight)
                 down_proj_weights.append(down_proj_weight)
 
-                if expert.fc1.bias is not None:
+                if hasattr(expert, "fc1") and expert.fc1.bias is not None:
                     gate_proj_bias = expert.fc1.bias.data[: expert.intermediate_size].unsqueeze(0)
                     up_proj_bias = expert.fc1.bias.data[expert.intermediate_size :].unsqueeze(0)
                     gate_proj_biases.append(gate_proj_bias)
                     up_proj_biases.append(up_proj_bias)
-                if expert.fc2.bias is not None:
+                else:
+                    if hasattr(expert, "gate_proj") and expert.gate_proj.bias is not None:
+                        gate_proj_biases.append(expert.gate_proj.bias.data.unsqueeze(0))
+                    if hasattr(expert, "up_proj") and expert.up_proj.bias is not None:
+                        up_proj_biases.append(expert.up_proj.bias.data.unsqueeze(0))
+
+                if hasattr(expert, "fc2") and expert.fc2.bias is not None:
                     down_proj_bias = expert.fc2.bias.data.unsqueeze(0)
                     down_proj_biases.append(down_proj_bias)
 
@@ -671,8 +689,8 @@ class _IPTMoE(_IPTMoEBase):
         else:
             self.moeblock.expert_down_proj_bias = None
 
-        # del self.routed_experts
-        # torch.cuda.empty_cache()
+        del self.routed_experts
+        torch.cuda.empty_cache()
 
         return self
 

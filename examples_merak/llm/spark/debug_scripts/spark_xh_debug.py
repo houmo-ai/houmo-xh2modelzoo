@@ -125,7 +125,7 @@ if __name__ == "__main__":
         default="configs_merak/xh2a/llm_models/spark/30b/spark_xh_30b_xh2a_2k_2layers.py",
     )
     parser.add_argument("--model", type=str)
-    parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)
+    parser.add_argument("--eval-type", type=str, default="fronted", choices=eval_types)
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
