@@ -82,6 +82,7 @@ def parse_args():
         default="",
         help="Golden output directory. If empty, auto-generated from hmonnx path.",
     )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for LoRA weight initialization.")
     parser.add_argument("--debug", action="store_true", help="Enable xhquant debug mode.")
     parser.add_argument("--skip-hmonnx", action="store_true", help="Skip HMONNX conversion and golden generation.")
     parser.add_argument("--skip-golden", action="store_true", help="Skip golden generation.")
@@ -103,6 +104,8 @@ def pick_dinov3_qk_target_modules(model: torch.nn.Module) -> list[str]:
 
 def main():
     args = parse_args()
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
     device = torch.device("cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu")
 
     processor = AutoImageProcessor.from_pretrained(args.model_id, local_files_only=True)
