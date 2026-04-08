@@ -520,7 +520,28 @@ class XHBaseModel(DeviceMixin):
 
     @classmethod
     def _load_gptqmodel(cls, hf_model_dir: str, device_map="cpu", **kwargs):
-        from gptqmodel import GPTQModel
+        try:
+            from gptqmodel import GPTQModel
+        except ImportError:
+            candidate_roots = [
+                Path(hf_model_dir).resolve().parents[2] if len(Path(hf_model_dir).resolve().parents) >= 3 else None,
+                Path.home() / "gptqmodel",
+            ]
+            for candidate_root in candidate_roots:
+                if candidate_root is None:
+                    continue
+                package_init = candidate_root / "gptqmodel" / "__init__.py"
+                if package_init.exists():
+                    import sys
+
+                    if str(candidate_root) not in sys.path:
+                        sys.path.insert(0, str(candidate_root))
+                    sys.modules.pop("gptqmodel", None)
+                    from gptqmodel import GPTQModel
+
+                    break
+            else:
+                raise
 
         trust_remote_code = bool(kwargs.pop("trust_remote_code", True))
         backend = kwargs.pop("backend", "torch")

@@ -110,7 +110,15 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         """
         # 获取 embedding 文件路径
         quant_embedding_path = Path(meta.quant_embedding)
-        state_dict = torch.load(str(quant_embedding_path), map_location="cpu")
+        try:
+            loaded = torch.load(str(quant_embedding_path), map_location="cpu", weights_only=True)
+        except Exception:
+            loaded = torch.load(str(quant_embedding_path), map_location="cpu", weights_only=False)
+
+        if isinstance(loaded, nn.Embedding):
+            return loaded
+
+        state_dict = loaded
         vocab_size, hidden_size = state_dict["weight"].shape
         # 从 HuggingFace 配置获取 vocab_size 和 hidden_size
         config = AutoConfig.from_pretrained(meta.hf_config, trust_remote_code=True)
@@ -124,7 +132,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
 
         # 加载从文件中保存的 state_dict
         if quant_embedding_path.exists():
-            state_dict = torch.load(str(quant_embedding_path), map_location="cpu")
+            state_dict = loaded
             embed_tokens.load_state_dict(state_dict)
             logger = get_xhquant_logger()
             logger.info(f"Loaded quantized embedding from {quant_embedding_path}")
