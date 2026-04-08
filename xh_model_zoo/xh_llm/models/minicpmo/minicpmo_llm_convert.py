@@ -32,6 +32,7 @@ from moviepy import VideoFileClip
 from PIL import Image
 from transformers import AutoTokenizer
 import numpy as np
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from ..base_converter import HFTransfromersConverter
 from .minicpmo_llm_convert_config import MinicpmoLLMConvertConfig
@@ -52,7 +53,6 @@ from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.minicpmo.minicpmo_hf_compatible import MiniCPMO_HFCompatible
 from xh_model_zoo.utils.time_profiler import TimeProfiler
 from ..llm_base_model import LLMBaseModel
-from xh_model_zoo.xh_llm.utils import decode_next_token
 
 
 def cleanup_memory(verbos=True) -> None:
@@ -106,7 +106,11 @@ def get_video_chunk_content(video_path, flatten=True):
 
     return contents
 
-
+def decode_next_token(tokenizer: PreTrainedTokenizerBase, logits: torch.Tensor):
+    # logits: (batch_size, 1, vocab_size)
+    next_token_id = torch.argmax(logits, dim=-1)
+    next_token_str = tokenizer.batch_decode(next_token_id, skip_special_tokens=True)
+    return next_token_id, next_token_str
 
 def xhmodel_export_onnx(
     xh_model: LLMBaseModel,
