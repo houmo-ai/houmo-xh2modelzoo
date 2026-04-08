@@ -92,7 +92,7 @@ def test_qwen2(trace_method: Literal["FX", "DFX", "ONNX"], w_bit: int, a_bit: in
 
     torch.set_grad_enabled(False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    current_dir = Path(__file__).parent.parent.resolve()  
+    current_dir = Path(__file__).parent.parent.parent.resolve()  
     model_file = os.path.join(current_dir, "examples/llm/qwen3_legacy/qwen3_legacy_xh2a_export_hmonnx.py")
 
     # ========================== 检查并下载模型 ==========================
