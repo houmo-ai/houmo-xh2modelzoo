@@ -57,7 +57,7 @@ from transformers.utils import (
 from transformers.utils.import_utils import is_torch_fx_available
 import sys
 sys.path.append("/data01/home/xuchen/.cache/huggingface/modules/transformers_modules/kimi/") 
-from configuration_deepseek import DeepseekV3Config
+from .configuration_deepseek import DeepseekV3Config
 import torch.distributed as dist
 import numpy as np
 
