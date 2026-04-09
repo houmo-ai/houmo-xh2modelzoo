@@ -221,14 +221,17 @@ def main(args):
     # ---- 6. Optional validation ----
     if args.valid:
         logger.info("Validating vision HMONNX ...")
-        try:
-            session = _create_hmonnx_session(Path(vision_onnx_file))
-            output = session.forward(dummy_pixels.cpu().to(torch.float16))
-            if isinstance(output, (list, tuple)):
-                output = output[0]
-            logger.info(f"Vision HMONNX validation passed, output shape: {tuple(output.shape)}")
-        except Exception as e:
-            logger.warning(f"Vision HMONNX inference validation skipped: {e}")
+        session = _create_hmonnx_session(Path(vision_onnx_file))
+        output = session.forward(dummy_pixels.cpu().to(torch.float16))
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        logger.info(f"Vision HMONNX validation passed, output shape: {tuple(output.shape)}")
+        session = None
+        output = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
         if args.demo:
             try:

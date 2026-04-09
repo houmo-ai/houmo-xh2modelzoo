@@ -27,9 +27,23 @@ def test_expected_qwen3omni_examples_exist():
         "qwen3_omni_xh2a_export_talker_prediction.py",
         "qwen3_omni_xh2a_export_talker_projection.py",
         "qwen3_omni_xh2a_export_code2wav.py",
-        "qwen3_omni_onnx_golden.py",
         "qwen3_omni_demo.py",
         "qwen3_omni_hmonnx_forward.py",
+        "qwen3_omni_hmonnx_generate.py",
     ]
     for name in expected:
         assert (base / name).exists(), f"missing {name}"
+
+
+def test_talker_projection_export_uses_bundled_hmonnx_meta():
+    export_file = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_talker_projection.py")
+    text = export_file.read_text(encoding="utf-8")
+    assert "talker_projection_hmonnx" in text
+
+
+def test_talker_prediction_export_uses_single_asset_bundle_meta():
+    export_file = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_talker_prediction.py")
+    text = export_file.read_text(encoding="utf-8")
+    assert "talker_prediction_assets_file" in text
+    assert 'codec_dir = work_dir / "codec_embedding"' not in text
+    assert 'lm_head_dir = work_dir / "lm_head"' not in text

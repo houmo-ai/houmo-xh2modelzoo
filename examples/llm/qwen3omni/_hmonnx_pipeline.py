@@ -33,6 +33,18 @@ _HMONNX_RUNTIME_FIX_CACHE: Dict[str, Path] = {}
 _GIB = 1024**3
 
 
+def release_export_cuda_memory(logger=None, label: Optional[str] = None):
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    if logger is not None:
+        suffix = f" after {label}" if label else ""
+        logger.info(f"released export resources and cleared CUDA cache{suffix}")
+
+
 def _pick_best_validation_single_gpu(logger=None) -> Optional[str]:
     if not torch.cuda.is_available():
         return None
@@ -397,17 +409,22 @@ def load_json(file_path: Path) -> Dict[str, Any]:
         return json.load(file_obj)
 
 
-def _latest_matching(root_dir: Path, pattern: str, required_key: Optional[str] = None) -> Optional[Path]:
+def _latest_matching(root_dir: Path, pattern: str, required_key: Optional[Any] = None) -> Optional[Path]:
     candidates = sorted(root_dir.rglob(pattern), key=lambda item: item.stat().st_mtime, reverse=True)
     if required_key is None:
         return candidates[0] if candidates else None
+
+    if isinstance(required_key, (list, tuple, set)):
+        required_keys = tuple(required_key)
+    else:
+        required_keys = (required_key,)
 
     for candidate in candidates:
         try:
             meta = load_json(candidate)
         except Exception:
             continue
-        if required_key in meta:
+        if any(key in meta for key in required_keys):
             return candidate
     return None
 
@@ -420,7 +437,7 @@ def discover_artifacts(root_dir: Path) -> Dict[str, Dict[str, Any]]:
         "vision": ("meta_vision.json", "vision_encoder_onnx"),
         "talker": ("meta_talker.json", "talker_prefill_onnx"),
         "talker_prediction": ("meta_talker_prediction.json", "talker_prediction_prefill_onnx"),
-        "projection": ("meta_talker_projection.json", "hidden_projection_hmonnx"),
+        "projection": ("meta_talker_projection.json", ("talker_projection_hmonnx", "hidden_projection_hmonnx")),
         "code2wav": ("meta_code2wav.json", "code2wav_hmonnx"),
     }
     for key, (pattern, required_key) in mapping.items():
@@ -659,6 +676,68 @@ def _replace_projection(module, hmonnx_path: Path, name: str, logger):
     logger.info(f"{name} replaced with HMONNX: {hmonnx_path}")
 
 
+def _replace_projection_bundle(native_model, projection_hmonnx_path: Path, logger):
+    session = _create_hmonnx_session(projection_hmonnx_path)
+
+    def _patch_projection(module, output_index: int, name: str):
+        module._hmonnx_session = session
+        module._hmonnx_output_index = output_index
+        input_shape = getattr(session.inputs[0], "shape", None)
+        static_seq_len = None
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 2:
+            try:
+                static_seq_len = int(input_shape[1])
+            except (TypeError, ValueError):
+                static_seq_len = None
+
+        def forward(self, hidden_states):
+            original_shape = hidden_states.shape
+            try:
+                if hidden_states.ndim == 2:
+                    hidden_states = hidden_states.unsqueeze(0)
+
+                hmonnx_input = hidden_states.cpu().to(torch.float16)
+                if static_seq_len is not None and static_seq_len > 0 and hmonnx_input.shape[1] != static_seq_len:
+                    outputs = []
+                    for i in range(hmonnx_input.shape[1]):
+                        step_in = hmonnx_input[:, i : i + 1, :]
+                        step_outputs = self._hmonnx_session.forward(step_in)
+                        if not isinstance(step_outputs, (list, tuple)) or len(step_outputs) <= self._hmonnx_output_index:
+                            raise RuntimeError("Projection bundle returned unexpected outputs")
+                        step_out = step_outputs[self._hmonnx_output_index]
+                        step_out = _ensure_tensor(step_out, hidden_states.device, hidden_states.dtype)
+                        if step_out.ndim == 2:
+                            step_out = step_out.unsqueeze(1)
+                        elif step_out.ndim == 1:
+                            step_out = step_out.unsqueeze(0).unsqueeze(0)
+                        outputs.append(step_out)
+                    out = torch.cat(outputs, dim=1)
+                else:
+                    bundle_outputs = self._hmonnx_session.forward(hmonnx_input)
+                    if not isinstance(bundle_outputs, (list, tuple)) or len(bundle_outputs) <= self._hmonnx_output_index:
+                        raise RuntimeError("Projection bundle returned unexpected outputs")
+                    out = bundle_outputs[self._hmonnx_output_index]
+                    out = _ensure_tensor(out, hidden_states.device, hidden_states.dtype)
+                    if out.ndim == 2:
+                        out = out.unsqueeze(1)
+                    elif out.ndim == 1:
+                        out = out.unsqueeze(0).unsqueeze(0)
+
+                if len(original_shape) == 2 and out.shape[0] == 1:
+                    out = out.squeeze(0)
+
+                return out
+            except Exception as e:
+                print(f"[ERROR] {name} forward failed: input_shape={original_shape}, error={e}")
+                raise
+
+        module.forward = types.MethodType(forward, module)
+        logger.info(f"{name} replaced with projection bundle output {output_index}: {projection_hmonnx_path}")
+
+    _patch_projection(native_model.talker.hidden_projection, 0, "hidden_projection")
+    _patch_projection(native_model.talker.text_projection, 1, "text_projection")
+
+
 def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], vision_hmonnx_path: Optional[Path], logger):
     thinker = native_model.thinker
     thinker.forward = types.MethodType(Qwen3OmniMoeThinkerForConditionalGeneration_forward, thinker)
@@ -892,18 +971,25 @@ def apply_artifact_replacements(native_model, artifacts: Dict[str, Dict[str, Any
 
     if "projection" in artifacts:
         projection_meta = artifacts["projection"]
-        _replace_projection(
-            native_model.talker.hidden_projection,
-            _resolve_meta_path(projection_meta, "hidden_projection_hmonnx"),
-            "hidden_projection",
-            logger,
-        )
-        _replace_projection(
-            native_model.talker.text_projection,
-            _resolve_meta_path(projection_meta, "text_projection_hmonnx"),
-            "text_projection",
-            logger,
-        )
+        if "talker_projection_hmonnx" in projection_meta:
+            _replace_projection_bundle(
+                native_model,
+                _resolve_meta_path(projection_meta, "talker_projection_hmonnx"),
+                logger,
+            )
+        else:
+            _replace_projection(
+                native_model.talker.hidden_projection,
+                _resolve_meta_path(projection_meta, "hidden_projection_hmonnx"),
+                "hidden_projection",
+                logger,
+            )
+            _replace_projection(
+                native_model.talker.text_projection,
+                _resolve_meta_path(projection_meta, "text_projection_hmonnx"),
+                "text_projection",
+                logger,
+            )
 
     audio_hmonnx_path = None
     if "audio" in artifacts:
@@ -1091,12 +1177,14 @@ def run_text_hmonnx_chain_forward(
     device_map: str = "auto",
 ):
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device_map = _resolve_validation_device_map(device_map, logger)
+    if logger is not None and device_map != "cpu":
+        logger.info(
+            f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}"
+        )
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
-        device_map=device_map,
+        device_map="cpu",
         attn_implementation="eager",
         trust_remote_code=True,
     )

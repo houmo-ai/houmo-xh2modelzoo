@@ -1,8 +1,9 @@
+import gc
 import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,16 @@ from xhquant.api import (  # isort:skip
     get_root_logger,
     is_ssfp_quant_config,
 )
+
+
+def _release_cuda_memory(logger=None, label: Optional[str] = None):
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    if logger is not None:
+        suffix = f" after {label}" if label else ""
+        logger.info(f"released converter resources and cleared CUDA cache{suffix}")
 
 
 class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
@@ -60,10 +71,8 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         talker = native_model.talker if hasattr(native_model, 'talker') else None
         token2wav = native_model.token2wav if hasattr(native_model, 'token2wav') else None
 
-        # Don't delete yet - we'll use them for export
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Keep the component references for export, but release any stale CUDA cache first.
+        _release_cuda_memory(logger, "model load")
 
         # Load quantisation weights if available
         resume_from = config.quant_weight
@@ -289,6 +298,24 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         with open(work_dir / "meta.json", "w") as f:
             json.dump(meta_info, f, indent=4)
         logger.info(f"Conversion complete. Artifacts in {work_dir}")
+
+        lm_head = None
+        token_embedding = None
+        quanted_model = None
+        wrapped_model = None
+        past_key_caches = None
+        past_value_caches = None
+        inputs_embeds = None
+        deepstack_visual_embed_0 = None
+        deepstack_visual_embed_1 = None
+        deepstack_visual_embed_2 = None
+        token2wav = None
+        talker = None
+        visual = None
+        audio_tower = None
+        thinker = None
+        native_model = None
+        _release_cuda_memory(logger, "converter export")
 
     def _export_audio_encoder(self, audio_tower, work_dir, meta_info, config, quant_config, 
                              model_name, target_device, quant_type):

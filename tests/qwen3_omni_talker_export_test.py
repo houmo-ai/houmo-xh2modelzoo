@@ -103,6 +103,14 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
     fake_transformers.Qwen3OmniMoeForConditionalGeneration = model_class
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
+    fake_soundfile = types.ModuleType("soundfile")
+
+    def _fake_write(path, *args, **kwargs):
+        Path(path).write_bytes(b"stub")
+
+    fake_soundfile.write = _fake_write
+    monkeypatch.setitem(sys.modules, "soundfile", fake_soundfile)
+
     fake_api = types.ModuleType("xhquant.api")
     fake_api.CacheTensor = lambda value: value
     monkeypatch.setitem(sys.modules, "xhquant.api", fake_api)

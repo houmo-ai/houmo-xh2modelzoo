@@ -20,6 +20,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import discover_artifacts, run_text_hmonnx_chain_forward
+
+try:
+    from _hmonnx_pipeline import release_export_cuda_memory
+except ImportError:
+    def release_export_cuda_memory(logger=None, label=None):
+        return None
 from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen3_omni import Qwen3OmniMoeConvertConfig
 
@@ -68,6 +74,7 @@ def main(args):
                 hf_model_path, "Qwen3OmniMoeForConditionalGeneration", config, str(work_dir)
             )
         logger.info(f"Text module export complete. Artifacts in {work_dir}")
+        release_export_cuda_memory(logger, "text export")
 
     if args.valid:
         artifacts = discover_artifacts(work_dir)
@@ -94,8 +101,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
     parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quantization type")
-    parser.add_argument("--context-length", type=int, default=2048)
-    parser.add_argument("--input-sequence-length", type=int, default=256)
+    parser.add_argument("--context-length", type=int, default=512)
+    parser.add_argument("--input-sequence-length", type=int, default=32)
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
     parser.add_argument("--quant-weight", type=str, default=None, help="path to quant weight (gptq/quarot)")
     parser.add_argument("--max-new-tokens", type=int, default=64)

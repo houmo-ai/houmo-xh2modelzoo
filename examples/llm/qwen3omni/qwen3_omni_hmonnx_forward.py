@@ -95,14 +95,23 @@ def _run_talker_prediction_forward(meta, report):
 
 
 def _run_projection_forward(meta, report):
-    hidden_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["hidden_projection_hmonnx"]))
-    text_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["text_projection_hmonnx"]))
     hidden_size = int(meta["hidden_size"])
     sample = torch.randn(1, 1, hidden_size, dtype=torch.float16)
-    hidden_out = hidden_projection.forward(sample)
-    text_out = text_projection.forward(sample)
-    hidden_tensor = hidden_out[0] if isinstance(hidden_out, (list, tuple)) else hidden_out
-    text_tensor = text_out[0] if isinstance(text_out, (list, tuple)) else text_out
+
+    if "talker_projection_hmonnx" in meta:
+        projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_projection_hmonnx"]))
+        outputs = projection.forward(sample)
+        if not isinstance(outputs, (list, tuple)) or len(outputs) != 2:
+            raise RuntimeError("talker projection bundle forward expected two outputs")
+        hidden_tensor, text_tensor = outputs
+    else:
+        hidden_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["hidden_projection_hmonnx"]))
+        text_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["text_projection_hmonnx"]))
+        hidden_out = hidden_projection.forward(sample)
+        text_out = text_projection.forward(sample)
+        hidden_tensor = hidden_out[0] if isinstance(hidden_out, (list, tuple)) else hidden_out
+        text_tensor = text_out[0] if isinstance(text_out, (list, tuple)) else text_out
+
     report["projection"] = {
         "status": "ok",
         "hidden_projection_shape": list(hidden_tensor.shape),

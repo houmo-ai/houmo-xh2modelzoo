@@ -10,12 +10,15 @@
 
 """Export Qwen3-Omni talker code predictor to HMONNX — prefill & decode.
 
-Also exports codec embeddings and per-codebook lm_heads.
+The predictor stays a two-graph module for prefill/decode, while auxiliary
+codec embeddings and lm_heads are packaged into one asset bundle instead of
+being emitted as many loose files.
 """
 
 import argparse
 import json
 import os.path as osp
+import os
 import time
 import sys
 import types
@@ -29,7 +32,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _hmonnx_pipeline import run_dialogue_validation, save_json
+from _hmonnx_pipeline import (
+    _build_safe_validation_max_memory,
+    _patch_inputs_embeds_generation_device,
+    _patch_runtime_device_property,
+    _resolve_validation_device_map,
+    run_dialogue_validation,
+    save_json,
+)
+
+try:
+    from _hmonnx_pipeline import release_export_cuda_memory
+except ImportError:
+    def release_export_cuda_memory(logger=None, label=None):
+        return None
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -68,6 +84,9 @@ except ImportError:
 
 def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture code_predictor.model.forward inputs, or load from cache."""
+    class _PredictorInputsCaptured(RuntimeError):
+        pass
+
     capture_path = work_dir / "talker_prediction_inputs.pth"
     if capture_path.exists():
         logger.info(f"Loading cached predictor inputs from {capture_path}")
@@ -106,18 +125,23 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
     captured = []
 
     def forward_hook(*args, **kwargs):
-        captured.append({k: deepcopy(v) for k, v in kwargs.items()})
+        if not captured:
+            captured.append({k: deepcopy(v) for k, v in kwargs.items()})
+            raise _PredictorInputsCaptured()
         return original_forward(*args, **kwargs)
 
     native_model.talker.code_predictor.model.forward = forward_hook
 
-    with torch.no_grad():
-        native_model.generate(
-            **inputs, speaker="Ethan",
-            thinker_return_dict_in_generate=True, use_audio_in_video=True,
-        )
-
-    native_model.talker.code_predictor.model.forward = original_forward
+    try:
+        with torch.no_grad():
+            native_model.generate(
+                **inputs, speaker="Ethan",
+                thinker_return_dict_in_generate=True, use_audio_in_video=True,
+            )
+    except _PredictorInputsCaptured:
+        logger.info("Captured first predictor forward inputs, stopping generate early")
+    finally:
+        native_model.talker.code_predictor.model.forward = original_forward
 
     if not captured:
         raise RuntimeError("Failed to capture predictor inputs")
@@ -125,6 +149,100 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
     torch.save(captured, capture_path)
     logger.info(f"Captured {len(captured)} predictor forward calls, saved to {capture_path}")
     return captured
+
+
+def _save_predictor_assets(native_model, asset_file: Path, logger):
+    codec_embeddings = [
+        emb.weight.detach().cpu()
+        for emb in native_model.talker.code_predictor.get_input_embeddings()
+    ]
+    lm_head_weights = [
+        head.weight.detach().cpu()
+        for head in native_model.talker.code_predictor.lm_head
+    ]
+    asset_payload = {
+        "codec_embeddings": codec_embeddings,
+        "lm_head_weights": lm_head_weights,
+        "num_codec_embeddings": len(codec_embeddings),
+        "num_lm_heads": len(lm_head_weights),
+    }
+    torch.save(asset_payload, asset_file)
+    logger.info(f"Saved talker prediction asset bundle to {asset_file}")
+    return asset_payload
+
+
+def _build_predictor_validation_inputs(work_dir: Path, meta_info):
+    kv_cache_shape = meta_info["talker_prediction_kv_cache"]["shape"]
+    num_hidden_layers = meta_info["talker_prediction_kv_cache"]["num_decoder_layers"]
+    capture_path = work_dir / "talker_prediction_inputs.pth"
+
+    if capture_path.exists():
+        captured = torch.load(capture_path, map_location="cpu", weights_only=False)
+        input_sequence_length = captured[0]["inputs_embeds"].shape[1]
+        inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
+        if inputs_embeds.shape[1] > input_sequence_length:
+            inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
+    else:
+        hidden_size = meta_info["talker_prediction_hidden_size"]
+        input_sequence_length = meta_info["talker_prediction_input_sequence_length"]
+        inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
+
+    past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_seq_length_t = torch.tensor([0], dtype=torch.int32)
+    current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
+    return inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
+
+
+def _load_native_model_for_capture(hf_model_path: str, logger):
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+
+    device_map = _resolve_validation_device_map("auto", logger)
+    max_memory = None
+    if device_map == "auto":
+        max_memory = _build_safe_validation_max_memory(logger)
+
+    load_kwargs = dict(
+        torch_dtype=torch.float16,
+        device_map=device_map,
+        attn_implementation="eager",
+        trust_remote_code=True,
+    )
+    if max_memory is not None:
+        load_kwargs["max_memory"] = max_memory
+
+    logger.info(
+        f"Loading HF model from {hf_model_path} for talker prediction export with device_map={device_map}"
+    )
+    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        hf_model_path,
+        **load_kwargs,
+    )
+    native_model.eval()
+    _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
+    _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
+    if hasattr(native_model, "code2wav"):
+        _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
+    return native_model
+
+
+def _reexec_with_phase(phase: str):
+    script_path = str(Path(__file__).resolve())
+    passthrough_args = []
+    skip_next = False
+
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--phase":
+            skip_next = True
+            continue
+        if arg.startswith("--phase="):
+            continue
+        passthrough_args.append(arg)
+
+    os.execv(sys.executable, [sys.executable, script_path, *passthrough_args, "--phase", phase])
 
 
 def main(args):
@@ -139,88 +257,59 @@ def main(args):
     work_dir = Path(args.work_dir) / prefix
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
-    xhquant_init(log_file, debug=args.debug)
+    xhquant_init(log_file, debug=args.debug, file_mode="a" if args.phase != "full" else "w")
     logger = get_root_logger()
+    native_model = None
+    processor = None
+    captured = None
+    code_predictor_model = None
+    wrapped_model = None
+    quanted_model = None
 
     hmonnx_dir = work_dir / "hmonnx"
     hmonnx_dir.mkdir(exist_ok=True, parents=True)
     prefill_file = hmonnx_dir / f"{model_name}-talker_prediction_prefill.onnx"
     decode_file = hmonnx_dir / f"{model_name}-talker_prediction_decode.onnx"
     meta_file = work_dir / "meta_talker_prediction.json"
+    asset_file = work_dir / "talker_prediction_assets.pt"
 
     # Check if artifacts already exist — skip export if so
     artifacts_exist = prefill_file.exists() and decode_file.exists() and meta_file.exists()
+    meta_info = None
 
     if artifacts_exist:
         logger.info("Talker prediction HMONNX artifacts already exist, skipping export")
         with open(meta_file) as f:
             meta_info = json.load(f)
-        kv_cache_shape = meta_info["talker_prediction_kv_cache"]["shape"]
-        num_hidden_layers = meta_info["talker_prediction_kv_cache"]["num_decoder_layers"]
-        # Reconstruct validation inputs from meta and cached capture
-        capture_path = work_dir / "talker_prediction_inputs.pth"
-        if capture_path.exists():
-            captured = torch.load(capture_path, map_location="cpu", weights_only=False)
-            input_sequence_length = captured[0]["inputs_embeds"].shape[1]
-            inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
-            if inputs_embeds.shape[1] > input_sequence_length:
-                inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
-        else:
-            hidden_size = meta_info["talker_prediction_hidden_size"]
-            input_sequence_length = meta_info["talker_prediction_input_sequence_length"]
-            inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
-        past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
-    else:
-        from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
+        legacy_layout = "codec_embedding_dir" in meta_info or "lm_head_dir" in meta_info
+        new_layout_ready = "talker_prediction_assets_file" in meta_info and asset_file.exists()
+        if legacy_layout and not new_layout_ready:
+            logger.info("Legacy scattered talker prediction artifacts detected, rebuilding consolidated export")
+            artifacts_exist = False
+        elif "talker_prediction_assets_file" in meta_info and not asset_file.exists():
+            logger.info("Talker prediction meta points to missing asset bundle, rebuilding consolidated export")
+            artifacts_exist = False
 
-        logger.info(f"Loading HF model from {hf_model_path}")
-        native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-            hf_model_path,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            attn_implementation="eager",
-            trust_remote_code=True,
+    if artifacts_exist:
+        inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
+            _build_predictor_validation_inputs(work_dir, meta_info)
         )
-        native_model.eval()
+    else:
+        from transformers import Qwen3OmniMoeProcessor
+
+        native_model = _load_native_model_for_capture(hf_model_path, logger)
         processor = Qwen3OmniMoeProcessor.from_pretrained(hf_model_path)
 
         device = next(native_model.parameters()).device
         dtype = next(native_model.parameters()).dtype
 
-        # ---- 2. Export codec embeddings ----
-        codec_dir = work_dir / "codec_embedding"
-        codec_dir.mkdir(exist_ok=True, parents=True)
-        for i, emb in enumerate(native_model.talker.code_predictor.get_input_embeddings()):
-            torch.save(emb.weight, codec_dir / f"token_embedding_{i}.pt")
-        logger.info(f"Saved codec embeddings to {codec_dir}")
+        # ---- 2. Package predictor-side assets into one bundle ----
+        asset_payload = _save_predictor_assets(native_model, asset_file, logger)
 
-        # ---- 3. Export lm_heads ----
-        lm_head_dir = work_dir / "lm_head"
-        lm_head_dir.mkdir(exist_ok=True, parents=True)
-        hidden_size = native_model.talker.code_predictor.config.hidden_size if hasattr(native_model.talker.code_predictor, "config") else 1024
-        for i, head in enumerate(native_model.talker.code_predictor.lm_head):
-            head_path = lm_head_dir / f"lm_head_{i}.onnx"
-            head_hmonnx_path = lm_head_dir / f"lm_head_{i}_hm.onnx"
-            dummy_input = torch.rand(1, 1, hidden_size).half().to(device)
-            torch.onnx.export(
-                head, (dummy_input,), head_path,
-                input_names=["input"], output_names=["logits"],
-                dynamic_axes={"input": {1: "seq_len"}, "logits": {1: "seq_len"}},
-            )
-            dummy_input_cpu = dummy_input.cpu()
-            convert_onnx_to_hmonnx(
-                head_path, [dummy_input_cpu], target_device, head_hmonnx_path,
-                quant_config=create_quant_config(quant_scheme), input_names=["input"],
-            )
-            logger.info(f"Exported lm_head_{i} to {head_hmonnx_path}")
-
-        # ---- 4. Capture predictor inputs ----
+        # ---- 3. Capture predictor inputs ----
         captured = _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, logger)
 
-        # ---- 5. Register wrap modules and wrap predictor ----
+        # ---- 4. Register wrap modules and wrap predictor ----
         from xh_model_zoo.xh_llm.models.qwen3_omni._talker_prediction import (
             register_wrap_modules as pred_register_wrap_modules,
         )
@@ -229,6 +318,10 @@ def main(args):
 
         code_predictor = native_model.talker.code_predictor
         code_predictor_model = code_predictor.model.to(torch.float16).cpu()
+        code_predictor = None
+        processor = None
+        native_model = None
+        release_export_cuda_memory(logger, "talker prediction capture")
 
         batch_size = 1
         context_length = args.context_length
@@ -251,7 +344,7 @@ def main(args):
 
         wrapped_model = wrap_llm_model(code_predictor_model, wrap_cfg)
 
-        # ---- 6. Setup KV cache and inputs ----
+        # ---- 5. Setup KV cache and inputs ----
         num_hidden_layers = wrapped_model.config.num_hidden_layers
         head_dim = wrapped_model.layers[0].self_attn.head_dim
         num_key_value_heads = wrapped_model.config.num_key_value_heads
@@ -282,7 +375,7 @@ def main(args):
             input_names.append(f"past_value_cache_{i}")
         output_names = ["logits"]
 
-        # ---- 7. Export prefill HMONNX ----
+        # ---- 6. Export prefill HMONNX ----
         logger.info(f"Exporting predictor prefill to {prefill_file}")
         with TimeProfiler("export_pred_prefill", logger), MemoryTracker("cuda:0", "export_pred_prefill", logger):
             quanted_model = convert_fx_model_to_quanted_model(
@@ -294,7 +387,7 @@ def main(args):
             )
         logger.info(f"Predictor prefill export successful: {prefill_file}")
 
-        # ---- 8. Export decode HMONNX ----
+        # ---- 7. Export decode HMONNX ----
         decode_inputs = (
             inputs_embeds[:, :1, :],
             past_seq_length_t,
@@ -312,15 +405,16 @@ def main(args):
         )
         logger.info(f"Predictor decode export successful: {decode_file}")
 
-        # ---- 9. Save meta ----
+        # ---- 8. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "module": "talker_prediction",
             "model_name": model_name,
             "talker_prediction_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_prediction_decode_onnx": str(decode_file.relative_to(work_dir)),
-            "codec_embedding_dir": str(codec_dir.relative_to(work_dir)),
-            "lm_head_dir": str(lm_head_dir.relative_to(work_dir)),
+            "talker_prediction_assets_file": str(asset_file.relative_to(work_dir)),
+            "codec_embedding_count": int(asset_payload["num_codec_embeddings"]),
+            "lm_head_count": int(asset_payload["num_lm_heads"]),
             "talker_prediction_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
             "talker_prediction_hidden_size": int(inputs_embeds.shape[-1]),
             "talker_prediction_input_sequence_length": int(input_sequence_length),
@@ -329,39 +423,69 @@ def main(args):
         save_json(meta_file, meta_info)
         logger.info(f"Predictor export complete. Meta saved to {meta_file}")
 
-    # ---- 10. Optional validation ----
+    quanted_model = None
+    wrapped_model = None
+    code_predictor_model = None
+    code_predictor = None
+    captured = None
+    processor = None
+    native_model = None
+    release_export_cuda_memory(logger, "talker prediction export")
+
+    # ---- 9. Optional validation ----
     if args.valid:
-        logger.info("Validating predictor HMONNX ...")
-        from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
+        if args.phase == "full":
+            logger.info("Restarting process for predictor HMONNX validation after export cleanup")
+            _reexec_with_phase("hmonnx-validate")
 
-        session = HMONNXInference(str(prefill_file))
-        output = session(inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches)
-        if isinstance(output, (list, tuple)):
-            output = output[0]
-        logger.info(f"Predictor prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
+        if args.phase == "hmonnx-validate":
+            inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
+                _build_predictor_validation_inputs(work_dir, meta_info)
+            )
+            logger.info("Validating predictor HMONNX ...")
+            from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
-        session_d = HMONNXInference(str(decode_file))
-        output_d = session_d(
-            inputs_embeds[:, :1, :], past_seq_length_t, torch.ones_like(current_input_length_t),
-            *past_key_caches, *past_value_caches,
-        )
-        if isinstance(output_d, (list, tuple)):
-            output_d = output_d[0]
-        logger.info(f"Predictor decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+            session = HMONNXInference(str(prefill_file))
+            output = session(inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches)
+            if isinstance(output, (list, tuple)):
+                output = output[0]
+            logger.info(f"Predictor prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
 
-        dialogue_artifacts = {
-            "talker_prediction": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
-        }
-        run_dialogue_validation(
-            hf_model_path,
-            work_dir,
-            logger,
-            case="multimodal",
-            max_new_tokens=args.max_new_tokens,
-            artifacts=dialogue_artifacts,
-            report_name="talker_prediction_dialogue_validation.json",
-            output_prefix="talker_prediction_dialogue",
-        )
+            session_d = HMONNXInference(str(decode_file))
+            output_d = session_d(
+                inputs_embeds[:, :1, :], past_seq_length_t, torch.ones_like(current_input_length_t),
+                *past_key_caches, *past_value_caches,
+            )
+            if isinstance(output_d, (list, tuple)):
+                output_d = output_d[0]
+            logger.info(f"Predictor decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+            session = None
+            session_d = None
+            output = None
+            output_d = None
+            inputs_embeds = None
+            past_key_caches = None
+            past_value_caches = None
+            past_seq_length_t = None
+            current_input_length_t = None
+            release_export_cuda_memory(logger, "talker prediction hmonnx validation")
+            logger.info("Restarting process for predictor dialogue validation after direct HMONNX validation")
+            _reexec_with_phase("dialogue-validate")
+
+        if args.phase == "dialogue-validate":
+            dialogue_artifacts = {
+                "talker_prediction": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
+            }
+            run_dialogue_validation(
+                hf_model_path,
+                work_dir,
+                logger,
+                case="multimodal",
+                max_new_tokens=args.max_new_tokens,
+                artifacts=dialogue_artifacts,
+                report_name="talker_prediction_dialogue_validation.json",
+                output_prefix="talker_prediction_dialogue",
+            )
 
 
 if __name__ == "__main__":
@@ -374,5 +498,6 @@ if __name__ == "__main__":
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--phase", choices=["full", "hmonnx-validate", "dialogue-validate"], default="full")
     args = parser.parse_args()
     main(args)

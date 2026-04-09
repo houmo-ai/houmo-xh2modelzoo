@@ -23,6 +23,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import run_dialogue_validation, save_json
+
+try:
+    from _hmonnx_pipeline import release_export_cuda_memory
+except ImportError:
+    def release_export_cuda_memory(logger=None, label=None):
+        return None
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -52,6 +58,9 @@ def main(args):
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
     logger = get_root_logger()
+    native_model = None
+    audio_tower = None
+    wrapped_audio = None
 
     # ---- 1. Load HF model and extract audio tower ----
     from transformers import Qwen3OmniMoeForConditionalGeneration
@@ -133,6 +142,11 @@ def main(args):
     save_json(meta_file, meta_info)
     logger.info(f"Audio export complete. Meta saved to {meta_file}")
 
+    wrapped_audio = None
+    audio_tower = None
+    native_model = None
+    release_export_cuda_memory(logger, "audio export")
+
     # ---- 6. Optional validation ----
     if args.valid:
         logger.info("Validating audio HMONNX ...")
@@ -143,6 +157,9 @@ def main(args):
         if isinstance(output, (list, tuple)):
             output = output[0]
         logger.info(f"Audio HMONNX validation passed, output shape: {tuple(output.shape)}")
+        session = None
+        output = None
+        release_export_cuda_memory(logger, "audio hmonnx validation")
 
         dialogue_artifacts = {
             "audio": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}

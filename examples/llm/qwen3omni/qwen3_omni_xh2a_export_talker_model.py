@@ -16,6 +16,7 @@ then uses those inputs to wrap / trace / quant / export the talker module.
 
 import argparse
 import os.path as osp
+import os
 import time
 import sys
 import types
@@ -36,6 +37,12 @@ from _hmonnx_pipeline import (
     run_dialogue_validation,
     save_json,
 )
+
+try:
+    from _hmonnx_pipeline import release_export_cuda_memory
+except ImportError:
+    def release_export_cuda_memory(logger=None, label=None):
+        return None
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -105,6 +112,9 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
 
 def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture talker.forward inputs, or load from cache."""
+    class _TalkerInputsCaptured(RuntimeError):
+        pass
+
     capture_path = work_dir / "talker_model_inputs.pth"
     if capture_path.exists():
         logger.info(f"Loading cached talker inputs from {capture_path}")
@@ -154,17 +164,21 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
                     continue
                 save_kwargs[k] = deepcopy(v) if isinstance(v, torch.Tensor) else v
             captured.append(save_kwargs)
+            raise _TalkerInputsCaptured()
         return original_forward(*args, **kwargs)
 
     native_model.talker.forward = forward_hook
 
-    with torch.no_grad():
-        native_model.generate(
-            **inputs, speaker="Ethan",
-            thinker_return_dict_in_generate=True, use_audio_in_video=True,
-        )
-
-    native_model.talker.forward = original_forward
+    try:
+        with torch.no_grad():
+            native_model.generate(
+                **inputs, speaker="Ethan",
+                thinker_return_dict_in_generate=True, use_audio_in_video=True,
+            )
+    except _TalkerInputsCaptured:
+        logger.info("Captured first talker forward inputs, stopping generate early")
+    finally:
+        native_model.talker.forward = original_forward
 
     if not captured:
         raise RuntimeError("Failed to capture talker inputs — generate produced no talker calls")
@@ -199,6 +213,47 @@ def _run_talker_dialogue_validation(
     )
 
 
+def _build_talker_validation_inputs(work_dir: Path, meta_info):
+    kv_cache_shape = meta_info["talker_kv_cache"]["shape"]
+    num_hidden_layers = meta_info["talker_kv_cache"]["num_decoder_layers"]
+    capture_path = work_dir / "talker_model_inputs.pth"
+    if capture_path.exists():
+        captured = torch.load(capture_path, map_location="cpu", weights_only=False)
+        input_sequence_length = captured[0]["inputs_embeds"].shape[1]
+        inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
+        if inputs_embeds.shape[1] > input_sequence_length:
+            inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
+    else:
+        hidden_size = meta_info["talker_hidden_size"]
+        input_sequence_length = meta_info["talker_input_sequence_length"]
+        inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
+
+    past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_seq_length_t = torch.tensor([0], dtype=torch.int32)
+    current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
+    return inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
+
+
+def _reexec_with_phase(phase: str):
+    script_path = str(Path(__file__).resolve())
+    passthrough_args = []
+    skip_next = False
+
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--phase":
+            skip_next = True
+            continue
+        if arg.startswith("--phase="):
+            continue
+        passthrough_args.append(arg)
+
+    os.execv(sys.executable, [sys.executable, script_path, *passthrough_args, "--phase", phase])
+
+
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -211,8 +266,14 @@ def main(args):
     work_dir = Path(args.work_dir) / prefix
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
-    xhquant_init(log_file, debug=args.debug)
+    xhquant_init(log_file, debug=args.debug, file_mode="a" if args.phase != "full" else "w")
     logger = get_root_logger()
+    native_model = None
+    processor = None
+    captured = None
+    talker = None
+    wrapped_talker = None
+    quanted_talker = None
 
     hmonnx_dir = work_dir / "hmonnx"
     hmonnx_dir.mkdir(exist_ok=True, parents=True)
@@ -228,24 +289,9 @@ def main(args):
         logger.info("Talker HMONNX artifacts already exist, skipping export")
         with open(meta_file) as f:
             meta_info = json.load(f)
-        kv_cache_shape = meta_info["talker_kv_cache"]["shape"]
-        num_hidden_layers = meta_info["talker_kv_cache"]["num_decoder_layers"]
-        # Reconstruct validation inputs from meta and cached capture
-        capture_path = work_dir / "talker_model_inputs.pth"
-        if capture_path.exists():
-            captured = torch.load(capture_path, map_location="cpu", weights_only=False)
-            input_sequence_length = captured[0]["inputs_embeds"].shape[1]
-            inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
-            if inputs_embeds.shape[1] > input_sequence_length:
-                inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
-        else:
-            hidden_size = meta_info["talker_hidden_size"]
-            input_sequence_length = meta_info["talker_input_sequence_length"]
-            inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
-        past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
+        inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
+            _build_talker_validation_inputs(work_dir, meta_info)
+        )
     else:
         # ---- 1. Load full HF model ----
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
@@ -368,27 +414,62 @@ def main(args):
         save_json(meta_file, meta_info)
         logger.info(f"Talker export complete. Meta saved to {meta_file}")
 
+    quanted_talker = None
+    wrapped_talker = None
+    talker = None
+    captured = None
+    processor = None
+    native_model = None
+    release_export_cuda_memory(logger, "talker export")
+
     # ---- 9. Optional validation ----
     if args.valid:
-        logger.info("Validating talker HMONNX ...")
-        from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
+        if args.phase == "full":
+            logger.info("Restarting process for talker HMONNX validation after export cleanup")
+            _reexec_with_phase("hmonnx-validate")
 
-        session = HMONNXInference(str(prefill_file))
-        output = session(inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches)
-        if isinstance(output, (list, tuple)):
-            output = output[0]
-        logger.info(f"Talker prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
+        if args.phase == "hmonnx-validate":
+            logger.info("Validating talker HMONNX ...")
+            from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
-        session_d = HMONNXInference(str(decode_file))
-        output_d = session_d(
-            inputs_embeds[:, :1, :], past_seq_length_t, torch.ones_like(current_input_length_t),
-            *past_key_caches, *past_value_caches,
-        )
-        if isinstance(output_d, (list, tuple)):
-            output_d = output_d[0]
-        logger.info(f"Talker decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+            session = HMONNXInference(str(prefill_file))
+            output = session(
+                inputs_embeds,
+                past_seq_length_t,
+                current_input_length_t,
+                *past_key_caches,
+                *past_value_caches,
+            )
+            if isinstance(output, (list, tuple)):
+                output = output[0]
+            logger.info(f"Talker prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
 
-        try:
+            session_d = HMONNXInference(str(decode_file))
+            output_d = session_d(
+                inputs_embeds[:, :1, :],
+                past_seq_length_t,
+                torch.ones_like(current_input_length_t),
+                *past_key_caches,
+                *past_value_caches,
+            )
+            if isinstance(output_d, (list, tuple)):
+                output_d = output_d[0]
+            logger.info(f"Talker decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+
+            session = None
+            session_d = None
+            output = None
+            output_d = None
+            inputs_embeds = None
+            past_key_caches = None
+            past_value_caches = None
+            past_seq_length_t = None
+            current_input_length_t = None
+            release_export_cuda_memory(logger, "talker hmonnx validation")
+            logger.info("Restarting process for talker dialogue validation after direct HMONNX validation")
+            _reexec_with_phase("dialogue-validate")
+
+        if args.phase == "dialogue-validate":
             _run_talker_dialogue_validation(
                 hf_model_path,
                 work_dir,
@@ -398,8 +479,6 @@ def main(args):
                 max_new_tokens=args.max_new_tokens,
                 talker_max_new_tokens=args.talker_max_new_tokens,
             )
-        except RuntimeError as e:
-            logger.warning(f"Talker dialogue validation skipped due to runtime error: {e}")
 
 
 if __name__ == "__main__":
@@ -418,5 +497,6 @@ if __name__ == "__main__":
         help="cap talker audio tokens during dialogue validation",
     )
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--phase", choices=["full", "hmonnx-validate", "dialogue-validate"], default="full")
     args = parser.parse_args()
     main(args)

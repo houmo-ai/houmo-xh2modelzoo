@@ -218,18 +218,15 @@ def main(args):
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
 
-        try:
-            _run_code2wav_validation(
-                hf_model_path,
-                work_dir,
-                logger,
-                meta_info,
-                meta_file,
-                max_new_tokens=args.max_new_tokens,
-                validation_device_map=args.validation_device_map,
-            )
-        except (RuntimeError, AssertionError, Exception) as e:
-            logger.warning(f"Code2wav dialogue validation skipped due to error: {e}")
+        _run_code2wav_validation(
+            hf_model_path,
+            work_dir,
+            logger,
+            meta_info,
+            meta_file,
+            max_new_tokens=args.max_new_tokens,
+            validation_device_map=args.validation_device_map,
+        )
     else:
         if native_model is not None:
             del native_model

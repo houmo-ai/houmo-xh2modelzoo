@@ -8,9 +8,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export Qwen3-Omni talker hidden_projection & text_projection to HMONNX.
+"""Export Qwen3-Omni talker projection bundle to HMONNX.
 
-These are small Linear layers exported via torch.onnx.export + convert_onnx_to_hmonnx.
+The talker always consumes ``hidden_projection`` and ``text_projection`` together,
+so they are exported as a single logical module with two outputs.
 """
 
 import argparse
@@ -20,12 +21,19 @@ from pathlib import Path
 import sys
 
 import torch
+from torch import nn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import run_dialogue_validation, save_json
+
+try:
+    from _hmonnx_pipeline import release_export_cuda_memory
+except ImportError:
+    def release_export_cuda_memory(logger=None, label=None):
+        return None
 from xhquant.api import (  # isort:skip
     DeviceType,
     QuantScheme,
@@ -34,6 +42,18 @@ from xhquant.api import (  # isort:skip
     get_root_logger,
     xhquant_init,
 )
+
+
+class TalkerProjectionBundle(nn.Module):
+    def __init__(self, hidden_projection: nn.Module, text_projection: nn.Module):
+        super().__init__()
+        self.hidden_projection = hidden_projection
+        self.text_projection = text_projection
+
+    def forward(self, hidden_states):
+        hidden_output = self.hidden_projection(hidden_states)
+        text_output = self.text_projection(hidden_states)
+        return hidden_output, text_output
 
 
 def main(args):
@@ -50,16 +70,17 @@ def main(args):
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
     logger = get_root_logger()
+    native_model = None
+    projection_bundle = None
+    dummy_input = None
 
-    hp_dir = work_dir / "hidden_projection"
-    hp_hmonnx = hp_dir / "talker_hidden_projection_hm.onnx"
-    tp_dir = work_dir / "text_projection"
-    tp_hmonnx = tp_dir / "talker_text_projection_hm.onnx"
+    projection_dir = work_dir / "projection"
+    projection_hmonnx = projection_dir / "talker_projection_hm.onnx"
     meta_file = work_dir / "meta_talker_projection.json"
 
     # Check if artifacts already exist — skip export if so
     import json
-    artifacts_exist = hp_hmonnx.exists() and tp_hmonnx.exists() and meta_file.exists()
+    artifacts_exist = projection_hmonnx.exists() and meta_file.exists()
 
     if artifacts_exist:
         logger.info("Talker projection HMONNX artifacts already exist, skipping export")
@@ -75,109 +96,98 @@ def main(args):
         native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             hf_model_path,
             torch_dtype=torch.float16,
-            device_map="auto",
+            device_map="cpu",
             attn_implementation="eager",
             trust_remote_code=True,
         )
         native_model.eval()
-        device = next(native_model.talker.parameters()).device
 
         hidden_size = native_model.talker.hidden_projection.linear_fc1.in_features
-        dummy_input = torch.rand(1, 1, hidden_size, dtype=torch.float16, device=device)
-        dummy_input_cpu = dummy_input.cpu()
+        dummy_input = torch.rand(1, 1, hidden_size, dtype=torch.float16)
+        dummy_input_cpu = dummy_input
 
-        # ---- 2. Export hidden_projection ----
-        hp_dir.mkdir(exist_ok=True, parents=True)
-        hp_onnx = hp_dir / "talker_hidden_projection.onnx"
-
-        logger.info("Exporting talker.hidden_projection ...")
-        torch.onnx.export(
+        # ---- 2. Export projection bundle ----
+        projection_dir.mkdir(exist_ok=True, parents=True)
+        projection_onnx = projection_dir / "talker_projection.onnx"
+        projection_bundle = TalkerProjectionBundle(
             native_model.talker.hidden_projection,
-            (dummy_input,),
-            hp_onnx,
-            input_names=["input"],
-            output_names=["output"],
-            dynamic_axes={"input": {1: "seq_len"}, "output": {1: "seq_len"}},
-        )
-        convert_onnx_to_hmonnx(
-            hp_onnx,
-            [dummy_input_cpu],
-            target_device,
-            hp_hmonnx,
-            quant_config=quant_config,
-            input_names=["input"],
-        )
-        logger.info(f"hidden_projection exported to {hp_hmonnx}")
-
-        # ---- 3. Export text_projection ----
-        tp_dir.mkdir(exist_ok=True, parents=True)
-        tp_onnx = tp_dir / "talker_text_projection.onnx"
-
-        logger.info("Exporting talker.text_projection ...")
-        torch.onnx.export(
             native_model.talker.text_projection,
+        ).to(torch.float16).cpu()
+        native_model = None
+        release_export_cuda_memory(logger, "talker projection preparation")
+
+        logger.info("Exporting talker projection bundle ...")
+        torch.onnx.export(
+            projection_bundle,
             (dummy_input,),
-            tp_onnx,
+            projection_onnx,
             input_names=["input"],
-            output_names=["output"],
-            dynamic_axes={"input": {1: "seq_len"}, "output": {1: "seq_len"}},
+            output_names=["hidden_projection_output", "text_projection_output"],
+            dynamic_axes={
+                "input": {1: "seq_len"},
+                "hidden_projection_output": {1: "seq_len"},
+                "text_projection_output": {1: "seq_len"},
+            },
         )
         convert_onnx_to_hmonnx(
-            tp_onnx,
+            projection_onnx,
             [dummy_input_cpu],
             target_device,
-            tp_hmonnx,
+            projection_hmonnx,
             quant_config=quant_config,
             input_names=["input"],
+            output_names=["hidden_projection_output", "text_projection_output"],
         )
-        logger.info(f"text_projection exported to {tp_hmonnx}")
+        logger.info(f"talker projection bundle exported to {projection_hmonnx}")
 
-        # ---- 4. Save meta ----
+        # ---- 3. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "module": "talker_projection",
             "model_name": model_name,
-            "hidden_projection_hmonnx": str(hp_hmonnx.relative_to(work_dir)),
-            "text_projection_hmonnx": str(tp_hmonnx.relative_to(work_dir)),
+            "talker_projection_hmonnx": str(projection_hmonnx.relative_to(work_dir)),
             "hidden_size": hidden_size,
             "quant_type": quant_type,
         }
         save_json(meta_file, meta_info)
         logger.info(f"Projection export complete. Meta saved to {meta_file}")
 
-    # ---- 5. Optional validation ----
+    projection_bundle = None
+    dummy_input = None
+    native_model = None
+    release_export_cuda_memory(logger, "talker projection export")
+
+    # ---- 4. Optional validation ----
     if args.valid:
         logger.info("Validating projection HMONNX ...")
         from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
-        sess_hp = HMONNXInference(str(hp_hmonnx))
-        out_hp = sess_hp(dummy_input_cpu)
-        if isinstance(out_hp, (list, tuple)):
-            out_hp = out_hp[0]
+        session = HMONNXInference(str(projection_hmonnx))
+        outputs = session(dummy_input_cpu)
+        if not isinstance(outputs, (list, tuple)) or len(outputs) != 2:
+            raise RuntimeError("Projection bundle validation expected two outputs")
+        out_hp, out_tp = outputs
         logger.info(f"hidden_projection validation passed, output shape: {tuple(out_hp.shape)}")
-
-        sess_tp = HMONNXInference(str(tp_hmonnx))
-        out_tp = sess_tp(dummy_input_cpu)
-        if isinstance(out_tp, (list, tuple)):
-            out_tp = out_tp[0]
         logger.info(f"text_projection validation passed, output shape: {tuple(out_tp.shape)}")
+        session = None
+        outputs = None
+        out_hp = None
+        out_tp = None
+        release_export_cuda_memory(logger, "talker projection hmonnx validation")
 
         dialogue_artifacts = {
             "projection": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
         }
-        try:
-            run_dialogue_validation(
-                hf_model_path,
-                work_dir,
-                logger,
-                case="multimodal",
-                max_new_tokens=args.max_new_tokens,
-                artifacts=dialogue_artifacts,
-                report_name="projection_dialogue_validation.json",
-                output_prefix="projection_dialogue",
-            )
-        except (RuntimeError, AssertionError, Exception) as e:
-            logger.warning(f"Projection dialogue validation skipped due to error: {e}")
+        run_dialogue_validation(
+            hf_model_path,
+            work_dir,
+            logger,
+            case="multimodal",
+            max_new_tokens=args.max_new_tokens,
+            artifacts=dialogue_artifacts,
+            report_name="projection_dialogue_validation.json",
+            output_prefix="projection_dialogue",
+        )
 
 
 if __name__ == "__main__":
