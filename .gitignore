@@ -201,3 +201,7 @@ data/
 benchmark_test/allure-results
 /drafts
 /weights
+
+xhmodel_merak/xh_llm/models/spark_xh/grouped-gemm-v1.1.4i/third_party/cutlass/include
+xh_model_zoo/xh_llm/models/groot/gr00t
+examples/llm/whisper/data/models/whisper-medium
