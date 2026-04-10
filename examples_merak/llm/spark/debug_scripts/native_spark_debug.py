@@ -94,7 +94,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Test Spark MoE (IPT) model")
-    parser.add_argument("--model-dir", type=str, default="./data/models/ipt_30b_2")
+    parser.add_argument("--model-dir", type=str, default="./data/models/ipt_30b")
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--max-new-tokens", type=int, default=1024, help="max new tokens to generate")

@@ -4,8 +4,6 @@ from typing import Any, cast
 import torch
 from transformers import AutoModelForCausalLM
 
-from xhquant.core import CacheTensor
-
 from ...builder import register_llm_model
 from ...kv_cache_mixin import KVCacheMixin
 from ...text_llm_model import TextLLMModel, TextLLMModelConfig
