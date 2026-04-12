@@ -25,7 +25,6 @@ def main():
         torch_dtype=torch.bfloat16 if 'cuda' in device else torch.float32,
         device_map={'': device},
     ).eval()
-    xh_model.visual.init_wrap_model(hf_model)
     processor = XHGemma4Processor.from_pretrained(model_cfg.hf_model)
     inputs = processor.apply_chat_template([
         {'role': 'user', 'content': [
@@ -35,12 +34,26 @@ def main():
     ])
     pixel_values = inputs['pixel_values'].to(device)
     image_position_ids = inputs['image_position_ids'].to(device)
+
+    # Run HF BEFORE wrapping (wrap modifies vision_tower in-place)
     with torch.no_grad():
         hf_features = hf_model.model.get_image_features(pixel_values, image_position_ids, return_dict=True).pooler_output
-        wrap_features = xh_model.visual.wrap_model(pixel_values, image_position_ids)
+
+    # init_wrap_model pre-computes buffers and modifies vision_tower in-place
+    xh_model.visual.init_wrap_model(hf_model)
+
+    # Wrap model now takes only pixel_values (all other inputs are pre-computed buffers)
+    wrap_model = xh_model.visual.wrap_model
+    wrap_model = wrap_model.to(device)
+    with torch.no_grad():
+        wrap_features = wrap_model(pixel_values)
+
     print('hf_features', tuple(hf_features.shape))
     print('wrap_features', tuple(wrap_features.shape))
-    print('cosine', torch.nn.functional.cosine_similarity(hf_features.flatten(), wrap_features.flatten(), dim=0).item())
+    cos_sim = torch.nn.functional.cosine_similarity(hf_features.flatten().float(), wrap_features.flatten().float(), dim=0)
+    print('cosine', cos_sim.item())
+    max_diff = (hf_features.float() - wrap_features.float()).abs().max().item()
+    print('max_diff', max_diff)
 
 
 if __name__ == '__main__':

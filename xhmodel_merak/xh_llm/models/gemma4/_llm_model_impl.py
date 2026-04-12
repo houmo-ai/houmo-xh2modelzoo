@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import math
-from copy import deepcopy
+import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -68,18 +67,6 @@ class _Gemma4RMSNorm(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module({Gemma4TextAttention: "Gemma4TextAttention"})
 class _Gemma4TextAttention(DynamicModule):
-    def _rotate_half(self, x: Tensor):
-        half = self.head_dim // 2
-        x1 = x[..., :half]
-        x2 = x[..., half:]
-        return torch.cat((-x2, x1), dim=-1)
-
-    def _apply_rotary(self, x: Tensor, cos: Tensor, sin: Tensor):
-        # cos/sin from Gemma4TextRotaryEmbedding: [batch, seq, head_dim] -> [batch, seq, 1, head_dim]
-        cos = cos.unsqueeze(2)
-        sin = sin.unsqueeze(2)
-        return (x * cos) + (self._rotate_half(x) * sin)
-
     def _setup(self, cfg: ConfigDict | dict[str, Any]):
         if isinstance(cfg, dict):
             cfg = ConfigDict(cfg)
@@ -130,8 +117,8 @@ class _Gemma4TextAttention(DynamicModule):
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
-            query_states = self._apply_rotary(query_states, cos, sin)
-            key_states = self._apply_rotary(key_states, cos, sin)
+            query_states = self.rope(query_states, cos, sin)
+            key_states = self.rope(key_states, cos, sin)
 
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
@@ -140,10 +127,10 @@ class _Gemma4TextAttention(DynamicModule):
         if self.use_cache:
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
-
+        key_states = key_states.transpose(2, 3)
         key_states = torch.repeat_interleave(key_states, self.num_key_value_groups, dim=1)
         value_states = torch.repeat_interleave(value_states, self.num_key_value_groups, dim=1)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.kv_scale
+        attn_weights = torch.matmul(query_states, key_states) * self.kv_scale
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -209,11 +196,13 @@ class _Gemma4TextModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict]):
         self.use_cache = cfg.get("use_cache", True)
         max_seq_len = cfg.get("context_max_length", 2048) if hasattr(cfg, "get") else getattr(cfg, "context_max_length", 2048)
+        input_seq_len = cfg.get("input_sequence_length", max_seq_len) if hasattr(cfg, "get") else getattr(cfg, "input_sequence_length", max_seq_len)
         self._precompute_rope_cache(max_seq_len)
+        self._setup_rope_slices(input_seq_len)
         return self
 
     def _precompute_rope_cache(self, max_seq_len: int):
-        """Pre-compute cos/sin tables so forward avoids Sin/Cos/MatMul ops."""
+        """Pre-compute cos/sin tables. Shape: [1, max_seq_len, 1, head_dim] for DynamicSlice + xhnn.Rope."""
         rope = self.rotary_emb
         for layer_type in set(self.config.layer_types):
             inv_freq = getattr(rope, f"{layer_type}_inv_freq")
@@ -223,20 +212,38 @@ class _Gemma4TextModel(DynamicModule):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos_table = (emb.cos() * attn_scaling).to(inv_freq.dtype)
             sin_table = (emb.sin() * attn_scaling).to(inv_freq.dtype)
+            # [max_seq_len, head_dim] → [1, max_seq_len, 1, head_dim]
+            cos_table = cos_table.unsqueeze(0).unsqueeze(2)
+            sin_table = sin_table.unsqueeze(0).unsqueeze(2)
             self.register_buffer(f"_{layer_type}_cos", cos_table, persistent=False)
             self.register_buffer(f"_{layer_type}_sin", sin_table, persistent=False)
 
-    def _get_rope(self, position_ids: Tensor, layer_type: str, dtype: torch.dtype):
+    def _setup_rope_slices(self, input_seq_len: int):
+        """Create DynamicSlice modules for cos/sin lookup by past_seq_length."""
+        for layer_type in set(self.config.layer_types):
+            cos_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
+            sin_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
+
+            def _slice_update_cfg(self, cfg=None):
+                self.valid_length = [cfg.input_sequence_length]
+
+            cos_slice._update_cfg = types.MethodType(_slice_update_cfg, cos_slice)
+            sin_slice._update_cfg = types.MethodType(_slice_update_cfg, sin_slice)
+            setattr(self, f"_{layer_type}_cos_slice", cos_slice)
+            setattr(self, f"_{layer_type}_sin_slice", sin_slice)
+
+    def _get_rope(self, past_seq_length: Tensor, layer_type: str, dtype: torch.dtype):
         cos_table = getattr(self, f"_{layer_type}_cos")
         sin_table = getattr(self, f"_{layer_type}_sin")
-        cos = F.embedding(position_ids, cos_table).to(dtype)
-        sin = F.embedding(position_ids, sin_table).to(dtype)
+        cos_slice = getattr(self, f"_{layer_type}_cos_slice")
+        sin_slice = getattr(self, f"_{layer_type}_sin_slice")
+        cos = cos_slice(cos_table, past_seq_length).to(dtype)  # [1, seq_len, 1, head_dim]
+        sin = sin_slice(sin_table, past_seq_length).to(dtype)
         return cos, sin
 
     def forward(
         self,
         inputs_embeds: Tensor,
-        position_ids: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
         full_attention_mask: Tensor,
@@ -247,7 +254,7 @@ class _Gemma4TextModel(DynamicModule):
         hidden_states = inputs_embeds
         position_embeddings = {}
         for layer_type in set(self.config.layer_types):
-            position_embeddings[layer_type] = self._get_rope(position_ids, layer_type, hidden_states.dtype)
+            position_embeddings[layer_type] = self._get_rope(past_seq_length, layer_type, hidden_states.dtype)
 
         for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             layer_type = self.config.layer_types[idx]
@@ -274,7 +281,6 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
     def forward(
         self,
         inputs_embeds: Tensor,
-        position_ids: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
         full_attention_mask: Tensor,
@@ -284,7 +290,6 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
     ) -> Tensor:
         outputs = self.model.language_model(
             inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             full_attention_mask=full_attention_mask,

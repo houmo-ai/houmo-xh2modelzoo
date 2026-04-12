@@ -105,9 +105,15 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         # Vision: run visual model on first call (prefill) only
         image_embeds = None
         if pixel_values is not None and image_position_ids is not None:
+            # Strip padding patches (position_ids == -1) before feeding to visual
+            if image_position_ids.dim() == 2:
+                is_real = ~(image_position_ids == -1).all(dim=-1)
+            else:
+                is_real = ~(image_position_ids == -1).all(dim=-1)[0]  # (total_patches,)
+            n_real = int(is_real.sum().item())
+            pixel_values = pixel_values[:, :n_real, :]
             image_embeds = self._llm_model.visual.forward(
                 pixel_values.to(dtype=self._llm_model.visual.dtype, device=self._llm_model.visual.device),
-                image_position_ids.to(dtype=torch.int32, device=self._llm_model.visual.device),
             )
             if isinstance(image_embeds, (tuple, list)):
                 image_embeds = image_embeds[0]
@@ -120,44 +126,109 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
             self._gemma4_image_position_ids = None
 
         seq_length = inputs_embeds.shape[1]
-        data_processor = self._llm_model.get_data_preprocessor()
+        data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
+        device = inputs_embeds.device
+        chunk_len = data_processor.input_sequence_length
 
-        data_batch = {
-            "input_ids": input_ids,
-            "image_embeds": image_embeds,
-            "past_seq_length": self._past_seq_length,
-            "mm_token_type_ids": mm_token_type_ids,
-        }
-        data_input = data_processor(data_batch)
-        (
-            inputs_embeds_proc,
-            position_ids_proc,
-            past_seq_length_t,
-            current_input_length_t,
-            full_attention_mask,
-            sliding_attention_mask,
-            past_key_caches,
-            past_value_caches,
-        ) = data_input
+        if seq_length <= chunk_len:
+            # --- Single-chunk path (original) ---
+            data_batch = {
+                "input_ids": input_ids,
+                "image_embeds": image_embeds,
+                "past_seq_length": self._past_seq_length,
+                "mm_token_type_ids": mm_token_type_ids,
+            }
+            data_input = data_processor(data_batch)
+            (
+                inputs_embeds_proc,
+                past_seq_length_t,
+                current_input_length_t,
+                full_attention_mask,
+                sliding_attention_mask,
+                past_key_caches,
+                past_value_caches,
+            ) = data_input
 
-        logits = self._llm_model.forward(
-            inputs_embeds_proc,
-            position_ids_proc,
-            past_seq_length_t,
-            current_input_length_t,
-            full_attention_mask,
-            sliding_attention_mask,
-            *past_key_caches,
-            *past_value_caches,
-        )
-        if isinstance(logits, (tuple, list)):
-            logits = logits[0]
+            logits = self._llm_model.forward(
+                inputs_embeds_proc,
+                past_seq_length_t,
+                current_input_length_t,
+                full_attention_mask,
+                sliding_attention_mask,
+                *past_key_caches,
+                *past_value_caches,
+            )
+            if isinstance(logits, (tuple, list)):
+                logits = logits[0]
+            if logits.dim() == 3 and logits.shape[1] > seq_length:
+                logits = logits[:, :seq_length, :]
+        else:
+            # --- Multi-chunk prefill ---
+            # 1. Replace image tokens in the full embedding
+            if image_embeds is not None and input_ids is not None:
+                image_token_id = data_processor.image_token_id
+                n_image_tokens = (input_ids == image_token_id).sum().item()
+                if n_image_tokens > 0:
+                    image_mask = (input_ids == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                    if image_embeds.shape[0] != n_image_tokens:
+                        raise ValueError(
+                            f"Image features and image tokens do not match: "
+                            f"tokens={n_image_tokens}, features={image_embeds.shape[0]}"
+                        )
+                    inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-        # The data_processor pads to prefill_chunk_length (e.g. 512).
-        # Slice back to actual seq_length so HF generate picks logits[:, -1, :]
-        # at the correct (last real token) position.
-        if logits.dim() == 3 and logits.shape[1] > seq_length:
-            logits = logits[:, :seq_length, :]
+            # 2. Prepare mm_token_type_ids for the full sequence
+            if mm_token_type_ids is None:
+                mm_full = torch.zeros(seq_length, dtype=torch.long, device=device)
+            else:
+                mm_full = mm_token_type_ids.to(device).flatten()[:seq_length]
+
+            # 3. Chunk and process
+            steps = (seq_length + chunk_len - 1) // chunk_len
+            pad_len = steps * chunk_len - seq_length
+            if pad_len > 0:
+                pad_embeds = self.get_input_embeddings()(
+                    torch.zeros(1, pad_len, dtype=torch.long, device=device)
+                )
+                inputs_embeds = torch.cat([inputs_embeds, pad_embeds], dim=1)
+                mm_full = torch.cat([mm_full, torch.zeros(pad_len, dtype=torch.long, device=device)])
+
+            past_key_caches = data_processor.past_key_caches
+            past_value_caches = data_processor.past_value_caches
+            running_past_seq = self._past_seq_length
+
+            outputs_logits = []
+            for i in range(steps):
+                start = i * chunk_len
+                end = (i + 1) * chunk_len
+                sub_embeds = inputs_embeds[:, start:end, :]
+                sub_current_len = min(end, seq_length) - start
+                sub_mm = mm_full[start:end]
+
+                full_mask, sliding_mask = data_processor._build_attention_masks(
+                    current_input_length=sub_current_len,
+                    past_seq_length=running_past_seq,
+                    mm_token_type_ids=sub_mm,
+                    device=device,
+                )
+
+                chunk_logits = self._llm_model.forward(
+                    sub_embeds,
+                    torch.tensor([running_past_seq], dtype=torch.int32, device=device),
+                    torch.tensor([sub_current_len], dtype=torch.int32, device=device),
+                    full_mask,
+                    sliding_mask,
+                    *past_key_caches,
+                    *past_value_caches,
+                )
+                if isinstance(chunk_logits, (tuple, list)):
+                    chunk_logits = chunk_logits[0]
+                outputs_logits.append(chunk_logits)
+                running_past_seq += sub_current_len
+
+            # Use last chunk's logits, trimmed to valid length
+            last_valid = min(chunk_len, seq_length - (steps - 1) * chunk_len)
+            logits = outputs_logits[-1][:, :last_valid, :]
 
         return CausalLMOutputWithPast(
             logits=logits,
@@ -217,7 +288,9 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
         kwargs.setdefault("dtype", torch.bfloat16)
-        kwargs.setdefault("device_map", "auto")
+        # Load entirely on CPU to avoid accelerate meta tensors and hooks.
+        # The model is moved to GPU only when needed (ptq quantization).
+        kwargs.setdefault("device_map", "cpu")
         kwargs.setdefault("trust_remote_code", True)
         return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
 
@@ -268,6 +341,8 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         return super().init_wrap_model(hf_model)
 
     def _to_fronted(self, wrap_model):
+        # Model is on CPU (loaded with device_map="cpu"), no hook removal needed.
+
         self.set_prefill()
         prefill_wrap_model = wrap_model
         decode_wrap_model = _copy_model_shared_params(wrap_model)
@@ -283,21 +358,22 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         return ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
 
     def _to_quanted(self, frontend_model, state):
-        # Offload decode to CPU first — prefill and decode share parameter data via
-        # _copy_model_shared_params.  When ptq_quantize converts to float16, it breaks the
-        # sharing and would double GPU memory.  Moving decode to CPU first creates independent
-        # CPU copies, so the shared GPU tensors are freed during prefill's dtype conversion.
+        # With device_map="cpu", both models start on CPU.
+        # Move each to GPU one at a time for ptq quantization, then back to CPU.
         decode_fronted_model = frontend_model.decode
-        decode_fronted_model.cpu()
-        torch.cuda.empty_cache()
-
         prefill_fronted_model = frontend_model.prefill
+
+        # Quantize prefill on GPU
         self.set_prefill()
+        prefill_fronted_model.cuda()
         prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state)
 
-        # Bring decode back to GPU for its quantization
+        # Move quantized prefill to CPU to free GPU for decode
+        prefill_quanted_model.cpu()
+        torch.cuda.empty_cache()
+
+        # Quantize decode on GPU
         decode_fronted_model.cuda()
-        # Free prefill frontend (quant graph wraps it in-place, so nothing extra to delete)
         torch.cuda.empty_cache()
 
         self.set_decode()
@@ -321,7 +397,6 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         export_cfg = {
             "input_names": [
                 "inputs_embeds",
-                "position_ids",
                 "past_seq_length",
                 "current_input_length",
                 "full_attention_mask",

@@ -71,7 +71,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                 full_mask[0, 0, q, 0] = 0
                 sliding_mask[0, 0, q, 0] = 0
 
-        if past_seq_length == 0 and mm_token_type_ids.numel() > 0:
+        if mm_token_type_ids.numel() > 0:
             mm = mm_token_type_ids[:current_input_length]
             is_vision = (mm == 1) | (mm == 2)
             group_start = None
@@ -80,8 +80,10 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                     group_start = idx
                 if group_start is not None and (idx == current_input_length - 1 or not bool(is_vision[idx + 1])):
                     group_end = idx + 1
-                    full_mask[0, 0, group_start:group_end, group_start:group_end] = 0
-                    sliding_mask[0, 0, group_start:group_end, group_start:group_end] = 0
+                    abs_start = past_seq_length + group_start
+                    abs_end = past_seq_length + group_end
+                    full_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
+                    sliding_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
                     group_start = None
 
         return full_mask, sliding_mask
@@ -120,9 +122,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         past_seq_length = int(data["past_seq_length"])
         current_input_length = int(seq_length)
 
-        position_ids = torch.arange(self.input_sequence_length, device=device, dtype=torch.long).unsqueeze(0)
-        position_ids = position_ids + past_seq_length
-
         full_attention_mask, sliding_attention_mask = self._build_attention_masks(
             current_input_length=current_input_length,
             past_seq_length=past_seq_length,
@@ -132,7 +131,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
 
         return (
             inputs_embeds,
-            position_ids,
             torch.tensor([past_seq_length], dtype=torch.int32, device=device),
             torch.tensor([current_input_length], dtype=torch.int32, device=device),
             full_attention_mask,
