@@ -30,19 +30,28 @@ from tqdm import tqdm
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 import math
 
+def _snap_to_factor(value: float, factor: int, mode: str) -> int:
+    if mode == "nearest":
+        snapped = int(math.floor(value / factor + 0.5)) * factor
+    elif mode == "up":
+        snapped = int(math.ceil(value / factor)) * factor
+    elif mode == "down":
+        snapped = int(math.floor(value / factor)) * factor
+    else:
+        raise ValueError(f"unsupported mode: {mode}")
+    return snapped
+
+
 def round_by_factor(number: int, factor: int) -> int:
-    """Returns the closest integer to 'number' that is divisible by 'factor'."""
-    return round(number / factor) * factor
+    return _snap_to_factor(number, factor, "nearest")
 
 
 def ceil_by_factor(number: int, factor: int) -> int:
-    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
-    return math.ceil(number / factor) * factor
+    return _snap_to_factor(number, factor, "up")
 
 
 def floor_by_factor(number: int, factor: int) -> int:
-    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
-    return math.floor(number / factor) * factor
+    return _snap_to_factor(number, factor, "down")
 
 
 def smart_resize(height: int,
@@ -50,30 +59,30 @@ def smart_resize(height: int,
                  factor: int = 28,
                  min_pixels: int = 100 * 28 * 28,
                  max_pixels: int = 16384 * 28 * 28) -> tuple[int, int]:
-    """
-    Rescales the image so that the following conditions are met:
+    if factor <= 0:
+        raise ValueError("factor must be positive")
+    if height <= 0 or width <= 0:
+        raise ValueError("height and width must be positive")
 
-    1. Both dimensions (height and width) are divisible by 'factor'.
+    ratio = max(height, width) / min(height, width)
+    if ratio > 200:
+        raise ValueError(f"absolute aspect ratio must be smaller than 200, got {ratio}")
 
-    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+    out_h = max(factor, _snap_to_factor(height, factor, "nearest"))
+    out_w = max(factor, _snap_to_factor(width, factor, "nearest"))
 
-    3. The aspect ratio of the image is maintained as closely as possible.
-    """
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
-        )
-    h_bar = max(factor, round_by_factor(height, factor))
-    w_bar = max(factor, round_by_factor(width, factor))
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = floor_by_factor(height / beta, factor)
-        w_bar = floor_by_factor(width / beta, factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = ceil_by_factor(height * beta, factor)
-        w_bar = ceil_by_factor(width * beta, factor)
-    return h_bar, w_bar
+    pixel_count = out_h * out_w
+    base_pixels = height * width
+    if pixel_count > max_pixels:
+        down_scale = math.sqrt(max_pixels / base_pixels)
+        out_h = max(factor, _snap_to_factor(height * down_scale, factor, "down"))
+        out_w = max(factor, _snap_to_factor(width * down_scale, factor, "down"))
+    elif pixel_count < min_pixels:
+        up_scale = math.sqrt(min_pixels / base_pixels)
+        out_h = max(factor, _snap_to_factor(height * up_scale, factor, "up"))
+        out_w = max(factor, _snap_to_factor(width * up_scale, factor, "up"))
+
+    return out_h, out_w
 
 from ui_tars_utils import construct_prompt, parse_output, parse_coordinates
 
