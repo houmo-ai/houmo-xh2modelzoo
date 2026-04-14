@@ -4,6 +4,13 @@
 # Description:
 #   Minicpmo Hf Compatible implementation.
 #
+# Portions of this file adapt or wrap upstream OpenBMB MiniCPM / MiniCPM-V
+# behavior for local HuggingFace compatibility, XH2A integration, and export
+# workflows.
+# Original project: https://github.com/OpenBMB/MiniCPM-V
+# Original license: Apache License, Version 2.0
+# Modifications by HOUMO AI: local compatibility, wrapping, and export support.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at

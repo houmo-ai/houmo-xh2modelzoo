@@ -4,6 +4,12 @@
 # Description:
 #   Audio Model Impl model implementation.
 #
+# Portions of this file adapt upstream OpenBMB MiniCPM / MiniCPM-V audio
+# components for local tracing, wrapping, and export workflows.
+# Original project: https://github.com/OpenBMB/MiniCPM-V
+# Original license: Apache License, Version 2.0
+# Modifications by HOUMO AI: local tracing, wrapping, and export integration.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at

@@ -50,8 +50,12 @@ def find_symlinks_not_in_gitignore(repo_root: Path):
 
         for name in dirs + files:
             path = root_path / name
+            rel_parts = path.relative_to(repo_root).parts
+
+            if rel_parts == ('.git',):
+                continue
+
             if path.is_symlink():
-                rel_parts = path.relative_to(repo_root).parts
                 if len(rel_parts) > 1 and rel_parts[0] in skipped_top_level_dirs:
                     continue
                 if not matches_gitignore(path, gitignore_patterns, repo_root):
