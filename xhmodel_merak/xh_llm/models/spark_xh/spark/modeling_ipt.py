@@ -222,25 +222,36 @@ class IPTMLP(nn.Module):
         if hasattr(config, "clamp_training"):
             clamp_training_cfg = config.clamp_training
             self.clamp_input_value = clamp_training_cfg["clamp_input_value"]
+        self.grouped_mlp = config.grouped_mlp
+        if self.grouped_mlp:
+            self.fc1 = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=False)
+            self.fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        else:
+            self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
-        self.fc1 = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=False)
-        self.fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
         if self.clamp_input_value > 0:
             x = torch.clamp_(x, -self.clamp_input_value, self.clamp_input_value)
-        intermediate_parallel = self.fc1(x)
+        if self.grouped_mlp:
+            intermediate_parallel = self.fc1(x)
 
-        intermediate_parallel1, intermediate_parallel2 = torch.chunk(intermediate_parallel, 2, dim=-1)
-        intermediate_parallel1 = intermediate_parallel1.squeeze(-1)
-        intermediate_parallel2 = intermediate_parallel2.squeeze(-1)
-        intermediate_parallel1 = self.act_fn(intermediate_parallel1)
-        intermediate_parallel = intermediate_parallel1 * intermediate_parallel2
+            intermediate_parallel1, intermediate_parallel2 = torch.chunk(intermediate_parallel, 2, dim=-1)
+            intermediate_parallel1 = intermediate_parallel1.squeeze(-1)
+            intermediate_parallel2 = intermediate_parallel2.squeeze(-1)
+            intermediate_parallel1 = self.act_fn(intermediate_parallel1)
+            intermediate_parallel = intermediate_parallel1 * intermediate_parallel2
 
-        if self.clamp_input_value > 0:
-            intermediate_parallel = torch.clamp_(intermediate_parallel, -self.clamp_input_value, self.clamp_input_value)
-        output = self.fc2(intermediate_parallel)
+            if self.clamp_input_value > 0:
+                intermediate_parallel = torch.clamp_(
+                    intermediate_parallel, -self.clamp_input_value, self.clamp_input_value
+                )
+            output = self.fc2(intermediate_parallel)
+        else:
+            output = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
         return output
 
@@ -823,6 +834,218 @@ class IPTMLAttention(nn.Module):
                 mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
                 self.scaling = self.scaling * mscale * mscale
         self.rotary_emb = IPTRotaryEmbedding(config=config)
+        self._mla_absorbed = False
+
+    def prepare_mla_weights(self):
+        """Absorb kv_up_proj weights into q_up_proj and o_proj for compact KV cache.
+
+        Following the GLM4-MoE-Lite approach: fuse W_UK into Q projection and
+        W_UV into O projection, so the KV cache only stores:
+          - k_pe:     [B, 1, S, qk_rope_head_dim]  (RoPE key, 1 head)
+          - k_latent: [B, 1, S, kv_lora_rank]       (latent vector, 1 head)
+        Instead of the original:
+          - key_states:   [B, num_heads, S, qk_head_dim]
+          - value_states: [B, num_heads, S, v_head_dim]
+
+        Call this method once after loading weights and before inference.
+        """
+        if self._mla_absorbed:
+            return
+
+        device = self.kv_up_proj.weight.device
+        weight_dtype = self.kv_up_proj.weight.dtype
+        fusion_dtype = torch.float32
+
+        with torch.no_grad():
+            # ==== Step 1: Split kv_down_proj_with_mqa into latent and rope parts ====
+            W_KV_down = self.kv_down_proj_with_mqa.weight  # [kv_lora_rank + rope_dim, hidden_size]
+            has_kv_bias = self.kv_down_proj_with_mqa.bias is not None
+            proj_dtype = W_KV_down.dtype
+            split_idx = self.kv_lora_rank
+
+            # Latent projection
+            W_latent = W_KV_down[:split_idx, :].contiguous()
+            self.kv_proj_latent = nn.Linear(self.config.hidden_size, self.kv_lora_rank, bias=has_kv_bias)
+            self.kv_proj_latent.weight = nn.Parameter(W_latent.to(dtype=proj_dtype))
+            if has_kv_bias:
+                self.kv_proj_latent.bias = nn.Parameter(
+                    self.kv_down_proj_with_mqa.bias[:split_idx].contiguous().to(dtype=proj_dtype)
+                )
+
+            # RoPE projection
+            W_rope = W_KV_down[split_idx:, :].contiguous()
+            self.kv_proj_rope = nn.Linear(self.config.hidden_size, self.qk_rope_head_dim, bias=has_kv_bias)
+            self.kv_proj_rope.weight = nn.Parameter(W_rope.to(dtype=proj_dtype))
+            if has_kv_bias:
+                self.kv_proj_rope.bias = nn.Parameter(
+                    self.kv_down_proj_with_mqa.bias[split_idx:].contiguous().to(dtype=proj_dtype)
+                )
+
+            # ==== Step 2: Extract W_UK and W_UV from kv_up_proj ====
+            W_Up = self.kv_up_proj.weight.to(device=device, dtype=fusion_dtype)
+            D_latent = W_Up.shape[1]  # kv_lora_rank
+            # kv_up_proj weight: [num_heads * (nope_dim + v_dim), kv_lora_rank]
+            W_Up_view = W_Up.view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, D_latent)
+            W_UK = W_Up_view[:, : self.qk_nope_head_dim, :].clone()  # [H, nope_dim, lora_rank]
+            W_UV = W_Up_view[:, self.qk_nope_head_dim :, :].clone()  # [H, v_dim, lora_rank]
+
+            # ==== Step 3: Absorb W_UK into q_up_proj ====
+            W_Q_all = self.q_up_proj.weight.to(device=device, dtype=fusion_dtype)
+            D_in = W_Q_all.shape[1]  # q_lora_rank or hidden_size
+            W_Q_view = W_Q_all.view(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, D_in)
+            W_Q_nope = W_Q_view[:, : self.qk_nope_head_dim, :]  # [H, nope, D_in]
+            W_Q_rope = W_Q_view[:, self.qk_nope_head_dim :, :]  # [H, rope, D_in]
+
+            # RoPE Q projection
+            W_Q_rope_flat = W_Q_rope.reshape(-1, D_in).contiguous()
+            self.q_rope_proj = nn.Linear(D_in, self.num_heads * self.qk_rope_head_dim, bias=False)
+            self.q_rope_proj.weight = nn.Parameter(W_Q_rope_flat.to(device=device, dtype=weight_dtype))
+
+            # Absorbed Q projection: W_absorbed[h,c,i] = sum_n W_Q_nope[h,n,i] * W_UK[h,n,c]
+            W_Q_absorbed = torch.einsum("hni, hnc -> hci", W_Q_nope, W_UK)
+            W_Q_absorbed_flat = W_Q_absorbed.reshape(-1, D_in).contiguous()
+            self.q_absorbed_proj = nn.Linear(D_in, self.num_heads * self.kv_lora_rank, bias=False)
+            self.q_absorbed_proj.weight = nn.Parameter(W_Q_absorbed_flat.to(device=device, dtype=weight_dtype))
+
+            # ==== Step 4: Absorb W_UV into o_proj ====
+            W_O = self.o_proj.weight.to(device=device, dtype=fusion_dtype)  # [hidden_size, H * v_dim]
+            has_o_bias = self.o_proj.bias is not None
+            old_o_bias = self.o_proj.bias
+
+            W_O_view = W_O.view(self.config.hidden_size, self.num_heads, self.v_head_dim)
+            # Fused: W_Fused_VO[x, h, c] = sum_d W_O[x, h, d] * W_UV[h, d, c]
+            W_Fused_VO = torch.einsum("xhd, hdc -> xhc", W_O_view, W_UV)
+
+            new_in_features = self.num_heads * self.kv_lora_rank
+            W_Fused_flat = W_Fused_VO.reshape(self.config.hidden_size, new_in_features).contiguous()
+
+            self.o_proj = nn.Linear(new_in_features, self.config.hidden_size, bias=has_o_bias)
+            self.o_proj.weight = nn.Parameter(W_Fused_flat.to(device=device, dtype=weight_dtype))
+            if has_o_bias and old_o_bias is not None:
+                self.o_proj.bias = nn.Parameter(old_o_bias.to(device=device, dtype=weight_dtype))
+
+            # ==== Step 5: Cleanup old layers ====
+            del self.q_up_proj
+            del self.kv_up_proj
+            del self.kv_down_proj_with_mqa
+
+        self._mla_absorbed = True
+
+    def _forward_absorbed(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+        """Forward pass with absorbed MLA weights and compact KV cache.
+
+        KV cache stores only k_pe [B, 1, S, rope_dim] and k_latent [B, 1, S, lora_rank],
+        uses matmul broadcasting instead of repeat_interleave.
+        """
+        batch_size, seq_length = hidden_states.shape[:-1]
+
+        if self.clamp_input_value > 0:
+            hidden_states = torch.clamp_(hidden_states, -self.clamp_input_value, self.clamp_input_value)
+
+        # ==== Q: split into RoPE and Content (absorbed) ====
+        if not self.apply_q_lora:
+            q_inp = hidden_states
+        else:
+            q_inp = self.q_down_layernorm(self.q_down_proj(hidden_states))
+            if self.clamp_input_value > 0:
+                q_inp = torch.clamp_(q_inp, -self.clamp_input_value, self.clamp_input_value)
+
+        # q_pe: [B, H, S, rope_dim]
+        q_pe = (
+            self.q_rope_proj(q_inp).view(batch_size, seq_length, self.num_heads, self.qk_rope_head_dim).transpose(1, 2)
+        )
+        # q_content: [B, H, S, kv_lora_rank]  (W_UK already absorbed)
+        q_content = (
+            self.q_absorbed_proj(q_inp).view(batch_size, seq_length, self.num_heads, self.kv_lora_rank).transpose(1, 2)
+        )
+
+        # ==== K: latent vector and RoPE key ====
+        k_latent = self.kv_proj_latent(hidden_states)  # [B, S, kv_lora_rank]
+        k_latent = self.kv_down_layernorm(k_latent)
+        if self.clamp_input_value > 0:
+            k_latent = torch.clamp_(k_latent, -self.clamp_input_value, self.clamp_input_value)
+
+        k_pe = self.kv_proj_rope(hidden_states)  # [B, S, rope_dim]
+        k_pe = k_pe.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
+
+        # ==== RoPE position encoding ====
+        if position_embeddings is None:
+            cos, sin = self.rotary_emb(hidden_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+
+        origin_dtype = q_pe.dtype
+        q_pe = q_pe.float()
+        k_pe = k_pe.float()
+        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        q_pe = q_pe.to(origin_dtype)
+        k_pe = k_pe.to(origin_dtype)
+
+        # ==== KV Cache: compact storage (极低显存占用) ====
+        # k_pe:     [B, 1, S, rope_dim]      — RoPE key, 1 head
+        # k_latent: [B, 1, S, kv_lora_rank]  — latent vector, 1 "head"
+        k_latent = k_latent.unsqueeze(1)  # [B, 1, S, kv_lora_rank]
+
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k_pe, k_latent = past_key_value.update(k_pe, k_latent, self.layer_idx, cache_kwargs)
+
+        kv_seq_length = k_pe.shape[2]
+
+        # ==== Attention via broadcasting (no repeat_interleave) ====
+        # query:  [B, H, S_q, kv_lora_rank + rope_dim]
+        query_states = torch.cat((q_content, q_pe), dim=-1)
+        # key:    [B, 1, S_kv, kv_lora_rank + rope_dim]
+        key_states = torch.cat((k_latent, k_pe), dim=-1)
+
+        # Score: [B, H, S_q, S_kv]  (broadcasts over head dim 1)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
+
+        # Causal mask
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, :kv_seq_length]
+            attn_weights = attn_weights + causal_mask
+        elif cache_position is not None:
+            # FA2 path returns None for attention_mask; generate causal mask here
+            causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+                attention_mask=None,
+                sequence_length=seq_length,
+                target_length=kv_seq_length,
+                dtype=query_states.dtype,
+                device=query_states.device,
+                min_dtype=torch.finfo(query_states.dtype).min,
+                cache_position=cache_position,
+                batch_size=batch_size,
+            )
+            attn_weights = attn_weights + causal_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        if self.training and self.attention_dropout > 0:
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=True)
+
+        # Value is k_latent itself (o_proj has absorbed W_UV)
+        # [B, H, S_q, kv_lora_rank] = [B, H, S_q, S_kv] @ [B, 1, S_kv, kv_lora_rank]
+        attn_output = torch.matmul(attn_weights, k_latent)
+
+        attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_length, -1).contiguous()
+        if self.clamp_input_value > 0:
+            attn_output = torch.clamp_(attn_output, -self.clamp_input_value, self.clamp_input_value)
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+        return attn_output, attn_weights, past_key_value
 
     def forward(
         self,
@@ -836,6 +1059,19 @@ class IPTMLAttention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+        if self._mla_absorbed:
+            return self._forward_absorbed(
+                hidden_states,
+                attention_mask,
+                position_ids,
+                past_key_value,
+                output_attentions,
+                use_cache,
+                cache_position,
+                position_embeddings,
+                **kwargs,
+            )
+
         batch_size, seq_length = hidden_states.shape[:-1]
         query_shape = (batch_size, seq_length, -1, self.qk_head_dim)
         key_shape = (batch_size, seq_length, -1, self.qk_nope_head_dim + self.v_head_dim)
@@ -1010,7 +1246,7 @@ class IPTDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-        
+
         hidden_states = (residual.float() + hidden_states.float()).to(orig_dtype)
 
         # Fully Connected
@@ -1767,3 +2003,27 @@ class IPTForCausalLM(IPTPreTrainedModel, GenerationMixin):
             self.model._unfuse_experts()
         else:
             self.model._unfuse_padding_experts()
+        self.config.grouped_gemm = False
+
+    def unfuse_mlp(self):
+        mlp_modules = []
+        for _, module in self.model.named_modules():
+            if isinstance(module, IPTMLP) and module.grouped_mlp:
+                mlp_modules.append(module)
+        for module in tqdm(mlp_modules, desc="Unfusing MLPs"):
+            module.gate_proj = nn.Linear(
+                module.fc1.in_features, module.fc1.out_features // 2, bias=module.fc1.bias is not None
+            )
+            module.up_proj = nn.Linear(
+                module.fc1.in_features, module.fc1.out_features // 2, bias=module.fc1.bias is not None
+            )
+            module.down_proj = module.fc2
+            module.gate_proj.weight.data.copy_(module.fc1.weight.data[: module.fc1.out_features // 2, :])
+            module.up_proj.weight.data.copy_(module.fc1.weight.data[module.fc1.out_features // 2 :, :])
+            if module.fc1.bias is not None:
+                module.gate_proj.bias.data.copy_(module.fc1.bias.data[: module.fc1.out_features // 2])
+                module.up_proj.bias.data.copy_(module.fc1.bias.data[module.fc1.out_features // 2 :])
+            del module.fc1
+            del module.fc2
+            module.grouped_mlp = False
+        self.config.grouped_mlp = False

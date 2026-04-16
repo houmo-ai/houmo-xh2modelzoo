@@ -143,29 +143,15 @@ class _IPTMLP(_IPTMLPBase):
         # #     intermediate_parallel = torch.clamp_(intermediate_parallel, -self.clamp_input_value, self.clamp_input_value)
         # output = self.fc2(intermediate_parallel)
         # return output
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if self.grouped_mlp:
+            raise AssertionError(
+                "Grouped MLP is not supported in the current implementation. Please set `grouped_mlp=False` in the configuration to disable the grouped MLP and use the unfused MLP implementation instead."
+            )
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
-    def _setup(self, cfg: dict | None = None):
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.fc1.bias is not None)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.fc1.bias is not None)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.fc2.bias is not None)
-        self.gate_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        self.up_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        self.down_proj.to(self.fc1.weight.device, dtype=self.fc1.weight.dtype)
-        with torch.no_grad():
-            self.gate_proj.weight.copy_(self.fc1.weight.data[: self.intermediate_size, :])
-            self.up_proj.weight.copy_(self.fc1.weight.data[self.intermediate_size :, :])
-            self.down_proj.weight.copy_(self.fc2.weight.data)
-            if self.fc1.bias is not None:
-                self.gate_proj.bias.copy_(self.fc1.bias.data[: self.intermediate_size])
-                self.up_proj.bias.copy_(self.fc1.bias.data[self.intermediate_size :])
-            if self.fc2.bias is not None:
-                self.down_proj.bias.copy_(self.fc2.bias.data)
-
-        del self.fc1
-        del self.fc2
-
+    def _setup(self, *args, **kwargs):
         return self
 
 
@@ -589,17 +575,28 @@ class _IPTMoE(_IPTMoEBase):
             probs, indices, tokens_per_expert = self.router(hidden_states, routing_map)
             hidden_states = self.grouped_moe(hidden_states, indices, probs, tokens_per_expert).view(*orig_shape)
         else:
-            # probs, indices, tokens_per_expert = self._router(hidden_states, routing_map)
-            # hidden_states = self.moe(hidden_states, indices, probs).view(*orig_shape)
-            hidden_states = hidden_states
-            logits = self.router.gating(hidden_states)
-            logits = logits.view(-1, self.router.num_groups, self.num_experts)
+            # 1. 计算激活分数
+            logits = self.router.gating(hidden_states)  # [num_tokens, num_groups * num_experts_per_group]
+            scores = logits.sigmoid()
+            # 2. 加入专家修正偏差（防止负载失衡）
+            scores_for_choice = scores + self.e_score_correction_bias
 
-            num_tokens, num_groups, num_experts_per_group = logits.shape
-            routing_weights = logits.sigmoid()  # [num_tokens, groups, num_routed_experts_per_group]
-            routing_weights = routing_weights.view(batch_size, sequence_length, self.num_experts)
-            routing_weights = routing_weights.to(hidden_states.dtype)
-            hidden_states = self.moeblock(hidden_states, routing_weights)
+            # 3. 选取前 K 个专家
+            _, topk_indices = torch.topk(
+                scores_for_choice, k=self.config.num_experts_per_tok, dim=-1, sorted=True
+            )  # [num_tokens, groups, topk]
+
+            # 4. 获取对应专家的权重
+            routing_weights = scores.gather(-1, topk_indices)
+
+            # 5. 调整维度以匹配 (batch, seq_len, k)
+            # routing_weights = routing_weights.view(batch_size, sequence_length, self.config.num_experts_per_tok)
+            # topk_indices = topk_indices.view(batch_size, sequence_length, self.config.num_experts_per_tok)
+
+            # 6. 将 Token 路由至选中的专家进行计算
+            hidden_states = self.moeblock(hidden_states, routing_weights, topk_indices)
+
+            # 7. 应用缩放因子
             hidden_states = hidden_states * self.router.routed_scaling_factor
 
         if self.shared_experts:
@@ -611,21 +608,26 @@ class _IPTMoE(_IPTMoEBase):
         assert self.grouped_gemm is False, (
             "Grouped GEMM is not supported in the current implementation. Please set `grouped_gemm=False` in the configuration to use the standard MoE forward pass with pre-computed routing weights."
         )
-        has_expert_modules = True
-        has_gate_quant = has_expert_modules and all(
-            hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
-            for expert in self.routed_experts
-        )
-        has_up_quant = has_expert_modules and all(
-            hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
-            for expert in self.routed_experts
-        )
-        has_down_quant = has_expert_modules and all(
-            hasattr(expert.fc2, "quant_weight") and expert.fc2.quant_weight is not None
-            for expert in self.routed_experts
+        # has_expert_modules = True
+        # has_gate_quant = has_expert_modules and all(
+        #     hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
+        #     for expert in self.routed_experts
+        # )
+        # has_up_quant = has_expert_modules and all(
+        #     hasattr(expert.fc1, "quant_weight") and expert.fc1.quant_weight is not None
+        #     for expert in self.routed_experts
+        # )
+        # has_down_quant = has_expert_modules and all(
+        #     hasattr(expert.fc2, "quant_weight") and expert.fc2.quant_weight is not None
+        #     for expert in self.routed_experts
+        # )
+        self.register_buffer(
+            "e_score_correction_bias",
+            self.router.e_score_correction_bias.unsqueeze(0).unsqueeze(0).contiguous(),
+            persistent=False,
         )
         self.moeblock = MoeBlock(
-            self.config.hidden_act, self.config.num_experts_per_tok, normalize_routing_weights=True
+            self.config.hidden_act, self.config.num_experts_per_tok, normalize_routing_weights=True, topk_outside=True
         )
 
         expert_modules = [expert for expert in self.routed_experts]
@@ -719,7 +721,6 @@ class _IPTDecoderLayer(_IPTDecoderLayerBase):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
-
         residual = hidden_states
         hidden_states = self.layer_norm(hidden_states)
 

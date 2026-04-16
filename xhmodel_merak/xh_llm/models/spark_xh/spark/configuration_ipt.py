@@ -142,6 +142,7 @@ class IPTConfig(PretrainedConfig):
         mlp_bias=False,
         head_dim=None,
         grouped_gemm=False,
+        grouped_mlp=True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -170,6 +171,7 @@ class IPTConfig(PretrainedConfig):
         self.kv_lora_rank = kv_lora_rank
         self.v_head_dim = v_head_dim
         self.grouped_gemm = grouped_gemm
+        self.grouped_mlp = grouped_mlp
 
         self.initializer_range = initializer_range
         self.pretraining_tp = pretraining_tp

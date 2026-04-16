@@ -36,6 +36,11 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import DynamicModule
 from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
+from ._gptq_model_converter import (
+    general_qlinear_converter,
+    gptqmodel_torch_qlinear_converter,
+    qlinear_cuda_old_converter,
+)
 from .device_mixin import DeviceMixin
 from .types import LLMModelMeta, LLMModelState, ModelMeta
 from .utils import hf_auto_offload, unfold_args
@@ -905,7 +910,7 @@ class XHBaseModel(DeviceMixin):
         return self.get_compatible_model(self.hf_model_dir)
 
     ### 模型推理
-    
+
     def prepare_for_inference(self, *args, **kwargs):
         for _, sub_model in self._models.items():
             sub_model.prepare_for_inference()
