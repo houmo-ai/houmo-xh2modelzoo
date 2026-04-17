@@ -6,3 +6,8 @@ from .scan_model_types import get_support_all_model_types
 
 ## model type to module mapping, used for auto loading model class
 MODEL_TYPE_MAPPING_MODULES: OrderedDict[str, str] = get_support_all_model_types()
+
+
+def update_model_type_mapping():
+    global MODEL_TYPE_MAPPING_MODULES
+    MODEL_TYPE_MAPPING_MODULES = get_support_all_model_types()

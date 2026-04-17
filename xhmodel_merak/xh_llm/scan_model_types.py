@@ -2,8 +2,6 @@ import ast
 from collections import OrderedDict
 from pathlib import Path
 
-from .register import CUSTOM_MODELS
-
 
 def is_register_llm_model_call(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
@@ -72,10 +70,6 @@ def get_support_all_model_types():
     for py_file in sorted(models_dir.rglob("*.py")):
         results += parse_register_llm_models(py_file)
 
-    for custom_dir in CUSTOM_MODELS:
-        for py_file in sorted(Path(custom_dir).rglob("*.py")):
-            results += parse_register_llm_models(py_file)
-
     model_types = {result["model_type"]: result["module_name"] for result in results}
     return OrderedDict(model_types)
 
@@ -85,10 +79,6 @@ def get_support_master_model_types():
     results = []
     for py_file in sorted(models_dir.rglob("*.py")):
         results += parse_register_llm_models(py_file)
-
-    for custom_dir in CUSTOM_MODELS:
-        for py_file in sorted(Path(custom_dir).rglob("*.py")):
-            results += parse_register_llm_models(py_file)
 
     model_types = {result["model_type"]: result["module_name"] for result in results if result["master"]}
     return OrderedDict(model_types)
