@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.gemma4.modeling_gemma4 import (
@@ -18,7 +17,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
 
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
-from xhquant.nn import LLMCache, RMSNorm
+from xhquant.nn import LLMCache, MaskedAdd, RMSNorm, SoftmaxPlus
 from xhquant.utils.registry import DynamicModule
 
 from ...register import XHLLM_TRACEABLE_MODULES
@@ -82,9 +81,15 @@ class _Gemma4TextAttention(DynamicModule):
             norm = getattr(self, norm_name, None)
             if norm is not None and not getattr(norm, "with_scale", True):
                 norm._head_dim_hint = self.head_dim
+        # Per-layer sliding window: sliding layers get attention_max_length=sliding_window,
+        # full attention layers get -1 (no truncation). The compiler uses this marker to
+        # recognize sliding-window KV caches and optimize accordingly.
+        attention_max_length = self.sliding_window if getattr(self, "sliding_window", None) is not None else -1
+        self.masked_add = MaskedAdd()
+        self.softmax = SoftmaxPlus(dim=-1)
         if self.use_cache:
-            self.k_cache = LLMCache(axis=cfg.kv_cache.cache_axis, attention_max_length=-1)
-            self.v_cache = LLMCache(axis=cfg.kv_cache.cache_axis, attention_max_length=-1)
+            self.k_cache = LLMCache(axis=cfg.kv_cache.cache_axis, attention_max_length=attention_max_length)
+            self.v_cache = LLMCache(axis=cfg.kv_cache.cache_axis, attention_max_length=attention_max_length)
         else:
             self.k_cache = None
             self.v_cache = None
@@ -130,10 +135,13 @@ class _Gemma4TextAttention(DynamicModule):
         key_states = key_states.transpose(2, 3)
         key_states = torch.repeat_interleave(key_states, self.num_key_value_groups, dim=1)
         value_states = torch.repeat_interleave(value_states, self.num_key_value_groups, dim=1)
-        attn_weights = torch.matmul(query_states, key_states) * self.kv_scale
+        if self.kv_scale == 1.0:
+            attn_weights = torch.matmul(query_states, key_states)
+        else:
+            attn_weights = torch.matmul(query_states, key_states) * self.kv_scale
         if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = self.masked_add(attn_weights, attention_mask)
+        attn_weights = self.softmax(attn_weights).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)

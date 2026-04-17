@@ -665,7 +665,20 @@ class XHBaseModel(DeviceMixin):
         assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
         hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
 
-        from transformers.utils import is_auto_gptq_available, is_gptqmodel_available
+        from transformers.utils import is_gptqmodel_available
+
+        try:
+            from transformers.utils import is_auto_gptq_available
+        except ImportError:
+
+            def is_auto_gptq_available():
+                return False
+
+        from .base_llm_model import (
+            general_qlinear_converter,
+            gptqmodel_torch_qlinear_converter,
+            qlinear_cuda_old_converter,
+        )
 
         converter: Optional[Callable] = None
 
@@ -697,6 +710,12 @@ class XHBaseModel(DeviceMixin):
                 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 
                 torch_linear_cls.append(TorchFusedQuantLinear)
+            except Exception:
+                pass
+            try:
+                from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
+
+                torch_linear_cls.append(HFKernelLinear)
             except Exception:
                 pass
 

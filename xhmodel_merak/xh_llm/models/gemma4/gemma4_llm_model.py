@@ -8,7 +8,7 @@ from typing import Any, Optional, Union, cast
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForImageTextToText
+from transformers import AutoConfig, AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration as XHGemma4ForConditionalGeneration
@@ -292,6 +292,22 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         # The model is moved to GPU only when needed (ptq quantization).
         kwargs.setdefault("device_map", "cpu")
         kwargs.setdefault("trust_remote_code", True)
+        # Gemma4 is not registered in gptqmodel yet; bypass GPTQModel.load and
+        # rely on transformers' native auto-gptq loading + our _dequantize_gptq
+        # converter. This produces per-layer `quant_weight` buffers just like
+        # the qwen3.5 path.
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        quantization_config = getattr(config, "quantization_config", None)
+        quant_method = getattr(quantization_config, "quant_method", None)
+        if isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method", quant_method)
+        if str(quant_method).lower() == "gptq":
+            assert quant_weight is None or len(quant_weight) == 0, (
+                "Model is already quantized, quant_weight should be None or empty when loading quantized model."
+            )
+            native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
+            native_hf_model = cls._dequantize_hf_model(native_hf_model, quant_weight=None, **kwargs)
+            return native_hf_model
         return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
 
     def _wraped_pre(self, hf_model: XHGemma4ForConditionalGeneration):
@@ -324,15 +340,19 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
             embed_copy.num_embeddings, embed_copy.embedding_dim, _weight=embed_copy.weight
         ).to(orig_device)
         self.pad_token_id = int(getattr(llm_model.config, "pad_token_id", 0) or 0)
-
-        layer_kv_shapes: list[list[int]] = []
-        for layer in llm_model.layers:
-            attn = layer.self_attn
-            num_key_value_heads = attn.k_proj.out_features // attn.head_dim
-            layer_kv_shapes.append([1, num_key_value_heads, self.config.context_max_length, attn.head_dim])
-        self._kvcache_mixin.set_layer_kv_shapes(layer_kv_shapes)
         self.sliding_window = int(getattr(llm_model.config, "sliding_window", 1024))
         self.layer_types = list(getattr(llm_model.config, "layer_types", []))
+
+        layer_kv_shapes: list[list[int]] = []
+        # All layers get the same cache input size (context_max_length).
+        # LLMCache with attention_max_length=sliding_window handles output truncation;
+        # the compiler reads this marker and optimizes the actual read pattern.
+        cache_seq_len = self.config.context_max_length
+        for idx, layer in enumerate(llm_model.layers):
+            attn = layer.self_attn
+            num_key_value_heads = attn.k_proj.out_features // attn.head_dim
+            layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
+        self._kvcache_mixin.set_layer_kv_shapes(layer_kv_shapes)
 
     def init_wrap_model(self, hf_model: XHGemma4ForConditionalGeneration) -> Any:
         from ._llm_model_impl import register_wrap_modules
@@ -363,9 +383,24 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         decode_fronted_model = frontend_model.decode
         prefill_fronted_model = frontend_model.prefill
 
+        def _detach_quant_weights(m: nn.Module):
+            """Temporarily detach int8 quant_weight buffers so .cuda() doesn't move them to GPU."""
+            cache = {}
+            for name, sub in m.named_modules():
+                if isinstance(sub, nn.Linear) and "quant_weight" in sub._buffers:
+                    cache[name] = sub._buffers.pop("quant_weight")
+            return cache
+
+        def _reattach_quant_weights(m: nn.Module, cache: dict):
+            for name, buf in cache.items():
+                sub = m.get_submodule(name)
+                sub.register_buffer("quant_weight", buf)
+
         # Quantize prefill on GPU
         self.set_prefill()
+        prefill_qw_cache = _detach_quant_weights(prefill_fronted_model)
         prefill_fronted_model.cuda()
+        _reattach_quant_weights(prefill_fronted_model, prefill_qw_cache)
         prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state)
 
         # Move quantized prefill to CPU to free GPU for decode
@@ -373,7 +408,9 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         torch.cuda.empty_cache()
 
         # Quantize decode on GPU
+        decode_qw_cache = _detach_quant_weights(decode_fronted_model)
         decode_fronted_model.cuda()
+        _reattach_quant_weights(decode_fronted_model, decode_qw_cache)
         torch.cuda.empty_cache()
 
         self.set_decode()

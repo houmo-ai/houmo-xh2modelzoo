@@ -33,6 +33,10 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         self.image_token_id = image_token_id
         self.sliding_window = sliding_window
 
+    @staticmethod
+    def _aligned(size: int, alignment: int = 16) -> int:
+        return ((size + alignment - 1) // alignment) * alignment
+
     def _pad_1d(self, tensor: torch.Tensor, value: int = 0):
         if tensor.shape[-1] >= self.input_sequence_length:
             return tensor[..., : self.input_sequence_length]
@@ -52,28 +56,41 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         device: torch.device,
     ):
         q_len = self.input_sequence_length
-        ctx = self.context_length
         neg = torch.tensor(torch.finfo(torch.float16).min, dtype=torch.float16, device=device)
-        full_mask = torch.full((1, 1, q_len, ctx), neg, dtype=torch.float16, device=device)
-        sliding_mask = torch.full((1, 1, q_len, ctx), neg, dtype=torch.float16, device=device)
+        full_ctx = self.context_length
+        sw = self.sliding_window
 
-        valid_k = min(ctx, max(1, past_seq_length + current_input_length))
+        # ── Full attention mask (width = context_length) ──
+        full_mask = torch.full((1, 1, q_len, full_ctx), neg, dtype=torch.float16, device=device)
+        valid_k = min(full_ctx, max(1, past_seq_length + current_input_length))
         for q in range(q_len):
             if q < current_input_length:
-                abs_q = past_seq_length + q
-                full_end = min(valid_k, abs_q + 1)
+                full_end = min(valid_k, past_seq_length + q + 1)
                 full_mask[0, 0, q, :full_end] = 0
-
-                slide_start = max(0, abs_q - self.sliding_window + 1)
-                slide_end = full_end
-                sliding_mask[0, 0, q, slide_start:slide_end] = 0
             else:
                 full_mask[0, 0, q, 0] = 0
+
+        # ── Sliding attention mask (width = LLMCache output size for this input_seq_len) ──
+        # LLMCache with attention_max_length=sw outputs aligned(sw + nq - 1, 16) entries.
+        slide_ctx = self._aligned(sw + q_len - 1, 16)
+        # Uses the _gen_mask_v2 approach: clamp past_seq_length to (sw - 1) so that
+        # the mask coordinates match the truncated KV cache managed by LLMCache.
+        sliding_mask = torch.full((1, 1, q_len, slide_ctx), neg, dtype=torch.float16, device=device)
+        clamped_past = min(past_seq_length, sw - 1) if sw > 0 else past_seq_length
+        for q in range(q_len):
+            if q < current_input_length:
+                causal_end = min(slide_ctx, clamped_past + q + 1)
+                sw_start = max(0, clamped_past + q - sw + 1)
+                sliding_mask[0, 0, q, sw_start:causal_end] = 0
+            else:
                 sliding_mask[0, 0, q, 0] = 0
 
+        # ── Vision token bidirectional attention (unmask entire group for both masks) ──
         if mm_token_type_ids.numel() > 0:
             mm = mm_token_type_ids[:current_input_length]
             is_vision = (mm == 1) | (mm == 2)
+            # Offset to convert absolute positions to sliding-cache coordinates
+            cache_offset = max(0, past_seq_length - clamped_past)
             group_start = None
             for idx in range(current_input_length):
                 if bool(is_vision[idx]) and group_start is None:
@@ -82,8 +99,13 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                     group_end = idx + 1
                     abs_start = past_seq_length + group_start
                     abs_end = past_seq_length + group_end
+                    # Full mask: absolute positions map directly
                     full_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
-                    sliding_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
+                    # Sliding mask: convert to cache-relative coordinates
+                    c_start = max(0, abs_start - cache_offset)
+                    c_end = min(slide_ctx, abs_end - cache_offset)
+                    if c_start < slide_ctx and c_end > 0:
+                        sliding_mask[0, 0, group_start:group_end, c_start:c_end] = 0
                     group_start = None
 
         return full_mask, sliding_mask
