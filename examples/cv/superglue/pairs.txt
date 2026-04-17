@@ -1,0 +1,1 @@
+/data02/datasets/hpatches/raw/hpatches_seq/hpatches/hpatches-sequences-release/i_pool/1.ppm /data02/datasets/hpatches/raw/hpatches_seq/hpatches/hpatches-sequences-release/i_pool/3.ppm 
