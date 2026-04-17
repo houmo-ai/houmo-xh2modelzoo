@@ -18,3 +18,4 @@ XHLLM_TRACEABLE_MODULES = _DMRegistryCls("XHTrace")
 # for torch.compile
 ONLY_EVAL_MODULES = _DMRegistryCls("fast_eval_dynamic_modules")
 XHLLM_TRACEABLE_MODULES_TORCH_COMPILE = _DMRegistryCls("XHTrace_Torch_Compile")
+CUSTOM_MODELS = []
