@@ -329,7 +329,6 @@ class _IPTMLAttention(_IPTMLAttentionBase):
         k_latent = self.kv_down_layernorm(self.kv_a_proj_latent(hidden_states))
         k_rot = self.kv_a_proj_rope(hidden_states).view(batch_size, 1, seq_length, self.qk_rope_head_dim)
 
-        # RoPE in float32 (per original implementation)
         q_pe = q_pe.transpose(1, 2)
         cos, sin = position_embeddings
         origin_dtype = q_pe.dtype
@@ -587,7 +586,8 @@ class _IPTMoE(_IPTMoEBase):
             )  # [num_tokens, groups, topk]
 
             # 4. 获取对应专家的权重
-            routing_weights = scores.gather(-1, topk_indices)
+            # routing_weights = scores.gather(-1, topk_indices)
+            routing_weights = scores
 
             # 5. 调整维度以匹配 (batch, seq_len, k)
             # routing_weights = routing_weights.view(batch_size, sequence_length, self.config.num_experts_per_tok)

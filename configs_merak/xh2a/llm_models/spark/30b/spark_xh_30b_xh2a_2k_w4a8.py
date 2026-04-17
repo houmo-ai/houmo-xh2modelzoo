@@ -1,7 +1,7 @@
 _base_ = [
     "../_spark_xh_xh2a_2k.py",
 ]
-hf_model_dir = "./data/models/ipt_30b"
+hf_model_dir = "./data/models/ipt_30b_unfuse"
 
 model = dict(
     hf_model=hf_model_dir,

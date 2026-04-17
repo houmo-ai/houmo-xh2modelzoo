@@ -33,9 +33,15 @@ class KVCacheMixin:
         num_decoder_layers = self.kvcache_config.num_layers
         kv_cache_shape = self.kvcache_config.kv_cache_shape
 
+        if isinstance(kv_cache_shape[0], list):
+            k_cache_shape = kv_cache_shape[0]
+            v_cache_shape = kv_cache_shape[1]
+        else:
+            k_cache_shape = kv_cache_shape
+            v_cache_shape = kv_cache_shape
         for _i in range(num_decoder_layers):
-            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(kv_cache_shape, dtype=torch.float16)))
-            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(k_cache_shape, dtype=torch.float16)))
+            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(v_cache_shape, dtype=torch.float16)))
 
     def clear_kv_cache(self):
         self.past_key_caches.clear()

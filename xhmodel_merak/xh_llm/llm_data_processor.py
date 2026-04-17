@@ -41,6 +41,11 @@ class BaseLLMInputProcessor:
         return self
 
     def __call__(self, data: dict | tuple | list) -> list[torch.Tensor]:
+        if isinstance(data, dict):
+            data = {k: v.to(self._device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        elif isinstance(data, (tuple, list)):
+            data = type(data)([d.to(self._device) if isinstance(d, torch.Tensor) else d for d in data])
+
         return self.forward(data)
 
     def forward(self, data: dict | tuple | list) -> list[torch.Tensor]:

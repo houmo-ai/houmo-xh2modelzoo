@@ -208,3 +208,5 @@ examples/llm/whisper/data/models/whisper-medium
 examples/llm/paddle_ocr_v5/PPOCRv3/*
 examples/llm/paddle_ocr_v5/houmo/*
 .omx/
+# Added by code-review-graph
+.code-review-graph/

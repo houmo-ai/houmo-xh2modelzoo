@@ -113,7 +113,7 @@ def main(args):
         logits = xh_model(*xh_inputs)
 
     diff = (logits_gt - logits).abs().max().item()
-    logger.info(f"Max absolute difference in logits: {diff}")
+    logger.info(f" HF vs {eval_type}  Max absolute difference in logits: {diff}")
 
 
 if __name__ == "__main__":

@@ -162,12 +162,15 @@ class BaseLLMModelConfig(HFModelConfig):
     #     return f"{self.__class__.__name__} {self.to_json_string()}"
 
 
+TensorShape = list[int]
+
+
 class KVCacheConfig(BaseConfig):
     def __init__(
         self,
         *,
         num_layers: int = -1,
-        kv_cache_shape: list[int] = None,
+        kv_cache_shape: TensorShape | list[TensorShape] | None = None,
         cache_axis: int = 2,
         batch_size: int = 1,
         cache_dtype: str = "float16",
@@ -214,7 +217,7 @@ class KVCacheWithLinearConfig(KVCacheConfig):
         self,
         *,
         num_layers: int = -1,
-        kv_cache_shape: list[int] = None,
+        kv_cache_shape: TensorShape | list[TensorShape] | None = None,
         cache_axis: int = 2,
         batch_size: int = 1,
         cache_dtype: str = "float16",

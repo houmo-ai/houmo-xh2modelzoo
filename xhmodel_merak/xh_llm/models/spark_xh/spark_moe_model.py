@@ -85,9 +85,9 @@ class XHSparkModeModel(TextLLMModel):
                     self.config.context_max_length,
                     layer0_attn.kv_lora_rank,
                 ]
-                self.kvcache_config.kv_cache_shape = k_cache_shape
+                self.kvcache_config.kv_cache_shape = [k_cache_shape, v_cache_shape]
                 # Replace the default mixin with MLA-aware variant
-                self._kvcache_mixin = _MLAKVCacheMixin(self.kvcache_config, v_cache_shape)
+                # self._kvcache_mixin = _MLAKVCacheMixin(self.kvcache_config, v_cache_shape)
             else:
                 self.kvcache_config.kv_cache_shape = [
                     1,
@@ -101,4 +101,5 @@ class XHSparkModeModel(TextLLMModel):
         hf_model = super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
         hf_model = cast(IPTForCausalLM, hf_model)
         hf_model.unfuse_experts(use_padding_expert=False)
+        hf_model.unfuse_mlp()
         return hf_model

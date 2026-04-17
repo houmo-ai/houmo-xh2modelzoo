@@ -29,16 +29,23 @@ def main(args):
 
     # 模型裁剪逻辑
     layer_count = args.layers
-    model.config.num_hidden_layers = layer_count
-    model.config.num_layers = layer_count
-    model.model.transformer.layers = model.model.transformer.layers[:layer_count]
+    if layer_count > 0:
+        assert layer_count <= model.config.num_hidden_layers, (
+            f"Layer count to unfuse ({layer_count}) cannot exceed total layers ({model.config.num_hidden_layers})"
+        )
+        model.config.num_hidden_layers = layer_count
+        model.config.num_layers = layer_count
+        model.model.transformer.layers = model.model.transformer.layers[:layer_count]
 
     # 解耦操作
     model.unfuse_experts()
     model.unfuse_mlp()
 
     # 保存截断且解耦后的模型
-    unfuse_expert_model_dir = f"{model_dir}_unfuse_{layer_count}"
+    if layer_count > 0:
+        unfuse_expert_model_dir = f"{model_dir}_unfuse_{layer_count}"
+    else:
+        unfuse_expert_model_dir = f"{model_dir}_unfuse"
     model.save_pretrained(unfuse_expert_model_dir)
     tokenizer.save_pretrained(unfuse_expert_model_dir)
     logger.info(f"Unfused and truncated model saved to {unfuse_expert_model_dir}")
