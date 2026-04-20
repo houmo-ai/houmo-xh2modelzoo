@@ -470,7 +470,7 @@ class XHBaseModel(DeviceMixin):
 
         model_dtype = cls.get_hf_model_dtype()
         if "dtype" not in kwargs:
-            kwargs["dtype"] = model_dtype
+            kwargs["torch_dtype"] = model_dtype
         native_model = auto_model_cls.from_pretrained(hf_model_dir, **kwargs)
         native_model = cls.untied_weights(native_model)
         # if native_model.config.tie_word_embeddings:  # type: ignore

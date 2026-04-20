@@ -41,13 +41,12 @@ from diffusers import SD3Transformer2DModel, StableDiffusion3Pipeline
 from torch import Tensor
 from transformers.models.clip.modeling_clip import (
     BaseModelOutputWithPooling,
-    CLIPSdpaAttention,
     CLIPTextTransformer,
     _create_4d_causal_attention_mask,
     _prepare_4d_attention_mask,
-    is_torch_greater_or_equal_than_2_2,
 )
 from transformers.models.t5.modeling_t5 import T5Block, T5Stack
+
 from xhquant.api import QuantScheme, convert_onnx_to_hmonnx
 from xhquant.nn.modules import Clip
 from xhquant.utils import digit_version, get_root_logger
@@ -277,6 +276,7 @@ def CLIPSdpaAttention_forward(
     query_states = query_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
+    from transformers.models.clip.modeling_clip import is_torch_greater_or_equal_than_2_2
 
     # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
     # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -664,6 +664,7 @@ class SD3Converter:
             return text_embeds, text_outputs.hidden_states[-2]
 
         export_model.forward = types.MethodType(forward, export_model)
+        from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
         for name, module in export_model.named_modules():
             if isinstance(module, CLIPTextTransformer):
@@ -811,6 +812,7 @@ class SD3Converter:
             return text_embeds, text_outputs.hidden_states[-2]
 
         export_model.forward = types.MethodType(forward, export_model)
+        from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
         for name, module in export_model.named_modules():
             if isinstance(module, CLIPTextTransformer):
@@ -1045,6 +1047,7 @@ class SD3Converter:
 
             from transformers.activations import NewGELUActivation
             from transformers.models.t5.modeling_t5 import T5LayerNorm
+
             from xhquant.nn.modules import RMSNorm
 
             # if args.t5_quant:
