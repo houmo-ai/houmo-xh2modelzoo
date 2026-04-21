@@ -5,7 +5,7 @@
 1. 依赖包
 
 ```
-pip install transformers==4.57
+pip install transformers==4.57.6
 pip install torchcodec
 ```
 

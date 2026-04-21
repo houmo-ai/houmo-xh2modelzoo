@@ -4,6 +4,9 @@
 
 ```bash
 pip install transformers==4.47.0
+diffusers       0.29.2
+sentencepiece
+peft            0.16.0
 ```
 
 ## 导出SD3-2b模型

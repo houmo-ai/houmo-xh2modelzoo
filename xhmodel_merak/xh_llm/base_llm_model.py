@@ -235,6 +235,19 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     self.quant_weight = quant_weight
 
 
+def _dequantize_gptqmodel_hf_model(native_hf_model):
+    from transformers.utils import is_gptqmodel_available
+
+    assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
+    converter = gptqmodel_torch_qlinear_converter
+    from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
+    for name, module in native_hf_model.named_modules():  # type: ignore
+        if isinstance(module, PackableQuantLinear):
+            converter(module)
+    return native_hf_model
+
+
 class BaseLLMModel(XHBaseModel):
     CONFIG_CLS = BaseLLMModelConfig
 

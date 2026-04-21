@@ -95,8 +95,8 @@ class BaseLLMInputProcessor:
         return (
             # position_ids.to(self.device),
             inputs_embeds,
-            torch.tensor([past_seq_length], dtype=torch.int32),
-            torch.tensor([seq_length], dtype=torch.int32),
+            torch.tensor([past_seq_length], dtype=torch.int32, device=self._device),
+            torch.tensor([seq_length], dtype=torch.int32, device=self._device),
             past_key_caches,
             past_value_caches,
         )

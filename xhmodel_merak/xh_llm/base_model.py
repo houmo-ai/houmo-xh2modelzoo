@@ -16,6 +16,7 @@ from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
+from xhmodel_merak.xh_llm._gptq_model_converter import gptqmodel_torch_qlinear_converter
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
 from xhquant.api import (
@@ -36,11 +37,6 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import DynamicModule
 from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
-from ._gptq_model_converter import (
-    general_qlinear_converter,
-    gptqmodel_torch_qlinear_converter,
-    qlinear_cuda_old_converter,
-)
 from .device_mixin import DeviceMixin
 from .types import LLMModelMeta, LLMModelState, ModelMeta
 from .utils import hf_auto_offload, unfold_args
@@ -49,6 +45,19 @@ from .wrap_model import wrap_llm_model
 
 if TYPE_CHECKING:
     from .hmonnx import BaseLLMHMONNXModel
+
+
+def _dequantize_gptqmodel_hf_model(native_hf_model):
+    from transformers.utils import is_gptqmodel_available
+
+    assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
+    converter = gptqmodel_torch_qlinear_converter
+    from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
+    for name, module in native_hf_model.named_modules():  # type: ignore
+        if isinstance(module, PackableQuantLinear):
+            converter(module)
+    return native_hf_model
 
 
 class XHBaseModel(DeviceMixin):
@@ -674,7 +683,7 @@ class XHBaseModel(DeviceMixin):
             def is_auto_gptq_available():
                 return False
 
-        from .base_llm_model import (
+        from ._gptq_model_converter import (
             general_qlinear_converter,
             gptqmodel_torch_qlinear_converter,
             qlinear_cuda_old_converter,
@@ -855,6 +864,7 @@ class XHBaseModel(DeviceMixin):
                 "Model is already quantized, quant_weight should be None or empty when loading quantized model."
             )
             native_hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
+            _dequantize_gptqmodel_hf_model(native_hf_model)
             return native_hf_model
 
         if quant_weight is not None and len(quant_weight) > 0:
