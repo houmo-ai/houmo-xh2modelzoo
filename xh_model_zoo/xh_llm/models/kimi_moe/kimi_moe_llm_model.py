@@ -42,15 +42,21 @@ class XHKimiMoeModel(LLMBaseModel):
 
     def get_hf_model(self, device_map="cpu", **kwargs):
         assert self.hf_model_dir is not None
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            self.hf_model_dir,
-            # dtype=torch.float16,
-            # torch_dtype=torch.float16,
-            trust_remote_code=True,
-            device_map=device_map,
-            # low_cpu_mem_usage=True,
-            **kwargs,
-        ).eval()
+        from transformers import AutoConfig
+        from xh_model_zoo.xh_llm.models.kimi_moe.modeling_deepseek import DeepseekV3ForCausalLM
+        hf_config = AutoConfig.from_pretrained(self.hf_model_dir, trust_remote_code=True)
+        hf_model = DeepseekV3ForCausalLM(hf_config).eval()
+
+        # hf_model = AutoModelForCausalLM.from_pretrained(
+        #     self.hf_model_dir,
+        #     # dtype=torch.float16,
+        #     # torch_dtype=torch.float16,
+        #     trust_remote_code=True,
+        #     device_map=device_map,
+        #     # low_cpu_mem_usage=True,
+        #     **kwargs,
+        # ).eval()
+
         if hf_model.config.tie_word_embeddings:
             hf_model.config.torchscript = True
             hf_model.tie_weights()

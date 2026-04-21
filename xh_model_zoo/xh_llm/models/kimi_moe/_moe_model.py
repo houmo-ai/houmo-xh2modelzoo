@@ -12,17 +12,21 @@ from torch import Tensor
 import sys
 import importlib
 # /data01/home/xuchen/.cache/huggingface/modules/transformers_modules/kimi/modeling_deepseek.py
-sys.path.append("/data01/home/xuchen/.cache/huggingface/modules/transformers_modules/kimi/")
+# sys.path.append("/data01/home/xuchen/.cache/huggingface/modules/transformers_modules/kimi/")
 
-full_module_name = "transformers_modules.kimi.modeling_deepseek"
-modeling_deepseek = importlib.import_module(full_module_name)
-DeepseekV3Attention = modeling_deepseek.DeepseekV3Attention
-DeepseekV3DecoderLayer = modeling_deepseek.DeepseekV3DecoderLayer
-DeepseekV3RMSNorm = modeling_deepseek.DeepseekV3RMSNorm
-DeepseekV3RotaryEmbedding = modeling_deepseek.DeepseekV3RotaryEmbedding
-DeepseekV3MoE = modeling_deepseek.DeepseekV3MoE
-DeepseekV3Model = modeling_deepseek.DeepseekV3Model
-DeepseekV3ForCausalLM = modeling_deepseek.DeepseekV3ForCausalLM
+# full_module_name = "transformers_modules.kimi.modeling_deepseek"
+# modeling_deepseek = importlib.import_module(full_module_name)
+# DeepseekV3Attention = modeling_deepseek.DeepseekV3Attention
+# DeepseekV3DecoderLayer = modeling_deepseek.DeepseekV3DecoderLayer
+# DeepseekV3RMSNorm = modeling_deepseek.DeepseekV3RMSNorm
+# DeepseekV3RotaryEmbedding = modeling_deepseek.DeepseekV3RotaryEmbedding
+# DeepseekV3MoE = modeling_deepseek.DeepseekV3MoE
+# DeepseekV3Model = modeling_deepseek.DeepseekV3Model
+# DeepseekV3ForCausalLM = modeling_deepseek.DeepseekV3ForCausalLM
+
+from xh_model_zoo.xh_llm.models.kimi_moe.modeling_deepseek import \
+    DeepseekV3Attention, DeepseekV3DecoderLayer, DeepseekV3RMSNorm, DeepseekV3RotaryEmbedding, \
+    DeepseekV3MoE, DeepseekV3Model, DeepseekV3ForCausalLM
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
