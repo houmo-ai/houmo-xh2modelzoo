@@ -264,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="/data01/home/she.gao/xh2modelzoo/examples/vla/GigaBrain/config/gigabrain/llm/gigabrain_expert_xh2a.py",
+        default="/data01/home/she.gao/xh2modelzoo/examples/vla/gigabrain/config/gigabrain/llm/gigabrain_expert_xh2a.py",
     )
     parser.add_argument("--valid", action="store_true", help="validate the model")
     parser.add_argument("--debug", action="store_true", help="debug mode")
