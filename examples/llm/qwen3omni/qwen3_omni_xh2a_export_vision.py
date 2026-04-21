@@ -58,6 +58,10 @@ def main(args):
 
     prefix = f"{model_name}-{target_device}-vision-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
+    golden_root = Path(args.golden_root)
+    if not golden_root.is_absolute():
+        golden_root = (SCRIPT_DIR.parents[2] / golden_root).resolve()
+    golden_dir = golden_root / prefix / "golden"
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
@@ -112,12 +116,12 @@ def main(args):
     height = args.image_max_size_h
     width = args.image_max_size_w
     frames = args.image_max_size_t
-    
+
     # Load real image for actual accuracy (instead of random data)
     def load_sample_image():
-        if hasattr(args, 'sample_image_path') and args.sample_image_path and Path(args.sample_image_path).exists():
+        if hasattr(args, "sample_image_path") and args.sample_image_path and Path(args.sample_image_path).exists():
             logger.info(f"Loading sample image from {args.sample_image_path}")
-            img = Image.open(args.sample_image_path).convert('RGB')
+            img = Image.open(args.sample_image_path).convert("RGB")
             img = img.resize((width, height), Image.Resampling.LANCZOS)
             img_tensor = torch.from_numpy(np.array(img)).float() / 255.0
             img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
@@ -126,7 +130,7 @@ def main(args):
         else:
             logger.warning(f"Sample image not found or not provided, falling back to random data")
             return torch.randn(1, channels, frames, height, width, dtype=torch.float16)
-    
+
     dummy_pixels = load_sample_image()
     logger.info(f"Input pixels shape: {dummy_pixels.shape}")
 
@@ -143,11 +147,11 @@ def main(args):
     track_device = "cuda:0" if torch.cuda.is_available() else "cpu"
     with TimeProfiler("export_vision", logger), MemoryTracker(track_device, "export_vision", logger):
         compatible_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        
+
         # Two-stage export: FX -> ONNX -> (simplify) -> HMONNX
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_onnx_file = str(Path(tmp_dir) / "visual_temp.onnx")
-            
+
             # Stage 1: Export FX to ONNX
             logger.info("Stage 1: Exporting FX model to ONNX...")
             torch.onnx.export(
@@ -161,7 +165,7 @@ def main(args):
                 output_names=output_names,
                 verbose=False,
             )
-            
+
             # Stage 2: Simplify ONNX (CRITICAL FOR PRECISION & PERFORMANCE)
             logger.info("Stage 2: Simplifying ONNX model (fixes precision and improves performance)...")
             with TimeProfiler("simplify_onnx", logger):
@@ -169,7 +173,7 @@ def main(args):
                 onnx_model, check = simplify_large_onnx(onnx_model)
                 if not check:
                     logger.warning("ONNX simplification check failed, but continuing...")
-            
+
             # Stage 3: Convert simplified ONNX to HMONNX
             logger.info("Stage 3: Converting simplified ONNX to HMONNX...")
             convert_onnx_to_hmonnx(
@@ -237,9 +241,7 @@ def main(args):
             try:
                 # Keep only vision in artifacts so encoder runs on HMONNX,
                 # while thinker/talker/code2wav stay on HF path.
-                dialogue_artifacts = {
-                    "vision": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
-                }
+                dialogue_artifacts = {"vision": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
                 dialogue_report = run_dialogue_validation(
                     hf_model_path,
                     work_dir,
@@ -250,6 +252,8 @@ def main(args):
                     artifacts=dialogue_artifacts,
                     report_name="vision_dialogue_validation.json",
                     output_prefix="vision_dialogue",
+                    save_golden=args.save_golden,
+                    golden_dir=golden_dir,
                 )
                 output_text = dialogue_report.get("output_text", [])
                 applied_artifacts = dialogue_report.get("applied_artifacts", [])
@@ -296,18 +300,23 @@ if __name__ == "__main__":
     parser.add_argument("--temporal_patch_size", type=int, default=2)
     parser.add_argument("--valid", action="store_true", default=True, help="run validation")
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
-    parser.add_argument("--demo", action="store_true", default=True, help="run end-to-end demo: vision on HMONNX, others on HF")
+    parser.add_argument(
+        "--demo", action="store_true", default=True, help="run end-to-end demo: vision on HMONNX, others on HF"
+    )
     parser.add_argument("--no-demo", action="store_false", dest="demo", help="skip end-to-end demo run")
     parser.add_argument("--strict-demo", action="store_true", help="raise exception if demo run fails")
     parser.add_argument("--case", type=str, default="vision", choices=["text", "vision", "audio", "multimodal"])
     parser.add_argument("--valid-device", type=str, default="auto", choices=["auto", "cpu"])
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
+    parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
+    parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--sample_image_path",
         type=str,
         default="data/images/qwen2_vl_demo.jpeg",
-        help="Sample image path for export (provides real data for better accuracy instead of random)"
+        help="Sample image path for export (provides real data for better accuracy instead of random)",
     )
     args = parser.parse_args()
     main(args)

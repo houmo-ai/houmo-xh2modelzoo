@@ -29,19 +29,29 @@ def _run_talker_forward(meta, report):
     kv_info = meta["talker_kv_cache"]
     kv_shape = kv_info["shape"]
     num_layers = kv_info["num_decoder_layers"]
+    thinker_hs = int(meta.get("talker_thinker_hidden_size", meta.get("talker_projection_in_features", 0)))
     past_key_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     past_value_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     prefill = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_prefill_onnx"]))
     decode = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_decode_onnx"]))
+
+    batch = int(inputs_embeds.shape[0])
+    prefill_seq = int(inputs_embeds.shape[1])
     prefill_out = prefill.forward(
+        torch.zeros(batch, prefill_seq, thinker_hs, dtype=torch.float16),
+        torch.zeros(batch, prefill_seq, 1, dtype=torch.float16),
         inputs_embeds,
+        torch.ones(batch, prefill_seq, 1, dtype=torch.float16),
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([inputs_embeds.shape[1]], dtype=torch.int32),
+        torch.tensor([prefill_seq], dtype=torch.int32),
         *past_key_caches,
         *past_value_caches,
     )
     decode_out = decode.forward(
+        torch.zeros(batch, 1, thinker_hs, dtype=torch.float16),
+        torch.zeros(batch, 1, 1, dtype=torch.float16),
         inputs_embeds[:, :1, :],
+        torch.ones(batch, 1, 1, dtype=torch.float16),
         torch.tensor([0], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
         *past_key_caches,
@@ -91,31 +101,6 @@ def _run_talker_prediction_forward(meta, report):
         "status": "ok",
         "prefill_shape": list(prefill_tensor.shape),
         "decode_shape": list(decode_tensor.shape),
-    }
-
-
-def _run_projection_forward(meta, report):
-    hidden_size = int(meta["hidden_size"])
-    sample = torch.randn(1, 1, hidden_size, dtype=torch.float16)
-
-    if "talker_projection_hmonnx" in meta:
-        projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_projection_hmonnx"]))
-        outputs = projection.forward(sample)
-        if not isinstance(outputs, (list, tuple)) or len(outputs) != 2:
-            raise RuntimeError("talker projection bundle forward expected two outputs")
-        hidden_tensor, text_tensor = outputs
-    else:
-        hidden_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["hidden_projection_hmonnx"]))
-        text_projection = HMONNXInference(str(Path(meta["_root_dir"]) / meta["text_projection_hmonnx"]))
-        hidden_out = hidden_projection.forward(sample)
-        text_out = text_projection.forward(sample)
-        hidden_tensor = hidden_out[0] if isinstance(hidden_out, (list, tuple)) else hidden_out
-        text_tensor = text_out[0] if isinstance(text_out, (list, tuple)) else text_out
-
-    report["projection"] = {
-        "status": "ok",
-        "hidden_projection_shape": list(hidden_tensor.shape),
-        "text_projection_shape": list(text_tensor.shape),
     }
 
 
@@ -175,8 +160,6 @@ def main(args):
         _run_talker_forward(artifacts["talker"], report)
         if "talker_prediction" in artifacts:
             _run_talker_prediction_forward(artifacts["talker_prediction"], report)
-        if "projection" in artifacts:
-            _run_projection_forward(artifacts["projection"], report)
         if "code2wav" in artifacts:
             _run_code2wav_forward(artifacts["code2wav"], report)
 

@@ -21,10 +21,12 @@ from xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe import Qwen
 # without moving all weights to GPU, avoiding OOM).
 _orig_hmonnx_init = HMONNXInference.__init__
 
+
 def _hmonnx_init_cuda_exec(self, onnx_file: str) -> None:
     _orig_hmonnx_init(self, onnx_file)
     if torch.cuda.is_available():
         self.exec_device = torch.device("cuda")
+
 
 HMONNXInference.__init__ = _hmonnx_init_cuda_exec
 
@@ -409,6 +411,78 @@ def load_json(file_path: Path) -> Dict[str, Any]:
         return json.load(file_obj)
 
 
+def save_case_golden(
+    golden_dir: Path,
+    case_name: str,
+    input_ids: torch.Tensor,
+    output_ids: torch.Tensor,
+    output_text: list[str],
+    audio: Optional[torch.Tensor] = None,
+    sample_rate: int = 24000,
+    meta_overrides: Optional[Dict[str, Any]] = None,
+):
+    """Persist one validation case into standard golden artifacts.
+
+    Output layout:
+    - golden_<case>_ids.pt
+    - optional golden_<case>.wav
+    - golden_meta.json (incremental update)
+    - golden_validation.json (single-case integrity check)
+    """
+    golden_dir.mkdir(exist_ok=True, parents=True)
+
+    input_ids_cpu = input_ids.detach().cpu() if isinstance(input_ids, torch.Tensor) else torch.as_tensor(input_ids)
+    output_ids_cpu = output_ids.detach().cpu() if isinstance(output_ids, torch.Tensor) else torch.as_tensor(output_ids)
+    ids_path = golden_dir / f"golden_{case_name}_ids.pt"
+    torch.save(
+        {
+            "input_ids": input_ids_cpu,
+            "output_ids": output_ids_cpu,
+        },
+        ids_path,
+    )
+
+    result = {
+        "text": output_text,
+        "input_ids_shape": list(input_ids_cpu.shape),
+    }
+
+    if audio is not None:
+        wav_path = golden_dir / f"golden_{case_name}.wav"
+        sf.write(str(wav_path), audio.reshape(-1).detach().cpu().numpy(), samplerate=sample_rate)
+        result["audio_file"] = wav_path.name
+
+    meta_path = golden_dir / "golden_meta.json"
+    if meta_path.exists() and meta_path.stat().st_size > 0:
+        try:
+            meta = load_json(meta_path)
+        except Exception:
+            meta = {}
+    else:
+        meta = {}
+
+    if "create_time" not in meta:
+        meta["create_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    meta["last_update_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    meta.setdefault("results", {})
+    meta["results"][case_name] = result
+    if meta_overrides:
+        for key, value in meta_overrides.items():
+            meta[key] = value
+
+    save_json(meta_path, meta)
+
+    validation = validate_golden_outputs(golden_dir, [case_name])
+    save_json(golden_dir / "golden_validation.json", validation)
+
+    return {
+        "golden_dir": str(golden_dir),
+        "ids_file": str(ids_path),
+        "meta_file": str(meta_path),
+        "case": case_name,
+    }
+
+
 def _latest_matching(root_dir: Path, pattern: str, required_key: Optional[Any] = None) -> Optional[Path]:
     candidates = sorted(root_dir.rglob(pattern), key=lambda item: item.stat().st_mtime, reverse=True)
     if required_key is None:
@@ -437,7 +511,6 @@ def discover_artifacts(root_dir: Path) -> Dict[str, Dict[str, Any]]:
         "vision": ("meta_vision.json", "vision_encoder_onnx"),
         "talker": ("meta_talker.json", "talker_prefill_onnx"),
         "talker_prediction": ("meta_talker_prediction.json", "talker_prediction_prefill_onnx"),
-        "projection": ("meta_talker_projection.json", ("talker_projection_hmonnx", "hidden_projection_hmonnx")),
         "code2wav": ("meta_code2wav.json", "code2wav_hmonnx"),
     }
     for key, (pattern, required_key) in mapping.items():
@@ -458,13 +531,13 @@ def _resolve_meta_path(meta: Dict[str, Any], key: str) -> Path:
 def _ensure_tensor(value: Any, device: torch.device, dtype: Optional[torch.dtype] = None):
     if value is None:
         raise ValueError("Cannot convert None to tensor")
-    
+
     # Handle model output objects
-    if hasattr(value, 'last_hidden_state'):
+    if hasattr(value, "last_hidden_state"):
         value = value.last_hidden_state
-    elif hasattr(value, 'hidden_states'):
+    elif hasattr(value, "hidden_states"):
         value = value.hidden_states
-    
+
     if isinstance(value, torch.Tensor):
         tensor = value
     else:
@@ -472,7 +545,7 @@ def _ensure_tensor(value: Any, device: torch.device, dtype: Optional[torch.dtype
             tensor = torch.as_tensor(value)
         except Exception as e:
             raise ValueError(f"Cannot convert {type(value)} to tensor: {e}")
-    
+
     tensor = tensor.to(device)
     if dtype is not None and tensor.is_floating_point():
         tensor = tensor.to(dtype)
@@ -482,13 +555,13 @@ def _ensure_tensor(value: Any, device: torch.device, dtype: Optional[torch.dtype
 def _extract_primary_output(output: Any):
     if output is None:
         raise ValueError("HMONNX session returned None output")
-    
+
     # Handle model output objects with .last_hidden_state or similar attributes
-    if hasattr(output, 'last_hidden_state'):
+    if hasattr(output, "last_hidden_state"):
         return output.last_hidden_state
-    if hasattr(output, 'hidden_states'):
+    if hasattr(output, "hidden_states"):
         return output.hidden_states
-    
+
     if isinstance(output, (list, tuple)):
         if len(output) == 0:
             raise ValueError("HMONNX session returned empty output list/tuple")
@@ -622,123 +695,9 @@ def _replace_code2wav(native_model, code2wav_hmonnx_path: Path, static_code_len:
     logger.info(f"code2wav replaced with HMONNX: {code2wav_hmonnx_path}")
 
 
-def _replace_projection(module, hmonnx_path: Path, name: str, logger):
-    session = _create_hmonnx_session(hmonnx_path)
-    module._hmonnx_session = session
-    input_shape = getattr(session.inputs[0], "shape", None)
-    static_seq_len = None
-    if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 2:
-        try:
-            static_seq_len = int(input_shape[1])
-        except (TypeError, ValueError):
-            static_seq_len = None
-
-    def forward(self, hidden_states):
-        original_shape = hidden_states.shape
-        try:
-            # Handle 2D input [seq_len, hidden_dim]
-            if hidden_states.ndim == 2:
-                hidden_states = hidden_states.unsqueeze(0)
-            
-            hmonnx_input = hidden_states.cpu().to(torch.float16)
-            if static_seq_len is not None and static_seq_len > 0 and hmonnx_input.shape[1] != static_seq_len:
-                outputs = []
-                for i in range(hmonnx_input.shape[1]):
-                    step_in = hmonnx_input[:, i : i + 1, :]
-                    step_out = self._hmonnx_session.forward(step_in)
-                    step_out = _extract_primary_output(step_out)
-                    step_out = _ensure_tensor(step_out, hidden_states.device, hidden_states.dtype)
-                    if step_out.ndim == 2:
-                        step_out = step_out.unsqueeze(1)
-                    elif step_out.ndim == 1:
-                        step_out = step_out.unsqueeze(0).unsqueeze(0)
-                    outputs.append(step_out)
-                out = torch.cat(outputs, dim=1)
-            else:
-                out = self._hmonnx_session.forward(hmonnx_input)
-                out = _extract_primary_output(out)
-                out = _ensure_tensor(out, hidden_states.device, hidden_states.dtype)
-                if out.ndim == 2:
-                    out = out.unsqueeze(1)
-                elif out.ndim == 1:
-                    out = out.unsqueeze(0).unsqueeze(0)
-            
-            # Reshape back to original input shape
-            if len(original_shape) == 2 and out.shape[0] == 1:
-                out = out.squeeze(0)
-            
-            return out
-        except Exception as e:
-            print(f"[ERROR] Projection forward failed: input_shape={original_shape}, error={e}")
-            raise
-
-    module.forward = types.MethodType(forward, module)
-    logger.info(f"{name} replaced with HMONNX: {hmonnx_path}")
-
-
-def _replace_projection_bundle(native_model, projection_hmonnx_path: Path, logger):
-    session = _create_hmonnx_session(projection_hmonnx_path)
-
-    def _patch_projection(module, output_index: int, name: str):
-        module._hmonnx_session = session
-        module._hmonnx_output_index = output_index
-        input_shape = getattr(session.inputs[0], "shape", None)
-        static_seq_len = None
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 2:
-            try:
-                static_seq_len = int(input_shape[1])
-            except (TypeError, ValueError):
-                static_seq_len = None
-
-        def forward(self, hidden_states):
-            original_shape = hidden_states.shape
-            try:
-                if hidden_states.ndim == 2:
-                    hidden_states = hidden_states.unsqueeze(0)
-
-                hmonnx_input = hidden_states.cpu().to(torch.float16)
-                if static_seq_len is not None and static_seq_len > 0 and hmonnx_input.shape[1] != static_seq_len:
-                    outputs = []
-                    for i in range(hmonnx_input.shape[1]):
-                        step_in = hmonnx_input[:, i : i + 1, :]
-                        step_outputs = self._hmonnx_session.forward(step_in)
-                        if not isinstance(step_outputs, (list, tuple)) or len(step_outputs) <= self._hmonnx_output_index:
-                            raise RuntimeError("Projection bundle returned unexpected outputs")
-                        step_out = step_outputs[self._hmonnx_output_index]
-                        step_out = _ensure_tensor(step_out, hidden_states.device, hidden_states.dtype)
-                        if step_out.ndim == 2:
-                            step_out = step_out.unsqueeze(1)
-                        elif step_out.ndim == 1:
-                            step_out = step_out.unsqueeze(0).unsqueeze(0)
-                        outputs.append(step_out)
-                    out = torch.cat(outputs, dim=1)
-                else:
-                    bundle_outputs = self._hmonnx_session.forward(hmonnx_input)
-                    if not isinstance(bundle_outputs, (list, tuple)) or len(bundle_outputs) <= self._hmonnx_output_index:
-                        raise RuntimeError("Projection bundle returned unexpected outputs")
-                    out = bundle_outputs[self._hmonnx_output_index]
-                    out = _ensure_tensor(out, hidden_states.device, hidden_states.dtype)
-                    if out.ndim == 2:
-                        out = out.unsqueeze(1)
-                    elif out.ndim == 1:
-                        out = out.unsqueeze(0).unsqueeze(0)
-
-                if len(original_shape) == 2 and out.shape[0] == 1:
-                    out = out.squeeze(0)
-
-                return out
-            except Exception as e:
-                print(f"[ERROR] {name} forward failed: input_shape={original_shape}, error={e}")
-                raise
-
-        module.forward = types.MethodType(forward, module)
-        logger.info(f"{name} replaced with projection bundle output {output_index}: {projection_hmonnx_path}")
-
-    _patch_projection(native_model.talker.hidden_projection, 0, "hidden_projection")
-    _patch_projection(native_model.talker.text_projection, 1, "text_projection")
-
-
-def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], vision_hmonnx_path: Optional[Path], logger):
+def _patch_multimodal_encoders(
+    native_model, audio_hmonnx_path: Optional[Path], vision_hmonnx_path: Optional[Path], logger
+):
     thinker = native_model.thinker
     thinker.forward = types.MethodType(Qwen3OmniMoeThinkerForConditionalGeneration_forward, thinker)
 
@@ -751,7 +710,9 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
                 audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
                 input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
 
-            feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+            feature_lens = (
+                audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+            )
             aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
             n_window = self.audio_tower.n_window
             n_window_infer = self.audio_tower.n_window_infer
@@ -770,7 +731,10 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
             padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
             feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
             padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
-                [torch.ones(length, dtype=torch.bool, device=padded_feature.device) for length in feature_lens_after_cnn],
+                [
+                    torch.ones(length, dtype=torch.bool, device=padded_feature.device)
+                    for length in feature_lens_after_cnn
+                ],
                 batch_first=True,
             )
 
@@ -786,7 +750,7 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
             # Process one chunk at a time (HMONNX exported with batch_size=1)
             all_outputs = []
             for i in range(padded_feature.shape[0]):
-                single_feature = padded_feature[i:i+1].cpu().to(torch.float16)  # [1, mel, len]
+                single_feature = padded_feature[i : i + 1].cpu().to(torch.float16)  # [1, mel, len]
                 single_cu = torch.tensor([0, int(feature_lens_after_cnn[i])], dtype=torch.int32)
                 out_i = self._audio_hmonnx_session.forward(single_feature, single_cu)
                 out_i = _extract_primary_output(out_i)
@@ -809,10 +773,11 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
                 output = self._vision_hmonnx_session.forward(hmonnx_input.cpu())
                 all_outputs = _extract_outputs(output)
                 image_embeds = _ensure_tensor(all_outputs[0], pixel_values.device, torch.float16)
-                deepstack_features = tuple(
-                    _ensure_tensor(ds, pixel_values.device, torch.float16)
-                    for ds in all_outputs[1:4]
-                ) if len(all_outputs) > 1 else ()
+                deepstack_features = (
+                    tuple(_ensure_tensor(ds, pixel_values.device, torch.float16) for ds in all_outputs[1:4])
+                    if len(all_outputs) > 1
+                    else ()
+                )
                 return image_embeds, deepstack_features
             except Exception as e:
                 print(f"[ERROR] get_image_features failed: {e}")
@@ -824,10 +789,11 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
                 output = self._vision_hmonnx_session.forward(hmonnx_input.cpu())
                 all_outputs = _extract_outputs(output)
                 video_embeds = _ensure_tensor(all_outputs[0], pixel_values_videos.device, torch.float16)
-                deepstack_features = tuple(
-                    _ensure_tensor(ds, pixel_values_videos.device, torch.float16)
-                    for ds in all_outputs[1:4]
-                ) if len(all_outputs) > 1 else ()
+                deepstack_features = (
+                    tuple(_ensure_tensor(ds, pixel_values_videos.device, torch.float16) for ds in all_outputs[1:4])
+                    if len(all_outputs) > 1
+                    else ()
+                )
                 return video_embeds, deepstack_features
             except Exception as e:
                 print(f"[ERROR] get_video_features failed: {e}")
@@ -838,12 +804,84 @@ def _patch_multimodal_encoders(native_model, audio_hmonnx_path: Optional[Path], 
         logger.info(f"vision encoder replaced with HMONNX: {vision_hmonnx_path}")
 
 
+def _patch_talker_projection(talker, projection_hmonnx_path: Path, static_seq_len: int, logger):
+    """Replace talker.hidden_projection.forward and talker.text_projection.forward
+    with the quantized projection HMONNX exported alongside the talker graph.
+
+    The HMONNX takes a single thinker-hidden input and returns both heads'
+    outputs, so we share one session and dispatch per-call. Seq len is handled
+    by zero-padding up to the exported static length and slicing the result.
+    """
+    session = _create_hmonnx_session(projection_hmonnx_path)
+
+    def _run_projection(x: torch.Tensor, out_idx: int) -> torch.Tensor:
+        squeezed = False
+        if x.ndim == 2:
+            x = x.unsqueeze(0)
+            squeezed = True
+        if x.ndim != 3:
+            raise ValueError(f"projection input must be 2D or 3D, got shape {tuple(x.shape)}")
+
+        actual_seq = int(x.shape[1])
+        if actual_seq > static_seq_len:
+            raise ValueError(f"talker projection seq_len {actual_seq} exceeds exported static length {static_seq_len}")
+
+        x_cpu = x.detach().cpu().to(torch.float16)
+        pad_seq = static_seq_len - actual_seq
+        if pad_seq > 0:
+            pad = torch.zeros(x_cpu.shape[0], pad_seq, x_cpu.shape[2], dtype=x_cpu.dtype)
+            x_cpu = torch.cat([x_cpu, pad], dim=1)
+
+        outputs = _extract_outputs(session.forward(x_cpu))
+        out = outputs[out_idx]
+        out = _ensure_tensor(out, x.device, x.dtype)
+        out = out[:, :actual_seq, :]
+        if squeezed:
+            out = out.squeeze(0)
+        return out
+
+    def hidden_forward(self, hidden_state):
+        return _run_projection(hidden_state, 0)
+
+    def text_forward(self, hidden_state):
+        return _run_projection(hidden_state, 1)
+
+    talker.hidden_projection.forward = types.MethodType(hidden_forward, talker.hidden_projection)
+    talker.text_projection.forward = types.MethodType(text_forward, talker.text_projection)
+    logger.info(f"talker projection replaced with HMONNX: {projection_hmonnx_path}")
+
+
 def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
     prefill_session = _create_hmonnx_session(_resolve_meta_path(talker_meta, "talker_prefill_onnx"))
     decode_session = _create_hmonnx_session(_resolve_meta_path(talker_meta, "talker_decode_onnx"))
     state = _make_cache_state(talker_meta["talker_kv_cache"])
     static_prefill_len = int(talker_meta.get("talker_input_sequence_length", 0))
+    thinker_hs = int(talker_meta.get("talker_thinker_hidden_size", 0)) or int(
+        talker_meta.get("talker_projection_in_features", 0)
+    )
+    if thinker_hs <= 0:
+        raise RuntimeError(
+            "talker meta missing thinker hidden size (talker_thinker_hidden_size / talker_projection_in_features)"
+        )
     original_forward = native_model.talker.forward
+
+    def _call_fused(session, shadow_inputs_embeds, shadow_seq_len):
+        batch = int(shadow_inputs_embeds.shape[0])
+        # Shadow always exercises the bypass path: feed the pre-projected
+        # embeds the HF side produced via its python projection code.
+        source = torch.zeros(batch, shadow_seq_len, thinker_hs, dtype=torch.float16)
+        role_mask = torch.zeros(batch, shadow_seq_len, 1, dtype=torch.float16)
+        bypass_mask = torch.ones(batch, shadow_seq_len, 1, dtype=torch.float16)
+        return session.forward(
+            source,
+            role_mask,
+            shadow_inputs_embeds,
+            bypass_mask,
+            torch.tensor([state["past_seq_length"]], dtype=torch.int32),
+            torch.tensor([shadow_seq_len], dtype=torch.int32),
+            *state["past_key_caches"],
+            *state["past_value_caches"],
+        )
 
     def forward(self, *args, **kwargs):
         inputs_embeds = kwargs.get("inputs_embeds")
@@ -858,7 +896,9 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
             shadow_seq_len = seq_len
             if seq_len > 1 and static_prefill_len > 0:
                 if seq_len > static_prefill_len:
-                    raise ValueError(f"talker shadow seq_len {seq_len} exceeds exported static length {static_prefill_len}")
+                    raise ValueError(
+                        f"talker shadow seq_len {seq_len} exceeds exported static length {static_prefill_len}"
+                    )
                 if seq_len < static_prefill_len:
                     pad = torch.zeros(
                         shadow_inputs_embeds.shape[0],
@@ -868,14 +908,9 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
                     )
                     shadow_inputs_embeds = torch.cat([shadow_inputs_embeds, pad], dim=1)
                     shadow_seq_len = static_prefill_len
-            session.forward(
-                shadow_inputs_embeds,
-                torch.tensor([state["past_seq_length"]], dtype=torch.int32),
-                torch.tensor([shadow_seq_len], dtype=torch.int32),
-                *state["past_key_caches"],
-                *state["past_value_caches"],
-            )
+            _call_fused(session, shadow_inputs_embeds, shadow_seq_len)
             state["past_seq_length"] += seq_len
+
         # Ensure attention_mask is not None (generate may skip it when pad==eos)
         if kwargs.get("attention_mask") is None and kwargs.get("inputs_embeds") is not None:
             ie = kwargs["inputs_embeds"]
@@ -892,9 +927,7 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
 
     native_model.talker.forward = types.MethodType(forward, native_model.talker)
     # Skip custom kwarg validation in talker.generate()
-    native_model.talker._validate_model_kwargs = types.MethodType(
-        lambda self, model_kwargs: None, native_model.talker
-    )
+    native_model.talker._validate_model_kwargs = types.MethodType(lambda self, model_kwargs: None, native_model.talker)
     logger.info("talker model inserted in shadow mode")
 
 
@@ -911,8 +944,12 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
             seq_len = int(inputs_embeds.shape[1])
             if seq_len > 1:
                 state["past_seq_length"] = 0
-                state["past_key_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])["past_key_caches"]
-                state["past_value_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])["past_value_caches"]
+                state["past_key_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])[
+                    "past_key_caches"
+                ]
+                state["past_value_caches"] = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])[
+                    "past_value_caches"
+                ]
             session = prefill_session if seq_len > 1 else decode_session
             shadow_inputs_embeds = inputs_embeds.detach().cpu().to(torch.float16)
             shadow_seq_len = seq_len
@@ -938,6 +975,7 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
                 *state["past_value_caches"],
             )
             state["past_seq_length"] += seq_len
+
         # Ensure attention_mask is not None (generate may skip it when pad==eos)
         if kwargs.get("attention_mask") is None and kwargs.get("inputs_embeds") is not None:
             ie = kwargs["inputs_embeds"]
@@ -953,11 +991,11 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
         return original_forward(*args, **kwargs)
 
     native_model.talker.code_predictor.forward = types.MethodType(forward, native_model.talker.code_predictor)
+    logger.info("talker prediction inserted in shadow mode")
     # Skip custom kwarg validation in code_predictor.model.generate()
     native_model.talker.code_predictor.model._validate_model_kwargs = types.MethodType(
         lambda self, model_kwargs: None, native_model.talker.code_predictor.model
     )
-    logger.info("talker prediction inserted in shadow mode")
 
 
 def apply_artifact_replacements(native_model, artifacts: Dict[str, Dict[str, Any]], logger):
@@ -968,28 +1006,6 @@ def apply_artifact_replacements(native_model, artifacts: Dict[str, Dict[str, Any
             int(artifacts["code2wav"]["static_code_len"]),
             logger,
         )
-
-    if "projection" in artifacts:
-        projection_meta = artifacts["projection"]
-        if "talker_projection_hmonnx" in projection_meta:
-            _replace_projection_bundle(
-                native_model,
-                _resolve_meta_path(projection_meta, "talker_projection_hmonnx"),
-                logger,
-            )
-        else:
-            _replace_projection(
-                native_model.talker.hidden_projection,
-                _resolve_meta_path(projection_meta, "hidden_projection_hmonnx"),
-                "hidden_projection",
-                logger,
-            )
-            _replace_projection(
-                native_model.talker.text_projection,
-                _resolve_meta_path(projection_meta, "text_projection_hmonnx"),
-                "text_projection",
-                logger,
-            )
 
     audio_hmonnx_path = None
     if "audio" in artifacts:
@@ -1021,6 +1037,8 @@ def run_dialogue_validation(
     report_name: str = "dialogue_validation.json",
     output_prefix: str = "dialogue",
     talker_max_new_tokens: Optional[int] = None,
+    save_golden: bool = False,
+    golden_dir: Optional[Path] = None,
 ):
     device_map = _resolve_validation_device_map(device_map, logger)
     if device_map == "auto" and max_memory is None:
@@ -1089,12 +1107,13 @@ def run_dialogue_validation(
             text_ids, audio = native_model.generate(**generate_kwargs)
     except Exception as e:
         import traceback
+
         if logger is not None:
             logger.warning(f"dialogue validation generate failed: {e}")
             logger.warning(traceback.format_exc())
         raise
 
-    sequences = text_ids.sequences if hasattr(text_ids, 'sequences') else text_ids
+    sequences = text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
     output_text = processor.batch_decode(
         sequences[:, inputs["input_ids"].shape[1] :],
         skip_special_tokens=True,
@@ -1117,6 +1136,24 @@ def run_dialogue_validation(
     report_path = work_dir / report_name
     save_json(report_path, report)
     logger.info(f"dialogue validation report saved to {report_path}")
+
+    if save_golden:
+        target_golden_dir = Path(golden_dir) if golden_dir is not None else work_dir / "golden"
+        golden_info = save_case_golden(
+            target_golden_dir,
+            case,
+            inputs["input_ids"],
+            sequences,
+            output_text,
+            audio=audio,
+            meta_overrides={
+                "source_work_dir": str(work_dir),
+                "hmonnx_modules": sorted(list(artifacts.keys())) if artifacts else [],
+            },
+        )
+        report["golden_dir"] = golden_info["golden_dir"]
+        logger.info(f"dialogue golden saved to {target_golden_dir}")
+
     return report
 
 
@@ -1154,7 +1191,7 @@ def _run_audio_encoder_hmonnx(session: HMONNXInference, audio_tower, input_featu
     # Process one chunk at a time (HMONNX exported with batch_size=1)
     all_outputs = []
     for i in range(padded_feature.shape[0]):
-        single_feature = padded_feature[i:i+1].cpu().to(torch.float16)
+        single_feature = padded_feature[i : i + 1].cpu().to(torch.float16)
         single_cu = torch.tensor([0, int(feature_lens_after_cnn[i])], dtype=torch.int32)
         out_i = session.forward(single_feature, single_cu)
         out_i = _extract_primary_output(out_i)
@@ -1175,12 +1212,12 @@ def run_text_hmonnx_chain_forward(
     report_path: Optional[Path] = None,
     max_new_tokens: int = 256,
     device_map: str = "auto",
+    save_golden: bool = False,
+    golden_dir: Optional[Path] = None,
 ):
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
     if logger is not None and device_map != "cpu":
-        logger.info(
-            f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}"
-        )
+        logger.info(f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}")
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         model_path,
         torch_dtype=torch.float16,
@@ -1236,7 +1273,9 @@ def run_text_hmonnx_chain_forward(
 
     if vision_meta is not None and "hm_pixel_values" in inputs:
         vision_session = _create_hmonnx_session(_resolve_meta_path(vision_meta, "vision_encoder_onnx"))
-        vision_hmonnx_input = _prepare_vision_hmonnx_input(inputs["hm_pixel_values"].cpu(), vision_session.inputs[0].shape)
+        vision_hmonnx_input = _prepare_vision_hmonnx_input(
+            inputs["hm_pixel_values"].cpu(), vision_session.inputs[0].shape
+        )
         vision_output = vision_session.forward(vision_hmonnx_input.to(torch.float16))
         vision_outputs = _extract_outputs(vision_output)
         vision_embeds = _ensure_tensor(vision_outputs[0], torch.device("cpu"), torch.float16)
@@ -1267,7 +1306,8 @@ def run_text_hmonnx_chain_forward(
         )
         inputs_embeds = torch.cat([inputs_embeds, pad_embeds], dim=1)
         deepstack_tensors = [
-            torch.cat([tensor, torch.zeros_like(pad_embeds, dtype=torch.float16)], dim=1) for tensor in deepstack_tensors
+            torch.cat([tensor, torch.zeros_like(pad_embeds, dtype=torch.float16)], dim=1)
+            for tensor in deepstack_tensors
         ]
 
     current_input_length = torch.tensor([prefill_token_length], dtype=torch.int32)
@@ -1347,7 +1387,9 @@ def run_text_hmonnx_chain_forward(
 
     # Concat all generated token ids and decode to text
     all_token_ids = torch.cat(generated_tokens, dim=-1)  # [1, num_tokens]
-    output_text = processor.tokenizer.batch_decode(all_token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    output_text = processor.tokenizer.batch_decode(
+        all_token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
     logger.info(f"generated {all_token_ids.shape[-1]} tokens: {output_text}")
 
     report = {
@@ -1363,6 +1405,30 @@ def run_text_hmonnx_chain_forward(
     if report_path is not None:
         save_json(report_path, report)
         logger.info(f"text HMONNX chain report saved to {report_path}")
+
+    if save_golden:
+        if golden_dir is not None:
+            target_golden_dir = Path(golden_dir)
+        elif report_path is not None:
+            target_golden_dir = report_path.parent / "golden"
+        else:
+            target_golden_dir = Path("golden")
+        save_case_golden(
+            target_golden_dir,
+            case,
+            inputs["input_ids"],
+            all_token_ids,
+            output_text,
+            audio=None,
+            meta_overrides={
+                "source_work_dir": str(report_path.parent)
+                if report_path is not None
+                else str(target_golden_dir.parent),
+                "hmonnx_modules": ["text"],
+            },
+        )
+        logger.info(f"text chain golden saved to {target_golden_dir}")
+
     return report
 
 

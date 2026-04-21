@@ -24,8 +24,11 @@ from _hmonnx_pipeline import discover_artifacts, run_text_hmonnx_chain_forward
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
 except ImportError:
+
     def release_export_cuda_memory(logger=None, label=None):
         return None
+
+
 from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen3_omni import Qwen3OmniMoeConvertConfig
 
@@ -56,23 +59,35 @@ def main(args):
 
     prefix = f"{model_name}-{target_device}-text-{args.context_length // 1024}k-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
+    golden_root = Path(args.golden_root)
+    if not golden_root.is_absolute():
+        golden_root = (SCRIPT_DIR.parents[2] / golden_root).resolve()
+    golden_dir = golden_root / prefix / "golden"
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
     logger = get_root_logger()
 
     meta_file = work_dir / "meta.json"
-    prefill_file = work_dir / "hmonnx" / "prefill" / f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}_prefill.onnx"
-    decode_file = work_dir / "hmonnx" / "decode" / f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}_decoder.onnx"
+    prefill_file = (
+        work_dir
+        / "hmonnx"
+        / "prefill"
+        / f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}_prefill.onnx"
+    )
+    decode_file = (
+        work_dir
+        / "hmonnx"
+        / "decode"
+        / f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}_decoder.onnx"
+    )
 
     if meta_file.exists() and prefill_file.exists() and decode_file.exists():
         logger.info(f"Reusing existing text export artifacts in {work_dir}")
     else:
         logger.info(f"Exporting thinker text module from {hf_model_path}")
         with TimeProfiler("convert_text", logger), MemoryTracker("cuda:0", "convert_text", logger):
-            LLMConverter.from_pretrained(
-                hf_model_path, "Qwen3OmniMoeForConditionalGeneration", config, str(work_dir)
-            )
+            LLMConverter.from_pretrained(hf_model_path, "Qwen3OmniMoeForConditionalGeneration", config, str(work_dir))
         logger.info(f"Text module export complete. Artifacts in {work_dir}")
         release_export_cuda_memory(logger, "text export")
 
@@ -93,6 +108,8 @@ def main(args):
             report_path=work_dir / "text_hmonnx_chain_report.json",
             max_new_tokens=args.max_new_tokens,
             device_map="auto",
+            save_golden=args.save_golden,
+            golden_dir=golden_dir,
         )
 
 
@@ -106,7 +123,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
     parser.add_argument("--quant-weight", type=str, default=None, help="path to quant weight (gptq/quarot)")
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--valid", action="store_true", default=True, help="validate exported text artifacts with HMONNX forward")
+    parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
+    parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
+    parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")
+    parser.add_argument(
+        "--valid", action="store_true", default=True, help="validate exported text artifacts with HMONNX forward"
+    )
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()

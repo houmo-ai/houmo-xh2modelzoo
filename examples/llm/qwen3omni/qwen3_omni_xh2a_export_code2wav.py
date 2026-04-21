@@ -104,15 +104,15 @@ def _load_native_model_for_export(hf_model_path: str, logger):
 def _run_code2wav_validation(
     hf_model_path: str,
     work_dir: Path,
+    golden_dir: Path,
     logger,
     meta_info,
     meta_file: Path,
     max_new_tokens: int,
     validation_device_map: str,
+    save_golden: bool,
 ):
-    dialogue_artifacts = {
-        "code2wav": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
-    }
+    dialogue_artifacts = {"code2wav": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
     report = run_dialogue_validation(
         hf_model_path,
         work_dir,
@@ -123,6 +123,8 @@ def _run_code2wav_validation(
         artifacts=dialogue_artifacts,
         report_name="code2wav_dialogue_validation.json",
         output_prefix="code2wav_dialogue",
+        save_golden=save_golden,
+        golden_dir=golden_dir,
     )
     logger.info(f"Generate text: {report.get('output_text', [])}")
 
@@ -148,6 +150,10 @@ def main(args):
 
     prefix = f"{model_name}-{target_device}-code2wav-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
+    golden_root = Path(args.golden_root)
+    if not golden_root.is_absolute():
+        golden_root = (SCRIPT_DIR.parents[2] / golden_root).resolve()
+    golden_dir = golden_root / prefix / "golden"
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
@@ -166,6 +172,7 @@ def main(args):
     if hmonnx_path.exists() and meta_file.exists():
         logger.info("code2wav HMONNX artifacts already exist, skipping export")
         import json
+
         with open(meta_file) as f:
             meta_info = json.load(f)
     else:
@@ -221,11 +228,13 @@ def main(args):
         _run_code2wav_validation(
             hf_model_path,
             work_dir,
+            golden_dir,
             logger,
             meta_info,
             meta_file,
             max_new_tokens=args.max_new_tokens,
             validation_device_map=args.validation_device_map,
+            save_golden=args.save_golden,
         )
     else:
         if native_model is not None:
@@ -241,6 +250,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--validation-device-map", type=str, default="auto")
+    parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
+    parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
+    parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(args)

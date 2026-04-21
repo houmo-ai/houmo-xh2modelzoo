@@ -99,47 +99,6 @@ def _replace_code2wav(native_model, code2wav_hmonnx_path, static_code_len, logge
     logger.info(f"code2wav replaced with HMONNX: {code2wav_hmonnx_path}")
 
 
-def _replace_projection(module, hmonnx_path, name, logger):
-    """Monkey-patch a Linear projection with HMONNX session."""
-    session = HMONNXInference(str(hmonnx_path))
-    module._hmonnx_session = session
-
-    def forward(self, x):
-        out = self._hmonnx_session.forward(x.cpu().to(torch.float16))
-        if isinstance(out, (list, tuple)):
-            out = out[0]
-        if not isinstance(out, torch.Tensor):
-            out = torch.as_tensor(out)
-        return out.to(x.device).to(x.dtype)
-
-    module.forward = types.MethodType(forward, module)
-    logger.info(f"{name} replaced with HMONNX: {hmonnx_path}")
-
-
-def _replace_projection_bundle(native_model, hmonnx_path, logger):
-    """Monkey-patch both talker projections from one HMONNX session."""
-    session = HMONNXInference(str(hmonnx_path))
-
-    def _patch_projection(module, output_index, name):
-        module._hmonnx_session = session
-        module._hmonnx_output_index = output_index
-
-        def forward(self, x):
-            outputs = self._hmonnx_session.forward(x.cpu().to(torch.float16))
-            if not isinstance(outputs, (list, tuple)) or len(outputs) <= self._hmonnx_output_index:
-                raise RuntimeError("projection bundle returned unexpected outputs")
-            out = outputs[self._hmonnx_output_index]
-            if not isinstance(out, torch.Tensor):
-                out = torch.as_tensor(out)
-            return out.to(x.device).to(x.dtype)
-
-        module.forward = types.MethodType(forward, module)
-        logger.info(f"{name} replaced with projection bundle output {output_index}: {hmonnx_path}")
-
-    _patch_projection(native_model.talker.hidden_projection, 0, "hidden_projection")
-    _patch_projection(native_model.talker.text_projection, 1, "text_projection")
-
-
 # ────────────────────── main ──────────────────────
 
 
@@ -182,18 +141,6 @@ def main(args):
     if args.code2wav_hmonnx:
         _replace_code2wav(native_model, args.code2wav_hmonnx, args.code2wav_static_code_len, logger)
         applied_artifacts["code2wav"] = {"path": args.code2wav_hmonnx}
-
-    if args.talker_projection_hmonnx:
-        _replace_projection_bundle(native_model, args.talker_projection_hmonnx, logger)
-        applied_artifacts.setdefault("projection", {})["talker_projection_hmonnx"] = args.talker_projection_hmonnx
-    else:
-        if args.hidden_projection_hmonnx:
-            _replace_projection(native_model.talker.hidden_projection, args.hidden_projection_hmonnx, "hidden_projection", logger)
-            applied_artifacts.setdefault("projection", {})["hidden_projection_hmonnx"] = args.hidden_projection_hmonnx
-
-        if args.text_projection_hmonnx:
-            _replace_projection(native_model.talker.text_projection, args.text_projection_hmonnx, "text_projection", logger)
-            applied_artifacts.setdefault("projection", {})["text_projection_hmonnx"] = args.text_projection_hmonnx
 
     # ---- 3. Prepare inputs ----
     cases = {
@@ -318,9 +265,6 @@ if __name__ == "__main__":
     # HMONNX artifact paths (optional — if provided, replace native module)
     parser.add_argument("--code2wav-hmonnx", type=str, default=None, help="path to code2wav hmonnx file")
     parser.add_argument("--code2wav-static-code-len", type=int, default=126)
-    parser.add_argument("--talker-projection-hmonnx", type=str, default=None, help="path to bundled talker projection hmonnx")
-    parser.add_argument("--hidden-projection-hmonnx", type=str, default=None, help="path to legacy hidden_projection hmonnx")
-    parser.add_argument("--text-projection-hmonnx", type=str, default=None, help="path to legacy text_projection hmonnx")
     parser.add_argument("--auto-discover", action="store_true", help="auto load exported qwen3omni artifacts under work-dir")
     parser.add_argument("--device-map", type=str, default="cuda:0", choices=["auto", "cpu", "cuda:0"])
 

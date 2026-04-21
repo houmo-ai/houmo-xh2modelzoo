@@ -44,8 +44,11 @@ from _hmonnx_pipeline import (
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
 except ImportError:
+
     def release_export_cuda_memory(logger=None, label=None):
         return None
+
+
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -82,8 +85,10 @@ except ImportError:
                     videos.append(item.get("video"))
         return audios, images, videos
 
+
 def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture code_predictor.model.forward inputs, or load from cache."""
+
     class _PredictorInputsCaptured(RuntimeError):
         pass
 
@@ -108,8 +113,13 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
     text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
     inputs = processor(
-        text=text, audio=audios, images=images, videos=videos,
-        return_tensors="pt", padding=True, use_audio_in_video=True,
+        text=text,
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=True,
     )
     inputs = inputs.to(device).to(dtype)
 
@@ -135,8 +145,10 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
     try:
         with torch.no_grad():
             native_model.generate(
-                **inputs, speaker="Ethan",
-                thinker_return_dict_in_generate=True, use_audio_in_video=True,
+                **inputs,
+                speaker="Ethan",
+                thinker_return_dict_in_generate=True,
+                use_audio_in_video=True,
             )
     except _PredictorInputsCaptured:
         logger.info("Captured first predictor forward inputs, stopping generate early")
@@ -152,14 +164,8 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
 
 
 def _save_predictor_assets(native_model, asset_file: Path, logger):
-    codec_embeddings = [
-        emb.weight.detach().cpu()
-        for emb in native_model.talker.code_predictor.get_input_embeddings()
-    ]
-    lm_head_weights = [
-        head.weight.detach().cpu()
-        for head in native_model.talker.code_predictor.lm_head
-    ]
+    codec_embeddings = [emb.weight.detach().cpu() for emb in native_model.talker.code_predictor.get_input_embeddings()]
+    lm_head_weights = [head.weight.detach().cpu() for head in native_model.talker.code_predictor.lm_head]
     asset_payload = {
         "codec_embeddings": codec_embeddings,
         "lm_head_weights": lm_head_weights,
@@ -188,7 +194,9 @@ def _build_predictor_validation_inputs(work_dir: Path, meta_info):
         inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
 
     past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-    past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_value_caches = [
+        CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+    ]
     past_seq_length_t = torch.tensor([0], dtype=torch.int32)
     current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
     return inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
@@ -211,9 +219,7 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
     if max_memory is not None:
         load_kwargs["max_memory"] = max_memory
 
-    logger.info(
-        f"Loading HF model from {hf_model_path} for talker prediction export with device_map={device_map}"
-    )
+    logger.info(f"Loading HF model from {hf_model_path} for talker prediction export with device_map={device_map}")
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         hf_model_path,
         **load_kwargs,
@@ -255,6 +261,10 @@ def main(args):
 
     prefix = f"{model_name}-{target_device}-talker_prediction-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
+    golden_root = Path(args.golden_root)
+    if not golden_root.is_absolute():
+        golden_root = (SCRIPT_DIR.parents[2] / golden_root).resolve()
+    golden_dir = golden_root / prefix / "golden"
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug, file_mode="a" if args.phase != "full" else "w")
@@ -350,8 +360,12 @@ def main(args):
         num_key_value_heads = wrapped_model.config.num_key_value_heads
 
         kv_cache_shape = [1, num_key_value_heads, context_length, head_dim]
-        past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+        past_key_caches = [
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+        ]
+        past_value_caches = [
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+        ]
 
         inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
         if inputs_embeds.shape[1] > input_sequence_length:
@@ -379,11 +393,18 @@ def main(args):
         logger.info(f"Exporting predictor prefill to {prefill_file}")
         with TimeProfiler("export_pred_prefill", logger), MemoryTracker("cuda:0", "export_pred_prefill", logger):
             quanted_model = convert_fx_model_to_quanted_model(
-                wrapped_model, prefill_inputs, target_device, quant_config=quant_config,
+                wrapped_model,
+                prefill_inputs,
+                target_device,
+                quant_config=quant_config,
             )
             compatible_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(
-                quanted_model, prefill_inputs, str(prefill_file), compatible_names, output_names,
+                quanted_model,
+                prefill_inputs,
+                str(prefill_file),
+                compatible_names,
+                output_names,
             )
         logger.info(f"Predictor prefill export successful: {prefill_file}")
 
@@ -401,7 +422,11 @@ def main(args):
         logger.info(f"Exporting predictor decode to {decode_file}")
         compatible_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(
-            quanted_model, decode_inputs, str(decode_file), compatible_names, output_names,
+            quanted_model,
+            decode_inputs,
+            str(decode_file),
+            compatible_names,
+            output_names,
         )
         logger.info(f"Predictor decode export successful: {decode_file}")
 
@@ -446,15 +471,20 @@ def main(args):
             from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
             session = HMONNXInference(str(prefill_file))
-            output = session(inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches)
+            output = session(
+                inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches
+            )
             if isinstance(output, (list, tuple)):
                 output = output[0]
             logger.info(f"Predictor prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
 
             session_d = HMONNXInference(str(decode_file))
             output_d = session_d(
-                inputs_embeds[:, :1, :], past_seq_length_t, torch.ones_like(current_input_length_t),
-                *past_key_caches, *past_value_caches,
+                inputs_embeds[:, :1, :],
+                past_seq_length_t,
+                torch.ones_like(current_input_length_t),
+                *past_key_caches,
+                *past_value_caches,
             )
             if isinstance(output_d, (list, tuple)):
                 output_d = output_d[0]
@@ -485,6 +515,8 @@ def main(args):
                 artifacts=dialogue_artifacts,
                 report_name="talker_prediction_dialogue_validation.json",
                 output_prefix="talker_prediction_dialogue",
+                save_golden=args.save_golden,
+                golden_dir=golden_dir,
             )
 
 
@@ -497,6 +529,9 @@ if __name__ == "__main__":
     parser.add_argument("--valid", action="store_true", default=True, help="validate exported HMONNX")
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
+    parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
+    parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--phase", choices=["full", "hmonnx-validate", "dialogue-validate"], default="full")
     args = parser.parse_args()

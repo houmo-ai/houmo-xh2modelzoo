@@ -83,7 +83,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="/data02/datasets/DeepSeek-OCR/",  # /data02/datasets/Qwen2.5-1.5B-Instruct-int4-sym-inc
+        default="/data01/datasets/DeepSeek-OCR/",  # /data02/datasets/Qwen2.5-1.5B-Instruct-int4-sym-inc
     )
     parser.add_argument("--export-mode", type=str, default="Tiny", choices=["Tiny", "Small", "Base", "Large", "Gundam"],help="export mode, default is hmonnx")
     parser.add_argument("--context-length", type=int, default=8192, help="max sequence length")

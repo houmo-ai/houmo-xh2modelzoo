@@ -376,27 +376,49 @@ class _Qwen3MoeSparseMoeBlock(DynamicModule):
         self.batch_size = cfg.batch_size
         self.device = self.gate.weight.device
 
-        # In Qwen3Omni, top_k/norm_topk_prob live on the gate (TopKRouter),
-        # and experts is a fused Qwen3OmniMoeThinkerTextExperts object.
-        top_k = self.gate.top_k
-        norm_topk_prob = self.gate.norm_topk_prob
-        num_experts = self.experts.num_experts
+        # In Qwen3Omni, top_k/norm_topk_prob live on the SparseMoeBlock itself
+        # (self), and self.gate is already a plain nn.Linear; experts is a
+        # fused Qwen3OmniMoeThinkerTextExperts object. Older transformers
+        # versions exposed these on self.gate (TopKRouter); fall back if so.
+        top_k = getattr(self, "top_k", None)
+        if top_k is None:
+            top_k = self.gate.top_k
+        norm_topk_prob = getattr(self, "norm_topk_prob", None)
+        if norm_topk_prob is None:
+            norm_topk_prob = self.gate.norm_topk_prob
+        num_experts = getattr(self, "num_experts", None)
+        if num_experts is None:
+            num_experts = getattr(self.experts, "num_experts", None)
+        if num_experts is None:
+            num_experts = len(self.experts)
 
-        # Replace the TopKRouter gate with a plain nn.Linear for FX tracing
-        gate_weight = self.gate.weight.data  # (num_experts, hidden_dim)
-        gate_linear = nn.Linear(gate_weight.shape[1], gate_weight.shape[0], bias=False)
-        gate_linear.weight = nn.Parameter(gate_weight)
-        self.gate = gate_linear
+        # Ensure gate is a plain nn.Linear for FX tracing (it already is on
+        # newer transformers, but older TopKRouter-based gates need a rewrap).
+        if not isinstance(self.gate, nn.Linear):
+            gate_weight = self.gate.weight.data  # (num_experts, hidden_dim)
+            gate_linear = nn.Linear(gate_weight.shape[1], gate_weight.shape[0], bias=False)
+            gate_linear.weight = nn.Parameter(gate_weight)
+            self.gate = gate_linear
 
         experts = self.experts
-        act_fn_name = experts.act_fn._get_name().lower()
-        intermediate_dim = experts.intermediate_dim
-        gate_up_proj = experts.gate_up_proj.data  # (E, 2*I, H)
-        down_proj = experts.down_proj.data  # (E, H, I)
+        if isinstance(experts, nn.ModuleList):
+            # transformers 4.57+: experts is a ModuleList of per-expert MLPs.
+            first = experts[0]
+            act_fn_name = first.act_fn._get_name().lower()
+            intermediate_dim = first.intermediate_size
+            gate_proj_weight = torch.stack([e.gate_proj.weight.data for e in experts], dim=0)  # (E, I, H)
+            up_proj_weight = torch.stack([e.up_proj.weight.data for e in experts], dim=0)      # (E, I, H)
+            down_proj_weight = torch.stack([e.down_proj.weight.data for e in experts], dim=0)  # (E, H, I)
+        else:
+            # Fused Qwen3OmniMoeThinkerTextExperts object (older transformers).
+            act_fn_name = experts.act_fn._get_name().lower()
+            intermediate_dim = experts.intermediate_dim
+            gate_up_proj = experts.gate_up_proj.data  # (E, 2*I, H)
+            down_proj = experts.down_proj.data  # (E, H, I)
 
-        gate_proj_weight = gate_up_proj[:, :intermediate_dim, :]   # (E, I, H)
-        up_proj_weight = gate_up_proj[:, intermediate_dim:, :]     # (E, I, H)
-        down_proj_weight = down_proj                                # (E, H, I)
+            gate_proj_weight = gate_up_proj[:, :intermediate_dim, :]   # (E, I, H)
+            up_proj_weight = gate_up_proj[:, intermediate_dim:, :]     # (E, I, H)
+            down_proj_weight = down_proj                                # (E, H, I)
 
         self.moeblock = MoeBlock(act_fn_name, top_k, norm_topk_prob)
 

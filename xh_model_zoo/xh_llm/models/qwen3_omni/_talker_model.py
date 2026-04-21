@@ -282,22 +282,46 @@ class _Qwen3OmniMoeTalkerModel(_Qwen3MoeModel):
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3OmniMoeTalkerForConditionalGeneration: "Qwen3OmniMoeTalkerForConditionalGeneration",})
 class _Qwen3OmniMoeTalkerForConditionalGeneration(_Qwen3OmniTalkerDynamicModule):
-    """Register code predictor model for conditional generation wrapper."""
+    """Fused talker graph: both projection heads are baked into prefill/decode.
+
+    Forward takes the *thinker-side* ``source`` that HF feeds to
+    ``talker.hidden_projection`` / ``talker.text_projection`` plus two masks:
+
+    - ``role_mask`` (float16, 0.0 or 1.0): 1.0 routes the token through
+      ``text_projection``, 0.0 through ``hidden_projection``.
+    - ``bypass_mask`` (float16, 0.0 or 1.0): 1.0 bypasses projection entirely
+      and uses ``bypass_embeds`` as ``inputs_embeds`` (decode path / python
+      shadow path). 0.0 uses the projected result (prefill path).
+
+    Both projection heads always run, so their weights live inside the
+    exported HMONNX; selection is a pure arithmetic mix and stays
+    quant-friendly for w8a8.
+    """
+
     def forward(
         self,
-        inputs_embeds: Optional[Tensor] = None,
+        source: Optional[Tensor] = None,
+        role_mask: Optional[Tensor] = None,
+        bypass_embeds: Optional[Tensor] = None,
+        bypass_mask: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
-        # position_ids: Optional[Tensor] = None,
         past_key_cache: Optional[List[Tensor]] = None,
         past_value_cache: Optional[List[Tensor]] = None,
     ):
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        # Fused projection heads — always run, arithmetic select.
+        hidden_proj_out = self.hidden_projection(source)
+        text_proj_out = self.text_projection(source)
+        one_minus_role = 1.0 - role_mask
+        projected = hidden_proj_out * one_minus_role + text_proj_out * role_mask
+
+        one_minus_bypass = 1.0 - bypass_mask
+        inputs_embeds = projected * one_minus_bypass + bypass_embeds * bypass_mask
+
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
-            # position_ids=position_ids,
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )
@@ -305,7 +329,7 @@ class _Qwen3OmniMoeTalkerForConditionalGeneration(_Qwen3OmniTalkerDynamicModule)
         hidden_states = outputs.last_hidden_state
         logits = self.codec_head(hidden_states)
         return logits
-    
+
     def _setup(self, cfg: Optional[Dict] = None):
         return self
 

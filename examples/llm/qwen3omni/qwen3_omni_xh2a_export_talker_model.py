@@ -41,8 +41,11 @@ from _hmonnx_pipeline import (
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
 except ImportError:
+
     def release_export_cuda_memory(logger=None, label=None):
         return None
+
+
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
@@ -58,6 +61,8 @@ from xhquant.api import (  # isort:skip
     get_root_logger,
     xhquant_init,
 )
+
+
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
@@ -96,9 +101,7 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
     if max_memory is not None:
         load_kwargs["max_memory"] = max_memory
 
-    logger.info(
-        f"Loading HF model from {hf_model_path} for talker export with device_map={device_map}"
-    )
+    logger.info(f"Loading HF model from {hf_model_path} for talker export with device_map={device_map}")
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         hf_model_path,
         **load_kwargs,
@@ -110,8 +113,10 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
         _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
     return native_model
 
+
 def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture talker.forward inputs, or load from cache."""
+
     class _TalkerInputsCaptured(RuntimeError):
         pass
 
@@ -136,8 +141,13 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
     text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
     inputs = processor(
-        text=text, audio=audios, images=images, videos=videos,
-        return_tensors="pt", padding=True, use_audio_in_video=True,
+        text=text,
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=True,
     )
     inputs = inputs.to(device).to(dtype)
 
@@ -172,8 +182,10 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
     try:
         with torch.no_grad():
             native_model.generate(
-                **inputs, speaker="Ethan",
-                thinker_return_dict_in_generate=True, use_audio_in_video=True,
+                **inputs,
+                speaker="Ethan",
+                thinker_return_dict_in_generate=True,
+                use_audio_in_video=True,
             )
     except _TalkerInputsCaptured:
         logger.info("Captured first talker forward inputs, stopping generate early")
@@ -191,15 +203,15 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
 def _run_talker_dialogue_validation(
     hf_model_path: str,
     work_dir: Path,
+    golden_dir: Path,
     logger,
     meta_info,
     meta_file: Path,
     max_new_tokens: int,
     talker_max_new_tokens: int,
+    save_golden: bool,
 ):
-    dialogue_artifacts = {
-        "talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}
-    }
+    dialogue_artifacts = {"talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
     return run_dialogue_validation(
         hf_model_path,
         work_dir,
@@ -210,6 +222,8 @@ def _run_talker_dialogue_validation(
         artifacts=dialogue_artifacts,
         report_name="talker_dialogue_validation.json",
         output_prefix="talker_dialogue",
+        save_golden=save_golden,
+        golden_dir=golden_dir,
     )
 
 
@@ -229,7 +243,9 @@ def _build_talker_validation_inputs(work_dir: Path, meta_info):
         inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
 
     past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-    past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+    past_value_caches = [
+        CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+    ]
     past_seq_length_t = torch.tensor([0], dtype=torch.int32)
     current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
     return inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
@@ -264,6 +280,10 @@ def main(args):
 
     prefix = f"{model_name}-{target_device}-talker-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
+    golden_root = Path(args.golden_root)
+    if not golden_root.is_absolute():
+        golden_root = (SCRIPT_DIR.parents[2] / golden_root).resolve()
+    golden_dir = golden_root / prefix / "golden"
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug, file_mode="a" if args.phase != "full" else "w")
@@ -283,6 +303,7 @@ def main(args):
 
     # Check if artifacts already exist — skip export if so
     import json
+
     artifacts_exist = prefill_file.exists() and decode_file.exists() and meta_file.exists()
 
     if artifacts_exist:
@@ -320,6 +341,11 @@ def main(args):
 
         talker_embedding = talker.model.get_input_embeddings()
 
+        # Snapshot the projection head input-dim BEFORE wrapping (FX
+        # conversion may rewrite the module, and we need this number for
+        # meta info).
+        projection_in_features = int(talker.hidden_projection.linear_fc1.in_features)
+
         wrap_cfg = Config(
             dict(
                 batch_size=batch_size,
@@ -339,8 +365,12 @@ def main(args):
         num_key_value_heads = wrapped_talker.model.config.num_key_value_heads
 
         kv_cache_shape = [1, num_key_value_heads, context_length, head_dim]
-        past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
-        past_value_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
+        past_key_caches = [
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+        ]
+        past_value_caches = [
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
+        ]
 
         inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
         if inputs_embeds.shape[1] > input_sequence_length:
@@ -349,15 +379,45 @@ def main(args):
         past_seq_length_t = torch.tensor([0], dtype=torch.int32)
         current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
 
+        # Build calibration inputs for the fused graph (both projection heads
+        # baked into prefill/decode). Calibration source uses randn in a
+        # reasonable fp16 range so both projection heads get meaningful
+        # activations; bypass path is exercised by routing the captured
+        # ``inputs_embeds`` through ``bypass_embeds`` with ``bypass_mask=1``.
+        source_batch = int(inputs_embeds.shape[0])
+        source_seq = int(inputs_embeds.shape[1])
+        talker_hs = int(inputs_embeds.shape[-1])
+        thinker_hs = int(talker.hidden_projection.linear_fc1.in_features)
+
+        torch.manual_seed(0)
+        source_prefill = torch.randn(source_batch, source_seq, thinker_hs, dtype=torch.float16)
+        role_mask_prefill = torch.zeros(source_batch, source_seq, 1, dtype=torch.float16)
+        # Mark roughly half of positions as text-projection path so both heads
+        # receive representative activations during calibration.
+        if source_seq > 1:
+            role_mask_prefill[:, source_seq // 2 :, :] = 1.0
+        bypass_embeds_prefill = inputs_embeds
+        bypass_mask_prefill = torch.ones(source_batch, source_seq, 1, dtype=torch.float16)
+
         prefill_inputs = (
-            inputs_embeds,
+            source_prefill,
+            role_mask_prefill,
+            bypass_embeds_prefill,
+            bypass_mask_prefill,
             past_seq_length_t,
             current_input_length_t,
             past_key_caches,
             past_value_caches,
         )
 
-        input_names = ["inputs_embeds", "past_seq_length", "current_input_length"]
+        input_names = [
+            "source",
+            "role_mask",
+            "bypass_embeds",
+            "bypass_mask",
+            "past_seq_length",
+            "current_input_length",
+        ]
         for i in range(num_hidden_layers):
             input_names.append(f"past_key_cache_{i}")
         for i in range(num_hidden_layers):
@@ -368,17 +428,35 @@ def main(args):
         logger.info(f"Exporting talker prefill to {prefill_file}")
         with TimeProfiler("export_talker_prefill", logger), MemoryTracker("cuda:0", "export_talker_prefill", logger):
             quanted_talker = convert_fx_model_to_quanted_model(
-                wrapped_talker, prefill_inputs, target_device, quant_config=quant_config,
+                wrapped_talker,
+                prefill_inputs,
+                target_device,
+                quant_config=quant_config,
             )
             compatible_names = BaseConverter.xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(
-                quanted_talker, prefill_inputs, str(prefill_file), compatible_names, output_names,
+                quanted_talker,
+                prefill_inputs,
+                str(prefill_file),
+                compatible_names,
+                output_names,
             )
         logger.info(f"Talker prefill export successful: {prefill_file}")
 
         # ---- 6. Export decode HMONNX ----
+        # Decode uses seq_len=1. Projection heads still live in the graph
+        # (baked in) but the bypass path is active: bypass_mask=1 feeds the
+        # pre-projected codec embedding straight into the trunk.
+        source_decode = torch.zeros(source_batch, 1, thinker_hs, dtype=torch.float16)
+        role_mask_decode = torch.zeros(source_batch, 1, 1, dtype=torch.float16)
+        bypass_embeds_decode = inputs_embeds[:, :1, :]
+        bypass_mask_decode = torch.ones(source_batch, 1, 1, dtype=torch.float16)
+
         decode_inputs = (
-            inputs_embeds[:, :1, :],
+            source_decode,
+            role_mask_decode,
+            bypass_embeds_decode,
+            bypass_mask_decode,
             past_seq_length_t,
             torch.ones_like(current_input_length_t),
             past_key_caches,
@@ -390,7 +468,11 @@ def main(args):
         logger.info(f"Exporting talker decode to {decode_file}")
         compatible_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         convert_quanted_model_to_hmonnx(
-            quanted_talker, decode_inputs, str(decode_file), compatible_names, output_names,
+            quanted_talker,
+            decode_inputs,
+            str(decode_file),
+            compatible_names,
+            output_names,
         )
         logger.info(f"Talker decode export successful: {decode_file}")
 
@@ -406,10 +488,13 @@ def main(args):
             "model_name": model_name,
             "talker_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_decode_onnx": str(decode_file.relative_to(work_dir)),
+            "talker_projection_in_features": int(projection_in_features),
             "talker_embedding_file": str(embed_file.relative_to(work_dir)),
             "talker_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
             "talker_hidden_size": int(inputs_embeds.shape[-1]),
+            "talker_thinker_hidden_size": int(thinker_hs),
             "talker_input_sequence_length": int(input_sequence_length),
+            "fused_projection": True,
         }
         save_json(meta_file, meta_info)
         logger.info(f"Talker export complete. Meta saved to {meta_file}")
@@ -432,9 +517,20 @@ def main(args):
             logger.info("Validating talker HMONNX ...")
             from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
+            # Build fused-graph inputs for validation (bypass path, matches shadow).
+            prefill_batch = int(inputs_embeds.shape[0])
+            prefill_seq = int(inputs_embeds.shape[1])
+            prefill_thinker_hs = int(meta_info.get("talker_thinker_hidden_size", inputs_embeds.shape[-1]))
+            prefill_source = torch.zeros(prefill_batch, prefill_seq, prefill_thinker_hs, dtype=torch.float16)
+            prefill_role_mask = torch.zeros(prefill_batch, prefill_seq, 1, dtype=torch.float16)
+            prefill_bypass_mask = torch.ones(prefill_batch, prefill_seq, 1, dtype=torch.float16)
+
             session = HMONNXInference(str(prefill_file))
             output = session(
+                prefill_source,
+                prefill_role_mask,
                 inputs_embeds,
+                prefill_bypass_mask,
                 past_seq_length_t,
                 current_input_length_t,
                 *past_key_caches,
@@ -444,9 +540,16 @@ def main(args):
                 output = output[0]
             logger.info(f"Talker prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
 
+            decode_source = torch.zeros(prefill_batch, 1, prefill_thinker_hs, dtype=torch.float16)
+            decode_role_mask = torch.zeros(prefill_batch, 1, 1, dtype=torch.float16)
+            decode_bypass_mask = torch.ones(prefill_batch, 1, 1, dtype=torch.float16)
+
             session_d = HMONNXInference(str(decode_file))
             output_d = session_d(
+                decode_source,
+                decode_role_mask,
                 inputs_embeds[:, :1, :],
+                decode_bypass_mask,
                 past_seq_length_t,
                 torch.ones_like(current_input_length_t),
                 *past_key_caches,
@@ -473,11 +576,13 @@ def main(args):
             _run_talker_dialogue_validation(
                 hf_model_path,
                 work_dir,
+                golden_dir,
                 logger,
                 meta_info,
                 meta_file,
                 max_new_tokens=args.max_new_tokens,
                 talker_max_new_tokens=args.talker_max_new_tokens,
+                save_golden=args.save_golden,
             )
 
 
@@ -496,6 +601,9 @@ if __name__ == "__main__":
         default=16,
         help="cap talker audio tokens during dialogue validation",
     )
+    parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
+    parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
+    parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--phase", choices=["full", "hmonnx-validate", "dialogue-validate"], default="full")
     args = parser.parse_args()
