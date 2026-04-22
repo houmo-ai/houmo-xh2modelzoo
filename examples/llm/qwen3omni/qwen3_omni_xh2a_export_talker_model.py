@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _hmonnx_pipeline import (
     _build_safe_validation_max_memory,
+    discover_artifacts,
     _patch_inputs_embeds_generation_device,
     _patch_runtime_device_property,
     _resolve_validation_device_map,
@@ -212,6 +213,9 @@ def _run_talker_dialogue_validation(
     save_golden: bool,
 ):
     dialogue_artifacts = {"talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
+    sibling_artifacts = discover_artifacts(work_dir.parent)
+    if "talker_prediction" in sibling_artifacts:
+        dialogue_artifacts["talker_prediction"] = sibling_artifacts["talker_prediction"]
     return run_dialogue_validation(
         hf_model_path,
         work_dir,
@@ -310,6 +314,15 @@ def main(args):
         logger.info("Talker HMONNX artifacts already exist, skipping export")
         with open(meta_file) as f:
             meta_info = json.load(f)
+        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 2 and meta_info.get("output_names") == [
+            "logits",
+            "hidden_states",
+        ]
+        if not takeover_ready:
+            logger.info("Talker artifacts use legacy single-output contract, rebuilding for HMONNX takeover")
+            artifacts_exist = False
+
+    if artifacts_exist:
         inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
             _build_talker_validation_inputs(work_dir, meta_info)
         )
@@ -422,7 +435,7 @@ def main(args):
             input_names.append(f"past_key_cache_{i}")
         for i in range(num_hidden_layers):
             input_names.append(f"past_value_cache_{i}")
-        output_names = ["logits"]
+        output_names = ["logits", "hidden_states"]
 
         # ---- 5. Export prefill HMONNX ----
         logger.info(f"Exporting talker prefill to {prefill_file}")
@@ -484,10 +497,12 @@ def main(args):
         # ---- 8. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "artifact_contract_version": 2,
             "module": "talker_model",
             "model_name": model_name,
             "talker_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_decode_onnx": str(decode_file.relative_to(work_dir)),
+            "output_names": output_names,
             "talker_projection_in_features": int(projection_in_features),
             "talker_embedding_file": str(embed_file.relative_to(work_dir)),
             "talker_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
@@ -536,9 +551,11 @@ def main(args):
                 *past_key_caches,
                 *past_value_caches,
             )
-            if isinstance(output, (list, tuple)):
-                output = output[0]
-            logger.info(f"Talker prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
+            outputs = list(output) if isinstance(output, (list, tuple)) else [output]
+            logger.info(
+                "Talker prefill HMONNX validation passed, output shapes: "
+                + ", ".join(str(tuple(out.shape)) for out in outputs)
+            )
 
             decode_source = torch.zeros(prefill_batch, 1, prefill_thinker_hs, dtype=torch.float16)
             decode_role_mask = torch.zeros(prefill_batch, 1, 1, dtype=torch.float16)
@@ -555,9 +572,11 @@ def main(args):
                 *past_key_caches,
                 *past_value_caches,
             )
-            if isinstance(output_d, (list, tuple)):
-                output_d = output_d[0]
-            logger.info(f"Talker decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+            outputs_d = list(output_d) if isinstance(output_d, (list, tuple)) else [output_d]
+            logger.info(
+                "Talker decode HMONNX validation passed, output shapes: "
+                + ", ".join(str(tuple(out.shape)) for out in outputs_d)
+            )
 
             session = None
             session_d = None

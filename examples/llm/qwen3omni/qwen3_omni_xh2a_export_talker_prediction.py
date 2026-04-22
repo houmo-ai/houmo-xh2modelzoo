@@ -293,11 +293,18 @@ def main(args):
             meta_info = json.load(f)
         legacy_layout = "codec_embedding_dir" in meta_info or "lm_head_dir" in meta_info
         new_layout_ready = "talker_prediction_assets_file" in meta_info and asset_file.exists()
+        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 2 and meta_info.get("output_names") == [
+            "logits",
+            "hidden_states",
+        ]
         if legacy_layout and not new_layout_ready:
             logger.info("Legacy scattered talker prediction artifacts detected, rebuilding consolidated export")
             artifacts_exist = False
         elif "talker_prediction_assets_file" in meta_info and not asset_file.exists():
             logger.info("Talker prediction meta points to missing asset bundle, rebuilding consolidated export")
+            artifacts_exist = False
+        elif not takeover_ready:
+            logger.info("Talker prediction artifacts use legacy single-output contract, rebuilding for HMONNX takeover")
             artifacts_exist = False
 
     if artifacts_exist:
@@ -393,7 +400,7 @@ def main(args):
             input_names.append(f"past_key_cache_{i}")
         for i in range(num_hidden_layers):
             input_names.append(f"past_value_cache_{i}")
-        output_names = ["logits"]
+        output_names = ["logits", "hidden_states"]
 
         # ---- 6. Export prefill HMONNX ----
         logger.info(f"Exporting predictor prefill to {prefill_file}")
@@ -440,11 +447,13 @@ def main(args):
         # ---- 8. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "artifact_contract_version": 2,
             "module": "talker_prediction",
             "model_name": model_name,
             "talker_prediction_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_prediction_decode_onnx": str(decode_file.relative_to(work_dir)),
             "talker_prediction_assets_file": str(asset_file.relative_to(work_dir)),
+            "output_names": output_names,
             "codec_embedding_count": int(asset_payload["num_codec_embeddings"]),
             "lm_head_count": num_lm_heads,
             "talker_prediction_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
@@ -490,9 +499,11 @@ def main(args):
             output = session(
                 inputs_embeds, head_mask_prefill, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches
             )
-            if isinstance(output, (list, tuple)):
-                output = output[0]
-            logger.info(f"Predictor prefill HMONNX validation passed, output shape: {tuple(output.shape)}")
+            outputs = list(output) if isinstance(output, (list, tuple)) else [output]
+            logger.info(
+                "Predictor prefill HMONNX validation passed, output shapes: "
+                + ", ".join(str(tuple(out.shape)) for out in outputs)
+            )
 
             session_d = HMONNXInference(str(decode_file))
             output_d = session_d(
@@ -503,9 +514,11 @@ def main(args):
                 *past_key_caches,
                 *past_value_caches,
             )
-            if isinstance(output_d, (list, tuple)):
-                output_d = output_d[0]
-            logger.info(f"Predictor decode HMONNX validation passed, output shape: {tuple(output_d.shape)}")
+            outputs_d = list(output_d) if isinstance(output_d, (list, tuple)) else [output_d]
+            logger.info(
+                "Predictor decode HMONNX validation passed, output shapes: "
+                + ", ".join(str(tuple(out.shape)) for out in outputs_d)
+            )
             session = None
             session_d = None
             output = None
@@ -539,7 +552,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Qwen3-Omni talker code predictor to HMONNX")
-    parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
     parser.add_argument("--quant-type", default="w8a8h0_sefp")
     parser.add_argument("--context-length", type=int, default=2048)

@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional
 
+import torch
 from torch import Tensor
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     Qwen3OmniMoeRMSNorm,
@@ -94,11 +95,21 @@ class _Qwen3OmniMoeTalkerPrediction(_Qwen3MoeModel):
     }
 )
 class _Qwen3OmniMoeTalkerCodePredictorForConditionalGeneration(_Qwen3OmniTalkerDynamicModule):
-    """Register code predictor model-for-generation wrapper."""
+    """Register code predictor model-for-generation wrapper.
+
+    All 15 lm_heads are unfolded into the graph.  A ``head_mask`` tensor
+    (float16, shape ``[B,S,15,1]``) selects which head(s) contribute to the
+    output logits via element-wise multiplication and sum reduction.
+
+        Both prefill and decode should use one-hot ``head_mask`` to match
+        the HF predictor semantics where only one lm_head is active for
+        each forward call.
+    """
 
     def forward(
         self,
         inputs_embeds: Optional[Tensor] = None,
+        head_mask: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         past_key_cache: Optional[List[Tensor]] = None,
@@ -112,8 +123,15 @@ class _Qwen3OmniMoeTalkerCodePredictorForConditionalGeneration(_Qwen3OmniTalkerD
             past_value_cache=past_value_cache,
         )
         hidden_states = outputs.last_hidden_state
-        logits = self.lm_head(hidden_states)
-        return logits
+        # Unfold every lm_head into the graph.
+        # hidden_states: [B, S, H]
+        # head_logits_list[i]: [B, S, V]
+        head_logits_list = [head(hidden_states) for head in self.lm_head]
+        # Stack to [B, S, num_heads, V]
+        all_logits = torch.stack(head_logits_list, dim=2)
+        # head_mask: [B, S, num_heads, 1] -> broadcast over V
+        selected_logits = (all_logits * head_mask).sum(dim=2)
+        return selected_logits, hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

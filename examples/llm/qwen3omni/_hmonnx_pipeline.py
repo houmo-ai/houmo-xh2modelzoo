@@ -14,6 +14,10 @@ from xhquant.api import CacheTensor
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
 from xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+from xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe import (
+    Qwen3OmniMoeTalkerCodePredictorOutputWithPast,
+    Qwen3OmniMoeTalkerOutputWithPast,
+)
 from xh_model_zoo.xh_llm.models.qwen3_omni.monkey_patch import Qwen3OmniMoeThinkerForConditionalGeneration_forward
 from xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe import Qwen3OmniMoeProcessor
 
@@ -655,6 +659,35 @@ def _make_cache_state(kv_cache_info: Dict[str, Any]):
     }
 
 
+class _LengthOnlyPastKeyValues:
+    def __init__(self, seq_length: int = 0):
+        self.seq_length = int(seq_length)
+
+    def get_seq_length(self, layer_idx: int = 0):
+        return int(self.seq_length)
+
+
+def _extract_hmonnx_logits_and_hidden_states(
+    output: Any,
+    device: torch.device,
+    actual_seq_len: int,
+    hidden_dtype: Optional[torch.dtype] = None,
+):
+    outputs = _extract_outputs(output)
+    if len(outputs) < 2:
+        raise RuntimeError(
+            "HMONNX artifact uses legacy single-output contract; please re-export talker/talker_prediction artifacts"
+        )
+
+    logits = _ensure_tensor(outputs[0], device)
+    hidden_states = _ensure_tensor(outputs[1], device, hidden_dtype)
+    if logits.ndim == 2:
+        logits = logits.unsqueeze(1)
+    if hidden_states.ndim == 2:
+        hidden_states = hidden_states.unsqueeze(1)
+    return logits[:, :actual_seq_len, :], hidden_states[:, :actual_seq_len, :]
+
+
 def _replace_code2wav(native_model, code2wav_hmonnx_path: Path, static_code_len: int, logger):
     session = _create_hmonnx_session(code2wav_hmonnx_path)
     native_model.code2wav.hmonnx = session
@@ -863,7 +896,6 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
         raise RuntimeError(
             "talker meta missing thinker hidden size (talker_thinker_hidden_size / talker_projection_in_features)"
         )
-    original_forward = native_model.talker.forward
 
     def _call_fused(session, shadow_inputs_embeds, shadow_seq_len):
         batch = int(shadow_inputs_embeds.shape[0])
@@ -908,27 +940,35 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
                     )
                     shadow_inputs_embeds = torch.cat([shadow_inputs_embeds, pad], dim=1)
                     shadow_seq_len = static_prefill_len
-            _call_fused(session, shadow_inputs_embeds, shadow_seq_len)
+
+            generation_step = kwargs.get("generation_step")
+            residual_codes = kwargs.get("residual_codes")
+            if seq_len > 1:
+                generation_step = -1
+                residual_codes = None
+
+            logits, hidden_states = _extract_hmonnx_logits_and_hidden_states(
+                _call_fused(session, shadow_inputs_embeds, shadow_seq_len),
+                inputs_embeds.device,
+                seq_len,
+                hidden_dtype=inputs_embeds.dtype,
+            )
             state["past_seq_length"] += seq_len
 
-        # Ensure attention_mask is not None (generate may skip it when pad==eos)
-        if kwargs.get("attention_mask") is None and kwargs.get("inputs_embeds") is not None:
-            ie = kwargs["inputs_embeds"]
-            past_kv = kwargs.get("past_key_values")
-            if past_kv is not None and hasattr(past_kv, "get_seq_length"):
-                past_len = past_kv.get_seq_length()
-            elif past_kv is not None and isinstance(past_kv, (list, tuple)) and len(past_kv) > 0:
-                past_len = past_kv[0][0].shape[2]
-            else:
-                past_len = 0
-            total_len = past_len + ie.shape[1]
-            kwargs["attention_mask"] = torch.ones(ie.shape[0], total_len, device=ie.device, dtype=torch.long)
-        return original_forward(*args, **kwargs)
+            return Qwen3OmniMoeTalkerOutputWithPast(
+                logits=logits,
+                aux_loss=None,
+                past_key_values=_LengthOnlyPastKeyValues(state["past_seq_length"]),
+                hidden_states=((hidden_states,), residual_codes),
+                generation_step=int(generation_step) + 1,
+            )
+
+        raise RuntimeError("talker HMONNX takeover requires inputs_embeds")
 
     native_model.talker.forward = types.MethodType(forward, native_model.talker)
     # Skip custom kwarg validation in talker.generate()
     native_model.talker._validate_model_kwargs = types.MethodType(lambda self, model_kwargs: None, native_model.talker)
-    logger.info("talker model inserted in shadow mode")
+    logger.info("talker model inserted in HMONNX takeover mode")
 
 
 def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any], logger):
@@ -937,7 +977,6 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
     state = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])
     static_prefill_len = int(predictor_meta.get("talker_prediction_input_sequence_length", 0))
     num_lm_heads = int(predictor_meta.get("lm_head_count", 15))
-    original_forward = native_model.talker.code_predictor.forward
 
     def _call_fused(session, shadow_inputs_embeds, shadow_seq_len, head_mask):
         return session.forward(
@@ -951,6 +990,15 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
 
     def forward(self, *args, **kwargs):
         inputs_embeds = kwargs.get("inputs_embeds")
+        generation_step = kwargs.get("generation_steps", 0)
+        if generation_step is None:
+            generation_step = 0
+        if inputs_embeds is None:
+            input_ids = kwargs.get("input_ids")
+            if input_ids is None:
+                raise RuntimeError("talker prediction HMONNX takeover requires inputs_embeds or input_ids")
+            embed_index = max(0, int(generation_step) - 1)
+            inputs_embeds = self.model.get_input_embeddings()[embed_index](input_ids)
         if inputs_embeds is not None:
             seq_len = int(inputs_embeds.shape[1])
             if seq_len > 1:
@@ -987,32 +1035,29 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
                 head_mask = torch.zeros(batch, shadow_seq_len, num_lm_heads, 1, dtype=torch.float16)
                 head_mask[:, :, step, 0] = 1.0
             else:
-                generation_step = kwargs.get("generation_steps", 0)
-                if generation_step is None:
-                    generation_step = 0
                 head_mask = torch.zeros(batch, 1, num_lm_heads, 1, dtype=torch.float16)
                 step = int(generation_step) % num_lm_heads
                 head_mask[0, 0, step, 0] = 1.0
 
-            _call_fused(session, shadow_inputs_embeds, shadow_seq_len, head_mask)
+            logits, hidden_states = _extract_hmonnx_logits_and_hidden_states(
+                _call_fused(session, shadow_inputs_embeds, shadow_seq_len, head_mask),
+                inputs_embeds.device,
+                seq_len,
+                hidden_dtype=inputs_embeds.dtype,
+            )
             state["past_seq_length"] += seq_len
 
-        # Ensure attention_mask is not None (generate may skip it when pad==eos)
-        if kwargs.get("attention_mask") is None and kwargs.get("inputs_embeds") is not None:
-            ie = kwargs["inputs_embeds"]
-            past_kv = kwargs.get("past_key_values")
-            if past_kv is not None and hasattr(past_kv, "get_seq_length"):
-                past_len = past_kv.get_seq_length()
-            elif past_kv is not None and isinstance(past_kv, (list, tuple)) and len(past_kv) > 0:
-                past_len = past_kv[0][0].shape[2]
-            else:
-                past_len = 0
-            total_len = past_len + ie.shape[1]
-            kwargs["attention_mask"] = torch.ones(ie.shape[0], total_len, device=ie.device, dtype=torch.long)
-        return original_forward(*args, **kwargs)
+            return Qwen3OmniMoeTalkerCodePredictorOutputWithPast(
+                logits=logits,
+                past_key_values=_LengthOnlyPastKeyValues(state["past_seq_length"]),
+                hidden_states=(hidden_states,),
+                generation_steps=step + 1,
+            )
+
+        raise RuntimeError("talker prediction HMONNX takeover requires inputs_embeds or input_ids")
 
     native_model.talker.code_predictor.forward = types.MethodType(forward, native_model.talker.code_predictor)
-    logger.info("talker prediction inserted in shadow mode")
+    logger.info("talker prediction inserted in HMONNX takeover mode")
     # Skip custom kwarg validation in code_predictor.model.generate()
     native_model.talker.code_predictor.model._validate_model_kwargs = types.MethodType(
         lambda self, model_kwargs: None, native_model.talker.code_predictor.model

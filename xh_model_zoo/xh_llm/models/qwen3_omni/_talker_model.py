@@ -328,7 +328,7 @@ class _Qwen3OmniMoeTalkerForConditionalGeneration(_Qwen3OmniTalkerDynamicModule)
 
         hidden_states = outputs.last_hidden_state
         logits = self.codec_head(hidden_states)
-        return logits
+        return logits, hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self
