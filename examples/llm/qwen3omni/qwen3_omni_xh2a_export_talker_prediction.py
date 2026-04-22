@@ -326,9 +326,7 @@ def main(args):
 
         pred_register_wrap_modules()
 
-        code_predictor = native_model.talker.code_predictor
-        code_predictor_model = code_predictor.model.to(torch.float16).cpu()
-        code_predictor = None
+        code_predictor = native_model.talker.code_predictor.to(torch.float16).cpu()
         processor = None
         native_model = None
         release_export_cuda_memory(logger, "talker prediction capture")
@@ -336,10 +334,6 @@ def main(args):
         batch_size = 1
         context_length = args.context_length
         input_sequence_length = captured[0]["inputs_embeds"].shape[1]
-
-        codec_embedding = code_predictor_model.get_input_embeddings()
-        if isinstance(codec_embedding, (list, tuple, nn.ModuleList)):
-            codec_embedding = codec_embedding[0]
 
         wrap_cfg = Config(
             dict(
@@ -352,12 +346,12 @@ def main(args):
             )
         )
 
-        wrapped_model = wrap_llm_model(code_predictor_model, wrap_cfg)
+        wrapped_model = wrap_llm_model(code_predictor, wrap_cfg)
 
         # ---- 5. Setup KV cache and inputs ----
-        num_hidden_layers = wrapped_model.config.num_hidden_layers
-        head_dim = wrapped_model.layers[0].self_attn.head_dim
-        num_key_value_heads = wrapped_model.config.num_key_value_heads
+        num_hidden_layers = wrapped_model.model.config.num_hidden_layers
+        head_dim = wrapped_model.model.layers[0].self_attn.head_dim
+        num_key_value_heads = wrapped_model.model.config.num_key_value_heads
 
         kv_cache_shape = [1, num_key_value_heads, context_length, head_dim]
         past_key_caches = [
@@ -374,15 +368,27 @@ def main(args):
         past_seq_length_t = torch.tensor([0], dtype=torch.int32)
         current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
 
+        num_lm_heads = int(asset_payload["num_lm_heads"])
+        batch = int(inputs_embeds.shape[0])
+        prefill_seq = int(inputs_embeds.shape[1])
+        # Match HF predictor prefill: generation_steps = seq_len - 2.
+        prefill_step = max(0, min(prefill_seq - 2, num_lm_heads - 1))
+        head_mask_prefill = torch.zeros(batch, prefill_seq, num_lm_heads, 1, dtype=torch.float16)
+        head_mask_prefill[:, :, prefill_step, 0] = 1.0
+        # Decode: pick head 0 as the calibration path (one-hot).
+        head_mask_decode = torch.zeros(batch, 1, num_lm_heads, 1, dtype=torch.float16)
+        head_mask_decode[0, 0, 0, 0] = 1.0
+
         prefill_inputs = (
             inputs_embeds,
+            head_mask_prefill,
             past_seq_length_t,
             current_input_length_t,
             past_key_caches,
             past_value_caches,
         )
 
-        input_names = ["inputs_embeds", "past_seq_length", "current_input_length"]
+        input_names = ["inputs_embeds", "head_mask", "past_seq_length", "current_input_length"]
         for i in range(num_hidden_layers):
             input_names.append(f"past_key_cache_{i}")
         for i in range(num_hidden_layers):
@@ -411,6 +417,7 @@ def main(args):
         # ---- 7. Export decode HMONNX ----
         decode_inputs = (
             inputs_embeds[:, :1, :],
+            head_mask_decode,
             past_seq_length_t,
             torch.ones_like(current_input_length_t),
             past_key_caches,
@@ -439,7 +446,7 @@ def main(args):
             "talker_prediction_decode_onnx": str(decode_file.relative_to(work_dir)),
             "talker_prediction_assets_file": str(asset_file.relative_to(work_dir)),
             "codec_embedding_count": int(asset_payload["num_codec_embeddings"]),
-            "lm_head_count": int(asset_payload["num_lm_heads"]),
+            "lm_head_count": num_lm_heads,
             "talker_prediction_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
             "talker_prediction_hidden_size": int(inputs_embeds.shape[-1]),
             "talker_prediction_input_sequence_length": int(input_sequence_length),
@@ -467,12 +474,21 @@ def main(args):
             inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
                 _build_predictor_validation_inputs(work_dir, meta_info)
             )
+            num_lm_heads = int(meta_info.get("lm_head_count", 15))
+            batch = int(inputs_embeds.shape[0])
+            prefill_seq = int(inputs_embeds.shape[1])
+            prefill_step = max(0, min(prefill_seq - 2, num_lm_heads - 1))
+            head_mask_prefill = torch.zeros(batch, prefill_seq, num_lm_heads, 1, dtype=torch.float16)
+            head_mask_prefill[:, :, prefill_step, 0] = 1.0
+            head_mask_decode = torch.zeros(batch, 1, num_lm_heads, 1, dtype=torch.float16)
+            head_mask_decode[0, 0, 0, 0] = 1.0
+
             logger.info("Validating predictor HMONNX ...")
             from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
             session = HMONNXInference(str(prefill_file))
             output = session(
-                inputs_embeds, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches
+                inputs_embeds, head_mask_prefill, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches
             )
             if isinstance(output, (list, tuple)):
                 output = output[0]
@@ -481,6 +497,7 @@ def main(args):
             session_d = HMONNXInference(str(decode_file))
             output_d = session_d(
                 inputs_embeds[:, :1, :],
+                head_mask_decode,
                 past_seq_length_t,
                 torch.ones_like(current_input_length_t),
                 *past_key_caches,

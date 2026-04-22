@@ -936,7 +936,18 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
     decode_session = _create_hmonnx_session(_resolve_meta_path(predictor_meta, "talker_prediction_decode_onnx"))
     state = _make_cache_state(predictor_meta["talker_prediction_kv_cache"])
     static_prefill_len = int(predictor_meta.get("talker_prediction_input_sequence_length", 0))
+    num_lm_heads = int(predictor_meta.get("lm_head_count", 15))
     original_forward = native_model.talker.code_predictor.forward
+
+    def _call_fused(session, shadow_inputs_embeds, shadow_seq_len, head_mask):
+        return session.forward(
+            shadow_inputs_embeds,
+            head_mask,
+            torch.tensor([state["past_seq_length"]], dtype=torch.int32),
+            torch.tensor([shadow_seq_len], dtype=torch.int32),
+            *state["past_key_caches"],
+            *state["past_value_caches"],
+        )
 
     def forward(self, *args, **kwargs):
         inputs_embeds = kwargs.get("inputs_embeds")
@@ -967,13 +978,23 @@ def _patch_talker_prediction_shadow(native_model, predictor_meta: Dict[str, Any]
                     )
                     shadow_inputs_embeds = torch.cat([shadow_inputs_embeds, pad], dim=1)
                     shadow_seq_len = static_prefill_len
-            session.forward(
-                shadow_inputs_embeds,
-                torch.tensor([state["past_seq_length"]], dtype=torch.int32),
-                torch.tensor([shadow_seq_len], dtype=torch.int32),
-                *state["past_key_caches"],
-                *state["past_value_caches"],
-            )
+
+            # Build head mask to mirror HF predictor semantics:
+            # prefill -> generation_steps = seq_len - 2, decode -> explicit generation_steps.
+            batch = int(shadow_inputs_embeds.shape[0])
+            if seq_len > 1:
+                step = max(0, min(seq_len - 2, num_lm_heads - 1))
+                head_mask = torch.zeros(batch, shadow_seq_len, num_lm_heads, 1, dtype=torch.float16)
+                head_mask[:, :, step, 0] = 1.0
+            else:
+                generation_step = kwargs.get("generation_steps", 0)
+                if generation_step is None:
+                    generation_step = 0
+                head_mask = torch.zeros(batch, 1, num_lm_heads, 1, dtype=torch.float16)
+                step = int(generation_step) % num_lm_heads
+                head_mask[0, 0, step, 0] = 1.0
+
+            _call_fused(session, shadow_inputs_embeds, shadow_seq_len, head_mask)
             state["past_seq_length"] += seq_len
 
         # Ensure attention_mask is not None (generate may skip it when pad==eos)

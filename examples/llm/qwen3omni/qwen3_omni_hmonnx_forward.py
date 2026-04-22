@@ -77,19 +77,31 @@ def _run_talker_prediction_forward(meta, report):
     kv_info = meta["talker_prediction_kv_cache"]
     kv_shape = kv_info["shape"]
     num_layers = kv_info["num_decoder_layers"]
+    num_lm_heads = int(meta.get("lm_head_count", 15))
+    batch = int(inputs_embeds.shape[0])
+    prefill_seq = int(inputs_embeds.shape[1])
     past_key_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     past_value_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     prefill = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_prediction_prefill_onnx"]))
     decode = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_prediction_decode_onnx"]))
+
+    prefill_step = max(0, min(prefill_seq - 2, num_lm_heads - 1))
+    head_mask_prefill = torch.zeros(batch, prefill_seq, num_lm_heads, 1, dtype=torch.float16)
+    head_mask_prefill[:, :, prefill_step, 0] = 1.0
+    head_mask_decode = torch.zeros(batch, 1, num_lm_heads, 1, dtype=torch.float16)
+    head_mask_decode[0, 0, 0, 0] = 1.0
+
     prefill_out = prefill.forward(
         inputs_embeds,
+        head_mask_prefill,
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([inputs_embeds.shape[1]], dtype=torch.int32),
+        torch.tensor([prefill_seq], dtype=torch.int32),
         *past_key_caches,
         *past_value_caches,
     )
     decode_out = decode.forward(
         inputs_embeds[:, :1, :],
+        head_mask_decode,
         torch.tensor([0], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
         *past_key_caches,
