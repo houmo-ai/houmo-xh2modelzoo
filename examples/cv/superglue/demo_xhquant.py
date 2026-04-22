@@ -8,6 +8,7 @@ from typing import List
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -82,6 +83,84 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 random.seed(42)
 np.random.seed(42)
+
+
+def _to_torch_tensor(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach()
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x)
+    return None
+
+
+def print_tensor_range(name: str, x):
+    t = _to_torch_tensor(x)
+    if t is None:
+        print(f"[stats] {name}: unsupported type={type(x)}")
+        return
+    t = t.float().reshape(-1)
+    if t.numel() == 0:
+        print(f"[stats] {name}: empty tensor")
+        return
+    finite = t[torch.isfinite(t)]
+    if finite.numel() == 0:
+        print(f"[stats] {name}: no finite values")
+        return
+    print(
+        f"[stats] {name}: shape={tuple(_to_torch_tensor(x).shape)} "
+        f"min={finite.min().item():.6f} max={finite.max().item():.6f} "
+        f"mean={finite.mean().item():.6f} std={finite.std(unbiased=False).item():.6f}"
+    )
+
+
+def print_histogram(name: str, x, bins: int = 12):
+    t = _to_torch_tensor(x)
+    if t is None:
+        print(f"[hist] {name}: unsupported type={type(x)}")
+        return
+    t = t.float().reshape(-1)
+    finite = t[torch.isfinite(t)]
+    if finite.numel() == 0:
+        print(f"[hist] {name}: no finite values")
+        return
+    min_v = finite.min().item()
+    max_v = finite.max().item()
+    if min_v == max_v:
+        print(f"[hist] {name}: all values={min_v:.6f} (count={finite.numel()})")
+        return
+    hist = torch.histc(finite, bins=bins, min=min_v, max=max_v)
+    step = (max_v - min_v) / bins
+    print(f"[hist] {name}: bins={bins}, range=[{min_v:.6f}, {max_v:.6f}]")
+    for i, cnt in enumerate(hist.tolist()):
+        left = min_v + i * step
+        right = left + step
+        print(f"  [{left:.6f}, {right:.6f}): {int(cnt)}")
+
+
+class ONNXRuntimeInference:
+    def __init__(self, onnx_path: str, device: str = "cuda"):
+        providers = ["CPUExecutionProvider"]
+        if device == "cuda":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.session = ort.InferenceSession(onnx_path, providers=providers)
+        self.input_names = [i.name for i in self.session.get_inputs()]
+        self.output_names = [o.name for o in self.session.get_outputs()]
+
+    def to(self, device: str):
+        return self
+
+    def forward(self, *inputs):
+        feed = {}
+        for name, value in zip(self.input_names, inputs):
+            if isinstance(value, torch.Tensor):
+                feed[name] = value.detach().float().cpu().numpy()
+            elif isinstance(value, np.ndarray):
+                feed[name] = value.astype(np.float32)
+            else:
+                raise TypeError(f"Unsupported input type for {name}: {type(value)}")
+        outputs = self.session.run(self.output_names, feed)
+        torch_out = [torch.from_numpy(o) for o in outputs]
+        return torch_out[0] if len(torch_out) == 1 else torch_out
 
 
 def simple_nms(scores, nms_radius: int):
@@ -224,17 +303,12 @@ class SuperGlueONNX:
         scores1 = scores1.unsqueeze(0)
         desc0 = descriptors0.unsqueeze(0)
         desc1 = descriptors1.unsqueeze(0)
-        img0 = torch.zeros(1, 1, image_shape0[0], image_shape0[1], device=kpts0.device)
-        img1 = torch.zeros(1, 1, image_shape1[0], image_shape1[1], device=kpts1.device)
-
-        kpts0_n = normalize_keypoints(kpts0, img0.shape)
-        kpts1_n = normalize_keypoints(kpts1, img1.shape)
 
         n0 = min(kpts0.shape[1], self.max_keypoints)
         n1 = min(kpts1.shape[1], self.max_keypoints)
 
-        kpts0_n = kpts0_n[:, :n0]
-        kpts1_n = kpts1_n[:, :n1]
+        kpts0 = kpts0[:, :n0]
+        kpts1 = kpts1[:, :n1]
         scores0 = scores0[:, :n0]
         scores1 = scores1[:, :n1]
         desc0 = desc0[:, :, :n0]
@@ -242,18 +316,18 @@ class SuperGlueONNX:
 
         if n0 < self.max_keypoints:
             pad0 = self.max_keypoints - n0
-            kpts0_n = F.pad(kpts0_n, (0, 0, 0, pad0))
+            kpts0 = F.pad(kpts0, (0, 0, 0, pad0))
             scores0 = F.pad(scores0, (0, pad0), value=-1)
             desc0 = F.pad(desc0, (0, pad0), value=0)
         if n1 < self.max_keypoints:
             pad1 = self.max_keypoints - n1
-            kpts1_n = F.pad(kpts1_n, (0, 0, 0, pad1))
+            kpts1 = F.pad(kpts1, (0, 0, 0, pad1))
             scores1 = F.pad(scores1, (0, pad1), value=-1)
             desc1 = F.pad(desc1, (0, pad1), value=0)
 
         return {
-            "keypoints0_n": kpts0_n,
-            "keypoints1_n": kpts1_n,
+            "keypoints0_n": kpts0,
+            "keypoints1_n": kpts1,
             "scores0": scores0,
             "scores1": scores1,
             "descriptors0": desc0,
@@ -317,7 +391,11 @@ def parse_args():
     parser.add_argument("--superpoint_onnx", default="superpoint_dense.onnx", type=str)
     parser.add_argument("--superglue_onnx", default="superglue.onnx", type=str)
     parser.add_argument("--input_shape", default=[480, 640], type=int, nargs="+", help="[h, w]")
-    parser.add_argument("--quant_type", default="w8a8_sefp", help="quant type")
+    parser.add_argument("--quant_type", default="w8a16_sefp", help="quant type")
+    parser.add_argument("--quant_sp", type=str, default="on", choices=["on", "off"],
+                        help="Enable or disable SuperPoint quantized hmonnx runtime")
+    parser.add_argument("--quant_sg", type=str, default="on", choices=["on", "off"],
+                        help="Enable or disable SuperGlue quantized hmonnx runtime")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--img1_path", type=str, default="/data02/datasets/hpatches/raw/hpatches_seq/hpatches/hpatches-sequences-release/i_pool/1.ppm")
@@ -330,7 +408,7 @@ def parse_args():
     parser.add_argument("--remove_borders", default=4, type=int)
     parser.add_argument("--sinkhorn_iterations", default=20, type=int)
     parser.add_argument("--match_threshold", default=0.2, type=float)
-    parser.add_argument("--superglue_weight", default="examples/cv/superglue/superglue_outdoor.pth", type=str)
+    parser.add_argument("--superglue_weight", default="superglue_outdoor.pth", type=str)
     parser.add_argument(
         "--bin_score",
         default=None,
@@ -373,6 +451,10 @@ if __name__ == "__main__":
     sp_onnx_name = args.superpoint_onnx.split("/")[-1][:-5]
     sg_onnx_name = args.superglue_onnx.split("/")[-1][:-5]
     quant_type = args.quant_type
+    quant_sp = args.quant_sp == "on"
+    quant_sg = args.quant_sg == "on"
+
+    logger.info(f"A/B switch => quant_sp={quant_sp}, quant_sg={quant_sg}")
 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
     quant_config = create_quant_config(quant_scheme)
@@ -387,7 +469,7 @@ if __name__ == "__main__":
     sp_session = None
     sg_session = None
 
-    if not os.path.exists(sp_out_file):
+    if quant_sp and (not os.path.exists(sp_out_file)):
         logger.info(f"Converting SuperPoint ONNX to hmonnx: {sp_out_file}")
         convert_onnx_to_hmonnx(
             str(sp_onnx_path),
@@ -399,7 +481,7 @@ if __name__ == "__main__":
             output_names=["scores", "descriptors_dense"],
         )
 
-    if not os.path.exists(sg_out_file):
+    if quant_sg and (not os.path.exists(sg_out_file)):
         logger.info(f"Converting SuperGlue ONNX to hmonnx: {sg_out_file}")
         convert_onnx_to_hmonnx(
             str(sg_onnx_path),
@@ -419,8 +501,17 @@ if __name__ == "__main__":
             output_names=["score"],
         )
 
-    sp_session = HMONNXInference(sp_out_file)
-    sg_session = HMONNXInference(sg_out_file)
+    if quant_sp:
+        sp_session = HMONNXInference(sp_out_file)
+    else:
+        logger.info("Using FP ONNXRuntime for SuperPoint")
+        sp_session = ONNXRuntimeInference(str(sp_onnx_path), device=args.device)
+
+    if quant_sg:
+        sg_session = HMONNXInference(sg_out_file)
+    else:
+        logger.info("Using FP ONNXRuntime for SuperGlue")
+        sg_session = ONNXRuntimeInference(str(sg_onnx_path), device=args.device)
 
     if args.save_golden:
         sp_onnx_model = SuperPointONNX(
@@ -434,11 +525,13 @@ if __name__ == "__main__":
         )
         logger.info("Saving SuperPoint and SuperGlue golden...")
 
-        sp_session.save_golden = True
-        sp_session.save_golden_dir = work_dirs / "hmonnx" / f"{sp_onnx_name}_golden"
+        if hasattr(sp_session, "save_golden"):
+            sp_session.save_golden = True
+            sp_session.save_golden_dir = work_dirs / "hmonnx" / f"{sp_onnx_name}_golden"
 
-        sg_session.save_golden = True
-        sg_session.save_golden_dir = work_dirs / "hmonnx" / f"{sg_onnx_name}_golden"
+        if hasattr(sg_session, "save_golden"):
+            sg_session.save_golden = True
+            sg_session.save_golden_dir = work_dirs / "hmonnx" / f"{sg_onnx_name}_golden"
 
         bin_score = args.bin_score
         if bin_score is None:
@@ -457,8 +550,11 @@ if __name__ == "__main__":
             img1_raw, inp1, scales1 = read_image(args.img1_path, args.device, (args.input_shape[1], args.input_shape[0]))
             img2_raw, inp2, scales2 = read_image(args.img2_path, args.device, (args.input_shape[1], args.input_shape[0]))
 
-            nn_out1 = sp_session.forward(inp1.half())
-            nn_out2 = sp_session.forward(inp2.half())
+            sp_inp1 = inp1.half() if quant_sp else inp1.float()
+            sp_inp2 = inp2.half() if quant_sp else inp2.float()
+
+            nn_out1 = sp_session.forward(sp_inp1)
+            nn_out2 = sp_session.forward(sp_inp2)
 
             if isinstance(nn_out1, (tuple, list)):
                 nn_out1 = [o.float() for o in nn_out1]
@@ -479,12 +575,12 @@ if __name__ == "__main__":
             )
 
             nn_out_sg = sg_session.forward(
-                match_data["keypoints0_n"].half(),
-                match_data["scores0"].half(),
-                match_data["descriptors0"].half(),
-                match_data["keypoints1_n"].half(),
-                match_data["scores1"].half(),
-                match_data["descriptors1"].half(),
+                match_data["keypoints0_n"].half() if quant_sg else match_data["keypoints0_n"].float(),
+                match_data["scores0"].half() if quant_sg else match_data["scores0"].float(),
+                match_data["descriptors0"].half() if quant_sg else match_data["descriptors0"].float(),
+                match_data["keypoints1_n"].half() if quant_sg else match_data["keypoints1_n"].float(),
+                match_data["scores1"].half() if quant_sg else match_data["scores1"].float(),
+                match_data["descriptors1"].half() if quant_sg else match_data["descriptors1"].float(),
             )
 
             print("Golden saved for SuperPoint and SuperGlue")
@@ -501,16 +597,24 @@ if __name__ == "__main__":
             max_num_keypoints=args.max_keypoints,
         )
 
-        sp_session.exec_device = args.device
-        sp_session.to(args.device)
-        sg_session.exec_device = args.device
-        sg_session.to(args.device)
+        if hasattr(sp_session, "exec_device"):
+            sp_session.exec_device = args.device
+            sp_session.to(args.device)
+        if hasattr(sg_session, "exec_device"):
+            sg_session.exec_device = args.device
+            sg_session.to(args.device)
 
         img1_color, inp1, scales1 = read_image(args.img1_path, args.device, (args.input_shape[1], args.input_shape[0]))
         img2_color, inp2, scales2 = read_image(args.img2_path, args.device, (args.input_shape[1], args.input_shape[0]))
 
-        nn_out1 = sp_session.forward(inp1.half())
-        nn_out2 = sp_session.forward(inp2.half())
+        print_tensor_range("sp input image0", inp1)
+        print_tensor_range("sp input image1", inp2)
+
+        sp_inp1 = inp1.half() if quant_sp else inp1.float()
+        sp_inp2 = inp2.half() if quant_sp else inp2.float()
+
+        nn_out1 = sp_session.forward(sp_inp1)
+        nn_out2 = sp_session.forward(sp_inp2)
 
         if isinstance(nn_out1, (tuple, list)):
             nn_out1 = [o.float() for o in nn_out1]
@@ -518,6 +622,14 @@ if __name__ == "__main__":
         else:
             nn_out1 = nn_out1.float()
             nn_out2 = nn_out2.float()
+
+        if isinstance(nn_out1, (tuple, list)):
+            print_tensor_range("sp output scores0", nn_out1[0])
+            if len(nn_out1) > 1:
+                print_tensor_range("sp output descriptors0", nn_out1[1])
+            print_tensor_range("sp output scores1", nn_out2[0])
+            if len(nn_out2) > 1:
+                print_tensor_range("sp output descriptors1", nn_out2[1])
 
         post_out1 = sp_onnx_model.post_process(nn_out1, device=args.device)
         post_out2 = sp_onnx_model.post_process(nn_out2, device=args.device)
@@ -543,14 +655,30 @@ if __name__ == "__main__":
             post_out2["keypoints"][0], post_out2["scores"][0], post_out2["descriptors"][0], args.input_shape,
         )
 
+        print_tensor_range("sg input keypoints0_n", match_data["keypoints0_n"])
+        print_tensor_range("sg input scores0", match_data["scores0"])
+        print_tensor_range("sg input descriptors0", match_data["descriptors0"])
+        print_tensor_range("sg input keypoints1_n", match_data["keypoints1_n"])
+        print_tensor_range("sg input scores1", match_data["scores1"])
+        print_tensor_range("sg input descriptors1", match_data["descriptors1"])
+
         nn_out_sg = sg_session.forward(
-            match_data["keypoints0_n"].half(),
-            match_data["scores0"].half(),
-            match_data["descriptors0"].half(),
-            match_data["keypoints1_n"].half(),
-            match_data["scores1"].half(),
-            match_data["descriptors1"].half(),
+            match_data["keypoints0_n"].half() if quant_sg else match_data["keypoints0_n"].float(),
+            match_data["scores0"].half() if quant_sg else match_data["scores0"].float(),
+            match_data["descriptors0"].half() if quant_sg else match_data["descriptors0"].float(),
+            match_data["keypoints1_n"].half() if quant_sg else match_data["keypoints1_n"].float(),
+            match_data["scores1"].half() if quant_sg else match_data["scores1"].float(),
+            match_data["descriptors1"].half() if quant_sg else match_data["descriptors1"].float(),
         )
+
+        if isinstance(nn_out_sg, (tuple, list)):
+            nn_out_sg = nn_out_sg[0]
+        if isinstance(nn_out_sg, np.ndarray):
+            nn_out_sg = torch.from_numpy(nn_out_sg)
+        nn_out_sg = nn_out_sg.float()
+
+        print_tensor_range("sg raw score", nn_out_sg)
+        print_histogram("sg raw score", nn_out_sg)
 
         matches0, matches1, mscores0, mscores1, valid0, valid1 = sg_onnx_model.post_process(nn_out_sg)
 
