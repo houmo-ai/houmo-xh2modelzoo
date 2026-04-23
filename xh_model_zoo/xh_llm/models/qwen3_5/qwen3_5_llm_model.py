@@ -282,9 +282,10 @@ class XHQwen3_5Model(LLMBaseModel):
                 self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
                 output_names = ["logits"]
-                # Verify-intermediates path only expands recurrent_state. conv_cache
-                # stays as the original continuous window output and is sliced by the
-                # runtime according to the accepted verify step.
+                # Verify-intermediates path expands recurrent_state per step and
+                # exports conv_cache as the continuous rollback window
+                # (kernel_size - 1 + verify_steps). Runtime slices that window
+                # by accepted draft count to recover the committed conv state.
                 verify_steps = 1
                 if (
                     bool(self.wrap_cfg.get("verify_output_intermediates", False))

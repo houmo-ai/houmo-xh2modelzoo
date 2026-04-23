@@ -542,7 +542,17 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
             self.conv1d.weight.dtype
         )
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
-        conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
+        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
+            # Verify mode needs rollback-able conv state for every possible
+            # accepted draft count. Export the continuous window
+            # [cache[1:], step_0, ..., step_K] whose length is
+            # (kernel_size - 1 + verify_steps), so runtime can slice
+            # [accepted_drafts : accepted_drafts + kernel_size].
+            conv_cache_out = hidden_states_new[..., 1:]
+        else:
+            conv_cache_out = self.conv_cache_slice(
+                hidden_states_new, current_input_length
+            )
         conv_out = _manual_depthwise_conv1d_tail(
             hidden_states_new,
             self.conv1d_manual_weight,
