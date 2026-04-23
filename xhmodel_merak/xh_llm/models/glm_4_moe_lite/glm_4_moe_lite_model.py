@@ -1,7 +1,7 @@
 import copy
 from typing import Any
 
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteForCausalLM
 
 from xhmodel_merak.configuration_utils import BaseAttrDict
@@ -44,35 +44,11 @@ class XHGlm4MoeLiteModel(TextLLMModel):
         return super().init_wrap_model(hf_model)
 
     @classmethod
-    def _should_use_local_gptqmodel_path(cls, config: Any, hf_model_dir: str) -> bool:
-        from .gptqmodel_compat import detect_gptqmodel_moe_format
+    def postprocess_gptqmodel_structure(cls, native_hf_model: Any, hf_model_dir: str, **kwargs) -> Any:
+        from .gptqmodel_compat import convert_gptqmodel_moe_structure
 
-        quantization_config = getattr(config, "quantization_config", None)
-        quant_method = getattr(quantization_config, "quant_method", None)
-        if isinstance(quantization_config, dict):
-            quant_method = quantization_config.get("quant_method", quant_method)
-        return str(quant_method).lower() == "gptq" and detect_gptqmodel_moe_format(hf_model_dir)
-
-    @classmethod
-    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
-        # 只对 GLM split-MoE GPTQModel checkpoint 走本地化导出路径；
-        # 其他路径全部回退给框架原生实现，避免把模型私有逻辑扩散到公共层。
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        if not cls._should_use_local_gptqmodel_path(config, hf_model_dir):
-            return super().get_hf_model(hf_model_dir, quant_weight=quant_weight, **kwargs)
-
-        assert quant_weight is None or len(quant_weight) == 0, (
-            "Model is already quantized, quant_weight should be None or empty when loading quantized model."
-        )
-
-        from .gptqmodel_compat import convert_gptqmodel_moe_structure, glm_gptqmodel_load_context
-        from .gptqmodel_dequant import dequantize_gptqmodel_linears
-
-        with glm_gptqmodel_load_context(hf_model_dir, **kwargs):
-            hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
-        hf_model = dequantize_gptqmodel_linears(hf_model, hf_model_dir, keep_quant_weight=False)
-        convert_gptqmodel_moe_structure(hf_model)
-        return hf_model
+        convert_gptqmodel_moe_structure(native_hf_model)
+        return native_hf_model
 
     def _wraped_post(self, hf_model: Glm4MoeLiteForCausalLM):
         hf_model = self._wrap_model

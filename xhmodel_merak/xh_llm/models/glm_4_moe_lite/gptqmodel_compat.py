@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 #   3. convert_gptqmodel_moe_structure 是 GLM 专属结构转换，不应直接复用到其他 MoE 模型。
 
 
+# =============================================================================
+# OBSOLETE AFTER GPTQMODEL HOOK REFACTOR
+# 以下加载期兼容链路不再被 GLM 导出路径调用：
+#   - _ensure_transformers_no_init_weights_compat
+#   - _get_quant_cfg_attr
+#   - _build_gptq_expert_linear
+#   - _Glm4MoeLiteNaiveMoeCompat 及其辅助函数
+#   - detect_gptqmodel_moe_format
+#   - _load_gptqmodel_moe_expert_layout
+#   - glm_gptqmodel_load_context
+# 当前路径统一走 XHBaseModel._load_gptqmodel() 和公共 GPTQModel 反量化逻辑。
+# 暂时保留这些实现仅作回滚/对照，不要在新代码中继续调用。
+# =============================================================================
 def _ensure_transformers_no_init_weights_compat() -> None:
     import transformers.modeling_utils as modeling_utils
 
@@ -311,12 +324,17 @@ def glm_gptqmodel_load_context(hf_model_dir: str | Path, **kwargs):
         _Glm4MoeLiteNaiveMoeCompat.reset_layout()
 
 
+# =============================================================================
+# ACTIVE PATH
+# 该函数仍然需要：GLM 通过 XHBaseModel.postprocess_gptqmodel_structure()
+# 在公共 GPTQModel 反量化后调用它，完成 split-MoE 到 fused-MoE 的结构归一。
+# =============================================================================
 def convert_gptqmodel_moe_structure(
     hf_model: nn.Module,
     target_moe_cls: type[nn.Module] | None = None,
 ) -> int:
     # XHGlm4MoeLiteModel.get_hf_model 的结构归一化步骤。
-    # 输入前提：通用 dequantize_gptqmodel_linears 已经把专家 qlinear 转成 nn.Linear。
+    # 输入前提：base_model.py 中的公共 GPTQModel 反量化逻辑已经把专家 qlinear 转成 nn.Linear。
     # 输出契约：恢复为原生 Glm4MoeLiteNaiveMoe，且暴露 gate_up_proj/down_proj 参数供 Merak wrapper 使用。
     if target_moe_cls is None:
         target_moe_cls = resolve_native_glm_moe_cls()

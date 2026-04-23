@@ -10,6 +10,13 @@ from tqdm import tqdm
 # 本文件只服务于 glm_4_moe_lite 的 GPTQModel checkpoint 导出链路。
 # 这里放的是“本模型目录内可复用”的 qlinear -> nn.Linear 反量化工具，
 # 不向 xhmodel_merak/xh_llm/ 公共层泄漏能力。
+#
+# =============================================================================
+# OBSOLETE AFTER GPTQMODEL HOOK REFACTOR
+# 该文件中的 GLM 本地反量化实现当前不再被导出链路调用。
+# 当前路径统一使用 xhmodel_merak/xh_llm/base_model.py 中的公共 GPTQModel
+# 反量化逻辑；这里暂时保留仅作回滚/对照，不要在新代码中继续调用。
+# =============================================================================
 
 
 def _is_gptqmodel_available() -> bool:
@@ -212,6 +219,11 @@ def _gptqmodel_packable_qlinear_classes() -> tuple[type[nn.Module], ...]:
         return ()
 
 
+# =============================================================================
+# OBSOLETE PUBLIC ENTRY
+# dequantize_gptqmodel_linears() 是旧 GLM 本地 GPTQModel 反量化入口。
+# 当前导出链路改为调用 base_model.py 中的公共反量化逻辑。
+# =============================================================================
 def dequantize_gptqmodel_linears(
     hf_model: nn.Module,
     hf_model_dir: str | Path,
