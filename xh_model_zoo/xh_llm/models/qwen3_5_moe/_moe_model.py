@@ -1041,6 +1041,11 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         self.only_first_block = cfg.get("only_first_block", False)
         self.num_logits_to_keep = cfg.num_logits_to_keep
         assert self.num_logits_to_keep in [0, 1]
+        self.output_hidden_state_indices = cfg.get("output_hidden_state_indices", None)
+        if self.output_hidden_state_indices is not None:
+            self._output_hidden_set = set(self.output_hidden_state_indices)
+        # Spec-decode: optionally return hidden states before final norm.
+        self.output_pre_norm_hidden = cfg.get("output_pre_norm_hidden", False)
 
         input_seq_len = cfg.input_sequence_length
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
@@ -1120,6 +1125,25 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         else:
             self._setup_cos_sin_embeding()
 
+    def _update_cfg(self, cfg: Optional[Dict] = None):
+        if cfg is None:
+            return
+        self.batch_size = cfg.get("batch_size", self.batch_size)
+        self.only_first_block = cfg.get("only_first_block", self.only_first_block)
+        self.num_logits_to_keep = cfg.get(
+            "num_logits_to_keep", self.num_logits_to_keep
+        )
+        assert self.num_logits_to_keep in [0, 1]
+        self.output_hidden_state_indices = cfg.get(
+            "output_hidden_state_indices", self.output_hidden_state_indices
+        )
+        if self.output_hidden_state_indices is not None:
+            self._output_hidden_set = set(self.output_hidden_state_indices)
+        self.output_pre_norm_hidden = cfg.get(
+            "output_pre_norm_hidden", self.output_pre_norm_hidden
+        )
+        self.use_cache = cfg.get("use_cache", self.use_cache)
+
     def _setup_cos_sin_embeding(self):
         if hasattr(self.rotary_emb, "cos_cached"):
             _ = self.rotary_emb.cos_cached
@@ -1165,6 +1189,8 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         recurrent_state_out_list = []
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
+        if self.output_hidden_state_indices is not None:
+            collected_hidden_states = []
 
         for idx_layer, decoder_layer in enumerate(self.layers):
             layer_type = self.layer_types[idx_layer]
@@ -1244,6 +1270,12 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                     past_recurrent_state=_past_recurrent_state,
                 )
 
+            if (
+                self.output_hidden_state_indices is not None
+                and idx_layer in self._output_hidden_set
+            ):
+                collected_hidden_states.append(hidden_states)
+
             if self.only_first_block:
                 break
 
@@ -1256,8 +1288,19 @@ class _Qwen3_5MoeTextModel(DynamicModule):
             pass
         else:
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
+        if self.output_hidden_state_indices is not None:
+            target_hidden = torch.cat(collected_hidden_states, dim=-1)
+            if self.num_logits_to_keep != 0:
+                target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
+
+        # Save pre-norm hidden states for MTP speculative decoding before the final norm.
+        pre_norm_out = hidden_states
         hidden_states = self.norm(hidden_states)
 
+        if self.output_hidden_state_indices is not None:
+            return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
+        if self.output_pre_norm_hidden:
+            return hidden_states, conv_cache_out_list, recurrent_state_out_list, pre_norm_out
         return hidden_states, conv_cache_out_list, recurrent_state_out_list
 
 
@@ -1275,6 +1318,10 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
+        self._has_extra_hidden_output = (
+            cfg.get("output_hidden_state_indices") is not None
+            or cfg.get("output_pre_norm_hidden", False)
+        )
 
     def forward(
         self,
@@ -1290,21 +1337,38 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
         past_conv_cache: Optional[List[Tensor]] = None,
         past_recurrent_state: Optional[List[Tensor]] = None,
     ):
-        hidden_states, conv_cache_out_list, recurrent_state_out_list = self.model(
-            input_embeds=inputs_embeds,
-            time_position_ids=time_position_ids,
-            hight_position_ids=hight_position_ids,
-            width_position_ids=width_position_ids,
-            past_seq_length=past_seq_length,
-            current_input_length=current_input_length,
-            linear_attn_mask=linear_attn_mask,
-            past_key_cache=past_key_cache,
-            past_value_cache=past_value_cache,
-            past_conv_cache=past_conv_cache,
-            past_recurrent_state=past_recurrent_state,
-        )
-        logits = self.lm_head(hidden_states)
-        return logits, conv_cache_out_list, recurrent_state_out_list
+        if self._has_extra_hidden_output:
+            hidden_states, conv_cache_out_list, recurrent_state_out_list, extra_hidden = self.model(
+                input_embeds=inputs_embeds,
+                time_position_ids=time_position_ids,
+                hight_position_ids=hight_position_ids,
+                width_position_ids=width_position_ids,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                linear_attn_mask=linear_attn_mask,
+                past_key_cache=past_key_cache,
+                past_value_cache=past_value_cache,
+                past_conv_cache=past_conv_cache,
+                past_recurrent_state=past_recurrent_state,
+            )
+            logits = self.lm_head(hidden_states)
+            return logits, conv_cache_out_list, recurrent_state_out_list, extra_hidden
+        else:
+            hidden_states, conv_cache_out_list, recurrent_state_out_list = self.model(
+                input_embeds=inputs_embeds,
+                time_position_ids=time_position_ids,
+                hight_position_ids=hight_position_ids,
+                width_position_ids=width_position_ids,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                linear_attn_mask=linear_attn_mask,
+                past_key_cache=past_key_cache,
+                past_value_cache=past_value_cache,
+                past_conv_cache=past_conv_cache,
+                past_recurrent_state=past_recurrent_state,
+            )
+            logits = self.lm_head(hidden_states)
+            return logits, conv_cache_out_list, recurrent_state_out_list
 
 
 # ============================================================================
@@ -1320,6 +1384,10 @@ class _Qwen3_5MoeForConditionalGeneration(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
+        self._has_extra_hidden_output = (
+            cfg.get("output_hidden_state_indices") is not None
+            or cfg.get("output_pre_norm_hidden", False)
+        )
         # if hasattr(self, "visual"):
         #     del self.visual
 
@@ -1338,21 +1406,38 @@ class _Qwen3_5MoeForConditionalGeneration(DynamicModule):
         past_recurrent_state: Optional[List[Tensor]] = None,
     ):
         language_model = getattr(self.model, "language_model", self.model)
-        hidden_states, conv_cache_out_list, recurrent_state_out_list = language_model(
-            input_embeds=inputs_embeds,
-            time_position_ids=time_position_ids,
-            hight_position_ids=hight_position_ids,
-            width_position_ids=width_position_ids,
-            past_seq_length=past_seq_length,
-            current_input_length=current_input_length,
-            linear_attn_mask=linear_attn_mask,
-            past_key_cache=past_key_cache,
-            past_value_cache=past_value_cache,
-            past_conv_cache=past_conv_cache,
-            past_recurrent_state=past_recurrent_state,
-        )
-        logits = self.lm_head(hidden_states)
-        return logits, conv_cache_out_list, recurrent_state_out_list
+        if self._has_extra_hidden_output:
+            hidden_states, conv_cache_out_list, recurrent_state_out_list, extra_hidden = language_model(
+                input_embeds=inputs_embeds,
+                time_position_ids=time_position_ids,
+                hight_position_ids=hight_position_ids,
+                width_position_ids=width_position_ids,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                linear_attn_mask=linear_attn_mask,
+                past_key_cache=past_key_cache,
+                past_value_cache=past_value_cache,
+                past_conv_cache=past_conv_cache,
+                past_recurrent_state=past_recurrent_state,
+            )
+            logits = self.lm_head(hidden_states)
+            return logits, conv_cache_out_list, recurrent_state_out_list, extra_hidden
+        else:
+            hidden_states, conv_cache_out_list, recurrent_state_out_list = language_model(
+                input_embeds=inputs_embeds,
+                time_position_ids=time_position_ids,
+                hight_position_ids=hight_position_ids,
+                width_position_ids=width_position_ids,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                linear_attn_mask=linear_attn_mask,
+                past_key_cache=past_key_cache,
+                past_value_cache=past_value_cache,
+                past_conv_cache=past_conv_cache,
+                past_recurrent_state=past_recurrent_state,
+            )
+            logits = self.lm_head(hidden_states)
+            return logits, conv_cache_out_list, recurrent_state_out_list
 
 
 def register_wrap_modules():

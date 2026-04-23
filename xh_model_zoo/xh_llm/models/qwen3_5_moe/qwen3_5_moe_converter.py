@@ -59,12 +59,23 @@ def _extract_quant_method(config: AutoConfig) -> Optional[str]:
 
 
 def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
-    logits, conv_cache_out_list, recurrent_state_out_list = self._qwen3_5_moe_original_forward(*args, **kwargs)
-    outputs: List[torch.Tensor] = [logits]
-    if conv_cache_out_list is not None:
-        outputs.extend(list(conv_cache_out_list))
-    if recurrent_state_out_list is not None:
-        outputs.extend(list(recurrent_state_out_list))
+    result = self._qwen3_5_moe_original_forward(*args, **kwargs)
+    # Handle 3-tuple (logits, conv_caches, recurrent_states) and 4-tuple (+ pre_norm_hidden).
+    if len(result) == 4:
+        logits, conv_cache_out_list, recurrent_state_out_list, pre_norm_hidden = result
+        outputs: List[torch.Tensor] = [logits]
+        if conv_cache_out_list is not None:
+            outputs.extend(list(conv_cache_out_list))
+        if recurrent_state_out_list is not None:
+            outputs.extend(list(recurrent_state_out_list))
+        outputs.append(pre_norm_hidden)
+    else:
+        logits, conv_cache_out_list, recurrent_state_out_list = result
+        outputs: List[torch.Tensor] = [logits]
+        if conv_cache_out_list is not None:
+            outputs.extend(list(conv_cache_out_list))
+        if recurrent_state_out_list is not None:
+            outputs.extend(list(recurrent_state_out_list))
     return tuple(outputs)
 
 
@@ -84,6 +95,18 @@ def _get_text_config(native_model):
     if hasattr(config, "text_config"):
         return config.text_config
     return config
+
+
+def _load_dflash_target_layer_ids(dflash_model_dir: str) -> List[int]:
+    config_path = Path(dflash_model_dir) / "config.json"
+    with open(config_path, encoding="utf-8") as f:
+        dflash_config = json.load(f)
+    target_layer_ids = dflash_config.get("dflash_config", {}).get("target_layer_ids")
+    if not target_layer_ids:
+        raise ValueError(
+            f"Failed to read dflash_config.target_layer_ids from {config_path}"
+        )
+    return list(target_layer_ids)
 
 
 class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
@@ -258,6 +281,16 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         from ._moe_model import register_wrap_modules as qwen3_5_moe_register_wrap_modules
 
         qwen3_5_moe_register_wrap_modules()
+        spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
+        output_pre_norm_hidden = spec_decode_mode == "mtp"
+        output_hidden_state_indices = None
+        if spec_decode_mode == "dflash":
+            dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
+            if not dflash_model_dir:
+                raise ValueError(
+                    "dflash_model_dir is required when spec_decode_mode='dflash'"
+                )
+            output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
         wrap_cfg = Config(
             dict(
                 batch_size=self.config.batch_size,
@@ -270,6 +303,8 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 enable_rope=self.config.enable_rope,
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
+                output_hidden_state_indices=output_hidden_state_indices,
+                output_pre_norm_hidden=output_pre_norm_hidden,
                 kv_cache=dict(
                     cache_axis=2,
                 ),
@@ -519,11 +554,37 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         for layer_idx in range(len(linear_attention_layer_indices)):
             input_names.append(f"past_recurrent_state_{layer_idx}")
 
-        output_names = ["logits"]
+        output_names_base = ["logits"]
         for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names.append(f"conv_cache_out_{layer_idx}")
+            output_names_base.append(f"conv_cache_out_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names.append(f"recurrent_state_out_{layer_idx}")
+            output_names_base.append(f"recurrent_state_out_{layer_idx}")
+
+        # Spec decode: pre_norm_hidden appended last so existing cache-update
+        # indexing in Qwen3_5MoeInference._forward() is unaffected.
+        spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
+        num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
+        verify_length = num_draft_tokens + 1
+        output_hidden_state_indices = None
+        if spec_decode_mode == "dflash":
+            dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
+            if not dflash_model_dir:
+                raise ValueError(
+                    "dflash_model_dir is required when spec_decode_mode='dflash'"
+                )
+            output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
+        output_pre_norm_hidden = spec_decode_mode == "mtp"
+        extra_hidden_output_name = None
+        if output_hidden_state_indices is not None:
+            extra_hidden_output_name = "target_hidden"
+        elif output_pre_norm_hidden:
+            extra_hidden_output_name = "pre_norm_hidden"
+
+        prefill_output_names = list(output_names_base)
+        decode_output_names = list(output_names_base)
+        if extra_hidden_output_name is not None:
+            prefill_output_names.append(extra_hidden_output_name)
+            decode_output_names.append(extra_hidden_output_name)
 
         # ── PREFILL quantisation & export ────────────────────────────────────
         # convert_fx_model_to_quanted_model modifies wraped_model in-place
@@ -532,6 +593,15 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         # prefill so the original remains clean for decode re-trace.
         quant_config = self._build_quant_config(wraped_model)
         wraped_model_prefill = copy.deepcopy(wraped_model)
+        if spec_decode_mode:
+            wrap_cfg_prefill = copy.deepcopy(wrap_cfg)
+            wrap_cfg_prefill.num_logits_to_keep = 0
+
+            def _apply_prefill_update_cfg(module):
+                if hasattr(module, "_update_cfg"):
+                    module._update_cfg(wrap_cfg_prefill)
+
+            wraped_model_prefill.apply(_apply_prefill_update_cfg)
         quanted_prefill_model = convert_fx_model_to_quanted_model(
             wraped_model_prefill,
             inputs,
@@ -549,15 +619,21 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             inputs,
             str(prefill_onnx_file),
             BaseConverter.xh1_hmonnx_compatible(input_names),
-            output_names,
+            prefill_output_names,
         )
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
         del quanted_prefill_model, wraped_model_prefill
 
         # ── DECODE quantisation & export ─────────────────────────────────────
         # Re-trace from clean wraped_model after updating to decode mode so that
-        # baked-in FX slice constants use seq_len=1 (not the prefill value).
-        wrap_cfg.input_sequence_length = 1
+        # baked-in FX slice constants use seq_len appropriately.
+        #
+        # For spec decode mode, decode session processes verify_length tokens
+        # (draft tokens + 1 current) so the verifier can run in a single pass.
+        decode_seq_len = verify_length if spec_decode_mode else 1
+        wrap_cfg.input_sequence_length = decode_seq_len
+        if spec_decode_mode:
+            wrap_cfg.num_logits_to_keep = 0  # return all positions for verify
 
         def _apply_update_cfg(module):
             if hasattr(module, "_update_cfg"):
@@ -565,15 +641,15 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
 
         wraped_model.apply(_apply_update_cfg)
 
-        decode_position_ids = torch.zeros(self.config.batch_size, 1, dtype=torch.long)
+        decode_position_ids = torch.zeros(self.config.batch_size, decode_seq_len, dtype=torch.long)
         decode_inputs = (
-            inputs_embeds[:, :1, :],
+            inputs_embeds[:, :decode_seq_len, :],
             decode_position_ids,
             decode_position_ids,
             decode_position_ids,
             past_seq_length_t,
-            torch.ones_like(current_input_length_t),
-            torch.ones(self.config.batch_size, 1, dtype=inputs_embeds.dtype),
+            torch.full_like(current_input_length_t, decode_seq_len),
+            torch.ones(self.config.batch_size, decode_seq_len, dtype=inputs_embeds.dtype),
             past_key_caches,
             past_value_caches,
             past_conv_caches,
@@ -596,12 +672,210 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             decode_inputs,
             str(decode_onnx_file),
             BaseConverter.xh1_hmonnx_compatible(input_names),
-            output_names,
+            decode_output_names,
         )
         logger.info(f"Export decode model to {decode_onnx_file}")
 
+        # ── MTP draft model export ────────────────────────────────────────────
+        if spec_decode_mode == "mtp":
+            draft_onnx_files = self._export_mtp_draft_model(
+                hf_model_path=hf_model_path,
+                work_dir=work_dir,
+                prefix=prefix,
+                context_length=context_length,
+                verify_length=verify_length,
+                target_device=target_device,
+            )
+            for key, value in draft_onnx_files.items():
+                meta_info[f"{key}_file"] = str(Path(value).relative_to(work_dir))
+            if "draft_decode_onnx" in draft_onnx_files:
+                meta_info["draft_onnx_file"] = str(
+                    Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir)
+                )
+            meta_info["spec_decode_mode"] = spec_decode_mode
+            meta_info["spec_decode_block_size"] = num_draft_tokens
+            meta_info["spec_decode_hidden_output_name"] = "pre_norm_hidden"
+            meta_info["spec_decode_verify_length"] = verify_length
+        elif spec_decode_mode == "dflash":
+            draft_onnx_files = self._export_dflash_draft_model(
+                hf_model_path=hf_model_path,
+                dflash_model_dir=self.config.dflash_model_dir,
+                work_dir=work_dir,
+                prefix=prefix,
+                context_length=context_length,
+                verify_length=verify_length,
+                target_device=target_device,
+            )
+            for key, value in draft_onnx_files.items():
+                meta_info[f"{key}_file"] = str(Path(value).relative_to(work_dir))
+            if "draft_decode_onnx" in draft_onnx_files:
+                meta_info["draft_onnx_file"] = str(
+                    Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir)
+                )
+            meta_info["spec_decode_mode"] = spec_decode_mode
+            meta_info["spec_decode_block_size"] = num_draft_tokens
+            meta_info["spec_decode_hidden_output_name"] = "target_hidden"
+            meta_info["spec_decode_verify_length"] = verify_length
+
         with open(work_dir / "meta.json", "w", encoding="utf-8") as fout:
             json.dump(meta_info, fout, ensure_ascii=False, indent=4)
+
+    def _export_mtp_draft_model(
+        self,
+        hf_model_path: str,
+        work_dir: Path,
+        prefix: str,
+        context_length: int,
+        verify_length: int,
+        target_device: str,
+    ) -> dict:
+        """Export MTP draft model for MoE spec decode.
+
+        Reuses XHMTPDraftModel from the dense qwen3_5 package.  The MTP head
+        structure (single attention layer + MLP + norms) is identical for both
+        dense and MoE targets; only the backbone differs.
+
+        Returns:
+            dict mapping {"draft_prefill_onnx": path, "draft_decode_onnx": path}
+        """
+        from xhquant.api import (  # type: ignore
+            ConfigDict,
+            PrecisionMode,
+            ptq_quantize,
+        )
+        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: F401 – register XHMTPDraftModel
+        from xh_model_zoo.xh_llm.models.builder import MODELS
+
+        logger = get_root_logger()
+        draft_onnx_dir = work_dir / "draft_onnx"
+        draft_onnx_dir.mkdir(exist_ok=True, parents=True)
+        max_pe_length = 262144
+
+        def _export_one(wrap_cfg_extra: dict, name_suffix: str) -> str:
+            model_cfg = dict(
+                type="XHMTPDraftModel",
+                hf_model=None,
+                wrap_cfg=ConfigDict(
+                    max_sequence_length=context_length,
+                    max_pe_length=max_pe_length,
+                    dtype="float16",
+                    batch_size=1,
+                    **wrap_cfg_extra,
+                ),
+                quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+                export_cfg=ConfigDict(),
+                target_model_dir=hf_model_path,
+            )
+            draft_model = MODELS.build(model_cfg)
+            draft_model.init_wrap_model()
+            logger.info(
+                f"[{name_suffix}] MTP draft params: "
+                f"{sum(p.numel() for p in draft_model._wrap_model.parameters()) / 1e6:.1f}M"
+            )
+            dummy_data = draft_model.prepare_inputs(None)
+            draft_model.convert_to_fronted_graph(dummy_data)
+            draft_model.convert_to_quant_graph(target_device)
+            ptq_quantize(
+                draft_model._quanted_model,
+                [draft_model.prepare_inputs(None)],
+                PrecisionMode.ALIGNED,
+                [torch.device("cpu")],
+            )
+            draft_model.convert_to_export_graph(dummy_data)
+            onnx_file = draft_model.to_export_onnx(
+                dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}"
+            )[0]
+            draft_model.release_exported_model()
+            draft_model.release_quanted_model()
+            draft_model.release_frontend_model()
+            draft_model.release_wraped_model()
+            del draft_model
+            return onnx_file
+
+        prefill_isl = self.config.input_sequence_length
+        prefill_onnx = _export_one({"input_sequence_length": prefill_isl}, "mtp_prefill")
+        decode_onnx = _export_one({"input_sequence_length": 1}, "mtp_decode")
+        return {
+            "draft_prefill_onnx": prefill_onnx,
+            "draft_decode_onnx": decode_onnx,
+        }
+
+    def _export_dflash_draft_model(
+        self,
+        hf_model_path: str,
+        dflash_model_dir: str,
+        work_dir: Path,
+        prefix: str,
+        context_length: int,
+        verify_length: int,
+        target_device: str,
+    ) -> dict:
+        from xhquant.api import (  # type: ignore
+            ConfigDict,
+            PrecisionMode,
+            ptq_quantize,
+        )
+        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: F401
+        from xh_model_zoo.xh_llm.models.builder import MODELS
+
+        logger = get_root_logger()
+        draft_onnx_dir = work_dir / "draft_onnx"
+        draft_onnx_dir.mkdir(exist_ok=True, parents=True)
+        max_pe_length = 262144
+
+        def _export_one(mode: str, input_sequence_length: int, name_suffix: str) -> str:
+            model_cfg = dict(
+                type="XHDFlashDraftModel",
+                hf_model=None,
+                wrap_cfg=ConfigDict(
+                    mode=mode,
+                    input_sequence_length=input_sequence_length,
+                    max_sequence_length=context_length,
+                    max_pe_length=max_pe_length,
+                    dtype="float16",
+                    batch_size=1,
+                ),
+                quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+                export_cfg=ConfigDict(),
+                dflash_model_dir=dflash_model_dir,
+                target_model_dir=hf_model_path,
+            )
+            draft_model = MODELS.build(model_cfg)
+            draft_model.init_wrap_model()
+            logger.info(
+                f"[{name_suffix}] DFlash draft params: "
+                f"{sum(p.numel() for p in draft_model._wrap_model.parameters()) / 1e6:.1f}M"
+            )
+            dummy_data = draft_model.prepare_inputs(None)
+            draft_model.convert_to_fronted_graph(dummy_data)
+            draft_model.convert_to_quant_graph(target_device)
+            ptq_quantize(
+                draft_model._quanted_model,
+                [draft_model.prepare_inputs(None)],
+                PrecisionMode.ALIGNED,
+                [torch.device("cpu")],
+            )
+            draft_model.convert_to_export_graph(dummy_data)
+            onnx_file = draft_model.to_export_onnx(
+                dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}"
+            )[0]
+            draft_model.release_exported_model()
+            draft_model.release_quanted_model()
+            draft_model.release_frontend_model()
+            draft_model.release_wraped_model()
+            del draft_model
+            return onnx_file
+
+        return {
+            "draft_context_onnx": _export_one(
+                "context", self.config.input_sequence_length, "dflash_context"
+            ),
+            "draft_decode_onnx": _export_one(
+                "decode",
+                int(json.load(open(Path(dflash_model_dir) / "config.json", encoding="utf-8")).get("block_size", verify_length)),
+                "dflash_decode",
+            ),
+        }
 
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen3_5MoeConvertConfig, output_dir: str):

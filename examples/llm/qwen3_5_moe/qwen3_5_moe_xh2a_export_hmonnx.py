@@ -50,6 +50,9 @@ def main(args):
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=target_device, quant_type=quant_type)
 
+    spec_decode_mode = args.spec_decode_mode or None
+    num_draft_tokens = args.num_draft_tokens
+
     config = Qwen3_5MoeConvertConfig(
         batch_size=1,
         context_length=args.context_length,
@@ -59,11 +62,16 @@ def main(args):
         num_logits_to_keep=args.num_logits_to_keep,
         linear_attention_mode=args.linear_attention_mode,
         linear_chunk_size=args.linear_chunk_size,
+        spec_decode_mode=spec_decode_mode,
+        num_draft_tokens=num_draft_tokens,
+        dflash_model_dir=args.dflash_model_dir,
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}"
     if args.quant_weight:
         prefix += "-gptq"
+    if spec_decode_mode:
+        prefix += f"-spec_{spec_decode_mode}"
     work_dir = Path("work_dirs") / prefix
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
@@ -71,6 +79,7 @@ def main(args):
     logger = get_root_logger()
     logger.info(f"model: {hf_model_path}")
     logger.info(f"quant_weight: {args.quant_weight}")
+    logger.info(f"spec_decode_mode: {spec_decode_mode}")
     logger.info(f"output: {work_dir}")
 
     # Detect architecture from config.json automatically
@@ -108,5 +117,22 @@ if __name__ == "__main__":
     parser.add_argument("--linear-chunk-size", type=int, default=64,
                         help="Chunk size for linear attention")
     parser.add_argument("--debug", action="store_true")
+    # Speculative decoding
+    parser.add_argument(
+        "--spec-decode-mode", dest="spec_decode_mode", type=str, default=None,
+        choices=["none", "mtp", "dflash"],
+        help="Speculative decoding mode.  'mtp' exports MTP draft graphs; "
+             "'dflash' exports DFlash context/decode draft graphs.",
+    )
+    parser.add_argument(
+        "--dflash-model-dir", dest="dflash_model_dir", type=str, default=None,
+        help="Path to DFlash draft model dir (required for --spec-decode-mode dflash)",
+    )
+    parser.add_argument(
+        "--num-draft-tokens", dest="num_draft_tokens", type=int, default=4,
+        help="Number of draft tokens per spec-decode round (verify_length = N + 1)",
+    )
     args = parser.parse_args()
+    if args.spec_decode_mode == "none":
+        args.spec_decode_mode = None
     main(args)

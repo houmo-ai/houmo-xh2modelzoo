@@ -282,10 +282,31 @@ class XHQwen3_5Model(LLMBaseModel):
                 self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
                 output_names = ["logits"]
+                # Verify-intermediates path only expands recurrent_state. conv_cache
+                # stays as the original continuous window output and is sliced by the
+                # runtime according to the accepted verify step.
+                verify_steps = 1
+                if (
+                    bool(self.wrap_cfg.get("verify_output_intermediates", False))
+                    and int(self.wrap_cfg.get("input_sequence_length", 1)) > 1
+                ):
+                    verify_steps = int(self.wrap_cfg.input_sequence_length)
                 for cache_idx in range(num_linear_attention_layers):
                     output_names.append(f"conv_cache_out_{cache_idx}")
-                for cache_idx in range(num_linear_attention_layers):
-                    output_names.append(f"recurrent_state_out_{cache_idx}")
+                if verify_steps > 1:
+                    for cache_idx in range(num_linear_attention_layers):
+                        for step_idx in range(verify_steps):
+                            output_names.append(
+                                f"recurrent_state_out_{cache_idx}_{step_idx}"
+                            )
+                else:
+                    for cache_idx in range(num_linear_attention_layers):
+                        output_names.append(f"recurrent_state_out_{cache_idx}")
+                # Add spec_decode_hidden output if configured
+                if self.wrap_cfg.get("output_hidden_state_indices") is not None:
+                    output_names.append("target_hidden")
+                elif self.wrap_cfg.get("output_pre_norm_hidden", False):
+                    output_names.append("pre_norm_hidden")
                 self.export_cfg.output_names = output_names
 
     def prepare_inputs(self, data):
@@ -428,16 +449,21 @@ class XHQwen3_5Model(LLMBaseModel):
         conv_cache_out_list = out[1]
         recurrent_state_out_list = out[2]
 
-        if self.use_cache and conv_cache_out_list is not None:
+        verify_output_intermediates = bool(self.wrap_cfg.get("verify_output_intermediates", False))
+        if self.use_cache and conv_cache_out_list is not None and not verify_output_intermediates:
             for idx, conv_cache_out in enumerate(conv_cache_out_list):
                 if idx < len(self.past_conv_caches):
                     self.past_conv_caches[idx].copy_(conv_cache_out)
-        if self.use_cache and recurrent_state_out_list is not None:
+        if self.use_cache and recurrent_state_out_list is not None and not verify_output_intermediates:
             for idx, recurrent_state_out in enumerate(recurrent_state_out_list):
                 if idx < len(self.past_recurrent_states):
                     self.past_recurrent_states[idx].copy_(recurrent_state_out)
 
-        return CausalLMOutputWithPast(logits=logits)
+        result = CausalLMOutputWithPast(logits=logits)
+        # Propagate extra hidden state for speculative decoding
+        if len(out) > 3:
+            result.spec_decode_hidden = out[3]
+        return result
 
     def set_linear_attention_mode(self, mode: str):
         self.wrap_cfg.linear_attention_mode = mode

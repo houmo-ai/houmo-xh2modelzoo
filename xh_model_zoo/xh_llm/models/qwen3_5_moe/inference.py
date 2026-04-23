@@ -32,6 +32,15 @@ from ....utils import DeviceDtypeMixin
 from ....xh_llm.utils import decode_next_token
 
 
+def _build_runtime_linear_attn_mask(
+    valid_len: int, total_len: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    mask = torch.zeros((1, total_len), dtype=dtype, device=device)
+    if valid_len > 0:
+        mask[:, :valid_len] = 1
+    return mask
+
+
 class Qwen3_5MoeInference(DeviceDtypeMixin):
     """HMONNX inference engine for Qwen3.5-MoE (hybrid full-attention + linear-attention + MoE).
 
@@ -291,7 +300,9 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
         seq_len = inputs_embeds.shape[1]
         past_len = int(past_seq_length.item())
         time_pos, hight_pos, width_pos = self._make_position_ids(seq_len, past_len, inputs_embeds.device)
-        lin_mask = torch.ones(1, seq_len, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+        lin_mask = _build_runtime_linear_attn_mask(
+            seq_len, seq_len, inputs_embeds.dtype, inputs_embeds.device
+        )
         return self._forward(
             inputs_embeds,
             time_pos.unsqueeze(0).to(torch.int32),
@@ -333,7 +344,12 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
             past_conv_caches, past_recurrent_states,
         ) = self.prepare_inputs(data_prefill, self.prefill_input_sequence_length)
 
-        lin_mask = torch.ones(1, self.prefill_input_sequence_length, dtype=inputs_embeds.dtype, device=self.execution_device)
+        lin_mask = _build_runtime_linear_attn_mask(
+            int(seq_length_t.item()),
+            self.prefill_input_sequence_length,
+            inputs_embeds.dtype,
+            self.execution_device,
+        )
         prefill_logits = self._forward(
             inputs_embeds, time_pos, hight_pos, width_pos,
             past_seq_length_t, seq_length_t,
@@ -365,7 +381,9 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
                     past_key_caches, past_value_caches,
                     past_conv_caches, past_recurrent_states,
                 ) = self.prepare_inputs(data_decode, 1)
-                lin_mask = torch.ones(1, 1, dtype=inputs_embeds.dtype, device=self.execution_device)
+                lin_mask = _build_runtime_linear_attn_mask(
+                    int(seq_length_t.item()), 1, inputs_embeds.dtype, self.execution_device
+                )
                 decode_logits = self._forward(
                     inputs_embeds, time_pos, hight_pos, width_pos,
                     past_seq_length_t, seq_length_t,
@@ -435,7 +453,9 @@ class Qwen3_5MoeInference(DeviceDtypeMixin):
                 past_key_caches, past_value_caches,
                 past_conv_caches, past_recurrent_states,
             ) = self.prepare_inputs(data, isl)
-            lin_mask = torch.ones(1, isl, dtype=inputs_embeds.dtype, device=self.execution_device)
+            lin_mask = _build_runtime_linear_attn_mask(
+                int(seq_length_t.item()), isl, inputs_embeds.dtype, self.execution_device
+            )
 
             out = self._forward(
                 inputs_embeds, time_pos, hight_pos, width_pos,

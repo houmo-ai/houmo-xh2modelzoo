@@ -24,10 +24,17 @@ from .qwen3_5_moe_converter import Qwen3_5MoeConverterXH2a
 from .qwen3_5_moe_hf_compatible import Qwen3_5MoeHFCompatible
 from .qwen3_5_moe_vision_model import XHQwen3_5MoeVisionModel
 
+from .qwen3_5_moe_spec_decode_inference import (
+    Qwen3_5MoeSpecDecodeInference,
+    load_moe_inference,
+)
+
 __all__ = [
     "Qwen3_5MoeInference",
     "Qwen3_5MoeConvertConfig",
     "Qwen3_5MoeConverterXH2a",
     "Qwen3_5MoeHFCompatible",
     "XHQwen3_5MoeVisionModel",
+    "Qwen3_5MoeSpecDecodeInference",
+    "load_moe_inference",
 ]

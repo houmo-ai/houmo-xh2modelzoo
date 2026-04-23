@@ -37,6 +37,8 @@ except ImportError:
 from xh_model_zoo.xh_llm.models.builder import MODELS
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.qwen3_5 import XHQwen3_5Model
+import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: register
+import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: register
 
 
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
@@ -318,6 +320,19 @@ def _extract_model_size_from_candidates(*candidates) -> str:
         if match:
             return match.group(1).upper()
     return "unknown"
+
+
+def _sanitize_path_component(text: str) -> str:
+    sanitized = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text).strip())
+    sanitized = sanitized.strip("._-")
+    return sanitized or "model"
+
+
+def _build_default_work_dir(config_path: str, hf_model_dir: str) -> Path:
+    cfg_name = Path(config_path).stem
+    model_family = re.sub(r"_xh2a$", "", cfg_name)
+    hf_model_name = _sanitize_path_component(Path(hf_model_dir).name)
+    return Path("./work_dirs") / model_family / f"{cfg_name}_{hf_model_name}"
 
 
 def _with_model_size_in_name(modelscope_name: str, model_size: str) -> str:
@@ -784,14 +799,21 @@ def _export_single_graph(
     tokenizer,
     onnx_output_dir: Path,
     logger,
+    spec_decode_cfg: Optional[dict] = None,
 ) -> str:
     cfg_name = cfg.cfg_name
     dtype = getattr(torch, cfg.dtype)
-    input_sequence_length = cfg.model.wrap_cfg.input_sequence_length
 
     logger.info(f"{'=' * 20} Initializing model for {mode} export {'=' * 20}")
 
     model_cfg = deepcopy(cfg.model)
+    # Inject speculative decode config for prefill and decode modes
+    if spec_decode_cfg and mode in ("prefill", "decode"):
+        for key, val in spec_decode_cfg.items():
+            model_cfg.wrap_cfg[key] = val
+        logger.info(f"[{mode}] Spec decode config injected: {spec_decode_cfg}")
+    input_sequence_length = model_cfg.wrap_cfg.input_sequence_length
+
     qwen3_5_model: XHQwen3_5Model = MODELS.build(model_cfg)
     logger.info(f"[{mode}] Loading HF model with device_map='auto'")
     native_model = qwen3_5_model.get_hf_model(
@@ -832,11 +854,25 @@ def _export_single_graph(
         onnx_prefix = f"{cfg_name}_prefill"
     else:
         qwen3_5_model.set_linear_attention_mode("recurrent")
-        qwen3_5_model.set_input_sequence_length(1)
+        qwen3_5_model.set_input_sequence_length(input_sequence_length)
+        decode_input_ids = input_ids[:, :input_sequence_length]
+        if decode_input_ids.shape[-1] < input_sequence_length:
+            decode_input_ids = torch.cat(
+                [
+                    decode_input_ids,
+                    torch.full(
+                        (decode_input_ids.shape[0], input_sequence_length - decode_input_ids.shape[-1]),
+                        tokenizer.pad_token_id,
+                        dtype=torch.long,
+                    ),
+                ],
+                dim=-1,
+            )
+        decode_current_input_length = spec_decode_cfg.get("decode_current_input_length", 1) if spec_decode_cfg else 1
         data_batch = {
-            "input_ids": input_ids[:, :1],
+            "input_ids": decode_input_ids,
             "past_seq_length": [input_ids.shape[-1]],
-            "current_input_length": [1],
+            "current_input_length": [decode_current_input_length],
         }
         onnx_prefix = f"{cfg_name}_decode"
 
@@ -880,6 +916,146 @@ def _export_single_graph(
     cleanup_memory()
 
     return onnx_file
+
+
+def _export_draft_model(
+    cfg,
+    args,
+    mode: str,
+    onnx_output_dir: Path,
+    logger,
+) -> Dict[str, str]:
+    """Export cache-aware DFlash or MTP draft graphs to HMONNX.
+
+    Args:
+        mode: 'dflash' or 'mtp'
+        onnx_output_dir: directory to write ONNX files
+    """
+    cfg_name = cfg.cfg_name
+    target_device = cfg.get("target_device", "XH2a")
+    dtype = torch.float16  # draft models always exported as fp16
+    verify_length = max(1, int(getattr(args, "num_draft_tokens", 4)) + 1)
+    max_sequence_length = int(getattr(args, "max_sequence_length", cfg.model.wrap_cfg.max_sequence_length))
+    max_pe_length = int(getattr(cfg.model.wrap_cfg, "max_pe_length", cfg.model.wrap_cfg.get("max_pe_length", 262144)))
+
+    logger.info(f"{'=' * 20} Exporting {mode.upper()} draft model {'=' * 20}")
+
+    def _export_named_draft_model(model_cfg: dict, prefix: str) -> str:
+        draft_model = MODELS.build(model_cfg)
+        draft_model.init_wrap_model()
+        logger.info(
+            f"[{prefix}] Draft model params: "
+            f"{sum(p.numel() for p in draft_model._wrap_model.parameters()) / 1e6:.1f}M"
+        )
+
+        dummy_data = draft_model.prepare_inputs(None)
+        draft_model.convert_to_fronted_graph(dummy_data)
+        draft_model.convert_to_quant_graph(target_device)
+        ptq_quantize(
+            draft_model._quanted_model,
+            [draft_model.prepare_inputs(None)],
+            PrecisionMode.ALIGNED,
+            [torch.device("cpu")],
+        )
+        draft_model.convert_to_export_graph(dummy_data)
+        onnx_file = draft_model.to_export_onnx(
+            dummy_data, str(onnx_output_dir), prefix
+        )[0]
+        draft_model.release_exported_model()
+        draft_model.release_quanted_model()
+        draft_model.release_frontend_model()
+        draft_model.release_wraped_model()
+        del draft_model
+        cleanup_memory()
+        return onnx_file
+
+    if mode == "dflash":
+        dflash_model_dir = getattr(args, "dflash_model_dir", None)
+        if dflash_model_dir is None:
+            raise ValueError("--dflash_model_dir is required for dflash spec_decode_mode")
+        with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
+            dflash_cfg = json.load(f)
+        draft_decode_seq_len = int(dflash_cfg.get("block_size", verify_length))
+        context_cfg = dict(
+            type="XHDFlashDraftModel",
+            hf_model=None,
+            wrap_cfg=ConfigDict(
+                mode="context",
+                input_sequence_length=cfg.model.wrap_cfg.input_sequence_length,
+                max_sequence_length=max_sequence_length,
+                max_pe_length=max_pe_length,
+                dtype="float16",
+                batch_size=1,
+            ),
+            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            export_cfg=ConfigDict(),
+            dflash_model_dir=dflash_model_dir,
+            target_model_dir=args.hf_model_dir,
+        )
+        decode_cfg = dict(
+            type="XHDFlashDraftModel",
+            hf_model=None,
+            wrap_cfg=ConfigDict(
+                mode="decode",
+                input_sequence_length=draft_decode_seq_len,
+                max_sequence_length=max_sequence_length,
+                max_pe_length=max_pe_length,
+                dtype="float16",
+                batch_size=1,
+            ),
+            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            export_cfg=ConfigDict(),
+            dflash_model_dir=dflash_model_dir,
+            target_model_dir=args.hf_model_dir,
+        )
+        return {
+            "draft_context_onnx": _export_named_draft_model(
+                context_cfg, f"{cfg_name}_dflash_context"
+            ),
+            "draft_decode_onnx": _export_named_draft_model(
+                decode_cfg, f"{cfg_name}_dflash_decode"
+            ),
+        }
+
+    if mode == "mtp":
+        prefill_cfg = dict(
+            type="XHMTPDraftModel",
+            hf_model=None,
+            wrap_cfg=ConfigDict(
+                input_sequence_length=cfg.model.wrap_cfg.input_sequence_length,
+                max_sequence_length=max_sequence_length,
+                max_pe_length=max_pe_length,
+                dtype="float16",
+                batch_size=1,
+            ),
+            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            export_cfg=ConfigDict(),
+            target_model_dir=args.hf_model_dir,
+        )
+        decode_cfg = dict(
+            type="XHMTPDraftModel",
+            hf_model=None,
+            wrap_cfg=ConfigDict(
+                input_sequence_length=1,
+                max_sequence_length=max_sequence_length,
+                max_pe_length=max_pe_length,
+                dtype="float16",
+                batch_size=1,
+            ),
+            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            export_cfg=ConfigDict(),
+            target_model_dir=args.hf_model_dir,
+        )
+        return {
+            "draft_prefill_onnx": _export_named_draft_model(
+                prefill_cfg, f"{cfg_name}_mtp_prefill"
+            ),
+            "draft_decode_onnx": _export_named_draft_model(
+                decode_cfg, f"{cfg_name}_mtp_decode"
+            ),
+        }
+
+    raise ValueError(f"Unknown spec_decode_mode: {mode}")
 
 
 def _copy_hf_configs(hf_model_dir: str, work_dir: str, logger) -> Path:
@@ -937,6 +1113,16 @@ def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
             recurrent_shape=meta_info.get("recurrent_state_shape", None),
             num_decoder_layers=meta_info.get("num_linear_attention_layers", None),
         ),
+        spec_decode=dict(
+            mode=meta_info.get("spec_decode_mode", None),
+            draft_onnx=meta_info.get("draft_onnx_file", None),
+            draft_prefill_onnx=meta_info.get("draft_prefill_onnx_file", None),
+            draft_context_onnx=meta_info.get("draft_context_onnx_file", None),
+            draft_decode_onnx=meta_info.get("draft_decode_onnx_file", None),
+            block_size=meta_info.get("spec_decode_block_size", None),
+            hidden_output_name=meta_info.get("spec_decode_hidden_output_name", None),
+            verify_length=meta_info.get("spec_decode_verify_length", None),
+        ) if meta_info.get("spec_decode_mode") else None,
     )
 
 
@@ -1219,14 +1405,87 @@ def _export_impl(cfg, args):
     logger.info("=" * 60)
     logger.info("Exporting PREFILL graph (chunk mode)")
     logger.info("=" * 60)
-    prefill_onnx_file = _export_single_graph(cfg, args, "prefill", input_ids, tokenizer, prefill_onnx_dir, logger)
+    # Build spec_decode config for prefill if needed
+    spec_decode_mode = getattr(args, "spec_decode_mode", None)
+    spec_decode_prefill_cfg = None
+    spec_decode_decode_cfg = None
+    spec_verify_length = max(1, int(getattr(args, "num_draft_tokens", 4)) + 1)
+    if spec_decode_mode == "dflash":
+        dflash_model_dir = getattr(args, "dflash_model_dir", None)
+        if dflash_model_dir is None:
+            raise ValueError("--dflash_model_dir is required for dflash spec_decode_mode")
+        import json as _json
+        dflash_config = _json.load(open(Path(dflash_model_dir) / "config.json"))
+        num_target_layers = dflash_config["num_target_layers"]
+        num_draft_layers = dflash_config["num_hidden_layers"]
+        # Build target_layer_ids using same algorithm as DFlash
+        if num_draft_layers == 1:
+            target_layer_ids = [num_target_layers // 2]
+        else:
+            start, end = 1, num_target_layers - 3
+            span = end - start
+            target_layer_ids = [int(round(start + (i * span) / (num_draft_layers - 1))) for i in range(num_draft_layers)]
+        spec_decode_prefill_cfg = {
+            "output_hidden_state_indices": target_layer_ids,
+            "num_logits_to_keep": 0,
+        }
+        spec_decode_decode_cfg = {
+            "output_hidden_state_indices": target_layer_ids,
+            "num_logits_to_keep": 0,
+            "verify_output_intermediates": True,
+            "input_sequence_length": spec_verify_length,
+            "decode_current_input_length": spec_verify_length,
+        }
+        logger.info(f"DFlash target_layer_ids: {target_layer_ids}")
+    elif spec_decode_mode == "mtp":
+        spec_decode_prefill_cfg = {
+            "output_pre_norm_hidden": True,
+            "num_logits_to_keep": 0,
+        }
+        spec_decode_decode_cfg = {
+            "output_pre_norm_hidden": True,
+            "num_logits_to_keep": 0,
+            "verify_output_intermediates": True,
+            "input_sequence_length": spec_verify_length,
+            "decode_current_input_length": spec_verify_length,
+        }
+    prefill_onnx_file = _export_single_graph(
+        cfg, args, "prefill", input_ids, tokenizer, prefill_onnx_dir, logger,
+        spec_decode_cfg=spec_decode_prefill_cfg,
+    )
     meta_info.prefill_onnx_file = str(Path(prefill_onnx_file).relative_to(cfg.work_dir))
 
     logger.info("=" * 60)
     logger.info("Exporting DECODE graph (recurrent mode)")
     logger.info("=" * 60)
-    decode_onnx_file = _export_single_graph(cfg, args, "decode", input_ids, tokenizer, decode_onnx_dir, logger)
+    decode_onnx_file = _export_single_graph(
+        cfg, args, "decode", input_ids, tokenizer, decode_onnx_dir, logger,
+        spec_decode_cfg=spec_decode_decode_cfg,
+    )
     meta_info.decode_onnx_file = str(Path(decode_onnx_file).relative_to(cfg.work_dir))
+
+    # Export draft model for speculative decoding
+    spec_decode_mode = getattr(args, "spec_decode_mode", None)
+    if spec_decode_mode and spec_decode_mode != "none":
+        draft_onnx_dir = Path(cfg.work_dir) / "draft_onnx"
+        draft_onnx_dir.mkdir(exist_ok=True, parents=True)
+        draft_onnx_files = _export_draft_model(
+            cfg, args, spec_decode_mode, draft_onnx_dir, logger
+        )
+        for key, value in draft_onnx_files.items():
+            meta_info[f"{key}_file"] = str(Path(value).relative_to(cfg.work_dir))
+        if "draft_decode_onnx" in draft_onnx_files:
+            meta_info.draft_onnx_file = str(
+                Path(draft_onnx_files["draft_decode_onnx"]).relative_to(cfg.work_dir)
+            )
+        meta_info.spec_decode_mode = spec_decode_mode
+        if spec_decode_mode == "dflash":
+            meta_info.spec_decode_block_size = getattr(args, "num_draft_tokens", 4)
+            meta_info.spec_decode_hidden_output_name = "target_hidden"
+        elif spec_decode_mode == "mtp":
+            meta_info.spec_decode_block_size = getattr(args, "num_draft_tokens", 4)
+            meta_info.spec_decode_hidden_output_name = "pre_norm_hidden"
+        meta_info.spec_decode_verify_length = spec_verify_length
 
     release_dir = _run_golden_generation(cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger)
     if release_dir is not None:
@@ -1249,7 +1508,7 @@ def main(args):
     elif args.work_dir is not None:
         cfg.work_dir = str(Path(args.work_dir))
     else:
-        cfg.work_dir = str(Path("./work_dirs") / "qwen3_5_27b" / f"{cfg_name}_{Path(args.hf_model_dir).stem}")
+        cfg.work_dir = str(_build_default_work_dir(args.config, args.hf_model_dir))
     Path(cfg.work_dir).mkdir(exist_ok=True, parents=True)
 
     log_file = Path(cfg.work_dir) / f"{cfg_name}_debug.log"
@@ -1311,14 +1570,14 @@ def parse_arguments():
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
-    parser.add_argument("--system-prompt", type=str, default="You are a helpful assistant.")
+    parser.add_argument("--system-prompt", type=str, default="")
     parser.add_argument(
         "--no_split_modules",
         type=str,
         default="",
         help="comma-separated no_split_module_classes for accelerate dispatch (default: auto)",
     )
-    parser.add_argument("--max_sequence_length", type=int, default=2048)
+    parser.add_argument("--max_sequence_length", type=int, default=8192)
     parser.add_argument(
         "--support_long_context_over_fp16_limit",
         action="store_true",
@@ -1363,6 +1622,26 @@ def parse_arguments():
     parser.add_argument("--release_modelscope_name", type=str, default=None)
     parser.add_argument("--release_wmix_amix", type=str, default=None)
     parser.add_argument("--release_date", type=str, default=None)
+    # Speculative decoding
+    parser.add_argument(
+        "--spec_decode_mode",
+        type=str,
+        default=None,
+        choices=["none", "dflash", "mtp"],
+        help="Speculative decoding mode: export draft model alongside target model",
+    )
+    parser.add_argument(
+        "--dflash_model_dir",
+        type=str,
+        default=None,
+        help="Path to DFlash draft model directory (required when --spec_decode_mode=dflash)",
+    )
+    parser.add_argument(
+        "--num_draft_tokens",
+        type=int,
+        default=4,
+        help="Number of draft tokens to generate and verify per round.",
+    )
     return parser
 
 

@@ -92,6 +92,8 @@ def _alloc_cache_inputs(
         if (
             name.startswith(
                 (
+                    "past_key_cache",
+                    "past_value_cache",
                     "past_key_cache_",
                     "past_value_cache_",
                     "past_conv_cache_",
@@ -104,6 +106,19 @@ def _alloc_cache_inputs(
             info = session.get_input(name)
             cache_inputs[name] = CacheTensor(torch.zeros(info.shape, dtype=info.dtype, device=device))
     return cache_inputs
+
+
+def _as_cache_value(reference: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    if isinstance(reference, CacheTensor) and not isinstance(value, CacheTensor):
+        return CacheTensor(value)
+    return value
+
+
+def _clone_cache_value(value: torch.Tensor) -> torch.Tensor:
+    cloned = value.clone()
+    if isinstance(value, CacheTensor):
+        return CacheTensor(cloned)
+    return cloned
 
 
 def _ensure_logits_shape(logits: torch.Tensor) -> torch.Tensor:
@@ -127,7 +142,9 @@ def _select_last_valid_logits(logits: torch.Tensor, valid_len: int) -> torch.Ten
 
 def _is_kv_cache_name(name: str) -> bool:
     return (
-        name.startswith(("past_key_cache_", "past_value_cache_"))
+        name.startswith(
+            ("past_key_cache", "past_value_cache", "past_key_cache_", "past_value_cache_")
+        )
         or "kcache_input" in name
         or "vcache_input" in name
     )
@@ -468,18 +485,32 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
     ) -> None:
         for name in list(cache_state.keys()):
             if name in output_map:
-                cache_state[name] = output_map[name]
+                cache_state[name] = _as_cache_value(cache_state[name], output_map[name])
                 continue
             if name.startswith("past_conv_cache_"):
                 idx = name.rsplit("_", 1)[-1]
                 out_name = f"conv_cache_out_{idx}"
                 if out_name in output_map:
-                    cache_state[name] = output_map[out_name]
+                    conv_out = output_map[out_name]
+                    if (
+                        conv_out.dim() >= 3
+                        and conv_out.shape[-1] != cache_state[name].shape[-1]
+                    ):
+                        conv_out = conv_out[..., : cache_state[name].shape[-1]]
+                    cache_state[name] = _as_cache_value(cache_state[name], conv_out)
             elif name.startswith("past_recurrent_state_"):
                 idx = name.rsplit("_", 1)[-1]
                 out_name = f"recurrent_state_out_{idx}"
                 if out_name in output_map:
-                    cache_state[name] = output_map[out_name]
+                    cache_state[name] = _as_cache_value(
+                        cache_state[name], output_map[out_name]
+                    )
+                else:
+                    per_step = f"recurrent_state_out_{idx}_0"
+                    if per_step in output_map:
+                        cache_state[name] = _as_cache_value(
+                            cache_state[name], output_map[per_step]
+                        )
 
     def _build_prefill_feed(
         self,
@@ -552,22 +583,33 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
 
     def _build_decode_feed(
         self,
-        token_id: torch.Tensor,
+        token_ids: torch.Tensor,
         past_seq_len: int,
         cache_state: Dict[str, torch.Tensor],
+        current_input_length: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         assert self.token_embedding is not None
         assert self.decode_session is not None
+        if token_ids.dim() != 2:
+            raise ValueError(
+                f"token_ids must be [B, seq], got {tuple(token_ids.shape)}"
+            )
+        if current_input_length is None:
+            current_input_length = int(token_ids.shape[1])
+        if current_input_length <= 0:
+            raise ValueError(
+                f"current_input_length must be > 0, got {current_input_length}"
+            )
         inputs_embeds = _build_inputs_embeds(
             self.token_embedding,
-            token_id,
+            token_ids,
             self._decode_inputs_info.shape[1],
             self.pad_token_id,
             self.device,
             self._decode_inputs_info.dtype,
         )
         linear_attn_mask = _build_linear_attn_mask(
-            1, self._decode_mask_info, self.device
+            current_input_length, self._decode_mask_info, self.device
         )
 
         batch_size = self._decode_inputs_info.shape[0]
@@ -579,12 +621,15 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
         )
         current_input_length = torch.full(
             (batch_size,),
-            1,
+            int(current_input_length),
             dtype=self._decode_current_seq_info.dtype,
             device=self.device,
         )
-        decode_position_ids = torch.tensor(
-            [past_seq_len], device=self.device, dtype=torch.int32
+        decode_position_ids = torch.arange(
+            past_seq_len,
+            past_seq_len + self._decode_inputs_info.shape[1],
+            device=self.device,
+            dtype=torch.int32,
         )
 
         feed: Dict[str, torch.Tensor] = {}
@@ -724,7 +769,7 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
         current_token = next_token_id.to(self.device)
         for _ in range(max_new_tokens - 1):
             decode_feed = self._build_decode_feed(
-                current_token, past_seq_len, decode_cache_state
+                current_token, past_seq_len, decode_cache_state, current_input_length=1
             )
             _, decode_output_map = self._run_hmonnx(self.decode_session, decode_feed)
             decode_logits = self._extract_logits(decode_output_map)

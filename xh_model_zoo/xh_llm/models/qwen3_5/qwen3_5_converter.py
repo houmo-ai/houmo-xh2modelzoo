@@ -409,10 +409,23 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_recurrent_state_{layer_idx}")
 
         output_names = ["logits"]
+        # Verify-intermediates mode only expands recurrent_state. conv_cache keeps
+        # the original continuous window representation and is sliced by runtime.
+        _verify_steps = 1
+        if (
+            bool(wrap_cfg.get("verify_output_intermediates", False))
+            and int(wrap_cfg.get("input_sequence_length", 1)) > 1
+        ):
+            _verify_steps = int(wrap_cfg.input_sequence_length)
         for layer_idx in range(len(linear_attention_layer_indices)):
             output_names.append(f"conv_cache_out_{layer_idx}")
-        for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names.append(f"recurrent_state_out_{layer_idx}")
+        if _verify_steps > 1:
+            for layer_idx in range(len(linear_attention_layer_indices)):
+                for step_idx in range(_verify_steps):
+                    output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
+        else:
+            for layer_idx in range(len(linear_attention_layer_indices)):
+                output_names.append(f"recurrent_state_out_{layer_idx}")
 
         quant_config = self._build_quant_config(wraped_model)
         quanted_model = convert_fx_model_to_quanted_model(

@@ -53,7 +53,7 @@ def main(args):
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
             presence_penalty=args.presence_penalty,
-            stream_output=False,
+            stream_output=True,
         )
         timings.append(elapsed)
 

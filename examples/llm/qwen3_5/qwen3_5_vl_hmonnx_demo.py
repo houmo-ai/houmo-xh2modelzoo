@@ -29,10 +29,14 @@ from xhquant.api import HMONNXInference
 from xh_model_zoo.api import ConfigDict, get_root_logger, xhquant_llm_init
 from xh_model_zoo.xh_llm.models.qwen3_5 import Qwen3_5ONNXModel, Qwen3_5Processor
 from xh_model_zoo.xh_llm.models.qwen3_5.image_processing_qwen3_5 import Qwen3_5ImageProcessor
+from transformers import TextStreamer
 from xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_onnx_model import (
     _alloc_cache_inputs,
+    _apply_presence_penalty,
+    _apply_repetition_penalty,
     _build_linear_attn_mask,
     _resolve_input_name,
+    _sample_next_token,
     _select_last_valid_logits,
 )
 
@@ -78,12 +82,21 @@ def parse_arguments():
     )
     parser.add_argument("--image-path", type=str, default="data/images/qwen2_vl_demo.jpeg")
     parser.add_argument("--prompt", type=str, default="描述这张照片")
-    parser.add_argument("--system-prompt", type=str, default="you are a helpful assistant")
+    parser.add_argument("--system-prompt", type=str, default="")
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-context-tokens", type=int, default=None)
     parser.add_argument("--max-size-w", type=int, default=448)
     parser.add_argument("--max-size-h", type=int, default=448)
     parser.add_argument("--patch-size", type=int, default=16)
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true", default=False)
+    parser.add_argument("--no-sample", dest="do_sample", action="store_false")
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=0)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
+    parser.add_argument("--presence-penalty", type=float, default=0.0)
+    parser.add_argument("--stream-output", dest="stream_output", action="store_true", default=True)
+    parser.add_argument("--no-stream-output", dest="stream_output", action="store_false")
     parser.add_argument(
         "--enable-thinking",
         action="store_true",
@@ -718,6 +731,13 @@ class Qwen35VLHMONNXModel(Qwen3_5ONNXModel):
         image_grid_thw: Optional[torch.Tensor],
         tokenizer,
         max_new_tokens: int,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        repetition_penalty: float = 1.0,
+        presence_penalty: float = 0.0,
+        stream_output: bool = False,
     ) -> str:
         if max_new_tokens <= 0:
             return ""
@@ -769,10 +789,22 @@ class Qwen35VLHMONNXModel(Qwen3_5ONNXModel):
         if last_prefill_logits is None:
             return ""
 
-        next_token_id = torch.argmax(last_prefill_logits, dim=-1)
-        first_token_val = int(next_token_id[0][0].item())
+        history_token_ids = input_ids[0].tolist()
+        first_step_logits = _apply_repetition_penalty(
+            last_prefill_logits, history_token_ids, repetition_penalty
+        )
+        first_step_logits = _apply_presence_penalty(
+            first_step_logits, history_token_ids, presence_penalty
+        )
+        next_token_id = _sample_next_token(
+            first_step_logits,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+        )
         logger = get_root_logger()
-        logger.info(f"First generated token id: {first_token_val}")
+        logger.info(f"First generated token id: {int(next_token_id[0][0].item())}")
 
         if self.resource_tight_mode:
             self._release_prefill_session()
@@ -794,11 +826,20 @@ class Qwen35VLHMONNXModel(Qwen3_5ONNXModel):
             stop_token_ids.add(int(tokenizer_pad))
 
         generated_ids = []
+        streamer: Optional[TextStreamer] = None
+        if stream_output:
+            streamer = TextStreamer(tokenizer, skip_prompt=False, skip_special_tokens=True)
+
         token_val = int(next_token_id[0][0].item())
         if token_val in stop_token_ids:
             logger.info("Generation stopped immediately on EOS/PAD token.")
+            if streamer is not None:
+                streamer.end()
             return ""
         generated_ids.append(token_val)
+        history_token_ids.append(token_val)
+        if streamer is not None:
+            streamer.put(next_token_id.detach().cpu())
 
         current_token = next_token_id.to(self.device)
         for _ in range(max_new_tokens - 1):
@@ -806,21 +847,39 @@ class Qwen35VLHMONNXModel(Qwen3_5ONNXModel):
             _, decode_output_map = self._run_hmonnx(self.decode_session, decode_feed)
             decode_logits = self._extract_logits(decode_output_map)
             decode_logits = _select_last_valid_logits(decode_logits, 1)
-            next_token_id = torch.argmax(decode_logits, dim=-1)
+
+            decode_logits = _apply_repetition_penalty(
+                decode_logits, history_token_ids, repetition_penalty
+            )
+            decode_logits = _apply_presence_penalty(
+                decode_logits, history_token_ids, presence_penalty
+            )
+            next_token_id = _sample_next_token(
+                decode_logits,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+            )
             self._update_linear_cache(decode_cache_state, decode_output_map)
 
             token_val = int(next_token_id[0][0].item())
             if token_val in stop_token_ids:
                 break
             generated_ids.append(token_val)
+            history_token_ids.append(token_val)
+            if streamer is not None:
+                streamer.put(next_token_id.detach().cpu())
             current_token = next_token_id.to(self.device)
             past_seq_len += 1
 
+        if streamer is not None:
+            streamer.end()
         if self.resource_tight_mode:
             self._release_decode_session()
 
         output_text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        logger.info(f"Generated token ids: {generated_ids}")
+        logger.info(f"Generated {len(generated_ids)} tokens")
         return output_text
 
     @torch.no_grad()
@@ -857,6 +916,13 @@ class Qwen35VLHMONNXModel(Qwen3_5ONNXModel):
             image_grid_thw=image_grid_thw,
             tokenizer=processor.tokenizer,
             max_new_tokens=args.max_new_tokens,
+            do_sample=getattr(args, "do_sample", False),
+            temperature=getattr(args, "temperature", 1.0),
+            top_p=getattr(args, "top_p", 1.0),
+            top_k=getattr(args, "top_k", 0),
+            repetition_penalty=getattr(args, "repetition_penalty", 1.0),
+            presence_penalty=getattr(args, "presence_penalty", 0.0),
+            stream_output=getattr(args, "stream_output", False),
         )
 
 
@@ -963,7 +1029,9 @@ def main():
         history=None,
         system_prompt=args.system_prompt,
     )
-    print(repr(out), flush=True)
+    if args.stream_output:
+        print("", flush=True)
+    print(f"\n[Output]: {repr(out)}", flush=True)
 
 
 if __name__ == "__main__":

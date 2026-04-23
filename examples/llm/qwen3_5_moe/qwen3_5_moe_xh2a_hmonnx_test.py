@@ -30,7 +30,11 @@ from transformers import TextStreamer
 from xhquant.api import get_root_logger, xhquant_init
 from xhquant.xhonnxruntime import config as xhonnxruntime_config
 
-from xh_model_zoo.xh_llm.models.qwen3_5_moe import Qwen3_5MoeHFCompatible, Qwen3_5MoeInference
+from xh_model_zoo.xh_llm.models.qwen3_5_moe import (
+    Qwen3_5MoeHFCompatible,
+    Qwen3_5MoeInference,
+    load_moe_inference,
+)
 from xh_model_zoo.xh_llm.utils import auto_offload
 
 SAMPLE_MESSAGES = [
@@ -58,7 +62,7 @@ def main(args):
     logger = get_root_logger()
 
     logger.info(f"Loading inference engine from: {args.config}")
-    inference_engine = Qwen3_5MoeInference(args.config, fast_mode=args.fast)
+    inference_engine = load_moe_inference(args.config, fast_mode=args.fast)
 
     hf_model_path = inference_engine.meta_info.get("hf_model_path", args.hf_model)
     assert hf_model_path is not None and Path(hf_model_path).exists(), (
@@ -70,6 +74,15 @@ def main(args):
     batch_size = inference_engine.batch_size
 
     messages = SAMPLE_MESSAGES[:batch_size]
+    if hasattr(inference_engine, "spec_decode_mode"):
+        _, generate_text = inference_engine.generate(
+            messages,
+            enable_thinking=False,
+            max_new_tokens=args.max_new_tokens,
+        )
+        logger.info(f"content: {generate_text}")
+        return
+
     texts = tokenizer.apply_chat_template(
         messages,
         tokenize=False,

@@ -301,3 +301,5 @@ python examples/quantization/examples/example_qwen35dense.py \
 4. 运行 Vision 导出或 VL demo 时，建议始终显式设置 `PYTHONPATH=./`；如果缺少 hmquant 动态库路径，`xhquant` GPU 扩展可能加载失败。
 5. Vision 导出当前默认使用 `448 x 448` 输入分辨率、`patch_size=16`、`temporal_patch_size=2`，如果修改这些参数，Vision 产物与 VL demo 的输入配置也要保持一致。
 6. LLM 的 Prefill 和 Decode 是两张独立图，Vision HMONNX 只负责生成图像特征，最终由 VL demo 将图像特征散射回文本 token embedding 后再调用 LLM HMONNX。
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py --meta /data01/home/yujy/work/xh2modelzoo/work_dirs/qwen3_5_4b_mtp_k4_w4a8_8k/meta.json --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl --output-md /tmp/qwen35_bench/qwen3_5_4b_mtp_k4_w4a8_8k.shard0of4.md --output-json output/qwen35_bench/qwen3_5_4b_mtp_k4_w4a8_8k.shard0of4.json --think-mode both --max-new-tokens 128 --dtype fp16 --device cuda:0 --exec-device cuda:0 --repetition-penalty 1.1 --presence-penalty 0.0 --shard-index 0 --num-shards 4

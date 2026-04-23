@@ -34,3 +34,7 @@ class Qwen3_5MoeConvertConfig(LLMConvertConfig):
     alpha_scaling_layers: List[int] = field(default_factory=lambda: [8, 20])
     chunk_inverse_alpha: float = 0.5
     cumsum_matmul_quant_config: Optional[Dict] = None
+    # Speculative decoding
+    spec_decode_mode: Optional[str] = None   # "mtp", "dflash", or None
+    num_draft_tokens: int = 4
+    dflash_model_dir: Optional[str] = None

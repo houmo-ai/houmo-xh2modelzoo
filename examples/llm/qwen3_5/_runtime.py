@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 
-from xh_model_zoo.xh_llm.models.qwen3_5 import Qwen3_5ONNXModel
+from xh_model_zoo.xh_llm.models.qwen3_5 import Qwen3_5ONNXModel, Qwen3_5SpecDecodeONNXModel
 
 
 DTYPE_NAME_MAP = {
@@ -117,17 +117,39 @@ def load_runtime_from_meta(
     if pad_token_id is None:
         pad_token_id = 0
 
-    runtime = Qwen3_5ONNXModel(
-        prefill=dict(onnx=str(prefill_onnx)),
-        decode=dict(onnx=str(decode_onnx)),
-        max_context_tokens=max_context_tokens,
-        auto_offload=auto_offload,
-        auto_offload_max_memory=auto_offload_max_memory,
-        prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
-        decode_auto_offload_max_memory=decode_auto_offload_max_memory,
-        resource_tight_mode=resource_tight_mode,
-        pad_token_id=pad_token_id,
-    )
+    # Check for speculative decoding config in meta
+    spec_decode = meta_info.get("spec_decode")
+    if spec_decode and spec_decode.get("mode") in ("dflash", "mtp"):
+        draft_onnx = resolve_path(model_dir, spec_decode["draft_onnx"])
+        block_size = spec_decode.get("block_size", 4)
+        hidden_output_name = spec_decode.get("hidden_output_name", "pre_norm_hidden")
+        runtime = Qwen3_5SpecDecodeONNXModel(
+            prefill=dict(onnx=str(prefill_onnx)),
+            decode=dict(onnx=str(decode_onnx)),
+            draft=dict(onnx=str(draft_onnx)),
+            spec_decode_mode=spec_decode["mode"],
+            block_size=block_size,
+            hidden_output_name=hidden_output_name,
+            max_context_tokens=max_context_tokens,
+            auto_offload=auto_offload,
+            auto_offload_max_memory=auto_offload_max_memory,
+            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
+            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+            resource_tight_mode=resource_tight_mode,
+            pad_token_id=pad_token_id,
+        )
+    else:
+        runtime = Qwen3_5ONNXModel(
+            prefill=dict(onnx=str(prefill_onnx)),
+            decode=dict(onnx=str(decode_onnx)),
+            max_context_tokens=max_context_tokens,
+            auto_offload=auto_offload,
+            auto_offload_max_memory=auto_offload_max_memory,
+            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
+            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+            resource_tight_mode=resource_tight_mode,
+            pad_token_id=pad_token_id,
+        )
     runtime.set_input_embeddings(token_embedding)
     runtime.to(torch.device(device))
     runtime.set_exec_device(torch.device(exec_device))
@@ -155,7 +177,7 @@ def benchmark_chat(
         prompt=prompt,
         tokenizer=tokenizer,
         history=None,
-        system_prompt="You are a helpful assistant.",
+        system_prompt="",
         max_new_tokens=max_new_tokens,
         enable_thinking=enable_thinking,
         do_sample=do_sample,

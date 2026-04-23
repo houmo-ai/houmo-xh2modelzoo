@@ -550,14 +550,15 @@ def measure_acceptance_rate(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Generate → single forward pass to capture all pre-norm hidden → MTP batch → compare."""
     device = model.device
 
     # Tokenise
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = _apply_chat_template(tokenizer, msgs, enable_thinking=enable_thinking)
     inputs = tokenizer([text], return_tensors="pt").to(device)
     prompt_len = inputs.input_ids.shape[1]
 
@@ -639,13 +640,14 @@ def benchmark_timing(
     mtp_head: Qwen3_5MTPHead,
     tokenizer,
     prompt: str,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
     warmup: int = 5,
     num_steps: int = 50,
+    enable_thinking: bool | None = None,
 ) -> dict:
     device = model.device
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = _apply_chat_template(tokenizer, msgs, enable_thinking=enable_thinking)
     inputs = tokenizer([text], return_tensors="pt").to(device)
 
     # ── prefill ─────────────────────────────────────────────────
@@ -718,12 +720,13 @@ def baseline_decode(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Standard autoregressive greedy decode (for comparison)."""
     device = model.device
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = _apply_chat_template(tokenizer, msgs, enable_thinking=enable_thinking)
     inputs = tokenizer([text], return_tensors="pt").to(device)
     eos = tokenizer.eos_token_id
 
@@ -762,7 +765,8 @@ def speculative_decode(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
+    enable_thinking: bool | None = None,
 ) -> dict:
     """MTP-1 speculative decoding with sequential verification.
 
@@ -791,7 +795,7 @@ def speculative_decode(
     eos = tokenizer.eos_token_id
 
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = _apply_chat_template(tokenizer, msgs, enable_thinking=enable_thinking)
     inputs = tokenizer([text], return_tensors="pt").to(device)
     prompt_ids = inputs.input_ids  # [1, prompt_len]
     prompt_len = prompt_ids.shape[1]
@@ -921,15 +925,31 @@ def benchmark_speculative_decode(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Run both baseline and speculative decode, report comparative results."""
     print("  [baseline] autoregressive …")
-    base = baseline_decode(model, tokenizer, prompt, max_new_tokens, system_prompt)
+    base = baseline_decode(
+        model,
+        tokenizer,
+        prompt,
+        max_new_tokens,
+        system_prompt,
+        enable_thinking=enable_thinking,
+    )
     print(f"    {base['num_tokens']} tokens in {base['elapsed_s']}s  ({base['tok_per_s']} tok/s)")
 
     print("  [spec-dec] MTP-1 speculative …")
-    spec = speculative_decode(model, mtp_head, tokenizer, prompt, max_new_tokens, system_prompt)
+    spec = speculative_decode(
+        model,
+        mtp_head,
+        tokenizer,
+        prompt,
+        max_new_tokens,
+        system_prompt,
+        enable_thinking=enable_thinking,
+    )
     print(f"    {spec['num_tokens']} tokens in {spec['elapsed_s']}s  ({spec['tok_per_s']} tok/s)")
     print(f"    accept rate: {spec['acceptance_rate']:.2%}  avg tok/round: {spec['avg_tok_per_round']}")
 
@@ -1135,8 +1155,9 @@ def speculative_decode_forced(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
     num_draft_tokens: int = 1,
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Forced-decode speculative decoding with K draft tokens.
 
@@ -1159,7 +1180,7 @@ def speculative_decode_forced(
     eos = tokenizer.eos_token_id
 
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = _apply_chat_template(tokenizer, msgs, enable_thinking=enable_thinking)
     inputs = tokenizer([text], return_tensors="pt").to(device)
     prompt_ids = inputs.input_ids
     prompt_len = prompt_ids.shape[1]
@@ -1234,6 +1255,8 @@ def speculative_decode_forced(
                 accepted_count += 1
             else:
                 break
+            
+        print(f"Round {num_rounds}: accepted {accepted_count}/{K} drafts")
 
         if accepted_count == K:
             # ── ALL ACCEPTED ────────────────────────────────────
@@ -1344,18 +1367,27 @@ def benchmark_speculative_decode_forced(
     tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
     num_draft_tokens: int = 1,
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Run baseline and forced-decode spec-dec comparison."""
     print("  [baseline] autoregressive …")
-    base = baseline_decode(model, tokenizer, prompt, max_new_tokens, system_prompt)
+    base = baseline_decode(
+        model,
+        tokenizer,
+        prompt,
+        max_new_tokens,
+        system_prompt,
+        enable_thinking=enable_thinking,
+    )
     print(f"    {base['num_tokens']} tokens in {base['elapsed_s']}s  ({base['tok_per_s']} tok/s)")
 
     print(f"  [forced-decode K={num_draft_tokens}] speculative …")
     spec = speculative_decode_forced(
         model, mtp_head, tokenizer, prompt, max_new_tokens, system_prompt,
         num_draft_tokens=num_draft_tokens,
+        enable_thinking=enable_thinking,
     )
     print(f"    {spec['num_tokens']} tokens in {spec['elapsed_s']}s  ({spec['tok_per_s']} tok/s)")
     print(f"    accept rate: {spec['acceptance_rate']:.2%}  avg tok/round: {spec['avg_tok_per_round']}")
@@ -1378,8 +1410,9 @@ def benchmark_multi_k(
     tokenizer,
     prompts: list[dict],
     max_new_tokens: int = 128,
-    system_prompt: str = "You are a helpful assistant.",
+    system_prompt: str = "",
     k_values: list[int] | None = None,
+    enable_thinking: bool | None = None,
 ) -> dict:
     """Run forced-decode benchmark for multiple K values across all prompts.
 
@@ -1397,7 +1430,14 @@ def benchmark_multi_k(
     baseline_results: dict[str, dict] = {}
     for p in prompts:
         print(f"\n[baseline] {p['name']} …")
-        base = baseline_decode(model, tokenizer, p["prompt"], max_new_tokens, system_prompt)
+        base = baseline_decode(
+            model,
+            tokenizer,
+            p["prompt"],
+            max_new_tokens,
+            system_prompt,
+            enable_thinking=enable_thinking,
+        )
         print(f"  {base['num_tokens']} tokens in {base['elapsed_s']}s  ({base['tok_per_s']} tok/s)")
         baseline_results[p["name"]] = base
 
@@ -1417,6 +1457,7 @@ def benchmark_multi_k(
             spec = speculative_decode_forced(
                 model, mtp_head, tokenizer, p["prompt"],
                 max_new_tokens, system_prompt, num_draft_tokens=K,
+                enable_thinking=enable_thinking,
             )
             k_results[K][p["name"]] = spec
             base = baseline_results[p["name"]]
@@ -1627,6 +1668,17 @@ TEST_PROMPTS = [
 ]
 
 
+def _apply_chat_template(tokenizer, messages: list[dict[str, str]], enable_thinking: bool | None = None) -> str:
+    kwargs = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+    if enable_thinking is not None:
+        kwargs["enable_thinking"] = True
+    return tokenizer.apply_chat_template(messages, **kwargs)
+
+
 # ════════════════════════════════════════════════════════════════
 # CLI
 # ════════════════════════════════════════════════════════════════
@@ -1648,13 +1700,17 @@ def parse_args():
     p.add_argument("--max-new-tokens", type=int, default=4096)
     p.add_argument("--timing-steps", type=int, default=50)
     p.add_argument("--dtype", type=str, default="bf16", choices=sorted(DTYPE_MAP.keys()))
-    p.add_argument("--system-prompt", type=str, default="You are a helpful assistant.")
+    p.add_argument("--system-prompt", type=str, default="")
+    thinking_group = p.add_mutually_exclusive_group()
+    thinking_group.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode in chat template.")
+    thinking_group.add_argument("--disable-thinking", action="store_true", help="Disable thinking mode in chat template.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     dtype = args.dtype
+    enable_thinking = True if args.enable_thinking else False if args.disable_thinking else None
 
     print("═" * 72)
     print("  Qwen3.5 MTP Benchmark")
@@ -1693,6 +1749,7 @@ def main():
             prompts[0]["prompt"],
             system_prompt=args.system_prompt,
             num_steps=args.timing_steps,
+            enable_thinking=enable_thinking,
         )
         print_timing_result(timing)
 
@@ -1705,6 +1762,7 @@ def main():
             p["prompt"],
             max_new_tokens=args.max_new_tokens,
             system_prompt=args.system_prompt,
+            enable_thinking=enable_thinking,
         )
         print_acceptance_result(p["name"], r)
         all_results.append({"name": p["name"], "acceptance": r})
@@ -1721,6 +1779,7 @@ def main():
                 p["prompt"],
                 max_new_tokens=args.max_new_tokens,
                 system_prompt=args.system_prompt,
+                enable_thinking=enable_thinking,
             )
             print_spec_result(p["name"], sr, mode="sequential")
 
@@ -1735,6 +1794,7 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 system_prompt=args.system_prompt,
                 num_draft_tokens=K,
+                enable_thinking=enable_thinking,
             )
             print_spec_result(p["name"], sr, mode="forced-decode")
 
@@ -1748,6 +1808,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             system_prompt=args.system_prompt,
             k_values=[2, 3, 4],
+            enable_thinking=enable_thinking,
         )
         model_name = args.model.split("/")[-1]
         print_multi_k_summary(mk_results, model_name)
