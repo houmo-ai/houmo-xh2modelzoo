@@ -852,6 +852,10 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
+    def postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, hf_model_dir: str, **kwargs) -> nn.Module:
+        return native_hf_model
+
+    @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
         quantization_config = getattr(config, "quantization_config", None)
@@ -864,7 +868,15 @@ class XHBaseModel(DeviceMixin):
                 "Model is already quantized, quant_weight should be None or empty when loading quantized model."
             )
             native_hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
-            _dequantize_gptqmodel_hf_model(native_hf_model)
+            native_hf_model = _dequantize_gptqmodel_hf_model(native_hf_model)
+            
+            """
+            GPTQModel在量化某些模型时，会调整模型结构，这导致gptqmodel量化模型和原始hf模型结构不一致，
+            无法进行后续Wrap和Fronted等转换，postprocess_gptqmodel_structure函数的作用是对伪量化后
+            的gptqmodel模型结构进行调整，使其与原始hf模型结构一致。如果适配的新模型也存在类似问题，需要
+            实现自己的postprocess_gptqmodel_structure函数，覆盖基类行为
+            """
+            native_hf_model = cls.postprocess_gptqmodel_structure(native_hf_model, hf_model_dir, **kwargs)
             return native_hf_model
 
         if quant_weight is not None and len(quant_weight) > 0:
