@@ -26,8 +26,8 @@ def main(args):
     assert type(hmonnx_model).__name__ == "XHQwen3LegacyHMONNXModel", (
         f"Expected model type XHQwen3LegacyHMONNXModel, but got {type(hmonnx_model).__name__}"
     )
-    if args.auto_offload:
-        hmonnx_model.enable_auto_offload = True
+
+    hmonnx_model.enable_auto_offload = args.auto_offload
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     enable_think = args.think

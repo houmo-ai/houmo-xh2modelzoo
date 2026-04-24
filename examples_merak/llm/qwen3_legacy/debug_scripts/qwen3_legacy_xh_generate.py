@@ -46,11 +46,11 @@ def main(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}, dtype: {dtype}")
     model_cfg: XHQwen3LegacyModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
+    model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
     enable_prefill_chunk = args.enable_prefill_chunk
     if enable_prefill_chunk:
         model_cfg.enable_prefill_chunk = True  # 开启prefill chunk后，设置chunk长度为512
         model_cfg.use_cache = True
-        model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
 
     assert type(model_cfg).__name__ == "XHQwen3LegacyModelConfig", (
         f"Expected model config type XHQwen3LegacyModelConfig, but got {type(model_cfg).__name__}"

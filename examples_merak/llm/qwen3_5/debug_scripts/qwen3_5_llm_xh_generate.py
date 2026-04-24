@@ -45,11 +45,12 @@ def main(args):
     assert type(model_cfg).__name__ == "XHQwen3_5ModelConfig", (
         f"Expected model config type XHQwen3_5ModelConfig, but got {type(model_cfg).__name__}"
     )
+    model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
+
     enable_prefill_chunk = args.enable_prefill_chunk
     if enable_prefill_chunk:
         model_cfg.enable_prefill_chunk = True  # 开启prefill chunk后，设置chunk长度为512
         model_cfg.use_cache = True
-        model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
 
     xh_model: XHQwen3_5Model = AutoLLMModel.from_pretrained(config=model_cfg)
     assert type(xh_model).__name__ == "XHQwen3_5Model", (
