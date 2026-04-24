@@ -25,7 +25,7 @@ source /data01/home/yujy/miniconda3/etc/profile.d/conda.sh
 conda activate xhquant
 
 OUT_ROOT="${OUT_ROOT:-work_dirs}"
-BENCH_OUT="${BENCH_OUT:-/tmp/qwen35_bench}"
+BENCH_OUT="${BENCH_OUT:-output/qwen35_bench}"
 DATASET="${DATASET:-examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl}"
 THINK_MODE="${THINK_MODE:-both}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-8192}"

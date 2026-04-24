@@ -118,6 +118,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         self._create_draft_sessions()
         self._mtp_cache_state: Optional[Dict[str, torch.Tensor]] = None
         self._dflash_cache_state: Optional[Dict[str, torch.Tensor]] = None
+        self._dflash_noise_mask_token_id: Optional[int] = 248070
 
     def _set_exec_device(self, device):
         super()._set_exec_device(device)
@@ -337,9 +338,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 feed[name] = next_token_embedding
             elif name == "pre_norm_hidden":
                 feed[name] = hidden_states
-            elif name == "past_seq_length":
+            elif name in ["past_seq_length", "valid_length"]:
                 feed[name] = past_seq_length
-            elif name == "current_input_length":
+            elif name in ["current_input_length", "current_length"]:
                 feed[name] = current_input_length
             elif name in cache_state:
                 feed[name] = cache_state[name]
@@ -378,9 +379,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 feed[name] = next_token_embedding
             elif name == "pre_norm_hidden":
                 feed[name] = hidden_state.to(device=self.device, dtype=self._dtype)
-            elif name == "past_seq_length":
+            elif name in ["past_seq_length", "valid_length"]:
                 feed[name] = past_seq_length
-            elif name == "current_input_length":
+            elif name in ["current_input_length", "current_length"]:
                 feed[name] = current_input_length
             elif name in cache_state:
                 feed[name] = cache_state[name]
@@ -400,18 +401,12 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         if hidden_states.shape[1] == 0:
             return
         cache_state = self._ensure_mtp_cache_state()
-        output_map = self._run_draft_session(
+        self._run_draft_session(
             self.draft_prefill_session,
             self._build_mtp_prefill_feed(
                 hidden_states, next_token_ids, past_seq_len, cache_state
             ),
         )
-        for name in list(cache_state.keys()):
-            present_name = name.replace("past_", "present_", 1)
-            if present_name in output_map:
-                cache_state[name] = _as_cache_value(
-                    cache_state[name], output_map[present_name]
-                )
 
     def _append_dflash_context(
         self,
@@ -454,17 +449,8 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             elif name in cache_state:
                 feed[name] = cache_state[name]
             else:
-                info = self.draft_context_session.get_input(name)
-                feed[name] = torch.zeros(
-                    info.shape, dtype=info.dtype, device=self.device
-                )
-        output_map = self._run_draft_session(self.draft_context_session, feed)
-        for name in list(cache_state.keys()):
-            present_name = name.replace("past_", "present_", 1)
-            if present_name in output_map:
-                cache_state[name] = _as_cache_value(
-                    cache_state[name], output_map[present_name]
-                )
+                raise RuntimeError(f"Unexpected input '{name}' in DFlash draft context session.")
+        self._run_draft_session(self.draft_context_session, feed)
 
     def _build_dflash_decode_feed(
         self,
@@ -513,10 +499,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             elif name in cache_state:
                 feed[name] = cache_state[name]
             else:
-                info = self.draft_decode_session.get_input(name)
-                feed[name] = torch.zeros(
-                    info.shape, dtype=info.dtype, device=self.device
-                )
+                raise RuntimeError(f"Unexpected input '{name}' in DFlash draft decode session.")
         return feed
 
     # ---------------------------------------------------------------
@@ -534,7 +517,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         block_len = int(self.draft_decode_session.get_input("noise_embedding").shape[1])
         block_ids = torch.full(
             (1, block_len),
-            self.pad_token_id,
+            self._dflash_noise_mask_token_id,
             dtype=torch.long,
             device=self.device,
         )
@@ -580,12 +563,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 raise RuntimeError(
                     "MTP draft graph must export pre_norm_out for autoregressive chaining."
                 )
-            for name in list(cache_state.keys()):
-                present_name = name.replace("past_", "present_", 1)
-                if present_name in draft_output_map:
-                    cache_state[name] = _as_cache_value(
-                        cache_state[name], draft_output_map[present_name]
-                    )
 
             tok = torch.argmax(logits[:, -1:, :], dim=-1)  # [1, 1]
             drafts.append(tok)
@@ -757,11 +734,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 draft_tokens = self._run_draft_dflash(
                     current_token, past_seq_len
                 )
-            else:  # mtp
-                mtp_cache_snapshot = {
-                    name: _clone_cache_value(tensor)
-                    for name, tensor in self._ensure_mtp_cache_state().items()
-                }
+            else:  
                 draft_tokens = self._run_draft_mtp(
                     current_token, last_hidden, mtp_past_seq_len, num_drafts
                 )
@@ -846,39 +819,10 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 else None
             )
             if self.spec_decode_mode == "dflash":
-                if accepted_hidden is not None:
-                    self._append_dflash_context(accepted_hidden, initial_seq_len)
+                assert accepted_hidden is not None, "DFlash mode requires hidden states from the verify step."
+                self._append_dflash_context(accepted_hidden, initial_seq_len)
             else:
-                self._mtp_cache_state = {
-                    name: _clone_cache_value(tensor)
-                    for name, tensor in mtp_cache_snapshot.items()
-                }
-                if accepted_hidden is not None:
-                    mtp_cache_state = self._ensure_mtp_cache_state()
-                    mtp_initial_seq_len = mtp_past_seq_len
-                    for step_idx in range(accepted_steps):
-                        next_token_for_cache = (
-                            verify_tokens[step_idx + 1]
-                            if step_idx < accepted_steps - 1
-                            else current_token
-                        )
-                        draft_output_map = self._run_draft_session(
-                            self.draft_decode_session,
-                            self._build_mtp_decode_feed(
-                                next_token_for_cache,
-                                accepted_hidden[:, step_idx : step_idx + 1, :],
-                                mtp_initial_seq_len + step_idx,
-                                mtp_cache_state,
-                            ),
-                        )
-                        for name in list(mtp_cache_state.keys()):
-                            present_name = name.replace("past_", "present_", 1)
-                            if present_name in draft_output_map:
-                                mtp_cache_state[name] = _as_cache_value(
-                                    mtp_cache_state[name],
-                                    draft_output_map[present_name],
-                                )
-                    mtp_past_seq_len = mtp_initial_seq_len + accepted_steps
+                mtp_past_seq_len = mtp_past_seq_len + accepted_steps
 
             # Commit current_token (rejection replacement or bonus)
             token_val = int(current_token[0, 0].item())

@@ -19,13 +19,13 @@ OUT_ROOT="${OUT_ROOT:-work_dirs}"
 SEQ=8192
 MTP_K=4
 DFLASH_BS=16
-LOG_DIR="${LOG_DIR:-/tmp/qwen35_exports}"
+LOG_DIR="${LOG_DIR:-output/qwen35_exports}"
 ONLY_TAG_REGEX="${ONLY_TAG_REGEX:-}"
 mkdir -p "$LOG_DIR"
 
 # model_id | config | float_dir | dflash_dir | autoround_dir
 ROWS=(
-  "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only"
+  # "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only"
   "qwen3_5_9b|configs/qwen3_5/qwen3_5_9b_xh2a.py|weights/Qwen3.5-9B|weights/Qwen3.5-9B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only"
   "qwen3_5_27b|configs/qwen3_5/qwen3_5_27b_xh2a.py|weights/Qwen3.5-27B|weights/Qwen3.5-27B-DFlash|/data01/home/yujy/work/auto-round/output/sym-mode1"
   "qwen3_5_35b_a3b|configs/qwen3_5/qwen3_5_35b_a3b_xh2a.py|weights/Qwen3.5-35B-A3B|weights/Qwen3.5-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only"
@@ -130,11 +130,11 @@ for row in "${ROWS[@]}"; do
 
   if [[ "$MID" == "qwen3_5_35b_a3b" || "$MID" == "qwen3_6_35b_a3b" ]]; then
     local_model_name="$(basename "$FLOAT_DIR")"
-    run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_mtp" \
-      "$FLOAT_DIR" "w8a8h0_sefp" "mtp" "$MTP_K"
+    # run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_mtp" \
+    #   "$FLOAT_DIR" "w8a8h0_sefp" "mtp" "$MTP_K"
 
-    run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_dflash" \
-      "$FLOAT_DIR" "w8a8h0_sefp" "dflash" "$DFLASH_BS" "" "$DFLASH_DIR"
+    # run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_dflash" \
+    #   "$FLOAT_DIR" "w8a8h0_sefp" "dflash" "$DFLASH_BS" "" "$DFLASH_DIR"
 
     run_one_moe "${local_model_name}-XH2a-8k-w4a8h1_ssfp-gptq-spec_mtp" \
       "$FLOAT_DIR" "w4a8h1_ssfp" "mtp" "$MTP_K" "$AR_DIR"
@@ -144,16 +144,16 @@ for row in "${ROWS[@]}"; do
     continue
   fi
 
-  # w8a8 + MTP
-  run_one "${MID}_mtp_k${MTP_K}_w8a8_8k" \
-      --config "$CFG" --hf_model_dir "$FLOAT_DIR" \
-      --spec_decode_mode mtp --num_draft_tokens "$MTP_K"
+  # # w8a8 + MTP
+  # run_one "${MID}_mtp_k${MTP_K}_w8a8_8k" \
+  #     --config "$CFG" --hf_model_dir "$FLOAT_DIR" \
+  #     --spec_decode_mode mtp --num_draft_tokens "$MTP_K"
 
-  # w8a8 + DFlash
-  run_one "${MID}_dflash_bs${DFLASH_BS}_w8a8_8k" \
-      --config "$CFG" --hf_model_dir "$FLOAT_DIR" \
-      --spec_decode_mode dflash --num_draft_tokens "$DFLASH_BS" \
-      --dflash_model_dir "$DFLASH_DIR"
+  # # w8a8 + DFlash
+  # run_one "${MID}_dflash_bs${DFLASH_BS}_w8a8_8k" \
+  #     --config "$CFG" --hf_model_dir "$FLOAT_DIR" \
+  #     --spec_decode_mode dflash --num_draft_tokens "$DFLASH_BS" \
+  #     --dflash_model_dir "$DFLASH_DIR"
 
   # w4a8 + MTP
   run_one "${MID}_mtp_k${MTP_K}_w4a8_8k" \

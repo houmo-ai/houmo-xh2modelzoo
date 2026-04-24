@@ -318,7 +318,7 @@ def main(args):
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
             presence_penalty=args.presence_penalty,
-            stream_output=True,
+            stream_output=False,
         )
         timings.append(elapsed)
 
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt",
         type=str,
-        default="Write a short poem about AI.",
+        default="写一首关于 AI的诗",
     )
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--enable_thinking", action="store_true")
