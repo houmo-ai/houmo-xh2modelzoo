@@ -1,11 +1,13 @@
 import argparse
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from loguru import logger
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, TextStreamer
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForConditionalGeneration
 
 
 def main(args):
@@ -21,7 +23,7 @@ def main(args):
     hf_model_dir = args.model_dir
     processor = AutoProcessor.from_pretrained(hf_model_dir, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, trust_remote_code=True)
-    model = Qwen3_5ForConditionalGeneration.from_pretrained(
+    model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
         hf_model_dir,
         dtype=torch.bfloat16,
         device_map="auto",
@@ -96,7 +98,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Test Qwen3.5 model")
-    parser.add_argument("--model-dir", type=str, default="./data/models/Qwen3.5-9B")
+    parser.add_argument("--model-dir", type=str, default="./data/models/Qwen3.5-35B-A3B/")
     parser.add_argument("--image-path", type=str, default="./data/images/RealWorld-04.png")
     parser.add_argument("--prompt", type=str, default="Describe this image.")
 

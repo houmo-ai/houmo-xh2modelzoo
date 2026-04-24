@@ -123,7 +123,7 @@ class BaseLLMModelConfig(HFModelConfig):
         if "only_first_block" in kwargs:
             only_first_block = kwargs.pop("only_first_block")
 
-        max_layers = -1
+        max_layers = None
         if "max_layers" in kwargs:
             max_layers = kwargs.pop("max_layers")
 
@@ -148,10 +148,8 @@ class BaseLLMModelConfig(HFModelConfig):
         max_layers = -1
         if hasattr(self, "only_first_block") and self.only_first_block:
             max_layers = 1
-
-        if hasattr(self, "max_layers"):
+        if max_layers <= 0 and hasattr(self, "max_layers") and self.max_layers is not None:
             max_layers = self.max_layers
-
         return max_layers
 
     # def to_json_string(self, use_diff: bool = True) -> str:
@@ -174,12 +172,14 @@ class KVCacheConfig(BaseConfig):
         cache_axis: int = 2,
         batch_size: int = 1,
         cache_dtype: str = "float16",
+        use_cache: bool = True,
     ):
         self.num_layers = num_layers
         self.kv_cache_shape = kv_cache_shape
         self.cache_axis = cache_axis
         self.batch_size = batch_size
         self.cache_dtype = cache_dtype
+        self.use_cache = use_cache
 
     @property
     def cache_torch_dtype(self):
@@ -386,6 +386,10 @@ class ModelSwitcher:
     def __init__(self, models: dict[str, Any]):
         self._models = models
         self._activate_model = None
+
+    @property
+    def activate_model(self):
+        return self._activate_model
 
     def eval(self):
         for model in self._models.values():

@@ -21,7 +21,6 @@ from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ...base_vision_model import BaseVisionModel
 from ...builder import register_llm_model
-from ...onnx_lazy_load import lazy_load_onnx
 from ...types import VisualModelMeta
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForConditionalGeneration
 from .modeling_qwen3_5 import Qwen3_5VisionModel as HFQwen3_5VisionModel

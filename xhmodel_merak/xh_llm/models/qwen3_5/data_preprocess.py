@@ -275,8 +275,8 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
 
         if past_seq_length == 0:
             # prefill
-            image_grid_thw = data["image_grid_thw"]
-            video_grid_thw = data["video_grid_thw"]
+            image_grid_thw = data.get("image_grid_thw", None)
+            video_grid_thw = data.get("video_grid_thw", None)
             position_ids, rope_deltas = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)
             self.rope_deltas = rope_deltas
         else:

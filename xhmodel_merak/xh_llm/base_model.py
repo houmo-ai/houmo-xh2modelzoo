@@ -16,7 +16,8 @@ from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
-from xhmodel_merak.xh_llm._gptq_model_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
 from xhquant.api import (
@@ -37,27 +38,15 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import DynamicModule
 from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
+from ._dequant_converter import autoround_torch_qlinear_converter, restore_autoround_qwen3_5_moe_sparse_block
 from .device_mixin import DeviceMixin
-from .types import LLMModelMeta, LLMModelState, ModelMeta
+from .types import LLMModelMeta, LLMModelState, ModelMeta, ModelSwitcher
 from .utils import hf_auto_offload, unfold_args
 from .wrap_model import wrap_llm_model
 
 
 if TYPE_CHECKING:
     from .hmonnx import BaseLLMHMONNXModel
-
-
-def _dequantize_gptqmodel_hf_model(native_hf_model):
-    from transformers.utils import is_gptqmodel_available
-
-    assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
-    converter = gptqmodel_torch_qlinear_converter
-    from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-
-    for name, module in native_hf_model.named_modules():  # type: ignore
-        if isinstance(module, PackableQuantLinear):
-            converter(module)
-    return native_hf_model
 
 
 class XHBaseModel(DeviceMixin):
@@ -86,17 +75,25 @@ class XHBaseModel(DeviceMixin):
         self._exported_model: XHExportedGraph | None = None
         self.hf_compatible_model: nn.Module | None = None
         self.enable_hf_compatible: bool = False
-        self.interactive_mode = True
+        self.interactive_mode = False
         self._dtype = torch.float16
         self._device = "cpu"
         self._data_processor = None
         wrap_cfg = self.config.to_dict()
         wrap_cfg = BaseAttrDict(wrap_cfg)
-
+        self._inference_model = None
         # 兼容旧代码
         self.wrap_cfg = wrap_cfg
 
         self._models = {}
+
+    def get_wrap_cfg(self):
+        wrap_config = self.wrap_cfg
+        if hasattr(self.config, "only_first_block"):
+            wrap_config.only_first_block = self.config.only_first_block
+        if hasattr(self.config, "max_layers"):
+            wrap_config.max_layers = self.config.max_layers
+        return wrap_config
 
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, XHBaseModel):
@@ -407,7 +404,7 @@ class XHBaseModel(DeviceMixin):
         if hf_model is None:
             hf_model = self.get_native_model()
         self._wraped_pre(hf_model)
-        self._wrap_model = wrap_llm_model(hf_model, self.wrap_cfg)  # id(model) == id(wrap_model)
+        self._wrap_model = wrap_llm_model(hf_model, self.get_wrap_cfg())  # id(model) == id(wrap_model)
 
         def check_wraped(wraped_model: nn.Module):
             """
@@ -603,6 +600,19 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
+    def _dequantize_gptqmodel_hf_model(cls, native_hf_model):
+        from transformers.utils import is_gptqmodel_available
+
+        assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
+        converter = gptqmodel_torch_qlinear_converter
+        from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
+        for name, module in native_hf_model.named_modules():  # type: ignore
+            if isinstance(module, PackableQuantLinear):
+                converter(module)
+        return native_hf_model
+
+    @classmethod
     def _dequantize_awq_hf_model(cls, native_hf_model: nn.Module):
         assert native_hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ
         hf_model = native_hf_model
@@ -683,7 +693,7 @@ class XHBaseModel(DeviceMixin):
             def is_auto_gptq_available():
                 return False
 
-        from ._gptq_model_converter import (
+        from ._dequant_converter import (
             general_qlinear_converter,
             gptqmodel_torch_qlinear_converter,
             qlinear_cuda_old_converter,
@@ -824,6 +834,67 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
+    def _dequantize_autoround_hf_model(cls, native_hf_model: nn.Module):
+        hf_model = native_hf_model
+        logger = get_xhquant_logger()
+
+        try:
+            from auto_round.utils.weight_handler import (
+                check_and_mark_quantized_module,
+                convert_module_to_hp_if_necessary,
+            )
+
+            detected_types = check_and_mark_quantized_module(hf_model)
+            if len(detected_types) > 0:
+                hf_model = convert_module_to_hp_if_necessary(
+                    hf_model, dtype=cls.HF_MODEL_DTYPE, device="cpu", to_cpu=False
+                )
+        except ImportError:
+            logger.warning("auto_round weight_handler is unavailable; falling back to manual QuantLinear conversion.")
+
+        autoround_torch_quantlinear_classes = []
+        for module_path in (
+            "auto_round_extension.torch.qlinear_torch",
+            "auto_round_extension.torch.qlinear_torch_zp",
+        ):
+            try:
+                module = __import__(module_path, fromlist=["QuantLinear"])
+                autoround_torch_quantlinear_classes.append(module.QuantLinear)
+            except Exception:
+                continue
+
+        dequant_linears = []
+        if autoround_torch_quantlinear_classes:
+            quantlinear_types = tuple(autoround_torch_quantlinear_classes)
+            for _, module in hf_model.named_modules():
+                if isinstance(module, quantlinear_types):
+                    dequant_linears.append(module)
+
+        for module in tqdm(dequant_linears, desc="Dequantizing AutoRound QuantLinear modules"):
+            autoround_torch_qlinear_converter(module)
+
+        restored_moe_blocks = 0
+        try:
+            from auto_round.modeling.fused_moe.qwen3_5_moe import LinearQwen3_5MoeSparseMoeBlock
+
+            for name, module in list(hf_model.named_modules()):
+                if isinstance(module, LinearQwen3_5MoeSparseMoeBlock):
+                    hf_model.set_submodule(
+                        name,
+                        restore_autoround_qwen3_5_moe_sparse_block(module, hf_model.config),
+                    )
+                    restored_moe_blocks += 1
+        except ImportError:
+            pass
+
+        logger.info(f"Converted {len(dequant_linears)} AutoRound torch QuantLinear modules to nn.Linear.")
+        if restored_moe_blocks > 0:
+            logger.info(f"Restored {restored_moe_blocks} AutoRound Qwen3.5-MoE sparse blocks back to HF modules.")
+        hf_model.quantization_method = None  # type: ignore
+        hf_model._is_hf_initialized = False  # type: ignore
+        return hf_model
+
+    @classmethod
     def _dequantize_hf_model(cls, native_hf_model: nn.Module, quant_weight=None, **kwargs):
         if (
             not hasattr(native_hf_model.config, "quantization_config")
@@ -839,12 +910,16 @@ class XHBaseModel(DeviceMixin):
             )
 
         hf_model = native_hf_model
-        if hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ:
+        quant_method = hf_model.config.quantization_config.quant_method
+        quant_method_str = str(quant_method).lower()
+        if quant_method == QuantizationMethod.AWQ or "awq" in quant_method_str:
             hf_model = cls._dequantize_awq_hf_model(hf_model)
-        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ:
+        elif quant_method == QuantizationMethod.GPTQ or "gptq" in quant_method_str:
             hf_model = cls._dequantize_gptq_hf_model(hf_model)
-        elif hf_model.config.quantization_config.quant_method == QuantizationMethod.COMPRESSED_TENSORS:
+        elif quant_method == QuantizationMethod.COMPRESSED_TENSORS or "compressed-tensors" in quant_method_str:
             hf_model = cls._dequantize_compressed_tensors_hf_model(hf_model)
+        elif quant_method == QuantizationMethod.AUTOROUND or "auto-round" in quant_method_str:
+            hf_model = cls._dequantize_autoround_hf_model(hf_model)
         else:
             raise NotImplementedError(
                 f"Dequantize not implemented for quantization method: {hf_model.config.quantization_config.quant_method}"
@@ -868,15 +943,7 @@ class XHBaseModel(DeviceMixin):
                 "Model is already quantized, quant_weight should be None or empty when loading quantized model."
             )
             native_hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
-            native_hf_model = _dequantize_gptqmodel_hf_model(native_hf_model)
-            
-            """
-            GPTQModel在量化某些模型时，会调整模型结构，这导致gptqmodel量化模型和原始hf模型结构不一致，
-            无法进行后续Wrap和Fronted等转换，postprocess_gptqmodel_structure函数的作用是对伪量化后
-            的gptqmodel模型结构进行调整，使其与原始hf模型结构一致。如果适配的新模型也存在类似问题，需要
-            实现自己的postprocess_gptqmodel_structure函数，覆盖基类行为
-            """
-            native_hf_model = cls.postprocess_gptqmodel_structure(native_hf_model, hf_model_dir, **kwargs)
+            cls._dequantize_gptqmodel_hf_model(native_hf_model)
             return native_hf_model
 
         if quant_weight is not None and len(quant_weight) > 0:
@@ -891,8 +958,10 @@ class XHBaseModel(DeviceMixin):
     def get_native_model(self):
         resume_from = self.config.quant_weight
         kwargs = {}
-        # if self.config.enable_auto_offload:
-        #     kwargs["device_map"] = "auto"
+        if self.config.enable_auto_offload:
+            kwargs["device_map"] = "auto"
+        else:
+            kwargs["device_map"] = "cpu"
         native_hf_model = self.get_hf_model(self.hf_model_dir, quant_weight=resume_from, **kwargs)
         hf_model_cls = self.get_hf_model_cls()
         assert isinstance(native_hf_model, hf_model_cls), (
@@ -951,11 +1020,50 @@ class XHBaseModel(DeviceMixin):
         return self.get_compatible_model(self.hf_model_dir)
 
     ### 模型推理
+    def _set_inference_model(self):
+        inference_model = self.get_inference_model()
+        current_inference_model = self._inference_model if hasattr(self, "_inference_model") else None
+        source_model = None
+        if current_inference_model is not None:
+            if isinstance(current_inference_model, FXInterpreter):
+                source_model = current_inference_model.module
+            elif isinstance(current_inference_model, AutoOffloadGraphModel):
+                source_model = current_inference_model
+
+        if source_model is not None and source_model == inference_model:
+            return
+        enable_auto_offload = self.config.enable_auto_offload
+        if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
+            hf_auto_offload(inference_model)
+        elif self._state in [
+            LLMModelState.FRONTED,
+            LLMModelState.QUANTED_DISABLE,
+            LLMModelState.QUANTED_FAST,
+            LLMModelState.QUANTED_ALIGNED,
+        ]:
+            if enable_auto_offload:
+                auto_offload_max_memory = self.get_wrap_cfg().get("auto_offload_max_memory", None)
+                inference_model = AutoOffloadGraphModel.from_graph_model(
+                    inference_model, max_memory=auto_offload_max_memory
+                )
+            else:
+                inference_model.to(device=self.device, dtype=self.dtype)
+                if self.interactive_mode:
+                    assert isinstance(inference_model, fx.GraphModule)
+                    inference_model = FXInterpreter(inference_model)
+
+        if self._inference_model is not None:
+            if AutoOffloadGraphModel.is_auto_offload_model(self._inference_model):
+                AutoOffloadGraphModel.remove_auto_offload_model(self._inference_model)
+                self._inference_model = None
+        self._inference_model = inference_model
 
     def prepare_for_inference(self, *args, **kwargs):
         for _, sub_model in self._models.items():
             sub_model.prepare_for_inference()
         inference_model = self.get_inference_model()
+        if self._inference_model is not None and self._inference_model == inference_model:
+            return
         if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
             hf_auto_offload(inference_model)
         elif self._state in [
@@ -965,19 +1073,23 @@ class XHBaseModel(DeviceMixin):
             LLMModelState.QUANTED_ALIGNED,
         ]:
             if self.config.enable_auto_offload:
-                auto_offload_max_memory = self.wrap_cfg.get("auto_offload_max_memory", None)
+                auto_offload_max_memory = self.get_wrap_cfg().get("auto_offload_max_memory", None)
+                if isinstance(inference_model, ModelSwitcher):
+                    raise RuntimeError(
+                        "Auto offload is not supported for ModelSwitcher yet, please disable auto offload or use a single model."
+                    )
+
                 inference_model = AutoOffloadGraphModel.from_graph_model(
                     inference_model, max_memory=auto_offload_max_memory
                 )
             else:
-                if (
-                    self.interactive_mode
-                    and isinstance(inference_model, fx.GraphModule)
-                    and not isinstance(inference_model, AutoOffloadGraphModel)
-                ):
-                    interpreter = FXInterpreter(inference_model)
-                    # interpreter.register_hooks(self._hooks)
-                    inference_model = interpreter
+                if self.interactive_mode:
+                    if isinstance(inference_model, ModelSwitcher):
+                        inference_model = SwitchFXInterpreter(inference_model)
+                    else:
+                        assert isinstance(inference_model, fx.GraphModule)
+                        inference_model = FXInterpreter(inference_model)
+
         self._inference_model = inference_model
 
     def release_inference_model(self):
@@ -1005,23 +1117,7 @@ class XHBaseModel(DeviceMixin):
         infer_model = None
         if self._state == LLMModelState.NONE:
             raise RuntimeError("Model is not ready for generation, please set state to fronted or quanted.")
-        # if self._state in [LLMModelState.EAGER_FAST, LLMModelState.EAGER_ALIGNED]:
-        #     infer_model = self._wrap_model
-        # else:
-        #     if self.enable_hf_compatible:
-        #         if self.hf_compatible_model is None:
-        #             hf_model = self.get_empty_hf_model(self.hf_model_dir)
-        #             # 从类中直接获取函数，避免自动绑定 self
-        #             hf_compatible_model = type(self).build_hf_compatible_model(hf_model, self)
-        #             assert isinstance(hf_compatible_model, self.get_hf_model_cls())
-        #             hf_compatible_model.to(device=self.device, dtype=self.dtype)
-        #             self.hf_compatible_model = hf_compatible_model
-        #         infer_model = self.hf_compatible_model
-        #     else:
-        #         infer_model = self._inference_model
-        # assert infer_model is not None
-        # kwargs["use_cache"] = self.config.use_cache
-        # out = infer_model.forward(*args, **kwargs)
+        self._set_inference_model()
         assert self._inference_model is not None, (
             "Inference model is not prepared, please call prepare_for_inference first."
         )
@@ -1084,6 +1180,8 @@ class XHBaseModel(DeviceMixin):
             pass
         else:
             raise RuntimeError(f"Invalid model state: {self._state}")
+        if isinstance(inference_model, ModelSwitcher):
+            inference_model = inference_model.activate_model
         return inference_model
 
     def _set_device(self, device: torch.device | str | None):

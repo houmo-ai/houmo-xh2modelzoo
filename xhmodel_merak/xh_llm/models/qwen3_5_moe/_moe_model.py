@@ -30,25 +30,19 @@ Combines:
 """
 
 import math
-import importlib
-import sys
 import types
-from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeAttention,
     Qwen3_5MoeDecoderLayer,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeForConditionalGeneration,
     Qwen3_5MoeGatedDeltaNet,
-    Qwen3_5MoeMLP,
-    Qwen3_5MoeModel,
     Qwen3_5MoeRMSNorm,
     Qwen3_5MoeRMSNormGated,
     Qwen3_5MoeSparseMoeBlock,
@@ -64,10 +58,11 @@ from xhquant.utils.registry import DynamicModule
 from ...register import XHLLM_TRACEABLE_MODULES
 
 # Re-use the chunk/recurrent gated delta rule implementations from Qwen3Next
-from ..qwen3_5._llm_model_impl import (
+from ..qwen3_5._delta_rule import (
     torch_chunk_gated_delta_rule,
     torch_recurrent_gated_delta_rule,
 )
+
 
 # FusedRMSNormGated from fla package (used when fla is installed)
 try:
@@ -116,9 +111,7 @@ def _normalize_linear_conv_cache_rank(conv_cache: Tensor) -> Tensor:
             return conv_cache.squeeze(2)
         if conv_cache.shape[3] == 1:
             return conv_cache.squeeze(3)
-    raise RuntimeError(
-        f"Unsupported conv_cache shape for linear attention: {tuple(conv_cache.shape)}"
-    )
+    raise RuntimeError(f"Unsupported conv_cache shape for linear attention: {tuple(conv_cache.shape)}")
 
 
 def _is_linear_recurrent_state_shape(
@@ -172,9 +165,7 @@ def _manual_depthwise_conv1d_tail(
     """
     if weight.dim() == 3:
         if weight.shape[1] != 1:
-            raise ValueError(
-                f"Expected depthwise weight with shape [C, 1, K], got {tuple(weight.shape)}"
-            )
+            raise ValueError(f"Expected depthwise weight with shape [C, 1, K], got {tuple(weight.shape)}")
         weight = weight.squeeze(1)
     elif weight.dim() != 2:
         raise ValueError(f"Expected weight rank 2 or 3, got {weight.dim()}")
@@ -187,13 +178,11 @@ def _manual_depthwise_conv1d_tail(
     #         f"need at least {expected_input_length}, got {hidden_states_new.shape[-1]}"
     #     )
 
-    output = hidden_states_new[:, :, 1 : 1 + output_length] * weight[:, 0].view(
-        1, -1, 1
-    )
+    output = hidden_states_new[:, :, 1 : 1 + output_length] * weight[:, 0].view(1, -1, 1)
     for kernel_idx in range(1, kernel_size):
-        output = output + hidden_states_new[
-            :, :, 1 + kernel_idx : 1 + kernel_idx + output_length
-        ] * weight[:, kernel_idx].view(1, -1, 1)
+        output = output + hidden_states_new[:, :, 1 + kernel_idx : 1 + kernel_idx + output_length] * weight[
+            :, kernel_idx
+        ].view(1, -1, 1)
     if bias is not None:
         output = output + bias.view(1, -1, 1)
     return output
@@ -260,24 +249,17 @@ def _copy_defused_expert_weights_to_moeblock(moeblock: MoeBlock, experts, device
         for expert_idx, expert in enumerate(experts):
             for linear_name in ("gate_proj", "up_proj", "down_proj"):
                 linear = getattr(expert, linear_name)
-                getattr(moeblock, f"expert_{linear_name}_weight")[expert_idx].copy_(
-                    linear.weight.data.to(device)
-                )
+                getattr(moeblock, f"expert_{linear_name}_weight")[expert_idx].copy_(linear.weight.data.to(device))
 
                 quant_weight = getattr(linear, "quant_weight", None)
-                if (
-                    quant_weight is not None
-                    and hasattr(moeblock, f"expert_{linear_name}_quant_weight")
-                ):
+                if quant_weight is not None and hasattr(moeblock, f"expert_{linear_name}_quant_weight"):
                     getattr(moeblock, f"expert_{linear_name}_quant_weight")[expert_idx].copy_(
                         quant_weight.data.to(device)
                     )
 
                 bias = linear.bias
                 if bias is not None and getattr(moeblock, f"expert_{linear_name}_bias") is not None:
-                    getattr(moeblock, f"expert_{linear_name}_bias")[expert_idx].copy_(
-                        bias.data.to(device)
-                    )
+                    getattr(moeblock, f"expert_{linear_name}_bias")[expert_idx].copy_(bias.data.to(device))
 
 
 # ============================================================================
@@ -323,7 +305,7 @@ class _Qwen3_5MoeRMSNormGated(DynamicModule):
 
     def _setup(self, cfg: Optional[Dict] = None):
         hidden_size = self.weight.shape[0]
-        eps = getattr(self, 'variance_epsilon', getattr(self, 'eps', 1e-6))
+        eps = getattr(self, "variance_epsilon", getattr(self, "eps", 1e-6))
         self.norm = RMSNorm(hidden_size, eps)
         with torch.no_grad():
             # NOTE: Qwen3_5RMSNormGated / FusedRMSNormGated use 1-centered
@@ -338,9 +320,7 @@ class _Qwen3_5MoeRMSNormGated(DynamicModule):
 # ============================================================================
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3_5MoeTextRotaryEmbedding: "Qwen3_5MoeTextRotaryEmbedding"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeTextRotaryEmbedding: "Qwen3_5MoeTextRotaryEmbedding"})
 class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
     """Pre-compute cos/sin cache for M-RoPE.
 
@@ -379,19 +359,12 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
             cos: (1, max_seq_len, 1, rotary_dim)
             sin: (1, max_seq_len, 1, rotary_dim)
         """
-        inv_freq_expanded = (
-            self.inv_freq[None, None, :, None]
-            .float()
-            .expand(1, max_seq_len, -1, 1)
-        )
-        positions = torch.arange(
-            max_seq_len, device=self.inv_freq.device
-        ).float()[None, :, None, None]
+        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(1, max_seq_len, -1, 1)
+        positions = torch.arange(max_seq_len, device=self.inv_freq.device).float()[None, :, None, None]
 
         device_type = (
             self.inv_freq.device.type
-            if isinstance(self.inv_freq.device.type, str)
-            and self.inv_freq.device.type != "mps"
+            if isinstance(self.inv_freq.device.type, str) and self.inv_freq.device.type != "mps"
             else "cpu"
         )
         with torch.autocast(device_type=device_type, enabled=False):
@@ -461,26 +434,16 @@ class _Qwen3_5MoeAttention(DynamicModule):
         value_states = self.v_proj(hidden_states)
 
         query_states = self.q_norm(query_states).transpose(1, 2)
-        key_states = self.k_norm(
-            key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        key_states = self.k_norm(key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
-            query_states, key_states = self.apply_rotary_pos_emb(
-                query_states, key_states, cos, sin, unsqueeze_dim=1
-            )
+            query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
 
         if self.use_cache:
-            key_states = self.k_cache(
-                key_states, past_seq_length, current_input_length, past_k_cache
-            )
-            value_states = self.v_cache(
-                value_states, past_seq_length, current_input_length, past_v_cache
-            )
+            key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
+            value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
         if self.use_bfp_flash_attention:
             attn_output = self.bfp_attn(query_states, key_states, value_states)
@@ -599,9 +562,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         )
         assert conv_cache is not None, "conv_cache is required"
         conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
-        hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(
-            self.conv1d.weight.dtype
-        )
+        hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
         conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
         conv_out = _manual_depthwise_conv1d_tail(
             hidden_states_new,
@@ -614,9 +575,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         mixed_qkv = mixed_qkv * mask_qkv
 
         mixed_qkv = mixed_qkv.transpose(1, 2)
-        query, key, value = torch.split(
-            mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
-        )
+        query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
         query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
         key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
         value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
@@ -630,12 +589,8 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         g = g * mask
 
         if self.num_v_heads // self.num_k_heads > 1:
-            query = query.repeat_interleave(
-                self.num_v_heads // self.num_k_heads, dim=2
-            )
-            key = key.repeat_interleave(
-                self.num_v_heads // self.num_k_heads, dim=2
-            )
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
         if use_recurrent:
             core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
@@ -682,20 +637,14 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 cumsum_matmul=self.cumsum_matmul,
             )
 
-        recurrent_state_out = (
-            last_recurrent_state
-            if last_recurrent_state is not None
-            else recurrent_state
-        )
+        recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
 
         b_sz, s, n, h = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
-        core_attn_out = core_attn_out.reshape(
-            core_attn_out.shape[0], core_attn_out.shape[1], -1
-        )
+        core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
 
         core_attn_out = core_attn_out.to(self.out_proj.weight.dtype)
         output = self.out_proj(core_attn_out)
@@ -735,9 +684,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             persistent=True,
         )
 
-        a_log_exp = (-self.A_log.exp()).to(
-            device=self.A_log.device, dtype=self.dt_bias.dtype
-        )
+        a_log_exp = (-self.A_log.exp()).to(device=self.A_log.device, dtype=self.dt_bias.dtype)
         self.register_buffer("A_log_exp", a_log_exp, persistent=True)
 
         self.register_buffer(
@@ -753,9 +700,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             )
 
         # Conv cache slice: extract last conv_kernel_size elements along time dim
-        self.conv_cache_slice = xhnn.DynamicSlice(
-            [self.conv_kernel_size], [2], [1]
-        )
+        self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])
 
         # Pre-create triangular masks for TorchFX tracing
         chunk_size = self.linear_chunk_size
@@ -763,9 +708,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         mask_incl = (idx[:, None] >= idx[None, :]).to(target_dtype)
         mask_strict = (idx[:, None] > idx[None, :]).to(target_dtype)
 
-        num_chunks = (
-            self.input_sequence_length + chunk_size - 1
-        ) // chunk_size
+        num_chunks = (self.input_sequence_length + chunk_size - 1) // chunk_size
         flat_batch_size = self.batch_size * self.num_v_heads * num_chunks
         eye_matrix = (
             torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
@@ -773,11 +716,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             .expand(flat_batch_size, chunk_size, chunk_size)
             .contiguous()
         )
-        cumsum_matrix = torch.triu(
-            torch.ones(
-                chunk_size, chunk_size, dtype=target_dtype, device=self.A_log.device
-            )
-        )
+        cumsum_matrix = torch.triu(torch.ones(chunk_size, chunk_size, dtype=target_dtype, device=self.A_log.device))
         self.register_buffer("chunk_mask_incl", mask_incl, persistent=True)
         self.register_buffer("chunk_mask_strict", mask_strict, persistent=True)
         self.register_buffer("chunk_eye_matrix", eye_matrix, persistent=True)
@@ -786,9 +725,12 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.cumsum_matmul = MatMul()
 
         # Pre-compute row masks for Method 4 forward substitution
-        chunk_row_masks = torch.eye(
-            chunk_size, dtype=target_dtype, device=self.A_log.device
-        ).unsqueeze(-1).expand(chunk_size, chunk_size, chunk_size).contiguous()
+        chunk_row_masks = (
+            torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
+            .unsqueeze(-1)
+            .expand(chunk_size, chunk_size, chunk_size)
+            .contiguous()
+        )
         self.register_buffer("chunk_row_masks", chunk_row_masks, persistent=False)
 
         # Pre-computed 8x8 identity for block Neumann inverse (BHN*nb, 8, 8)
@@ -808,25 +750,17 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         if cfg is None:
             return
         self.use_cache = cfg.use_cache
-        self.linear_attention_mode = cfg.get(
-            "linear_attention_mode", self.linear_attention_mode
-        )
+        self.linear_attention_mode = cfg.get("linear_attention_mode", self.linear_attention_mode)
         self.linear_chunk_size = cfg.get("linear_chunk_size", self.linear_chunk_size)
         self.return_cache = cfg.get("return_cache", self.return_cache)
-        self.input_sequence_length = cfg.get(
-            "input_sequence_length", self.input_sequence_length
-        )
+        self.input_sequence_length = cfg.get("input_sequence_length", self.input_sequence_length)
         self.batch_size = cfg.get("batch_size", self.batch_size)
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
         num_chunks = (self.input_sequence_length + chunk_size - 1) // chunk_size
         flat_batch_size = self.batch_size * self.num_v_heads * num_chunks
-        target_dtype = (
-            self.chunk_scale.dtype
-            if hasattr(self, "chunk_scale")
-            else self.in_proj_qkv.weight.dtype
-        )
+        target_dtype = self.chunk_scale.dtype if hasattr(self, "chunk_scale") else self.in_proj_qkv.weight.dtype
         eye_matrix = (
             torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
             .unsqueeze(0)
@@ -846,9 +780,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
-        self.conv_cache_slice = xhnn.DynamicSlice(
-            [self.conv_kernel_size], [2], [1]
-        )
+        self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])
 
 
 # ============================================================================
@@ -958,9 +890,7 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
             # Release expert modules after packing to reduce memory.
             self.experts = nn.ModuleList()
         else:
-            raise RuntimeError(
-                f"Unsupported Qwen3.5-MoE experts structure: {type(experts)}"
-            )
+            raise RuntimeError(f"Unsupported Qwen3.5-MoE experts structure: {type(experts)}")
         torch.cuda.empty_cache()
 
         return self
@@ -1038,7 +968,14 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
     def _setup(self, cfg):
         self.batch_size = cfg.get("batch_size", 1)
+        self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
+        self.max_layers = -1
+        if self.only_first_block:
+            self.max_layers = 1
+        else:
+            if "max_layers" in cfg and cfg.max_layers is not None:
+                self.max_layers = cfg.max_layers
         self.num_logits_to_keep = cfg.num_logits_to_keep
         assert self.num_logits_to_keep in [0, 1]
 
@@ -1065,9 +1002,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         # Layer type tracking
         self.layer_types = self.config.layer_types
         self.num_full_attention_layers = sum(1 for t in self.layer_types if t == "full_attention")
-        self.num_linear_attention_layers = sum(
-            1 for t in self.layer_types if t == "linear_attention"
-        )
+        self.num_linear_attention_layers = sum(1 for t in self.layer_types if t == "linear_attention")
 
         # ---- M-RoPE interleaved masks ----
         rope_parameters = self.config.rope_parameters
@@ -1107,10 +1042,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         alpha_scaling_layers = cfg.get("alpha_scaling_layers", [8, 20])
         chunk_inverse_alpha = cfg.get("chunk_inverse_alpha", 0.5)
         for idx_layer, decoder_layer in enumerate(self.layers):
-            if (
-                self.layer_types[idx_layer] == "linear_attention"
-                and idx_layer in alpha_scaling_layers
-            ):
+            if self.layer_types[idx_layer] == "linear_attention" and idx_layer in alpha_scaling_layers:
                 gdn = decoder_layer.linear_attn
                 gdn._alpha_scaling_config = {"alpha": chunk_inverse_alpha}
 
@@ -1171,29 +1103,17 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
             if self.use_cache:
                 if layer_type == "full_attention":
-                    _past_k_cache = (
-                        past_key_cache[full_attn_cache_idx] if past_key_cache is not None else None
-                    )
-                    _past_v_cache = (
-                        past_value_cache[full_attn_cache_idx]
-                        if past_value_cache is not None
-                        else None
-                    )
+                    _past_k_cache = past_key_cache[full_attn_cache_idx] if past_key_cache is not None else None
+                    _past_v_cache = past_value_cache[full_attn_cache_idx] if past_value_cache is not None else None
                     _past_conv_cache = None
                     _past_recurrent_state = None
                     full_attn_cache_idx += 1
                 else:
                     _past_k_cache = None
                     _past_v_cache = None
-                    _past_conv_cache = (
-                        past_conv_cache[linear_attn_cache_idx]
-                        if past_conv_cache is not None
-                        else None
-                    )
+                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
                     _past_recurrent_state = (
-                        past_recurrent_state[linear_attn_cache_idx]
-                        if past_recurrent_state is not None
-                        else None
+                        past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
                     linear_attn_cache_idx += 1
             else:
@@ -1202,15 +1122,9 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                 # Linear attention layers need conv_cache/recurrent_state even
                 # when use_cache=False (as initial state for the computation)
                 if layer_type == "linear_attention":
-                    _past_conv_cache = (
-                        past_conv_cache[linear_attn_cache_idx]
-                        if past_conv_cache is not None
-                        else None
-                    )
+                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
                     _past_recurrent_state = (
-                        past_recurrent_state[linear_attn_cache_idx]
-                        if past_recurrent_state is not None
-                        else None
+                        past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
                     linear_attn_cache_idx += 1
                 else:
@@ -1244,7 +1158,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                     past_recurrent_state=_past_recurrent_state,
                 )
 
-            if self.only_first_block:
+            if self.max_layers > 0 and idx_layer + 1 >= self.max_layers:
                 break
 
             # if True:
@@ -1312,9 +1226,7 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
 # ============================================================================
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3_5MoeForConditionalGeneration: "Qwen3_5MoeForConditionalGeneration"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeForConditionalGeneration: "Qwen3_5MoeForConditionalGeneration"})
 class _Qwen3_5MoeForConditionalGeneration(DynamicModule):
     """Top-level wrapper for Qwen3.5-MoE VL (ConditionalGeneration)."""
 

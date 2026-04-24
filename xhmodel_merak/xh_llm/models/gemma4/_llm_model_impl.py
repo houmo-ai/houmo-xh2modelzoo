@@ -45,10 +45,10 @@ class _Gemma4RMSNorm(DynamicModule):
             # Fallback for wrapped modules that can't determine hidden_size
             hidden_size = 8192  # Default for Gemma4
             device = None
-        
-        # Cache the hidden_size for later  
+
+        # Cache the hidden_size for later
         self._cached_hidden_size = hidden_size
-        
+
         if device is None:
             try:
                 device = next(self.parameters()).device
@@ -203,8 +203,14 @@ class _Gemma4TextDecoderLayer(DynamicModule):
 class _Gemma4TextModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict]):
         self.use_cache = cfg.get("use_cache", True)
-        max_seq_len = cfg.get("context_max_length", 2048) if hasattr(cfg, "get") else getattr(cfg, "context_max_length", 2048)
-        input_seq_len = cfg.get("input_sequence_length", max_seq_len) if hasattr(cfg, "get") else getattr(cfg, "input_sequence_length", max_seq_len)
+        max_seq_len = (
+            cfg.get("context_max_length", 2048) if hasattr(cfg, "get") else getattr(cfg, "context_max_length", 2048)
+        )
+        input_seq_len = (
+            cfg.get("input_sequence_length", max_seq_len)
+            if hasattr(cfg, "get")
+            else getattr(cfg, "input_sequence_length", max_seq_len)
+        )
         self._precompute_rope_cache(max_seq_len)
         self._setup_rope_slices(input_seq_len)
         return self
@@ -316,11 +322,11 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
 
 
 def register_wrap_modules():
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRotaryEmbedding
+
     from xhquant.nn.builder import FX_LEAF_MODULES
     from xhquant.nn.modules.normalized_modules import FloorDiv
     from xhquant.quantization.xh2a.builder import register_none_quanted_module
-
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextRotaryEmbedding
 
     # Register Gemma4TextRotaryEmbedding as FX leaf so the tracer doesn't trace into it
     # (its forward uses getattr with f-strings and x.device which are not proxy-safe)

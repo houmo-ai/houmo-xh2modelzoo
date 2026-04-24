@@ -503,12 +503,14 @@ class _Qwen3Model(_Qwen3ModelBase):
             logger.warning("Cosine and sine caches are not set up. This may lead to incorrect positional embeddings.")
 
     def _setup(self, cfg: dict | None = None):
+        self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
         self.max_layers = -1
         if self.only_first_block:
             self.max_layers = 1
-        if "max_layers" in cfg:
-            self.max_layers = cfg.max_layers
+        else:
+            if "max_layers" in cfg and cfg.max_layers is not None:
+                self.max_layers = cfg.max_layers
 
         self.num_logits_to_keep = cfg.num_logits_to_keep  # 1,取最后一个token的输出，0,取所有token的输出
         assert self.num_logits_to_keep in [0, 1]

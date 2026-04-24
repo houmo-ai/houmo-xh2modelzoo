@@ -2,7 +2,7 @@
 
 ## 开发手册
 
-[这里](<https://houmo.feishu.cn/wiki/GjWNwICABiBm8Ykn0GAcRKnen6d>)
+[这里](https://houmo.feishu.cn/wiki/GjWNwICABiBm8Ykn0GAcRKnen6d)
 
 ## 依赖项
 
@@ -15,14 +15,14 @@ pip install -v -e . --no-index --no-build-isolation
 或者 uv pip install -e . --link-mode=copy
 ```
 
-## 代码提交  
+## 代码提交
 
 ```拉取代码
 git pull --rebase
 ```
 
 ```bash
-在develop分支上提交代码，提交前请确保代码已经通过测试。  
+在develop分支上提交代码，提交前请确保代码已经通过测试。
 git push origin HEAD:refs/for/develop
 ```
 
@@ -30,11 +30,11 @@ git push origin HEAD:refs/for/develop
 
 需要量化的算子：Conv、Linear、MatMul、Gemm
 
-| 量化模式 | 权重位宽 | 激活位宽 | 计算模式 |
-|----------|----------|----------|----------|
-| w8a8-sefp | 8bit | 8bit | sefp |
-| w8a16-sefp | 8bit | 16bit | sefp |
-| w4a8-ssfp | 4bit | 8bit | ssfp |
+| 量化模式   | 权重位宽 | 激活位宽 | 计算模式 |
+| ---------- | -------- | -------- | -------- |
+| w8a8-sefp  | 8bit     | 8bit     | sefp     |
+| w8a16-sefp | 8bit     | 16bit    | sefp     |
+| w4a8-ssfp  | 4bit     | 8bit     | ssfp     |
 
 ## Model zoo
 

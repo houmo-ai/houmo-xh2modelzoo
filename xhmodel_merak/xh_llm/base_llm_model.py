@@ -255,6 +255,7 @@ class BaseLLMModel(XHBaseModel):
         super().__init__(config)
 
         self._kvcache_config = KVCacheConfig()  # 不能重新赋值
+        self._kvcache_config.use_cache = self.config.use_cache
         self.embed_tokens: nn.Module | None = None
 
         # self.wrap_cfg会在init_wrap中传入_model.py中
@@ -418,6 +419,8 @@ class BaseLLMModel(XHBaseModel):
         return not self.is_prefill()
 
     def set_prefill(self):
+        if self.is_prefill():
+            return
         self._llm_prefill = True
         data_processor = self.get_data_preprocessor()
         data_processor.input_sequence_length = self.config.prefill_chunk_length
@@ -426,6 +429,8 @@ class BaseLLMModel(XHBaseModel):
         self.update_cfg(self.wrap_cfg)
 
     def set_decode(self):
+        if self.is_decode():
+            return
         self._llm_prefill = False
         data_processor = self.get_data_preprocessor()
         data_processor.input_sequence_length = 1
@@ -510,7 +515,8 @@ class BaseLLMModel(XHBaseModel):
             if hasattr(module, "_update_cfg"):
                 module._update_cfg(cfg)
 
-        inference_model.apply(apply_fn)
+        if inference_model is not None:
+            inference_model.apply(apply_fn)
 
     def set_input_sequence_length(self, input_sequence_length: int):
         self.wrap_cfg.input_sequence_length = input_sequence_length
@@ -527,11 +533,12 @@ class BaseLLMModel(XHBaseModel):
             self._data_processor.input_sequence_length = self.config.prefill_chunk_length
 
     def forward(self, *args, **kwargs):
+        self._set_inference_model()
         inference_model = self._inference_model
         assert inference_model is not None, f"Inference model is not initialized for state: {self._state}"
         if is_graph_module(inference_model):
             args = unfold_args(args)
-        out = self._inference_model(*args, **kwargs)
+        out = inference_model(*args, **kwargs)
         if isinstance(out, (tuple, list)) and len(out) == 1:
             out = out[0]
         return out

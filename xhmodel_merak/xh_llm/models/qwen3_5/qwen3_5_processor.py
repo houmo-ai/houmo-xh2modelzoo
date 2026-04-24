@@ -8,9 +8,9 @@ from .processing_qwen3_5 import Qwen3_5Processor
 class Qwen3_5VLProcessorConfig(BaseConfig):  # noqa: N801
     def __init__(self):
         super().__init__()
-        self.patch_size: int = None
-        self.max_size_h: int = None
-        self.max_size_w: int = None
+        self.patch_size: int = 16
+        self.max_size_h: int = 224
+        self.max_size_w: int = 224
 
 
 class XHQwen3_5Processor(Qwen3_5Processor):  # noqa: N801

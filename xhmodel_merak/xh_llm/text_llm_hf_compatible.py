@@ -251,9 +251,11 @@ class TextLLMHFCompatible(DynamicModule):  # noqa: N801
         else:
             raise ValueError("You must specify either input_ids or inputs_embeds")
         if self._llm_prefill:
+            self._llm_model.set_prefill()
             if self.is_support_dynamic_input:
                 self._llm_model.set_input_sequence_length(seq_length)
         else:
+            self._llm_model.set_decode()
             self._llm_model.set_input_sequence_length(1)
 
         out = self._xh_orig_forward(

@@ -66,6 +66,7 @@ dependencies = [
   "peft (>=0.17.0)",
   "diffusers (>=0.37.0,<0.38.0)",
   "flash_attn (>=2.7.0,<2.8.2)",
+  "auto-round (>=0.12.0,<0.13.0)",
 ]
 description = "Quanted Model Zoo toolkit for XH2a."
 name = "xhmodel_zoo"

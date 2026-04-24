@@ -2,6 +2,9 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from xhmodel_merak.xh_llm.types import ModelSwitcher
+from xhquant.api import FXInterpreter
+
 from .kv_cache_mixin import KVCacheContextManager, KVCacheMixin, KVCacheWithLinearMixin
 
 
@@ -90,3 +93,13 @@ class LLMInferenceContextManager(KVCacheContextManager):
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
         self._model.release_inference_model()
+
+
+class SwitchFXInterpreter:
+    def __init__(self, model: ModelSwitcher):
+        self._model = model
+
+    def run(self, *args, **kwargs):
+        inference_model = self._model.activate_model()
+        fx_interpreter = FXInterpreter(inference_model)
+        return fx_interpreter.run(*args, **kwargs)

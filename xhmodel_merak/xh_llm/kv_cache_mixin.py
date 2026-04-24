@@ -14,16 +14,18 @@ class KVCacheMixin:
 
     CACHCE_TENSOR_TYPE = CacheTensor  # KV Cache使用的Tensor类型，默认为CacheTensor
     kvcache_config: KVCacheConfig | KVCacheWithLinearConfig
-    use_cache: bool
 
     def __init__(self, kv_cache_config: KVCacheConfig | KVCacheWithLinearConfig) -> None:
         super().__init__()
         self.kvcache_config = kv_cache_config
-        self.use_cache = True
         self.past_key_caches: CacheList[Tensor | CacheTensor] = CacheList()
         self.past_value_caches: CacheList[Tensor | CacheTensor] = CacheList()
         self._device = None
         self._dtype = None
+
+    @property
+    def use_cache(self) -> bool:
+        return self.kvcache_config.use_cache
 
     def prepare_kv_cache(self):
         if not self.use_cache:
@@ -73,17 +75,16 @@ class KVCacheMixin:
             ...     do_something()
         """
         try:
-            if self.use_cache:
-                if device is not None:
-                    with torch.device(device):
-                        self.prepare_kv_cache()
-                    if torch.device(device).type == "meta":
-                        device = "cpu"
-                    with torch.device(device):
-                        self.prepare_other_cache()
-                else:
+            if device is not None:
+                with torch.device(device):
                     self.prepare_kv_cache()
+                if torch.device(device).type == "meta":
+                    device = "cpu"
+                with torch.device(device):
                     self.prepare_other_cache()
+            else:
+                self.prepare_kv_cache()
+                self.prepare_other_cache()
             yield
         finally:
             self.clear_kv_cache()
@@ -124,9 +125,11 @@ class EmptyKVCacheMixin:
     def kv_cache_scope(self, device: torch.device | str | None = None) -> Generator[None, None, None]:
         try:
             self.prepare_kv_cache()
+            self.prepare_other_cache()
             yield
         finally:
             self.clear_kv_cache()
+            self.clear_other_cache()
 
 
 class KVCacheWithLinearMixin(KVCacheMixin):
@@ -138,8 +141,6 @@ class KVCacheWithLinearMixin(KVCacheMixin):
         self.past_recurrent_states: CacheList[Tensor | CacheTensor] = CacheList()
 
     def prepare_other_cache(self):
-        if not self.use_cache:
-            return
         linear_kv_cache_config = self.kvcache_config.linear_kv_cache_config
         for _i in range(linear_kv_cache_config.num_layers):
             conv_cache_shape = [
@@ -154,8 +155,12 @@ class KVCacheWithLinearMixin(KVCacheMixin):
                 linear_kv_cache_config.head_v_dim,
             ]
             cache_dtype = linear_kv_cache_config.cache_torch_dtype
-            self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
-            self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
+            self.past_conv_caches.append(
+                CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype, device=self._device))
+            )
+            self.past_recurrent_states.append(
+                CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype, device=self._device))
+            )
 
     def clear_other_cache(self):
         self.past_conv_caches.clear()
@@ -181,18 +186,17 @@ class KVCacheContextManager:
         self._model = llm_model
 
     def __enter__(self):
-        if self._model.get_kvcache_mixin().use_cache:
-            if self.device is not None:
-                with torch.device(self.device):
-                    self._model.get_kvcache_mixin().prepare_kv_cache()
-                device = self.device
-                if torch.device(device).type == "meta":
-                    device = "cpu"
-                with torch.device(device):
-                    self._model.get_kvcache_mixin().prepare_other_cache()
-            else:
+        if self.device is not None:
+            with torch.device(self.device):
                 self._model.get_kvcache_mixin().prepare_kv_cache()
+            device = self.device
+            if torch.device(device).type == "meta":
+                device = "cpu"
+            with torch.device(device):
                 self._model.get_kvcache_mixin().prepare_other_cache()
+        else:
+            self._model.get_kvcache_mixin().prepare_kv_cache()
+            self._model.get_kvcache_mixin().prepare_other_cache()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._model.get_kvcache_mixin().clear_kv_cache()

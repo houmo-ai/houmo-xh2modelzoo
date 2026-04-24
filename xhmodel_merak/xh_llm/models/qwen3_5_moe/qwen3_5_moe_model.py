@@ -9,7 +9,10 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText
 from transformers.cache_utils import Cache
-from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeCausalLMOutputWithPast, Qwen3_5MoeForConditionalGeneration
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeCausalLMOutputWithPast,
+    Qwen3_5MoeForConditionalGeneration,
+)
 
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_vision_model import XHQwen3_5MoeVisionModel
@@ -178,11 +181,13 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
     def __init__(self, config: XHQwen3_5MoeModelConfig):
         super().__init__(config)
 
-        if hasattr(config, "visual_config") and config.visual_config is not None:
+        if hasattr(config, "visual_config") and config.visual_config is not None and config.visual_config.enable:
             self.visual = XHQwen3_5MoeVisionModel(config.visual_config)
-        self.visual.config.model_name = (
-            f"{self.config.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
-        )
+            self.visual.config.model_name = (
+                f"{self.config.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
+            )
+        else:
+            self.visual = None
         self.full_attention_layer_indices: list[int] = []
         self.linear_attention_layer_indices: list[int] = []
         self._kvcache_config = KVCacheWithLinearConfig()
@@ -196,7 +201,8 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
     @VisionLLMModel.work_dir.setter
     def work_dir(self, work_dir: str):
         self.config.work_dir = work_dir
-        self.visual.work_dir = str(Path(work_dir) / "visual")
+        if self.visual is not None:
+            self.visual.work_dir = str(Path(work_dir) / "visual")
 
     def is_support_dynamic_input(self) -> bool:
         if self._state in [
@@ -215,9 +221,10 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
 
     def get_dummy_inputs(self):
         data_batch = super().get_dummy_inputs()
-        visual_dummy_inputs = self.visual._get_dummy_inputs()
-        data_batch["image_grid_thw"] = visual_dummy_inputs.get("image_grid_thw", None)
-        data_batch["video_grid_thw"] = visual_dummy_inputs.get("video_grid_thw", None)
+        if self.visual is not None:
+            visual_dummy_inputs = self.visual._get_dummy_inputs()
+            data_batch["image_grid_thw"] = visual_dummy_inputs.get("image_grid_thw", None)
+            data_batch["video_grid_thw"] = visual_dummy_inputs.get("video_grid_thw", None)
         return data_batch
 
     @property
@@ -232,7 +239,9 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
         return hf_model.model.language_model
 
     def get_tf_processor(self):
-        return self.visual.get_tf_processor()
+        if self.visual is not None:
+            return self.visual.get_tf_processor()
+        return None
 
     def get_inference_model(self):
         inference_model = super().get_inference_model()
@@ -246,19 +255,19 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
 
     def set_prefill(self):
         self.wrap_cfg["linear_attention_mode"] = "chunk"
-        super().set_prefill()
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("prefill")
         elif self._state in [LLMModelState.QUANTED_ALIGNED, LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_DISABLE]:
             self._quanted_model.set_activate_model("prefill")
+        super().set_prefill()
 
     def set_decode(self):
         self.wrap_cfg["linear_attention_mode"] = "recurrent"
-        super().set_decode()
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("decode")
         elif self._state in [LLMModelState.QUANTED_ALIGNED, LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_DISABLE]:
             self._quanted_model.set_activate_model("decode")
+        super().set_decode()
 
     def _to_quanted(self, frontend_model, state):
         prefill_fronted_model = frontend_model.prefill
@@ -277,19 +286,40 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
         prefill_wrap_model = wrap_model
         decode_wrap_model = wrap_model
         decode_wrap_model = _copy_model_shared_params(wrap_model)
-        self._wrap_model = wrap_model
+        self._wrap_model = prefill_wrap_model
         prefill_frontend_model = super()._to_fronted(prefill_wrap_model)
 
         self._wrap_model = decode_wrap_model
         self.set_decode()
         decode_frontend_model = super()._to_fronted(decode_wrap_model)
         self._frontend_model = prefill_frontend_model
-        self._wrap_model = prefill_frontend_model
+        self._wrap_model = prefill_wrap_model
         self.set_prefill()
         return ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
 
     def _wraped_pre(self, hf_model: Qwen3_5MoeForConditionalGeneration):
         super()._wraped_pre(hf_model)
+        llm_model = self._get_language_model(hf_model)
+        text_config = llm_model.config
+        self.layer_types = list(text_config.layer_types)
+
+        if self.config.only_first_block:
+            self.linear_attention_layer_indices = []
+            for idx, layer_type in enumerate(self.layer_types):
+                if layer_type == "full_attention":
+                    self.full_attention_layer_indices = [idx]
+                    break
+                else:
+                    self.linear_attention_layer_indices.append(idx)
+            self.config.max_layers = len(self.full_attention_layer_indices) + len(self.linear_attention_layer_indices)
+            self.config.only_first_block = False
+        else:
+            self.full_attention_layer_indices = [
+                idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
+            ]
+            self.linear_attention_layer_indices = [
+                idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+            ]
         del hf_model.model.visual
         return hf_model
 
@@ -307,18 +337,24 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
         self.embed_tokens = copy.deepcopy(llm_model.get_input_embeddings())
         text_config = llm_model.config
         self.pad_token_id = llm_model.config.eos_token_id
-        self.layer_types = list(text_config.layer_types)
-        self.full_attention_layer_indices = [
-            idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
-        ]
-        self.linear_attention_layer_indices = [
-            idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        ]
+        # self.layer_types = list(text_config.layer_types)
+        # self.full_attention_layer_indices = [
+        #     idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
+        # ]
+        # self.linear_attention_layer_indices = [
+        #     idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        # ]
         self_attn = llm_model.layers[self.full_attention_layer_indices[0]].self_attn
         linear_attn = llm_model.layers[self.linear_attention_layer_indices[0]].linear_attn
         if self.use_cache:
             num_decoder_layers = len(self.full_attention_layer_indices)
             head_dim = self_attn.head_dim
+
+            max_layers = self.config.get_max_decode_layers()
+            if max_layers > 0:
+                assert max_layers <= num_decoder_layers
+                num_decoder_layers = max_layers
+
             self.kvcache_config.num_layers = num_decoder_layers
             self.kvcache_config.kv_cache_shape = [
                 1,
@@ -357,12 +393,14 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
 
     def _set_device(self, device):
         super()._set_device(device)
-        self.visual._set_device(device)
+        if self.visual is not None:
+            self.visual._set_device(device)
         return self
 
     def _set_dtype(self, dtype):
         super()._set_dtype(dtype)
-        self.visual._set_dtype(dtype)
+        if self.visual is not None:
+            self.visual._set_dtype(dtype)
         return self
 
     def _get_data_preprocessor(self) -> BaseLLMInputProcessor:
@@ -437,6 +475,7 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
         super().export_hmonnx(output_dir)
 
     def export_visual_hmonnx(self, output_dir):
+        assert self.visual is not None, "Visual model is not initialized, cannot export visual hmonnx."
         self.visual.export_hmonnx(output_dir)
 
     def get_export_info(self, output_dir) -> ExportData:
@@ -445,6 +484,7 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
         if model_name is None or len(model_name) == 0:
             raise ValueError("Model name is not specified in config, please set model_name in config before exporting.")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
+        assert self.visual is not None, "Visual model is not initialized, cannot get visual config for export."
         image_size_h = self.visual.config.max_size_h
         image_size_w = self.visual.config.max_size_w
         model_name = f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"
@@ -466,6 +506,7 @@ class XHQwen3_5MoeModel(VisionLLMModel):  # noqa: N801
             self.to_quanted_aligned()
         self._quanted_model.prefill.fixed()
         self._quanted_model.decode.fixed()
+        assert self.visual is not None, "Visual model is not initialized, cannot export hmonnx."
         self.visual.quanted_model.fixed()
         exported_info = self.get_export_info(output_dir)
         self.config.model_name = exported_info.model_name

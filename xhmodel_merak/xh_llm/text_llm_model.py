@@ -23,7 +23,6 @@ class TextLLMModel(BaseLLMModel, TextLLMInferenceMixin):
         config: TextLLMModelConfig,
     ):
         super().__init__(config)
-        self.use_cache = config.use_cache
 
     def _get_language_model(self, hf_model: Any) -> Any:
         if not hasattr(hf_model, "model"):
