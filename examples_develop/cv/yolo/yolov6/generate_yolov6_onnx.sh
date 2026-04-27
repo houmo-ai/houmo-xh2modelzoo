@@ -34,6 +34,7 @@ echo "项目根目录: $PROJECT_ROOT"
 # YOLOv6 ONNX 文件的最终目标存放目录 (与 xhquant export.py 的默认路径一致)
 FINAL_ONNX_DIR="$PROJECT_ROOT/data/models/yolo"
 YOLOV6_OFFICIAL_REPO_PATH="$PROJECT_ROOT/yolov6_official_repo"
+YOLOV6_REPO_URL="https://github.com/meituan/YOLOv6.git"
 YOLOV6M_PT_URL="https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6m.pt" # YOLOv6m 的下载链接
 YOLOV6M_PT_FILE="$YOLOV6_OFFICIAL_REPO_PATH/yolov6m.pt"
 YOLOV6_EXPORT_SCRIPT_PATH="deploy/ONNX/export_onnx.py" # 官方导出脚本相对于其仓库根目录的路径
@@ -58,7 +59,7 @@ fi
 # 3. 克隆 YOLOv6 官方代码 (如果还没有的话)
 if [ ! -d "$YOLOV6_OFFICIAL_REPO_PATH" ]; then
     echo "Cloning YOLOv6 official repository to $YOLOV6_OFFICIAL_REPO_PATH..."
-    git clone https://github.com/meituan/YOLOv6.git "$YOLOV6_OFFICIAL_REPO_PATH"
+    git clone "$YOLOV6_REPO_URL" "$YOLOV6_OFFICIAL_REPO_PATH"
     if [ $? -ne 0 ]; then
         echo "错误: 克隆 YOLOv6 仓库失败！请检查网络或权限。脚本将终止。"
         exit 1
@@ -89,13 +90,14 @@ fi
 
 # 6. 使用官方脚本导出 ONNX 模型
 echo "使用官方脚本导出 YOLOv6m.pt 为 ONNX 格式..."
+# PyTorch 2.6+ 默认为 torch.load(..., weights_only=True)，
+# 会导致 YOLOv6 官方脚本无法直接加载发布的 .pt checkpoint。
 (cd "$YOLOV6_OFFICIAL_REPO_PATH" && \
-python "$YOLOV6_EXPORT_SCRIPT_PATH" \
+TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 python "$YOLOV6_EXPORT_SCRIPT_PATH" \
     --weights "$YOLOV6M_PT_FILE" \
     --img 640 \
     --batch 1 \
-    --simplify \
-    &> /dev/null)
+    --simplify)
 if [ $? -ne 0 ]; then
     echo "错误: YOLOv6m ONNX 导出失败！脚本将终止。"
     exit 1

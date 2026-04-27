@@ -77,9 +77,10 @@ fi
 
 # 4. 进入官方仓库并安装 Python 依赖
 echo "进入 $YOLOV7_OFFICIAL_REPO_PATH 并安装 Python 依赖..."
-# 注意: YOLOv7 的 requirements.txt 可能需要一些特殊处理 (例如安装 torch 等)
-# 确保在安装 torch 后再安装 requirements，或者按照其官方指南
-(cd "$YOLOV7_OFFICIAL_REPO_PATH" && pip install -r requirements.txt)
+# YOLOv7 官方 requirements 钉死了 numpy<1.24，在 Python 3.13 下无法正常安装。
+# 导出流程只需要一组较小的运行时依赖，这里直接安装兼容当前环境的最小集合。
+(cd "$YOLOV7_OFFICIAL_REPO_PATH" && \
+pip install matplotlib opencv-python Pillow PyYAML requests scipy tqdm pandas seaborn tensorboard thop onnx onnx-simplifier)
 if [ $? -ne 0 ]; then
     echo "错误: YOLOv7 官方仓库依赖安装失败！脚本将终止。"
     exit 1
@@ -99,14 +100,14 @@ fi
 
 # 6. 使用官方脚本导出 ONNX 模型
 echo "使用官方脚本导出 $YOLOV7_MODEL_NAME.pt 为 ONNX 格式..."
-# --- 关键修正: 移除 --output 参数，确保行尾没有空格 ---
+# PyTorch 2.6+ 默认为 torch.load(..., weights_only=True)，
+# 会导致 YOLOv7 官方脚本无法直接加载发布的 .pt checkpoint。
 (cd "$YOLOV7_OFFICIAL_REPO_PATH" && \
-python "$YOLOV7_EXPORT_SCRIPT_PATH" \
+TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 python "$YOLOV7_EXPORT_SCRIPT_PATH" \
     --weights "$YOLOV7_PT_FILE" \
     --img-size "$YOLOV7_IMG_SIZE" \
     --batch-size 1 \
-    --simplify \
-    &> /dev/null) # 将所有输出重定向到 /dev/null，避免干扰
+    --simplify)
 # 检查 python 命令的退出状态
 if [ $? -ne 0 ]; then
     echo "错误: YOLOv7 ONNX 导出失败！(Python 命令返回非零状态)。脚本将终止。"

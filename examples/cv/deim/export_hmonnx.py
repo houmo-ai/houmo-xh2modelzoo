@@ -312,7 +312,8 @@ def main(args):
     result_images = draw_results([im_pil], torch_results)
     result_images[0].save(Path(work_dir) / f"{fname}_torch.jpg")
 
-    im_dummy = torch.rand(1, 3, 640, 640)
+    im_dummy_cpu = torch.rand(1, 3, 640, 640)
+    im_dummy = im_dummy_cpu.to(device)
     # size = torch.tensor([[640, 640]])
     _ = model(im_dummy)
 
@@ -324,7 +325,7 @@ def main(args):
             tmp_onnx_file = os.path.join(tmpdir, "tmp.onnx")
             torch.onnx.export(
                 model,
-                im_dummy,
+                im_dummy_cpu,
                 tmp_onnx_file,
                 input_names=["images"],
                 output_names=["logits", "boxes"],
@@ -350,7 +351,7 @@ def main(args):
             to_export_hmonnx,
         )
 
-        fronted_graph_module = to_frontend_graph(out_onnx_file, FrontendType.ONNX, [im_dummy])
+        fronted_graph_module = to_frontend_graph(out_onnx_file, FrontendType.ONNX, [im_dummy_cpu])
 
         fronted_graph_module.to(device)
         pred_logits, pred_boxes = fronted_graph_module(*inputs)
@@ -375,7 +376,7 @@ def main(args):
         del pred_logits
         del pred_boxes
 
-        exported_graph_module = to_export_graph(quant_graph_module, [im_dummy])
+        exported_graph_module = to_export_graph(quant_graph_module, [im_dummy_cpu])
         inputs = map_aggregate(inputs, lambda x: x.to(device).to(torch.float16))
         pred_logits, pred_boxes = exported_graph_module(*inputs)
         exported_result = postprocess(pred_logits, pred_boxes, postprocessor, data_sample["meta"], 0.5)
@@ -387,11 +388,11 @@ def main(args):
         to_export_hmonnx(exported_graph_module, out_hmonnx_file)
 
     else:
-        convert_onnx_to_hmonnx(out_onnx_file, [im_dummy], target_device, out_hmonnx_file)
+        convert_onnx_to_hmonnx(out_onnx_file, [im_dummy_cpu], target_device, out_hmonnx_file)
 
     meta_file = str(Path(work_dir) / "meta.json")
     meta_info = {
-        "input_shape": im_dummy.shape,
+        "input_shape": im_dummy_cpu.shape,
         "model_name": "deim",
         "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "hmonnx": str(Path(out_hmonnx_file).relative_to(Path(meta_file).parent)),

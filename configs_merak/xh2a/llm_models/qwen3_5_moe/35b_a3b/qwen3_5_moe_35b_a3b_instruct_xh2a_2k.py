@@ -11,7 +11,7 @@ model = dict(
         max_size_w=448,
         max_size_h=448,
         quant_scheme=dict(
-            quant_type="w8a8h1_sefp",
+            quant_type="w8a8h0_ssfp",
             ops={},
         ),
     ),

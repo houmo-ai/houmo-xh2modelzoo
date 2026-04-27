@@ -8,13 +8,13 @@
 #   python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
 #       --model /data01/nfs_shared/Qwen3.5-35B-A3B \
 #       --context-length 2048 --input-sequence-length 256 \
-#       --quant-type w8a8h0_sefp
+#       --quant-type w8a8h0_ssfp
 #
 # Usage (GPTQModel weights):
 #   python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
 #       --model /data01/nfs_shared/Qwen3.5-35B-A3B \
 #       --quant-weight /data01/home/huxing/gptqmodel/work_dirs/Qwen35_35B_A3B_attn4_e4_se4_0324 \
-#       --quant-type w4a8h0_sefp \
+#       --quant-type w4a8h0_ssfp \
 #       --context-length 2048 --input-sequence-length 256
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

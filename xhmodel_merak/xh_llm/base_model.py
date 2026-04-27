@@ -263,6 +263,19 @@ class XHBaseModel(DeviceMixin):
         else:
             quant_cfg = {}
         quant_cfg = ConfigDict(quant_cfg)
+        for legacy_key, config_key in (("nodes", "nodes_cfg"), ("ops", "ops_cfg")):
+            if legacy_key not in quant_cfg:
+                continue
+            legacy_overrides = quant_cfg.pop(legacy_key)
+            mapped_overrides = quant_cfg.setdefault(config_key, ConfigDict())
+            for name, override_cfg in legacy_overrides.items():
+                if name in mapped_overrides:
+                    continue
+                mapped_overrides[name] = (
+                    ConfigDict(dict(quant_type=override_cfg))
+                    if isinstance(override_cfg, str)
+                    else ConfigDict(override_cfg)
+                )
         return quant_cfg
 
     def _to_quanted(self, frontend_model, state):
@@ -756,6 +769,47 @@ class XHBaseModel(DeviceMixin):
 
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
+        return hf_model
+    
+    @classmethod
+    def _dequantize_gptqmodel(cls, native_hf_model: nn.Module) -> nn.Module:
+        """
+        Dequantize a GPTQ model loaded via GPTQModel library.
+        This handles models loaded through `_load_gptqmodel` which contain QuantLinear layers.
+        """
+        from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
+        from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+        
+        hf_model = native_hf_model
+        torch_linear_cls = [PackableQuantLinear]
+        try:
+            from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+            torch_linear_cls.append(TorchFusedQuantLinear)
+        except Exception:
+            pass
+
+        # Find and convert all QuantLinear modules
+        dequant_linears = []
+        for name, module in hf_model.named_modules():
+            if isinstance(module, tuple(torch_linear_cls)):
+                dequant_linears.append((name, module))
+
+        if dequant_linears:
+            logger = get_xhquant_logger()
+            pbar = tqdm(dequant_linears, desc="Dequantizing GPTQ model")
+            for name, module in pbar:
+                pbar.set_description(f"Dequantizing GPTQ: {name}")
+                gptqmodel_torch_qlinear_converter(module)
+
+        # Clear quantization metadata
+        if hasattr(hf_model, "config") and hasattr(hf_model.config, "quantization_config"):
+            hf_model.config.quantization_config = None
+        
+        if hasattr(hf_model, "quantization_method"):
+            hf_model.quantization_method = None
+        if hasattr(hf_model, "_is_hf_initialized"):
+            hf_model._is_hf_initialized = False
+            
         return hf_model
 
     @classmethod

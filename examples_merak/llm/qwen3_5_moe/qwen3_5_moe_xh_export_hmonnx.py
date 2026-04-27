@@ -122,7 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="")
     parser.add_argument("--context-length", type=int, default=2048, help="max context sequence length")
     parser.add_argument("--prefill-chunk-length", type=int, default=256, help="prefill chunk length")
-    parser.add_argument("--quant-type", default="w8a8h1_sefp", help="quant type")
+    parser.add_argument("--quant-type", default="w8a8h0_ssfp", help="quant type")
     parser.add_argument("--quant-weight", type=str, default=None, help="optional quant weight path")
     parser.add_argument("--max-size-w", type=int, default=448, help="vision branch max width")
     parser.add_argument("--max-size-h", type=int, default=448, help="vision branch max height")
