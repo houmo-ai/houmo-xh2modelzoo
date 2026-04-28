@@ -96,6 +96,18 @@ class BaseLLMModelConfig(HFModelConfig):
         max_pe_length: int = 32768,
         **kwargs,
     ):
+        # 内部调试参数
+        only_first_block = False
+        if "only_first_block" in kwargs:
+            only_first_block = kwargs.pop("only_first_block")
+
+        max_layers = None
+        if "max_layers" in kwargs:
+            max_layers = kwargs.pop("max_layers")
+
+        enable_auto_offload = False
+        if "enable_auto_offload" in kwargs:
+            enable_auto_offload = kwargs.pop("enable_auto_offload")
         super().__init__(
             model_name=model_name,
             chip_arch=chip_arch,
@@ -117,19 +129,6 @@ class BaseLLMModelConfig(HFModelConfig):
             "quant_scheme must be a dict or QuantScheme instance"
         )
         self.quant_scheme = quant_scheme
-
-        # 内部调试参数
-        only_first_block = False
-        if "only_first_block" in kwargs:
-            only_first_block = kwargs.pop("only_first_block")
-
-        max_layers = None
-        if "max_layers" in kwargs:
-            max_layers = kwargs.pop("max_layers")
-
-        enable_auto_offload = False
-        if "enable_auto_offload" in kwargs:
-            enable_auto_offload = kwargs.pop("enable_auto_offload")
 
         self.only_first_block = only_first_block
         self.max_layers = max_layers

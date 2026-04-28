@@ -52,12 +52,12 @@ def main(args):
         model_cfg.enable_prefill_chunk = True  # 开启prefill chunk后，设置chunk长度为512
         model_cfg.use_cache = True
 
-    assert type(model_cfg).__name__ == "XHQwen3LegacyModelConfig", (
+    assert type(model_cfg).__name__ in ["XHQwen3LegacyModelConfig", "XHQwen3LegacyOptModelConfig"], (
         f"Expected model config type XHQwen3LegacyModelConfig, but got {type(model_cfg).__name__}"
     )
     logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
     xh_model: XHQwen3LegacyModel = AutoLLMModel.from_pretrained(config=model_cfg)
-    assert type(xh_model).__name__ == "XHQwen3LegacyModel", (
+    assert type(xh_model).__name__ in ["XHQwen3LegacyModel", "XHQwen3LegacyOptModel"], (
         f"Expected model type XHQwen3LegacyModel, but got {type(xh_model).__name__}"
     )
     eval_type = LLMModelState.from_string(eval_type)
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         default="configs_merak/xh2a/llm_models/qwen3_legacy/1.7b/qwen3_1.7b_legacy_xh2a_2k.py",
     )
     parser.add_argument("--model", type=str)
-    parser.add_argument("--eval-type", type=str, default="quanted_fast", choices=eval_types)
+    parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")

@@ -12,6 +12,10 @@ class BaseAttrDict(AttrDict):
 
 
 class BaseConfig:
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
     """
     以下划线开头的属性,不会出现在json中
     """
@@ -63,7 +67,7 @@ class BaseModelConfig(BaseConfig):
         enable: bool = True,
         **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
         self.model_name = model_name
         self.chip_arch = chip_arch
         self.model_type = model_type
