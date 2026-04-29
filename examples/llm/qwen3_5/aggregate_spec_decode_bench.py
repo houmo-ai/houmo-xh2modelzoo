@@ -70,7 +70,6 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         sums: dict[str, list[float]] = defaultdict(list)
         for item in items:
             spec = item.get("spec", {})
-            base = item.get("baseline", {})
             for key in (
                 "target_prefill_calls",
                 "target_decoder_calls",
@@ -85,9 +84,6 @@ def _summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ):
                 if key in spec and spec[key] is not None:
                     sums[f"spec_{key}"].append(float(spec[key]))
-            for key in ("target_prefill_calls", "target_decoder_calls"):
-                if key in base and base[key] is not None:
-                    sums[f"base_{key}"].append(float(base[key]))
         means = {key: (sum(values) / len(values)) for key, values in sums.items() if values}
         per_category[category] = {"n": len(items), **means}
         for key, value in means.items():
@@ -194,8 +190,8 @@ def _render_summary_table(reports: list[dict[str, Any]]) -> list[str]:
     lines = [
         "## Overall summary",
         "",
-        "| model | think | base_decoder | spec_target_decoder | mtp_prefill | mtp_decode | dflash_prefill | dflash_decode | accept_rate | avg_accept/round | output_tokens |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| model | think | spec_target_decoder | mtp_prefill | mtp_decode | dflash_prefill | dflash_decode | accept_rate | avg_accept/round | output_tokens |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for report in reports:
         tag = report["_tag"]
@@ -207,7 +203,6 @@ def _render_summary_table(reports: list[dict[str, Any]]) -> list[str]:
                     [
                         tag,
                         mode,
-                        _fmt_metric(overall.get("base_target_decoder_calls")),
                         _fmt_metric(overall.get("spec_target_decoder_calls")),
                         _fmt_metric(overall.get("spec_mtp_prefill_calls")),
                         _fmt_metric(overall.get("spec_mtp_decode_calls")),
@@ -243,8 +238,8 @@ def _render_category_sections(reports: list[dict[str, Any]]) -> list[str]:
             lines.append("")
             per_cat = _summary_for_mode(report, mode).get("per_category", {})
             if per_cat:
-                lines.append("| category | n | base_decoder | spec_target_decoder | mtp_decode | dflash_decode | accept_rate | avg_accept/round |")
-                lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+                lines.append("| category | n | spec_target_decoder | mtp_decode | dflash_decode | accept_rate | avg_accept/round |")
+                lines.append("| --- | --- | --- | --- | --- | --- | --- |")
                 for cat, stats in per_cat.items():
                     lines.append(
                         "| "
@@ -252,7 +247,6 @@ def _render_category_sections(reports: list[dict[str, Any]]) -> list[str]:
                             [
                                 cat,
                                 _fmt_metric(stats.get("n")),
-                                _fmt_metric(stats.get("base_target_decoder_calls")),
                                 _fmt_metric(stats.get("spec_target_decoder_calls")),
                                 _fmt_metric(stats.get("spec_mtp_decode_calls")),
                                 _fmt_metric(stats.get("spec_dflash_decode_calls")),
@@ -266,11 +260,9 @@ def _render_category_sections(reports: list[dict[str, Any]]) -> list[str]:
 
             chosen = _examples_for_mode(report, mode)
             if chosen:
-                lines.append("Representative cases (baseline vs draft):")
+                lines.append("Representative cases:")
                 lines.append("")
                 for cat, row in chosen.items():
-                    base = row.get("baseline_full") or row.get("baseline", {})
-                    baseline_counts = row.get("baseline", {})
                     spec = row.get("spec", {})
                     lines.append(f"##### {cat} — `{row.get('id', '')}` (len={row.get('char_length')})")
                     lines.append("")
@@ -280,17 +272,6 @@ def _render_category_sections(reports: list[dict[str, Any]]) -> list[str]:
                     lines.append(row.get("prompt", ""))
                     lines.append("```")
                     lines.append("")
-                    lines.append(
-                        f"- baseline same-output counts: decoder_calls={baseline_counts.get('target_decoder_calls')}, "
-                        f"prefill_calls={baseline_counts.get('target_prefill_calls')}, "
-                        f"output_tokens={baseline_counts.get('output_tokens')}"
-                    )
-                    if row.get("baseline_full"):
-                        lines.append(
-                            f"- baseline actual run: decoder_calls={base.get('target_decoder_calls')}, "
-                            f"prefill_calls={base.get('target_prefill_calls')}, "
-                            f"output_tokens={base.get('output_tokens')}"
-                        )
                     draft_extra = ""
                     if "mtp_decode_calls" in spec:
                         draft_extra = (
@@ -309,13 +290,6 @@ def _render_category_sections(reports: list[dict[str, Any]]) -> list[str]:
                         f"output_tokens={spec.get('output_tokens')}, "
                         f"overall_accept_rate={accept_str}{draft_extra}"
                     )
-                    lines.append("")
-                    lines.append("<details><summary>baseline output</summary>")
-                    lines.append("")
-                    lines.append("```text")
-                    lines.append(base.get("text", ""))
-                    lines.append("```")
-                    lines.append("</details>")
                     lines.append("")
                     lines.append("<details><summary>spec output</summary>")
                     lines.append("")

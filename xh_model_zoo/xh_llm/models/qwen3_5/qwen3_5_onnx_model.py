@@ -14,13 +14,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import TextStreamer
 
-from xhquant.xhonnxruntime import AutoOffloadGraphModel, HMONNXGrapInference
+from xhquant.xhonnxruntime import (
+    AutoOffloadGraphModel,
+    HMONNXCUDAGraphInference,
+    HMONNXGrapInference,
+)
 from xhquant.core import CacheTensor
 
 from ..builder import MODELS
@@ -61,8 +65,11 @@ def _build_inputs_embeds(
     return inputs_embeds
 
 
+HMONNXSession = Union[HMONNXGrapInference, HMONNXCUDAGraphInference]
+
+
 def _resolve_input_name(
-    session: HMONNXGrapInference, candidates: Tuple[str, ...], fallback=None
+    session: HMONNXSession, candidates: Tuple[str, ...], fallback=None
 ) -> str:
     input_names = session.get_input_names()
     for name in candidates:
@@ -73,7 +80,7 @@ def _resolve_input_name(
     raise ValueError(f"None of {candidates} found in inputs: {input_names}")
 
 
-def _infer_inputs_embeds_name(session: HMONNXGrapInference) -> str:
+def _infer_inputs_embeds_name(session: HMONNXSession) -> str:
     for name in session.get_input_names():
         info = session.get_input(name)
         if (
@@ -85,7 +92,7 @@ def _infer_inputs_embeds_name(session: HMONNXGrapInference) -> str:
 
 
 def _alloc_cache_inputs(
-    session: HMONNXGrapInference, device: torch.device
+    session: HMONNXSession, device: torch.device
 ) -> Dict[str, torch.Tensor]:
     cache_inputs: Dict[str, torch.Tensor] = {}
     for name in session.get_input_names():
@@ -241,6 +248,11 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
         ] = None,
         resource_tight_mode: bool = False,
         pad_token_id: int = 0,
+        enable_cuda_graph: bool = False,
+        cuda_graph_modules: Optional[Iterable[str]] = None,
+        cuda_graph_warmup_runs: int = 3,
+        cuda_graph_graph_warmup_runs: int = 6,
+        cuda_graph_clone_outputs: bool = True,
     ):
         super().__init__()
         self._device = torch.device("cpu")
@@ -256,10 +268,19 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
         self.decode_auto_offload_max_memory = decode_auto_offload_max_memory
         self.resource_tight_mode = resource_tight_mode
         self.pad_token_id = pad_token_id
+        self.enable_cuda_graph = enable_cuda_graph
+        self.cuda_graph_modules = (
+            {name.strip().lower() for name in cuda_graph_modules if str(name).strip()}
+            if cuda_graph_modules is not None
+            else None
+        )
+        self.cuda_graph_warmup_runs = max(cuda_graph_warmup_runs, 0)
+        self.cuda_graph_graph_warmup_runs = max(cuda_graph_graph_warmup_runs, 0)
+        self.cuda_graph_clone_outputs = cuda_graph_clone_outputs
 
         self.token_embedding: Optional[nn.Module] = None
-        self.prefill_session: Optional[HMONNXGrapInference] = None
-        self.decode_session: Optional[HMONNXGrapInference] = None
+        self.prefill_session: Optional[HMONNXSession] = None
+        self.decode_session: Optional[HMONNXSession] = None
 
         self._prefill_inputs_name = None
         self._prefill_past_seq_name = None
@@ -318,9 +339,13 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
 
     def _apply_auto_offload(
         self,
-        session: HMONNXGrapInference,
+        session: HMONNXSession,
         max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
     ) -> None:
+        if isinstance(session, HMONNXCUDAGraphInference):
+            session.configure_auto_offload(max_memory=max_memory)
+            session.enable_auto_offload = self.auto_offload and torch.cuda.is_available()
+            return
         if not self.auto_offload:
             return
         if not torch.cuda.is_available():
@@ -341,12 +366,64 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
                 "Please increase GPU budgets or provide more GPU devices in max_memory."
             ) from e
 
+    def _should_enable_cuda_graph(self, session_name: str) -> bool:
+        if not self.enable_cuda_graph:
+            return False
+        if self.cuda_graph_modules is None:
+            return True
+        return session_name.strip().lower() in self.cuda_graph_modules
+
+    def _create_hmonnx_session(self, onnx_path: str, session_name: str) -> HMONNXSession:
+        if self._should_enable_cuda_graph(session_name):
+            session: HMONNXSession = HMONNXCUDAGraphInference(
+                onnx_path,
+                enable_cuda_graph=True,
+                warmup_runs=self.cuda_graph_warmup_runs,
+                graph_warmup_runs=self.cuda_graph_graph_warmup_runs,
+                clone_outputs=self.cuda_graph_clone_outputs,
+            )
+        else:
+            session = HMONNXGrapInference(onnx_path)
+        if not self.auto_offload:
+            session.to(self.device)
+        session.exec_device = self.exec_device
+        return session
+
+    def _get_session_cuda_graph_status(
+        self, session: Optional[HMONNXSession]
+    ) -> Dict[str, Union[bool, Optional[str]]]:
+        if session is None:
+            return {
+                "enabled": False,
+                "captured": False,
+                "reason": "session not initialized",
+                "backend": None,
+            }
+        backend = type(session).__name__
+        if isinstance(session, HMONNXCUDAGraphInference):
+            reason = None if session.has_captured_graph else session.capture_unavailable_reason
+            return {
+                "enabled": session.enable_cuda_graph,
+                "captured": session.has_captured_graph,
+                "reason": reason,
+                "backend": backend,
+            }
+        return {
+            "enabled": False,
+            "captured": False,
+            "reason": "session backend does not use cuda graph",
+            "backend": backend,
+        }
+
+    def get_cuda_graph_status(self) -> Dict[str, Dict[str, Union[bool, Optional[str]]]]:
+        return {
+            "prefill": self._get_session_cuda_graph_status(self.prefill_session),
+            "decode": self._get_session_cuda_graph_status(self.decode_session),
+        }
+
     def _create_prefill_session(self):
         onnx_path = self.prefill_config["onnx"] if isinstance(self.prefill_config, dict) else self.prefill_config.onnx
-        self.prefill_session = HMONNXGrapInference(onnx_path)
-        if not self.auto_offload:
-            self.prefill_session.to(self.device)
-        self.prefill_session.exec_device = self.exec_device
+        self.prefill_session = self._create_hmonnx_session(onnx_path, "prefill")
         prefill_max_memory = (
             self.prefill_auto_offload_max_memory
             if self.prefill_auto_offload_max_memory is not None
@@ -386,10 +463,7 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
 
     def _create_decode_session(self):
         onnx_path = self.decode_config["onnx"] if isinstance(self.decode_config, dict) else self.decode_config.onnx
-        self.decode_session = HMONNXGrapInference(onnx_path)
-        if not self.auto_offload:
-            self.decode_session.to(self.device)
-        self.decode_session.exec_device = self.exec_device
+        self.decode_session = self._create_hmonnx_session(onnx_path, "decode")
         decode_max_memory = (
             self.decode_auto_offload_max_memory
             if self.decode_auto_offload_max_memory is not None
@@ -466,7 +540,7 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
         self._create_decode_session()
 
     def _run_hmonnx(
-        self, session: HMONNXGrapInference, input_feed: Dict[str, torch.Tensor]
+        self, session: HMONNXSession, input_feed: Dict[str, torch.Tensor]
     ):
         outputs = session.run(input_feed)
         if not isinstance(outputs, (tuple, list)):
@@ -489,6 +563,14 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
                 continue
             if name.startswith("past_conv_cache_"):
                 idx = name.rsplit("_", 1)[-1]
+                # Per-step verify export emits conv_cache_out_{idx}_{t};
+                # baseline path consumes only one valid token, so pick t=0.
+                per_step = f"conv_cache_out_{idx}_0"
+                if per_step in output_map:
+                    cache_state[name] = _as_cache_value(
+                        cache_state[name], output_map[per_step]
+                    )
+                    continue
                 out_name = f"conv_cache_out_{idx}"
                 if out_name in output_map:
                     conv_out = output_map[out_name]

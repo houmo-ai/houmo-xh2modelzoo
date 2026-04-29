@@ -122,7 +122,7 @@ class XHMTPDraftModel(BaseModel):
         if self.export_cfg is not None:
             self.export_cfg.input_names = [
                 "next_token_embedding",
-                "pre_norm_hidden",
+                "post_norm_hidden",
                 "past_seq_length",
                 "current_input_length",
                 "past_key_cache",
@@ -130,9 +130,7 @@ class XHMTPDraftModel(BaseModel):
             ]
             self.export_cfg.output_names = [
                 "logits",
-                "pre_norm_out",
-                "present_key_cache",
-                "present_value_cache",
+                "post_norm_out",
             ]
         return self._wrap_model
 
@@ -145,7 +143,7 @@ class XHMTPDraftModel(BaseModel):
             next_token_embedding = torch.randn(
                 batch_size, seq_len, self.hidden_size, dtype=dtype
             )
-            pre_norm_hidden = torch.randn(
+            post_norm_hidden = torch.randn(
                 batch_size, seq_len, self.hidden_size, dtype=dtype
             )
             past_seq_length = torch.zeros(batch_size, dtype=torch.int32)
@@ -165,9 +163,9 @@ class XHMTPDraftModel(BaseModel):
                     raise ValueError("token_embedding is not initialized")
                 self.token_embedding.to(dtype=dtype)
                 next_token_embedding = self.token_embedding(next_token_ids).to(dtype)
-            pre_norm_hidden = data["pre_norm_hidden"].to(dtype=dtype)
+            post_norm_hidden = data["post_norm_hidden"].to(dtype=dtype)
             next_token_embedding = _pad_hidden_tensor(next_token_embedding, seq_len)
-            pre_norm_hidden = _pad_hidden_tensor(pre_norm_hidden, seq_len)
+            post_norm_hidden = _pad_hidden_tensor(post_norm_hidden, seq_len)
 
             raw_past_seq_length = data.get("past_seq_length", 0)
             if isinstance(raw_past_seq_length, int):
@@ -212,7 +210,7 @@ class XHMTPDraftModel(BaseModel):
 
         return (
             next_token_embedding,
-            pre_norm_hidden,
+            post_norm_hidden,
             past_seq_length,
             current_input_length,
             past_key_cache,
@@ -222,7 +220,7 @@ class XHMTPDraftModel(BaseModel):
     def _forward(
         self,
         next_token_embedding: Tensor,
-        pre_norm_hidden: Tensor,
+        post_norm_hidden: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
         past_key_cache: Tensor,
@@ -230,7 +228,7 @@ class XHMTPDraftModel(BaseModel):
     ):
         out = self(
             next_token_embedding,
-            pre_norm_hidden,
+            post_norm_hidden,
             past_seq_length,
             current_input_length,
             past_key_cache,

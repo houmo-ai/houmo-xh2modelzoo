@@ -11,7 +11,7 @@ Measures:
 
 Reference architecture from vLLM Qwen3NextMultiTokenPredictor:
   embeds = pre_fc_norm_embedding(embed_tokens(next_token))
-  hidden = pre_fc_norm_hidden(main_model_pre_norm_hidden)
+  hidden = pre_fc_norm_hidden(main_model_final_norm_hidden)
   x = fc(cat([embeds, hidden], dim=-1))
   x = decoder_layer(x)   # single full-attention layer
   x = norm(x)
@@ -44,6 +44,12 @@ DTYPE_MAP = {
     "float32": torch.float32,
     "auto": "auto",
 }
+
+DEDICATED_MTP_HEAD_KEY = "mtp.lm_head_weight"
+LM_NORM_SCALE_KEY = "mtp.language_model_norm_scale"
+MTP_NORM_SCALE_KEY = "mtp.mtp_norm_scale"
+LM_NORM_ROTATED_MATRIX_KEY = "mtp.language_model_norm_rotated_matrix"
+MTP_NORM_ROTATED_MATRIX_KEY = "mtp.mtp_norm_rotated_matrix"
 
 
 # ════════════════════════════════════════════════════════════════
@@ -339,11 +345,20 @@ class Qwen3_5MTPHead(nn.Module):
         self.layers = nn.ModuleList([layer])
         self.norm = RMSNorm(hidden_size, eps=eps)
         self._shared: dict = {}
+        self._source_norm_transforms: dict[str, torch.Tensor | None] = {"llm": None, "mtp": None}
 
     # ── shared-module plumbing ──────────────────────────────────
 
     def set_shared_modules(self, embed_tokens: nn.Embedding, lm_head: nn.Linear, rotary_emb: nn.Module):
         self._shared = {"embed_tokens": embed_tokens, "lm_head": lm_head, "rotary_emb": rotary_emb}
+
+    def set_source_norm_transforms(
+        self,
+        *,
+        llm_norm_transform: torch.Tensor | None = None,
+        mtp_norm_transform: torch.Tensor | None = None,
+    ):
+        self._source_norm_transforms = {"llm": llm_norm_transform, "mtp": mtp_norm_transform}
 
     @property
     def _mtp_device(self) -> torch.device:
@@ -355,27 +370,40 @@ class Qwen3_5MTPHead(nn.Module):
 
     def _lm_head_forward(self, x: torch.Tensor) -> torch.Tensor:
         lm = self._shared["lm_head"]
-        return lm(x.to(lm.weight.device))
+        x = x.to(lm.weight.device)
+        if x.dtype != lm.weight.dtype:
+            x = x.to(lm.weight.dtype)
+        return lm(x)
 
     def _position_embeddings(self, x: torch.Tensor, position_ids: torch.Tensor):
         re = self._shared["rotary_emb"]
         cos, sin = re(x, position_ids)
         d = self._mtp_device
-        return cos.to(d), sin.to(d)
+        return cos.to(device=d, dtype=x.dtype), sin.to(device=d, dtype=x.dtype)
+
+    def _apply_source_norm_transform(self, x: torch.Tensor, source: str) -> torch.Tensor:
+        transform = self._source_norm_transforms.get(source)
+        if transform is None:
+            return x
+        transform = transform.to(device=x.device)
+        if transform.ndim == 1:
+            return x.float() * transform.float().view(1, 1, -1)
+        return torch.matmul(x.float(), transform.float())
 
     # ── forward paths ───────────────────────────────────────────
 
     def forward_batch(
         self,
-        pre_norm_hidden: torch.Tensor,
+        final_norm_hidden: torch.Tensor,
         next_token_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
         kv_cache: dict | None = None,
+        hidden_source: str = "llm",
     ) -> torch.Tensor:
         """Batch forward (optionally populates *kv_cache* for later step calls).
 
         Args:
-            pre_norm_hidden: ``[B, L, H]``  pre-norm hidden states from main model
+            final_norm_hidden: ``[B, L, H]``  hidden states after the main model final RMSNorm
             next_token_ids:  ``[B, L]``      shifted token ids  (token[i+1] at position i)
             positions:       ``[L]``         absolute position indices (default ``0..L-1``)
             kv_cache:        if provided, MTP attention KV will be stored here for
@@ -385,9 +413,12 @@ class Qwen3_5MTPHead(nn.Module):
         """
         d = self._mtp_device
         bsz, seq_len = next_token_ids.shape
+        compute_dtype = self.fc.weight.dtype
 
-        embeds = self.pre_fc_norm_embedding(self._embed(next_token_ids))
-        hidden = self.pre_fc_norm_hidden(pre_norm_hidden.to(d))
+        embeds = self.pre_fc_norm_embedding(self._embed(next_token_ids).to(compute_dtype))
+        hidden = self.pre_fc_norm_hidden(
+            self._apply_source_norm_transform(final_norm_hidden.to(d), hidden_source).to(compute_dtype)
+        )
         x = self.fc(torch.cat([embeds, hidden], dim=-1))
 
         if positions is None:
@@ -401,27 +432,31 @@ class Qwen3_5MTPHead(nn.Module):
 
     def forward_step(
         self,
-        pre_norm_hidden: torch.Tensor,
+        final_norm_hidden: torch.Tensor,
         next_token_id: torch.Tensor,
         position: int,
         kv_cache: dict | None = None,
+        hidden_source: str = "llm",
         return_hidden: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Single-step forward for speculative decoding.
 
         Args:
-            pre_norm_hidden: ``[1, 1, H]``
+            final_norm_hidden: ``[1, 1, H]``
             next_token_id:   ``[1, 1]``
             position:        absolute position index of the hidden state
             kv_cache:        mutable dict (``{"key": …, "value": …}`` or empty ``{}``)
-            return_hidden:   if True, also return pre-norm hidden (for auto-regressive MTP)
+            return_hidden:   if True, also return the MTP hidden after final norm
         Returns:
             logits ``[1, 1, V]``  or  (logits, hidden ``[1, 1, H]``)
         """
         d = self._mtp_device
+        compute_dtype = self.fc.weight.dtype
 
-        embeds = self.pre_fc_norm_embedding(self._embed(next_token_id))
-        hidden = self.pre_fc_norm_hidden(pre_norm_hidden.to(d))
+        embeds = self.pre_fc_norm_embedding(self._embed(next_token_id).to(compute_dtype))
+        hidden = self.pre_fc_norm_hidden(
+            self._apply_source_norm_transform(final_norm_hidden.to(d), hidden_source).to(compute_dtype)
+        )
         x = self.fc(torch.cat([embeds, hidden], dim=-1))
 
         pos = torch.tensor([position], device=d)
@@ -429,11 +464,11 @@ class Qwen3_5MTPHead(nn.Module):
         pos_emb = self._position_embeddings(x, pos_ids)
 
         x = self.layers[0](x, pos_emb, kv_cache)
-        pre_norm_out = x  # [1, 1, H] — decoder layer output before final norm
         x = self.norm(x)
+        final_hidden = x  # [1, 1, H] — MTP hidden after final norm
         logits = self._lm_head_forward(x)
         if return_hidden:
-            return logits, pre_norm_out
+            return logits, final_hidden
         return logits
 
 
@@ -456,18 +491,46 @@ def _get_text_config(model):
     return getattr(cfg, "text_config", cfg)
 
 
-def load_mtp_weights(model_path: str | Path) -> dict[str, torch.Tensor]:
+def load_mtp_weights(model_path: str | Path) -> tuple[
+    dict[str, torch.Tensor],
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
     model_path = Path(model_path)
     state: dict[str, torch.Tensor] = {}
+    dedicated_lm_head: torch.Tensor | None = None
+    llm_norm_scale: torch.Tensor | None = None
+    mtp_norm_scale: torch.Tensor | None = None
+    llm_norm_rotated_matrix: torch.Tensor | None = None
+    mtp_norm_rotated_matrix: torch.Tensor | None = None
     for sf in sorted(model_path.glob("*.safetensors")):
         with safe_open(str(sf), framework="pt", device="cpu") as f:
             for key in f.keys():
-                if key.startswith("mtp."):
+                if key == DEDICATED_MTP_HEAD_KEY:
+                    dedicated_lm_head = f.get_tensor(key)
+                elif key == LM_NORM_SCALE_KEY:
+                    llm_norm_scale = f.get_tensor(key)
+                elif key == MTP_NORM_SCALE_KEY:
+                    mtp_norm_scale = f.get_tensor(key)
+                elif key == LM_NORM_ROTATED_MATRIX_KEY:
+                    llm_norm_rotated_matrix = f.get_tensor(key)
+                elif key == MTP_NORM_ROTATED_MATRIX_KEY:
+                    mtp_norm_rotated_matrix = f.get_tensor(key)
+                elif key.startswith("mtp."):
                     state[key[4:]] = f.get_tensor(key)
     if not state:
         raise RuntimeError(f"No MTP weights found in {model_path}/*.safetensors")
     print(f"  Loaded {len(state)} MTP tensors from safetensors")
-    return state
+    if dedicated_lm_head is not None:
+        print("  Loaded dedicated rotated MTP lm_head_weight")
+    if llm_norm_rotated_matrix is not None and mtp_norm_rotated_matrix is not None:
+        print("  Loaded rotated MTP source norm transforms (LLM/MTP)")
+    elif llm_norm_scale is not None and mtp_norm_scale is not None:
+        print("  Loaded rotated MTP source norm scales (LLM/MTP)")
+    return state, dedicated_lm_head, llm_norm_scale, mtp_norm_scale, llm_norm_rotated_matrix, mtp_norm_rotated_matrix
 
 
 def build_mtp_head(model, model_path: str, dtype: str) -> Qwen3_5MTPHead:
@@ -494,14 +557,31 @@ def build_mtp_head(model, model_path: str, dtype: str) -> Qwen3_5MTPHead:
         print(f"  Config: hidden={hs} heads={nh} kv_heads={nkv} head_dim={hd} inter={inter}")
 
     head = Qwen3_5MTPHead(hs, nh, nkv, hd, inter or hs * 4, eps, moe_config=moe_config)
-    sd = load_mtp_weights(model_path)
+    (
+        sd,
+        dedicated_lm_head_weight,
+        llm_norm_scale,
+        mtp_norm_scale,
+        llm_norm_rotated_matrix,
+        mtp_norm_rotated_matrix,
+    ) = load_mtp_weights(model_path)
     head.load_state_dict(sd, strict=True)
 
     tm = _get_text_model(model)
-    head.set_shared_modules(tm.embed_tokens, model.lm_head, tm.rotary_emb)
+    lm_head = model.lm_head
+    if dedicated_lm_head_weight is not None:
+        lm_head = nn.Linear(dedicated_lm_head_weight.shape[1], dedicated_lm_head_weight.shape[0], bias=False)
+        lm_head.weight = nn.Parameter(
+            dedicated_lm_head_weight.to(device=model.lm_head.weight.device, dtype=model.lm_head.weight.dtype)
+        )
+    head.set_shared_modules(tm.embed_tokens, lm_head, tm.rotary_emb)
+    head.set_source_norm_transforms(
+        llm_norm_transform=llm_norm_rotated_matrix if llm_norm_rotated_matrix is not None else llm_norm_scale,
+        mtp_norm_transform=mtp_norm_rotated_matrix if mtp_norm_rotated_matrix is not None else mtp_norm_scale,
+    )
 
-    target_dev = model.lm_head.weight.device
-    target_dtype = model.lm_head.weight.dtype if dtype == "auto" else DTYPE_MAP.get(dtype, torch.bfloat16)
+    target_dev = lm_head.weight.device
+    target_dtype = lm_head.weight.dtype if dtype == "auto" else DTYPE_MAP.get(dtype, torch.bfloat16)
     head = head.to(device=target_dev, dtype=target_dtype)
     head.eval()
 
@@ -511,20 +591,20 @@ def build_mtp_head(model, model_path: str, dtype: str) -> Qwen3_5MTPHead:
 
 
 # ════════════════════════════════════════════════════════════════
-# Pre-norm hidden-state capture
+# Final-norm hidden-state capture
 # ════════════════════════════════════════════════════════════════
 
 
-class PreNormCapture:
-    """``register_forward_pre_hook`` on ``TextModel.norm`` to grab hidden states
-    *before* the final RMSNorm — exactly what MTP needs."""
+class AfterNormCapture:
+    """``register_forward_hook`` on ``TextModel.norm`` to grab hidden states
+    *after* the final RMSNorm — exactly what MTP needs."""
 
     def __init__(self, model):
         self.hidden_states: list[torch.Tensor] = []
-        self._hook = _get_text_model(model).norm.register_forward_pre_hook(self._fn)
+        self._hook = _get_text_model(model).norm.register_forward_hook(self._fn)
 
-    def _fn(self, _module, args):
-        self.hidden_states.append(args[0].detach())
+    def _fn(self, _module, _args, output):
+        self.hidden_states.append(output.detach())
 
     def reset(self):
         self.hidden_states.clear()
@@ -553,7 +633,7 @@ def measure_acceptance_rate(
     system_prompt: str = "",
     enable_thinking: bool | None = None,
 ) -> dict:
-    """Generate → single forward pass to capture all pre-norm hidden → MTP batch → compare."""
+    """Generate → single forward pass to capture all final-norm hidden → MTP batch → compare."""
     device = model.device
 
     # Tokenise
@@ -575,15 +655,15 @@ def measure_acceptance_rate(
     if gen_len < 3:
         return {"error": "Generated < 3 tokens — too short for MTP eval", "gen_len": gen_len}
 
-    # Full forward pass to get pre-norm hidden states
-    cap = PreNormCapture(model)
+    # Full forward pass to get final-norm hidden states
+    cap = AfterNormCapture(model)
     cap.reset()
     model(input_ids=gen_ids, use_cache=False)
-    pre_norm = cap.get_all()  # [1, T, H]
+    final_hidden = cap.get_all()  # [1, T, H]
     cap.remove()
 
     # MTP: position i → (hidden[i], embed(token[i+1])) → predicts token[i+2]
-    mtp_hidden = pre_norm[:, :-2, :]   # [1, T-2, H]
+    mtp_hidden = final_hidden[:, :-2, :]  # [1, T-2, H]
     mtp_tokens = gen_ids[:, 1:-1]      # [1, T-2]
     targets = gen_ids[0, 2:]           # [T-2]
 
@@ -651,12 +731,12 @@ def benchmark_timing(
     inputs = tokenizer([text], return_tensors="pt").to(device)
 
     # ── prefill ─────────────────────────────────────────────────
-    cap = PreNormCapture(model)
+    cap = AfterNormCapture(model)
     cap.reset()
     outputs = model(**inputs, use_cache=True)
     past_kv = outputs.past_key_values
     next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-    pre_h = cap.hidden_states[0][:, -1:, :]
+    final_h = cap.hidden_states[0][:, -1:, :]
 
     # ── warm-up main-model decode ───────────────────────────────
     for _ in range(warmup):
@@ -666,7 +746,7 @@ def benchmark_timing(
         outputs = model(input_ids=next_tok, attention_mask=mask, past_key_values=past_kv, use_cache=True)
         past_kv = outputs.past_key_values
         next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-        pre_h = cap.hidden_states[0][:, -1:, :]
+        final_h = cap.hidden_states[0][:, -1:, :]
 
     # ── timed main-model decode ─────────────────────────────────
     torch.cuda.synchronize()
@@ -678,7 +758,7 @@ def benchmark_timing(
         outputs = model(input_ids=next_tok, attention_mask=mask, past_key_values=past_kv, use_cache=True)
         past_kv = outputs.past_key_values
         next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-        pre_h = cap.hidden_states[0][:, -1:, :]
+        final_h = cap.hidden_states[0][:, -1:, :]
     torch.cuda.synchronize()
     main_ms = (time.perf_counter() - t0) / num_steps * 1000
 
@@ -686,7 +766,7 @@ def benchmark_timing(
 
     # ── warm-up MTP decode ──────────────────────────────────────
     mtp_d = mtp_head._mtp_device
-    dummy_h = pre_h.to(mtp_d)
+    dummy_h = final_h.to(mtp_d)
     dummy_t = next_tok.to(mtp_d)
     for i in range(warmup):
         mtp_head.forward_step(dummy_h, dummy_t, position=i, kv_cache=None)
@@ -801,19 +881,19 @@ def speculative_decode(
     prompt_len = prompt_ids.shape[1]
 
     # ── prefill (main model) ────────────────────────────────────
-    cap = PreNormCapture(model)
+    cap = AfterNormCapture(model)
     cap.reset()
     outputs = model(**inputs, use_cache=True)
     past_kv = outputs.past_key_values
     next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-    prefill_hidden = cap.hidden_states[0]  # [1, prompt_len, H]
+    prefill_final_hidden = cap.hidden_states[0]  # [1, prompt_len, H]
     committed_len = prompt_len
 
     # ── prefill (MTP) — populate MTP KV cache with prompt context
     mtp_kv: dict = {}
     if prompt_len >= 2:
         mtp_head.forward_batch(
-            prefill_hidden[:, :-1, :],
+            prefill_final_hidden[:, :-1, :],
             prompt_ids[:, 1:],
             positions=torch.arange(prompt_len - 1, device=mtp_head._mtp_device),
             kv_cache=mtp_kv,
@@ -821,7 +901,7 @@ def speculative_decode(
 
     # First MTP step
     mtp_logits = mtp_head.forward_step(
-        prefill_hidden[:, -1:, :], next_tok,
+        prefill_final_hidden[:, -1:, :], next_tok,
         position=committed_len - 1, kv_cache=mtp_kv,
     )
     draft_tok = mtp_logits[:, -1:, :].argmax(dim=-1)
@@ -1139,7 +1219,7 @@ def generate_drafts(
     h = mtp_h0
     for j in range(1, num_drafts):
         logits_j, h = mtp_head.forward_step(
-            h, drafts[-1], position=position + j, kv_cache=spec_kv, return_hidden=True,
+            h, drafts[-1], position=position + j, kv_cache=spec_kv, hidden_source="mtp", return_hidden=True,
         )
         draft_j = logits_j[:, -1:, :].argmax(dim=-1)
         drafts.append(draft_j)
@@ -1188,19 +1268,19 @@ def speculative_decode_forced(
     install_forced_decode_patch()
 
     # ── prefill (main model) ────────────────────────────────────
-    cap = PreNormCapture(model)
+    cap = AfterNormCapture(model)
     cap.reset()
     outputs = model(**inputs, use_cache=True)
     past_kv = outputs.past_key_values
     next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-    prefill_hidden = cap.hidden_states[0]
+    prefill_final_hidden = cap.hidden_states[0]
     committed_len = prompt_len
 
     # ── prefill (MTP) ──────────────────────────────────────────
     mtp_kv: dict = {}
     if prompt_len >= 2:
         mtp_head.forward_batch(
-            prefill_hidden[:, :-1, :],
+            prefill_final_hidden[:, :-1, :],
             prompt_ids[:, 1:],
             positions=torch.arange(prompt_len - 1, device=mtp_head._mtp_device),
             kv_cache=mtp_kv,
@@ -1208,7 +1288,7 @@ def speculative_decode_forced(
 
     # First draft batch
     drafts, _ = generate_drafts(
-        mtp_head, prefill_hidden[:, -1:, :], next_tok, K,
+        mtp_head, prefill_final_hidden[:, -1:, :], next_tok, K,
         position=committed_len - 1, mtp_kv=mtp_kv,
     )
 

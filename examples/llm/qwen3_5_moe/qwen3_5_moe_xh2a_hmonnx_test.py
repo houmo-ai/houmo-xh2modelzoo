@@ -1,148 +1,120 @@
-# Copyright 2025 HOUMO AI
-#
-# File: qwen3_5_moe_xh2a_hmonnx_test.py
-# Description:
-#   HMONNX inference test / interactive demo for Qwen3.5-MoE.
-#
-# Usage:
-#   python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_hmonnx_test.py \
-#       --config work_dirs/<prefix>/meta.json
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 import argparse
-from pathlib import Path
 
-import torch
-from transformers import TextStreamer
-from xhquant.api import get_root_logger, xhquant_init
-from xhquant.xhonnxruntime import config as xhonnxruntime_config
-
-from xh_model_zoo.xh_llm.models.qwen3_5_moe import (
-    Qwen3_5MoeHFCompatible,
-    Qwen3_5MoeInference,
-    load_moe_inference,
+from _runtime import (
+    benchmark_chat,
+    load_runtime_from_meta,
+    parse_auto_offload_max_memory,
+    parse_cuda_graph_modules,
+    parse_dtype,
+    print_cuda_graph_status,
 )
-from xh_model_zoo.xh_llm.utils import auto_offload
-
-SAMPLE_MESSAGES = [
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "你好，请用中文介绍一下你自己。"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "中国的首都是哪里？"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "神舟五号是哪年发射的？"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "人类第一个进入太空的宇航员是谁？"},
-    ],
-]
 
 
 def main(args):
-    xhquant_init(None, args.debug)
-    logger = get_root_logger()
-
-    logger.info(f"Loading inference engine from: {args.config}")
-    inference_engine = load_moe_inference(args.config, fast_mode=args.fast)
-
-    hf_model_path = inference_engine.meta_info.get("hf_model_path", args.hf_model)
-    assert hf_model_path is not None and Path(hf_model_path).exists(), (
-        f"HF model path '{hf_model_path}' does not exist. Pass --hf-model."
+    runtime, tokenizer, meta_info = load_runtime_from_meta(
+        meta_path=args.config,
+        dtype=parse_dtype(args.dtype),
+        device=args.device,
+        exec_device=args.exec_device,
+        auto_offload=args.auto_offload,
+        auto_offload_max_memory=parse_auto_offload_max_memory(args.auto_offload_max_memory),
+        prefill_auto_offload_max_memory=parse_auto_offload_max_memory(
+            args.prefill_auto_offload_max_memory
+        ),
+        decode_auto_offload_max_memory=parse_auto_offload_max_memory(
+            args.decode_auto_offload_max_memory
+        ),
+        resource_tight_mode=args.resource_tight_mode,
+        enable_cuda_graph=args.enable_cuda_graph,
+        cuda_graph_modules=parse_cuda_graph_modules(args.cuda_graph_modules),
+        cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
     )
 
-    device = torch.device(args.device)
-    tokenizer = inference_engine.tokenizer
-    batch_size = inference_engine.batch_size
-
-    messages = SAMPLE_MESSAGES[:batch_size]
-    if hasattr(inference_engine, "spec_decode_mode"):
-        _, generate_text = inference_engine.generate(
-            messages,
-            enable_thinking=False,
+    for _ in range(args.warmup_runs):
+        benchmark_chat(
+            runtime,
+            tokenizer,
+            prompt=args.prompt,
             max_new_tokens=args.max_new_tokens,
-        )
-        logger.info(f"content: {generate_text}")
-        return
-
-    texts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False,
-    )
-    model_inputs = tokenizer(texts, padding=True, return_tensors="pt").to(device)
-
-    logger.info(f"Building Qwen3_5MoeHFCompatible wrapper from {hf_model_path} ...")
-    wraped_hf_model = Qwen3_5MoeHFCompatible.to_hf_compatible(hf_model_path, inference_engine)
-    auto_offload(wraped_hf_model, "XH2aQuantQMoeBlock")
-    wraped_hf_model.eval()
-    wraped_hf_model.to(device)
-
-    streamer = TextStreamer(tokenizer)
-    xhonnxruntime_config.disable_progress = True
-    xhonnxruntime_config.verbose_progress = False
-
-    logger.info("Running generate() ...")
-    with torch.no_grad():
-        generated_ids = wraped_hf_model.generate(
-            **model_inputs,
-            max_new_tokens=args.max_new_tokens,
-            streamer=streamer,
+            enable_thinking=args.enable_thinking,
             do_sample=args.do_sample,
             temperature=args.temperature,
             top_p=args.top_p,
-            pad_token_id=tokenizer.eos_token_id,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+            presence_penalty=args.presence_penalty,
+            stream_output=False,
         )
 
-    # Parse thinking/content boundary (token 151668 = </think>)
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-    try:
-        index = len(output_ids) - output_ids[::-1].index(151668)
-    except ValueError:
-        index = 0
-    thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+    timings = []
+    output_text = ""
+    output_tokens = 0
+    for _ in range(args.benchmark_runs):
+        output_text, elapsed, output_tokens = benchmark_chat(
+            runtime,
+            tokenizer,
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+            enable_thinking=args.enable_thinking,
+            do_sample=args.do_sample,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+            presence_penalty=args.presence_penalty,
+            stream_output=True,
+        )
+        timings.append(elapsed)
 
-    if thinking_content:
-        logger.info(f"<think>: {thinking_content}")
-    logger.info(f"content: {content}")
+    avg_latency = sum(timings) / max(len(timings), 1)
+    toks_per_sec = output_tokens / avg_latency if avg_latency > 0 else 0.0
+
+    print(f"model_name: {meta_info.get('model_name')}")
+    print(f"quant_scheme: {meta_info.get('quant_scheme')}")
+    print(f"prompt: {args.prompt}")
+    print(f"output: {output_text}")
+    print(f"benchmark_runs: {args.benchmark_runs}")
+    print(f"avg_latency_s: {avg_latency:.4f}")
+    print(f"output_tokens: {output_tokens}")
+    print(f"tokens_per_second: {toks_per_sec:.4f}")
+    print(f"enable_cuda_graph: {args.enable_cuda_graph}")
+    print_cuda_graph_status(runtime)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Qwen3.5-MoE HMONNX inference test",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--config", type=str, required=True,
-                        help="Path to meta.json generated by export script")
-    parser.add_argument("--hf-model", type=str, default=None,
-                        help="HuggingFace model directory (falls back to meta.json hf_model_path)")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--do-sample", action="store_true", default=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to meta.json from export")
+    parser.add_argument("--prompt", type=str, default="请用中文简要介绍一下混合线性注意力模型。")
+    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument("--benchmark-runs", type=int, default=1)
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true", default=False)
     parser.add_argument("--no-sample", dest="do_sample", action="store_false")
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--top-p", type=float, default=0.8)
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--fast", action="store_true", help="Enable fast HMONNX mode")
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=1)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
+    parser.add_argument("--presence-penalty", type=float, default=0.0)
+    parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--dtype", type=str, default="fp16")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--exec-device", type=str, default="cuda")
+    parser.set_defaults(auto_offload=False)
+    parser.add_argument("--enable-auto-offload", dest="auto_offload", action="store_true")
+    parser.add_argument("--disable-auto-offload", dest="auto_offload", action="store_false")
+    parser.add_argument("--auto-offload-max-memory", type=str, default=None)
+    parser.add_argument("--prefill-auto-offload-max-memory", type=str, default=None)
+    parser.add_argument("--decode-auto-offload-max-memory", type=str, default=None)
+    parser.add_argument("--resource-tight-mode", action="store_true")
+    parser.add_argument("--enable-cuda-graph", action="store_true")
+    parser.add_argument(
+        "--cuda-graph-modules",
+        type=str,
+        default="",
+        help="Comma-separated session names: prefill,decode,draft_prefill,draft_context,draft_decode",
+    )
+    parser.add_argument("--cuda-graph-warmup-runs", type=int, default=3)
+    parser.add_argument("--cuda-graph-graph-warmup-runs", type=int, default=6)
     args = parser.parse_args()
     main(args)

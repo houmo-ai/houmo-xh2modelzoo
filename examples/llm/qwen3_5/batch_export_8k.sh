@@ -18,18 +18,19 @@ conda activate xhquant
 OUT_ROOT="${OUT_ROOT:-work_dirs}"
 SEQ=8192
 MTP_K=4
-DFLASH_BS=16
+DFLASH_BS=9
 LOG_DIR="${LOG_DIR:-output/qwen35_exports}"
 ONLY_TAG_REGEX="${ONLY_TAG_REGEX:-}"
+FORCE_REEXPORT="${FORCE_REEXPORT:-0}"
 mkdir -p "$LOG_DIR"
 
 # model_id | config | float_dir | dflash_dir | autoround_dir
 ROWS=(
-  # "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only"
+  "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only"
   "qwen3_5_9b|configs/qwen3_5/qwen3_5_9b_xh2a.py|weights/Qwen3.5-9B|weights/Qwen3.5-9B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only"
   "qwen3_5_27b|configs/qwen3_5/qwen3_5_27b_xh2a.py|weights/Qwen3.5-27B|weights/Qwen3.5-27B-DFlash|/data01/home/yujy/work/auto-round/output/sym-mode1"
-  "qwen3_5_35b_a3b|configs/qwen3_5/qwen3_5_35b_a3b_xh2a.py|weights/Qwen3.5-35B-A3B|weights/Qwen3.5-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only"
-  "qwen3_6_35b_a3b|configs/qwen3_5/qwen3_6_35b_a3b_xh2a.py|weights/Qwen3.6-35B-A3B|weights/Qwen3.6-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.6-35B-A3B-mode1-llm-only"
+  # "qwen3_5_35b_a3b|configs/qwen3_5/qwen3_5_35b_a3b_xh2a.py|weights/Qwen3.5-35B-A3B|weights/Qwen3.5-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only"
+  # "qwen3_6_35b_a3b|configs/qwen3_5/qwen3_6_35b_a3b_xh2a.py|weights/Qwen3.6-35B-A3B|weights/Qwen3.6-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.6-35B-A3B-mode1-llm-only"
 )
 
 run_one () {
@@ -41,8 +42,13 @@ run_one () {
     return 0
   fi
   if [[ -f "$work_dir/meta.json" ]]; then
+    if [[ "$FORCE_REEXPORT" == "1" ]]; then
+      echo ">>> CLEAN $tag (FORCE_REEXPORT=1)"
+      rm -rf "$work_dir"
+    else
     echo ">>> SKIP $tag (meta.json exists)"
     return 0
+    fi
   fi
   echo ">>> RUN $tag -> $work_dir (log: $log)"
   python -u examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py "$@" \
@@ -75,8 +81,13 @@ run_one_moe () {
     return 0
   fi
   if [[ -f "$work_dir/meta.json" ]]; then
+    if [[ "$FORCE_REEXPORT" == "1" ]]; then
+      echo ">>> CLEAN $tag (FORCE_REEXPORT=1)"
+      rm -rf "$work_dir"
+    else
     echo ">>> SKIP $tag (meta.json exists)"
     return 0
+    fi
   fi
   echo ">>> RUN $tag -> $work_dir (log: $log)"
   if [[ -n "$quant_weight" && -n "$dflash_dir" ]]; then

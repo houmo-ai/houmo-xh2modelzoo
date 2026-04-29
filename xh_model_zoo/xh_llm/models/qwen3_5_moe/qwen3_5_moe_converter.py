@@ -60,15 +60,15 @@ def _extract_quant_method(config: AutoConfig) -> Optional[str]:
 
 def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
     result = self._qwen3_5_moe_original_forward(*args, **kwargs)
-    # Handle 3-tuple (logits, conv_caches, recurrent_states) and 4-tuple (+ pre_norm_hidden).
+    # Handle 3-tuple (logits, conv_caches, recurrent_states) and 4-tuple (+ post_norm_hidden).
     if len(result) == 4:
-        logits, conv_cache_out_list, recurrent_state_out_list, pre_norm_hidden = result
+        logits, conv_cache_out_list, recurrent_state_out_list, post_norm_hidden = result
         outputs: List[torch.Tensor] = [logits]
         if conv_cache_out_list is not None:
             outputs.extend(list(conv_cache_out_list))
         if recurrent_state_out_list is not None:
             outputs.extend(list(recurrent_state_out_list))
-        outputs.append(pre_norm_hidden)
+        outputs.append(post_norm_hidden)
     else:
         logits, conv_cache_out_list, recurrent_state_out_list = result
         outputs: List[torch.Tensor] = [logits]
@@ -119,7 +119,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
 
     @staticmethod
     def _is_gptqmodel_checkpoint(hf_model_dir: str) -> bool:
-        """Detect gptqmodel-format checkpoints (checkpoint_format == 'gptq' in config)."""
+        """Detect gptqmodel-format checkpoints by quant_method or checkpoint_format."""
         cfg_path = Path(hf_model_dir) / "config.json"
         if not cfg_path.exists():
             return False
@@ -127,7 +127,11 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             with open(cfg_path) as f:
                 cfg = json.load(f)
             qc = cfg.get("quantization_config", {})
-            return isinstance(qc, dict) and qc.get("checkpoint_format") == "gptq"
+            if not isinstance(qc, dict):
+                return False
+            quant_method = str(qc.get("quant_method", "")).lower()
+            checkpoint_format = str(qc.get("checkpoint_format", "")).lower()
+            return quant_method == "gptq" or checkpoint_format.startswith("gptq")
         except Exception:
             return False
 
@@ -140,33 +144,30 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             # leaves Linear weights uninitialized, producing garbage outputs.
             # GPTQModel.load() properly unpacks and dequantizes back to float16 nn.Linear.
             try:
-                from gptqmodel import GPTQModel  # type: ignore
+                from gptqmodel import BACKEND, GPTQModel  # type: ignore
 
                 logger.info(
                     f"Detected gptqmodel checkpoint; using GPTQModel.load() for dequantization: {hf_model_dir}"
                 )
                 torch_dtype = kwargs.get("torch_dtype", torch.float16)
+                # BACKEND.TORCH ensures all packed linears become TorchQuantLinear, which
+                # the base ``_dequantize_gptq_hf_model`` already knows how to dequantize.
                 qmodel = GPTQModel.load(
                     hf_model_dir,
                     device="cpu",
                     dtype=torch_dtype,
+                    backend=BACKEND.TORCH,
                 )
                 # GPTQModel.load() wraps the HF model in a BaseQModel; extract the inner model.
-                # The inner model is the properly dequantized PreTrainedModel (nn.Linear weights).
                 from gptqmodel.models.base import BaseQModel  # type: ignore
 
-                if isinstance(qmodel, BaseQModel):
-                    native_model = qmodel.model
-                    logger.info(f"Extracted inner HF model: {type(native_model).__name__}")
-                else:
-                    native_model = qmodel
-                # Clear quantization metadata so downstream dequantize_hf_model() is a no-op.
+                native_model = qmodel.model if isinstance(qmodel, BaseQModel) else qmodel
+                logger.info(f"Extracted inner HF model: {type(native_model).__name__}")
+                # Unpack TorchQuantLinear -> nn.Linear via the existing base helper, then
+                # clear quantization metadata so the downstream dequantize_hf_model() is a no-op.
+                native_model = self._dequantize_gptq_hf_model(native_model)
                 if hasattr(native_model, "config"):
                     native_model.config.quantization_config = None
-                    if hasattr(native_model.config, "quantization_method"):
-                        native_model.config.quantization_method = None
-                    if hasattr(native_model, "quantization_method"):
-                        native_model.quantization_method = None
             except ImportError:
                 logger.warning("gptqmodel not available; falling back to AutoModelForCausalLM")
                 native_model = AutoModelForCausalLM.from_pretrained(
@@ -282,7 +283,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
 
         qwen3_5_moe_register_wrap_modules()
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
-        output_pre_norm_hidden = spec_decode_mode == "mtp"
+        output_post_norm_hidden = spec_decode_mode == "mtp"
         output_hidden_state_indices = None
         if spec_decode_mode == "dflash":
             dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
@@ -304,7 +305,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
                 output_hidden_state_indices=output_hidden_state_indices,
-                output_pre_norm_hidden=output_pre_norm_hidden,
+                output_post_norm_hidden=output_post_norm_hidden,
                 kv_cache=dict(
                     cache_axis=2,
                 ),
@@ -560,7 +561,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         for layer_idx in range(len(linear_attention_layer_indices)):
             output_names_base.append(f"recurrent_state_out_{layer_idx}")
 
-        # Spec decode: pre_norm_hidden appended last so existing cache-update
+        # Spec decode: post_norm_hidden appended last so existing cache-update
         # indexing in Qwen3_5MoeInference._forward() is unaffected.
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
         num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
@@ -573,15 +574,31 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                     "dflash_model_dir is required when spec_decode_mode='dflash'"
                 )
             output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
-        output_pre_norm_hidden = spec_decode_mode == "mtp"
+        output_post_norm_hidden = spec_decode_mode == "mtp"
         extra_hidden_output_name = None
         if output_hidden_state_indices is not None:
             extra_hidden_output_name = "target_hidden"
-        elif output_pre_norm_hidden:
-            extra_hidden_output_name = "pre_norm_hidden"
+        elif output_post_norm_hidden:
+            extra_hidden_output_name = "post_norm_hidden"
 
         prefill_output_names = list(output_names_base)
-        decode_output_names = list(output_names_base)
+        # Decode in spec mode emits per-step verify intermediates (mirrors dense
+        # ``qwen3_5_llm_model.py:284-316``): ``conv_cache_out_{l}_{t}`` and
+        # ``recurrent_state_out_{l}_{t}`` for ``t in 0..verify_length-1``.
+        if spec_decode_mode:
+            decode_output_names = ["logits"]
+            for layer_idx in range(len(linear_attention_layer_indices)):
+                for step_idx in range(verify_length):
+                    decode_output_names.append(
+                        f"conv_cache_out_{layer_idx}_{step_idx}"
+                    )
+            for layer_idx in range(len(linear_attention_layer_indices)):
+                for step_idx in range(verify_length):
+                    decode_output_names.append(
+                        f"recurrent_state_out_{layer_idx}_{step_idx}"
+                    )
+        else:
+            decode_output_names = list(output_names_base)
         if extra_hidden_output_name is not None:
             prefill_output_names.append(extra_hidden_output_name)
             decode_output_names.append(extra_hidden_output_name)
@@ -634,6 +651,12 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         wrap_cfg.input_sequence_length = decode_seq_len
         if spec_decode_mode:
             wrap_cfg.num_logits_to_keep = 0  # return all positions for verify
+            # Per-step conv/recurrent verify intermediates (Phase 3, mirrors dense).
+            wrap_cfg.verify_output_intermediates = True
+            # Force recurrent mode so the per-step verify branch in
+            # _Qwen3_5MoeGatedDeltaNet.forward executes (it requires use_recurrent=True).
+            # Mirrors dense set_linear_attention_mode("recurrent") for spec decode.
+            wrap_cfg.linear_attention_mode = "recurrent"
 
         def _apply_update_cfg(module):
             if hasattr(module, "_update_cfg"):
@@ -694,7 +717,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 )
             meta_info["spec_decode_mode"] = spec_decode_mode
             meta_info["spec_decode_block_size"] = num_draft_tokens
-            meta_info["spec_decode_hidden_output_name"] = "pre_norm_hidden"
+            meta_info["spec_decode_hidden_output_name"] = "post_norm_hidden"
             meta_info["spec_decode_verify_length"] = verify_length
         elif spec_decode_mode == "dflash":
             draft_onnx_files = self._export_dflash_draft_model(

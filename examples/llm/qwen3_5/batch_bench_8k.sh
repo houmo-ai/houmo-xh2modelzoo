@@ -18,6 +18,9 @@
 #   AUTO_OFFLOAD_MAX_MEMORY          optional, forwarded to dense bench
 #   PREFILL_AUTO_OFFLOAD_MAX_MEMORY  optional, forwarded to dense bench
 #   DECODE_AUTO_OFFLOAD_MAX_MEMORY   optional, forwarded to dense bench
+#   ENABLE_CUDA_GRAPH                1|0 (default 1, forwarded to dense/moe bench)
+#   CUDA_GRAPH_WARMUP_RUNS           (default 3, forwarded to dense/moe bench)
+#   CUDA_GRAPH_GRAPH_WARMUP_RUNS     (default 6, forwarded to dense/moe bench)
 
 set -u
 cd "$(dirname "$0")/../../.."
@@ -37,6 +40,9 @@ NUM_SHARDS="${NUM_SHARDS:-1}"
 AUTO_OFFLOAD_MAX_MEMORY="${AUTO_OFFLOAD_MAX_MEMORY:-}"
 PREFILL_AUTO_OFFLOAD_MAX_MEMORY="${PREFILL_AUTO_OFFLOAD_MAX_MEMORY:-}"
 DECODE_AUTO_OFFLOAD_MAX_MEMORY="${DECODE_AUTO_OFFLOAD_MAX_MEMORY:-}"
+ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH:-1}"
+CUDA_GRAPH_WARMUP_RUNS="${CUDA_GRAPH_WARMUP_RUNS:-3}"
+CUDA_GRAPH_GRAPH_WARMUP_RUNS="${CUDA_GRAPH_GRAPH_WARMUP_RUNS:-6}"
 
 mkdir -p "$BENCH_OUT"
 
@@ -63,17 +69,41 @@ if [[ -n "$DECODE_AUTO_OFFLOAD_MAX_MEMORY" ]]; then
   DENSE_OFFLOAD_ARG+=(--decode-auto-offload-max-memory "$DECODE_AUTO_OFFLOAD_MAX_MEMORY")
 fi
 
-mapfile -t metas < <(find "$OUT_ROOT" -mindepth 2 -maxdepth 2 -type f -name meta.json | sort)
+DENSE_CUDA_GRAPH_ARG=()
+case "${ENABLE_CUDA_GRAPH,,}" in
+  1|true|yes|on)
+    DENSE_CUDA_GRAPH_ARG+=(
+      --enable-cuda-graph
+      --cuda-graph-warmup-runs "$CUDA_GRAPH_WARMUP_RUNS"
+      --cuda-graph-graph-warmup-runs "$CUDA_GRAPH_GRAPH_WARMUP_RUNS"
+    )
+    ;;
+esac
+MOE_CUDA_GRAPH_ARG=("${DENSE_CUDA_GRAPH_ARG[@]}")
+
+extract_model_size_rank() {
+  local tag="$1"
+  if [[ "$tag" =~ ([0-9]+)[bB] ]]; then
+    printf "%05d" "${BASH_REMATCH[1]}"
+    return
+  fi
+  printf "99999"
+}
+
+mapfile -t metas < <(
+  find "$OUT_ROOT" -mindepth 2 -maxdepth 2 -type f -name meta.json | while read -r meta; do
+    tag="$(basename "$(dirname "$meta")")"
+    if [[ "$tag" != *8k* ]]; then
+      continue
+    fi
+    if [[ -n "$ONLY_TAG_REGEX" ]] && ! [[ "$tag" =~ $ONLY_TAG_REGEX ]]; then
+      continue
+    fi
+    printf "%s\t%s\t%s\n" "$(extract_model_size_rank "$tag")" "$tag" "$meta"
+  done | sort -t $'\t' -k1,1n -k2,2 | cut -f3-
+)
 for meta in "${metas[@]}"; do
   tag="$(basename "$(dirname "$meta")")"
-  if [[ "$tag" != *8k* ]]; then
-    echo ">>> FILTER $tag (non-8k)"
-    continue
-  fi
-  if [[ -n "$ONLY_TAG_REGEX" ]] && ! [[ "$tag" =~ $ONLY_TAG_REGEX ]]; then
-    echo ">>> FILTER $tag"
-    continue
-  fi
   md="$BENCH_OUT/${tag}${SUFFIX}.md"
   js="$BENCH_OUT/${tag}${SUFFIX}.json"
   if [[ -f "$md" && -f "$js" ]]; then
@@ -87,6 +117,7 @@ for meta in "${metas[@]}"; do
         --output-md "$md" --output-json "$js" \
         --think-mode "$THINK_MODE" \
         --max-new-tokens "$MAX_NEW_TOKENS" \
+        "${MOE_CUDA_GRAPH_ARG[@]}" \
         "${LIMIT_ARG[@]}" \
         "${SHARD_ARG[@]}" \
         2>&1 | tee "$BENCH_OUT/${tag}${SUFFIX}.log"
@@ -98,6 +129,7 @@ for meta in "${metas[@]}"; do
         --max-new-tokens "$MAX_NEW_TOKENS" \
         --dtype "$DTYPE" \
         "${DENSE_OFFLOAD_ARG[@]}" \
+        "${DENSE_CUDA_GRAPH_ARG[@]}" \
         "${LIMIT_ARG[@]}" \
         "${SHARD_ARG[@]}" \
         2>&1 | tee "$BENCH_OUT/${tag}${SUFFIX}.log"

@@ -5,7 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,10 @@ from transformers import AutoTokenizer
 from xh_model_zoo.xh_llm.models.qwen3_5 import (
     Qwen3_5ONNXModel,
     Qwen3_5SpecDecodeONNXModel,
+)
+from qwen3_5_spec_decode_metrics import (
+    run_dense_spec_generate_once,
+    run_dense_target_baseline_from_spec,
 )
 
 
@@ -99,6 +103,10 @@ def load_spec_decode_runtime(
     decode_auto_offload_max_memory=None,
     resource_tight_mode: bool = False,
     num_draft_tokens_override: Optional[int] = None,
+    enable_cuda_graph: bool = False,
+    cuda_graph_modules: Optional[Tuple[str, ...]] = None,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
 ) -> Tuple[Qwen3_5SpecDecodeONNXModel, AutoTokenizer, dict]:
     """Load speculative decode runtime from meta.json.
 
@@ -134,7 +142,7 @@ def load_spec_decode_runtime(
     block_size = num_draft_tokens_override or spec_decode.get("block_size", 4)
     hidden_output_name = spec_decode.get(
         "hidden_output_name",
-        "target_hidden" if spec_mode == "dflash" else "pre_norm_hidden",
+        "target_hidden" if spec_mode == "dflash" else "post_norm_hidden",
     )
     draft_cfg = {}
     if spec_mode == "mtp":
@@ -201,6 +209,10 @@ def load_spec_decode_runtime(
         decode_auto_offload_max_memory=decode_auto_offload_max_memory,
         resource_tight_mode=resource_tight_mode,
         pad_token_id=pad_token_id,
+        enable_cuda_graph=enable_cuda_graph,
+        cuda_graph_modules=cuda_graph_modules,
+        cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
     )
     runtime.set_input_embeddings(token_embedding)
     runtime.to(torch.device(device))
@@ -259,7 +271,68 @@ def benchmark_spec_decode(
     return cleaned, elapsed, output_token_count
 
 
-def main(args):
+def print_cuda_graph_status(runtime: Qwen3_5SpecDecodeONNXModel) -> None:
+    print("cuda_graph_status:")
+    for name, status in runtime.get_cuda_graph_status().items():
+        reason = status.get("reason") or "-"
+        backend = status.get("backend") or "-"
+        print(
+            f"  {name}: backend={backend} enabled={status.get('enabled')} "
+            f"captured={status.get('captured')} reason={reason}"
+        )
+
+
+def parse_cuda_graph_modules(modules_arg: str) -> Optional[Tuple[str, ...]]:
+    if not modules_arg or not modules_arg.strip():
+        return None
+    modules = tuple(
+        part.strip().lower() for part in modules_arg.split(",") if part.strip()
+    )
+    return modules or None
+
+
+def load_prompt(prompt: str, prompt_file: Optional[str]) -> str:
+    if prompt_file:
+        return Path(prompt_file).read_text(encoding="utf-8")
+    return prompt
+
+
+def compare_texts(reference: str, candidate: str) -> Dict[str, Any]:
+    exact_match = reference == candidate
+    first_diff = None
+    if not exact_match:
+        for idx, (lhs, rhs) in enumerate(zip(reference, candidate)):
+            if lhs != rhs:
+                first_diff = idx
+                break
+        if first_diff is None:
+            first_diff = min(len(reference), len(candidate))
+    return {
+        "exact_match": exact_match,
+        "reference_length": len(reference),
+        "candidate_length": len(candidate),
+        "first_diff_index": first_diff,
+        "reference_snippet": (
+            reference[max(0, first_diff - 80) : first_diff + 160]
+            if first_diff is not None
+            else ""
+        ),
+        "candidate_snippet": (
+            candidate[max(0, first_diff - 80) : first_diff + 160]
+            if first_diff is not None
+            else ""
+        ),
+    }
+
+
+def run_single_case(
+    *,
+    args,
+    prompt: str,
+    enable_cuda_graph: bool,
+    cuda_graph_modules: Optional[Tuple[str, ...]],
+    baseline_only: bool,
+) -> Dict[str, Any]:
     runtime, tokenizer, meta_info = load_spec_decode_runtime(
         meta_path=args.config,
         dtype=parse_dtype(args.dtype),
@@ -279,6 +352,162 @@ def main(args):
         num_draft_tokens_override=(
             args.num_draft_tokens if args.num_draft_tokens > 0 else None
         ),
+        enable_cuda_graph=enable_cuda_graph,
+        cuda_graph_modules=cuda_graph_modules,
+        cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
+    )
+    try:
+        spec_decode = meta_info.get("spec_decode", {})
+        if baseline_only:
+            result = run_dense_target_baseline_from_spec(
+                runtime,
+                tokenizer,
+                prompt,
+                args.max_new_tokens,
+                enable_thinking=args.enable_thinking,
+                repetition_penalty=args.repetition_penalty,
+                presence_penalty=args.presence_penalty,
+            )
+        else:
+            result = run_dense_spec_generate_once(
+                runtime=runtime,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_new_tokens=args.max_new_tokens,
+                enable_thinking=args.enable_thinking,
+                repetition_penalty=args.repetition_penalty,
+                presence_penalty=args.presence_penalty,
+            )
+        return {
+            "mode": "baseline" if baseline_only else "spec",
+            "enable_cuda_graph": enable_cuda_graph,
+            "cuda_graph_modules": list(cuda_graph_modules)
+            if cuda_graph_modules is not None
+            else None,
+            "spec_decode_mode": spec_decode.get("mode"),
+            "block_size": runtime.block_size,
+            "hidden_output_name": runtime.hidden_output_name,
+            "cuda_graph_status": runtime.get_cuda_graph_status(),
+            **result,
+        }
+    finally:
+        del runtime
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def print_compare_result(label: str, comparison: Dict[str, Any]) -> None:
+    print(f"{label}: exact_match={comparison['exact_match']}")
+    if comparison["exact_match"]:
+        return
+    print(f"{label}_first_diff_index: {comparison['first_diff_index']}")
+    print(f"{label}_reference_snippet: {comparison['reference_snippet']}")
+    print(f"{label}_candidate_snippet: {comparison['candidate_snippet']}")
+
+
+def run_compare(args) -> None:
+    prompt = load_prompt(args.prompt, args.prompt_file)
+    cuda_graph_modules = parse_cuda_graph_modules(args.cuda_graph_modules)
+
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "max_new_tokens": args.max_new_tokens,
+        "enable_thinking": args.enable_thinking,
+        "baseline_only": args.baseline_only,
+    }
+
+    if args.compare_to_no_cuda_graph:
+        reference = run_single_case(
+            args=args,
+            prompt=prompt,
+            enable_cuda_graph=False,
+            cuda_graph_modules=None,
+            baseline_only=args.baseline_only,
+        )
+        candidate = run_single_case(
+            args=args,
+            prompt=prompt,
+            enable_cuda_graph=args.enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            baseline_only=args.baseline_only,
+        )
+        comparison = compare_texts(reference["text"], candidate["text"])
+        payload["reference"] = reference
+        payload["candidate"] = candidate
+        payload["comparison"] = comparison
+
+        print(f"reference_mode: {reference['mode']}")
+        print(f"candidate_mode: {candidate['mode']}")
+        print(
+            f"candidate_cuda_graph_modules: "
+            f"{candidate['cuda_graph_modules'] or 'all' if candidate['enable_cuda_graph'] else 'disabled'}"
+        )
+        print_compare_result("compare_to_no_cuda_graph", comparison)
+
+    if args.compare_baseline:
+        baseline = run_single_case(
+            args=args,
+            prompt=prompt,
+            enable_cuda_graph=args.enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            baseline_only=True,
+        )
+        spec = run_single_case(
+            args=args,
+            prompt=prompt,
+            enable_cuda_graph=args.enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            baseline_only=False,
+        )
+        comparison = compare_texts(baseline["text"], spec["text"])
+        payload["baseline"] = baseline
+        payload["spec"] = spec
+        payload["baseline_vs_spec"] = comparison
+
+        print(
+            f"baseline_vs_spec_cuda_graph_modules: "
+            f"{spec['cuda_graph_modules'] or 'all' if spec['enable_cuda_graph'] else 'disabled'}"
+        )
+        print_compare_result("baseline_vs_spec", comparison)
+
+    if args.output_json:
+        Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output_json).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+def main(args):
+    if args.compare_to_no_cuda_graph or args.compare_baseline:
+        run_compare(args)
+        return
+
+    prompt = load_prompt(args.prompt, args.prompt_file)
+    cuda_graph_modules = parse_cuda_graph_modules(args.cuda_graph_modules)
+    runtime, tokenizer, meta_info = load_spec_decode_runtime(
+        meta_path=args.config,
+        dtype=parse_dtype(args.dtype),
+        device=args.device,
+        exec_device=args.exec_device,
+        auto_offload=not args.disable_auto_offload,
+        auto_offload_max_memory=parse_auto_offload_max_memory(
+            args.auto_offload_max_memory
+        ),
+        prefill_auto_offload_max_memory=parse_auto_offload_max_memory(
+            args.prefill_auto_offload_max_memory
+        ),
+        decode_auto_offload_max_memory=parse_auto_offload_max_memory(
+            args.decode_auto_offload_max_memory
+        ),
+        resource_tight_mode=args.resource_tight_mode,
+        num_draft_tokens_override=(
+            args.num_draft_tokens if args.num_draft_tokens > 0 else None
+        ),
+        enable_cuda_graph=args.enable_cuda_graph,
+        cuda_graph_modules=cuda_graph_modules,
+        cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
     )
 
     spec_decode = meta_info.get("spec_decode", {})
@@ -290,7 +519,7 @@ def main(args):
         benchmark_spec_decode(
             runtime,
             tokenizer,
-            prompt=args.prompt,
+            prompt=prompt,
             max_new_tokens=args.max_new_tokens,
             enable_thinking=args.enable_thinking,
             do_sample=args.do_sample,
@@ -309,7 +538,7 @@ def main(args):
         output_text, elapsed, output_tokens = benchmark_spec_decode(
             runtime,
             tokenizer,
-            prompt=args.prompt,
+            prompt=prompt,
             max_new_tokens=args.max_new_tokens,
             enable_thinking=args.enable_thinking,
             do_sample=args.do_sample,
@@ -327,12 +556,15 @@ def main(args):
 
     print(f"\nmodel_name: {meta_info.get('model_name')}")
     print(f"quant_scheme: {meta_info.get('quant_scheme')}")
-    print(f"prompt: {args.prompt}")
+    print(f"enable_cuda_graph: {args.enable_cuda_graph}")
+    print(f"cuda_graph_modules: {list(cuda_graph_modules) if cuda_graph_modules is not None else 'all' if args.enable_cuda_graph else 'disabled'}")
+    print(f"prompt: {prompt}")
     print(f"output: {output_text}")
     print(f"benchmark_runs: {args.benchmark_runs}")
     print(f"avg_latency_s: {avg_latency:.4f}")
     print(f"output_tokens: {output_tokens}")
     print(f"tokens_per_second: {toks_per_sec:.4f}")
+    print_cuda_graph_status(runtime)
 
 
 if __name__ == "__main__":
@@ -353,6 +585,7 @@ if __name__ == "__main__":
         type=str,
         default="写一首关于 AI的诗",
     )
+    parser.add_argument("--prompt_file", type=str, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--enable_thinking", action="store_true")
     parser.add_argument("--do_sample", action="store_true")
@@ -375,5 +608,18 @@ if __name__ == "__main__":
         default=0,
         help="Override number of draft tokens per round (0 = use meta.json value)",
     )
+    parser.add_argument("--enable_cuda_graph", action="store_true")
+    parser.add_argument(
+        "--cuda_graph_modules",
+        type=str,
+        default="",
+        help="Comma-separated session names: prefill,decode,draft_prefill,draft_context,draft_decode",
+    )
+    parser.add_argument("--cuda_graph_warmup_runs", type=int, default=3)
+    parser.add_argument("--cuda_graph_graph_warmup_runs", type=int, default=6)
+    parser.add_argument("--baseline_only", action="store_true")
+    parser.add_argument("--compare_to_no_cuda_graph", action="store_true")
+    parser.add_argument("--compare_baseline", action="store_true")
+    parser.add_argument("--output_json", type=str, default=None)
     args = parser.parse_args()
     main(args)

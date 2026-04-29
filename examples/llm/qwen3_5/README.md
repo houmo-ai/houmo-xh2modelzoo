@@ -293,6 +293,81 @@ python examples/quantization/examples/example_qwen35dense.py \
 3. 在使用 GPTQModel 前，建议先确认仓库代码已经包含 `aeb3864e` 之后的修复，否则 Qwen3.5 相关旋转与量化功能可能不完整。
 
 
+## Spec Decode 评测
+
+`qwen3_5_xh2a_spec_decode_bench.py` 用于评测已导出的 spec-decode HMONNX 产物。当前评测脚本不再维护一套私有 spec-decode 循环，而是直接调用 `Qwen3_5SpecDecodeONNXModel.generate(..., return_stats=True)`：
+
+- bench 只统计真实 `generate` 链路的 spec 指标：target prefill/decode、MTP/DFlash draft 调用次数、每轮接受 token 数、接受率、延迟和 tokens/s；
+- 不再在 bench 中额外跑 baseline。若要单独做 baseline/spec 消融或定位文本差异，请使用 `qwen3_5_xh2a_spec_decode_test.py`；
+- 默认 `--dtype fp16`、`--repetition-penalty 1.0`，与 `generate` 默认行为保持一致。
+
+### 数据集
+
+默认评测集为：
+
+```bash
+examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl
+```
+
+每行是一个 JSON case，至少包含 `prompt` 和 `category`。如需快速 smoke test，可加 `--limit 1 --max-new-tokens 32 --think-mode off`；完整评测建议去掉 `--limit`，并按显存/时间选择是否分片：
+
+```bash
+--shard-index 0 --num-shards 4
+```
+
+### 9B MTP 评测命令
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_9b_mtp_k4_w4a8_8k/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/spec_decode_metrics/qwen3_5_9b_mtp_generate_bench.md \
+  --output-json output/spec_decode_metrics/qwen3_5_9b_mtp_generate_bench.json \
+  --think-mode both \
+  --max-new-tokens 128 \
+  --dtype fp16 \
+  --device cuda:0 \
+  --exec-device cuda:0
+```
+
+### 27B MTP 评测命令
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_27b_mtp_k4_w4a8_8k/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/spec_decode_metrics/qwen3_5_27b_mtp_generate_bench.md \
+  --output-json output/spec_decode_metrics/qwen3_5_27b_mtp_generate_bench.json \
+  --think-mode both \
+  --max-new-tokens 128 \
+  --dtype fp16 \
+  --device cuda:0 \
+  --exec-device cuda:0
+```
+
+### 快速验证结果（2026-04-24）
+
+以下结果来自同一条 smoke case（`case_0021`，`think-mode=off`，`max-new-tokens=32`，`dtype=fp16`），用于证明 bench 已经通过真实 `generate` 链路在 9B/27B 产物上跑通；完整性能结论应以去掉 `--limit` 的全量报告为准。
+
+| 模型 | meta | spec target decode | MTP decode | 接受率 | 平均每轮接受 | spec latency | spec tokens/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.5 9B MTP k4 | `work_dirs/qwen3_5_9b_mtp_k4_w4a8_8k/meta.json` | 9 | 36 | 0.6389 | 2.5556 | 7.5709s | 4.2267 |
+| Qwen3.5 27B MTP k4 | `work_dirs/qwen3_5_27b_mtp_k4_w4a8_8k/meta.json` | 8 | 32 | 0.7188 | 2.8750 | 13.5037s | 2.3697 |
+
+结果分析：
+
+1. 两个模型都直接走真实 `generate` 链路，说明 bench 评测口径已经收敛到 spec runtime 本身，不再混入额外 baseline 逻辑。
+2. 9B 的 target decode 为 9 次，27B 为 8 次；spec decode 的收益主要来自把多个 draft token 合并进一次 target verify。
+3. 27B smoke case 的接受率更高（0.7188 vs 0.6389），平均每轮接受 token 更多，因此 target decode 次数更少；但模型更大，单次 target/draft 图耗时更高，tokens/s 低于 9B。
+4. smoke 结果只覆盖 1 条样本和 32 token，上表适合做回归验证，不适合当最终吞吐结论。正式报告应使用 `--think-mode both --max-new-tokens 128` 或业务指定长度，并汇总 Markdown/JSON 输出。
+
+
 ## 注意事项
 
 1. Qwen3.5 当前已经支持 LLM 与 Vision 两部分的独立导出，也已经支持 VL 联合推理 demo。
@@ -301,5 +376,3 @@ python examples/quantization/examples/example_qwen35dense.py \
 4. 运行 Vision 导出或 VL demo 时，建议始终显式设置 `PYTHONPATH=./`；如果缺少 hmquant 动态库路径，`xhquant` GPU 扩展可能加载失败。
 5. Vision 导出当前默认使用 `448 x 448` 输入分辨率、`patch_size=16`、`temporal_patch_size=2`，如果修改这些参数，Vision 产物与 VL demo 的输入配置也要保持一致。
 6. LLM 的 Prefill 和 Decode 是两张独立图，Vision HMONNX 只负责生成图像特征，最终由 VL demo 将图像特征散射回文本 token embedding 后再调用 LLM HMONNX。
-
-python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py --meta /data01/home/yujy/work/xh2modelzoo/work_dirs/qwen3_5_4b_mtp_k4_w4a8_8k/meta.json --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl --output-md /tmp/qwen35_bench/qwen3_5_4b_mtp_k4_w4a8_8k.shard0of4.md --output-json output/qwen35_bench/qwen3_5_4b_mtp_k4_w4a8_8k.shard0of4.json --think-mode both --max-new-tokens 128 --dtype fp16 --device cuda:0 --exec-device cuda:0 --repetition-penalty 1.1 --presence-penalty 0.0 --shard-index 0 --num-shards 4

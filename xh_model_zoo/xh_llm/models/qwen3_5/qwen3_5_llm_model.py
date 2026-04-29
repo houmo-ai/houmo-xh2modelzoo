@@ -282,19 +282,22 @@ class XHQwen3_5Model(LLMBaseModel):
                 self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
                 output_names = ["logits"]
-                # Verify-intermediates path expands recurrent_state per step and
-                # exports conv_cache as the continuous rollback window
-                # (kernel_size - 1 + verify_steps). Runtime slices that window
-                # by accepted draft count to recover the committed conv state.
+                # Verify-intermediates path expands BOTH conv_cache and
+                # recurrent_state into per-step snapshots so the runtime can
+                # pick the snapshot for the committed accepted_steps by name
+                # without slicing.
                 verify_steps = 1
                 if (
                     bool(self.wrap_cfg.get("verify_output_intermediates", False))
                     and int(self.wrap_cfg.get("input_sequence_length", 1)) > 1
                 ):
                     verify_steps = int(self.wrap_cfg.input_sequence_length)
-                for cache_idx in range(num_linear_attention_layers):
-                    output_names.append(f"conv_cache_out_{cache_idx}")
                 if verify_steps > 1:
+                    for cache_idx in range(num_linear_attention_layers):
+                        for step_idx in range(verify_steps):
+                            output_names.append(
+                                f"conv_cache_out_{cache_idx}_{step_idx}"
+                            )
                     for cache_idx in range(num_linear_attention_layers):
                         for step_idx in range(verify_steps):
                             output_names.append(
@@ -302,12 +305,14 @@ class XHQwen3_5Model(LLMBaseModel):
                             )
                 else:
                     for cache_idx in range(num_linear_attention_layers):
+                        output_names.append(f"conv_cache_out_{cache_idx}")
+                    for cache_idx in range(num_linear_attention_layers):
                         output_names.append(f"recurrent_state_out_{cache_idx}")
                 # Add spec_decode_hidden output if configured
                 if self.wrap_cfg.get("output_hidden_state_indices") is not None:
                     output_names.append("target_hidden")
-                elif self.wrap_cfg.get("output_pre_norm_hidden", False):
-                    output_names.append("pre_norm_hidden")
+                elif self.wrap_cfg.get("output_post_norm_hidden", False):
+                    output_names.append("post_norm_hidden")
                 self.export_cfg.output_names = output_names
 
     def prepare_inputs(self, data):

@@ -24,10 +24,10 @@
 
 | 图 | 作用 | 关键输入 | 关键输出 |
 | --- | --- | --- | --- |
-| target prefill | prompt 预填充 | `inputs_embeds`, `past_seq_length`, `current_input_length`, caches | `logits`, `target_hidden` 或 `pre_norm_hidden`, target caches |
+| target prefill | prompt 预填充 | `inputs_embeds`, `past_seq_length`, `current_input_length`, caches | `logits`, `target_hidden` 或 `post_norm_hidden`, target caches |
 | target decode | verify | 当前 token + `K` 个 draft token，一次性输入 | `logits[1+K]`, hidden 序列, verify-time conv/recurrent outputs |
-| MTP prefill | 用 target prefill hidden 建 MTP cache | `pre_norm_hidden`, `next_token_embedding`, `past_seq_length`, `current_input_length`, MTP KV cache | `present_key_cache`, `present_value_cache` |
-| MTP decode | 单步起草 | 单 token embedding + 单步 hidden + MTP KV cache | `logits`, `pre_norm_out`, `present_*cache` |
+| MTP prefill | 用 target prefill hidden 建 MTP cache | `post_norm_hidden`, `next_token_embedding`, `past_seq_length`, `current_input_length`, MTP KV cache | `logits`, `post_norm_out`（KV cache 输入端原地更新，不再作为输出） |
+| MTP decode | 单步起草 | 单 token embedding + 单步 hidden + MTP KV cache | `logits`, `post_norm_out`（KV cache 原地更新） |
 | DFlash context | 把 target hidden 预计算成 DFlash 各层 KV cache | `target_hidden`, `past_seq_length`, `current_input_length`, per-layer KV cache | per-layer `present_key_cache_i`, `present_value_cache_i` |
 | DFlash decode | 一次生成 K 个 draft 候选 | `noise_embedding[1+K]`, `past_seq_length`, `current_input_length`, `attn_mask`, per-layer KV cache | `logits[1+K]` |
 
@@ -69,9 +69,8 @@ MTP 的 block 与主模型 block 同类，都是 causal self attention，因此�
 
 - `_mtp_model.py`
   - 图内 RoPE cache
-  - 显式 `past_key_cache` / `past_value_cache`
-  - 输出 `present_key_cache` / `present_value_cache`
-  - 输出 `pre_norm_out`
+  - 显式 `past_key_cache` / `past_value_cache`（输入端原地更新，不再作为输出）
+  - 输出 `logits`, `post_norm_out`
 - `qwen3_5_mtp_model.py`
   - wrapper 改成新输入输出名
   - 真实 4B 权重加载已打通
@@ -123,7 +122,7 @@ DFlash decode 使用 additive mask：
 
 target prefill 在 spec decode 模式下会额外导出：
 
-- `pre_norm_hidden`（MTP）
+- `post_norm_hidden`（MTP）
 - `target_hidden`（DFlash，多层 hidden concat）
 
 并将 `num_logits_to_keep=0`，避免只保留最后一个 logits 导致 hidden 序列不完整。
@@ -155,7 +154,7 @@ target decode 在 spec decode 模式下会：
    - target prefill 跑完整个 prompt
    - 同步累计 MTP cache 或 DFlash context cache
 2. **draft**
-   - MTP：逐步用 `pre_norm_out` 链式起草 K 个 token
+   - MTP：逐步用 `post_norm_out` 链式起草 K 个 token
    - DFlash：一次 decode 输出 `1 + K` 个位置 logits，从位置 1..K 读 draft token
 3. **verify**
    - target decode 一次验证 `[current] + drafts`
@@ -271,7 +270,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py \
 | Qwen3.5-9B | DFlash | `work_dirs/qwen3_5_9b_dflash_k4_export/` | 同新 ABI | 已闭环通过 |
 | Qwen3.5-27B | MTP | `work_dirs/qwen3_5_27b_mtp_k4_export/` | 同新 ABI | `Count from 1 to 5.` → `1 2 3 4 5`，`accepted=5`，`avg_accepted_per_round=1.00` |
 | Qwen3.5-27B | DFlash | `work_dirs/qwen3_5_27b/qwen3_5_27b_xh2a_Qwen3.5-27B/` | prefill `target_hidden=[1,256,25600]`，decode `target_hidden=[1,5,25600]` | `中国的首都是哪里？请只回答城市名。` → `北京`，`accepted=1` |
-| Qwen3.5-35B-A3B | MTP | `work_dirs/Qwen3.5-35B-A3B-XH2a-2k-w8a8h0_sefp-spec_mtp/` | prefill `pre_norm_hidden=[1,256,2048]`，decode `pre_norm_hidden=[1,5,2048]` | `Count from 1 to 5.` → `1, 2, 3, 4, 5.` |
+| Qwen3.5-35B-A3B | MTP | `work_dirs/Qwen3.5-35B-A3B-XH2a-2k-w8a8h0_sefp-spec_mtp/` | prefill `post_norm_hidden=[1,256,2048]`，decode `post_norm_hidden=[1,5,2048]` | `Count from 1 to 5.` → `1, 2, 3, 4, 5.` |
 | Qwen3.5-35B-A3B | DFlash | `work_dirs/Qwen3.5-35B-A3B-XH2a-2k-w8a8h0_sefp-spec_dflash/` | prefill `target_hidden=[1,256,10240]`，decode `target_hidden=[1,5,10240]` | `中国的首都是哪里？请只回答城市名。` → `北京` |
 | Qwen3.6-35B-A3B | MTP | `work_dirs/Qwen3.6-35B-A3B-XH2a-2k-w8a8h0_sefp-spec_mtp/` | target prefill/decode 同新 ABI；draft prefill 有 KV cache，draft decode 输出单步 logits + cache | `Count from 1 to 5.` → `1, 2, 3, 4, 5\n` |
 | Qwen3.6-35B-A3B | DFlash | `work_dirs/Qwen3.6-35B-A3B-XH2a-2k-w8a8h0_sefp-spec_dflash/` | prefill `target_hidden=[1,256,10240]`，decode `target_hidden=[1,5,10240]` | `中国的首都是哪里？` → `中国的首都是北京。` |

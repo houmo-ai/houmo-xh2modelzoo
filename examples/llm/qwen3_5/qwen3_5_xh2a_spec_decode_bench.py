@@ -4,8 +4,7 @@ Qwen3.5 xh2a spec-decode large-scale benchmark.
 
 Reads a JSONL dataset of prompts (see `build_spec_decode_dataset.py`) and for
 each prompt runs:
-  - dense baseline (non-draft, greedy, via `run_dense_target_baseline_from_spec`)
-  - spec-decode (via `run_dense_spec_metrics`)
+  - spec-decode through `Qwen3_5SpecDecodeONNXModel.generate`
 
 Runs are done for each selected `--think-mode` ∈ {on, off, both}, aggregating
 per-category statistics plus one representative example per category.
@@ -42,10 +41,7 @@ from qwen3_5_spec_decode_metrics import (  # noqa: E402
     Qwen3_5SpecDecodeONNXModel,
     load_dense_runtime_from_meta,
     release_dense_runtime,
-    reset_dense_spec_runtime,
-    run_dense_spec_metrics,
     run_dense_spec_metrics_with_runtime,
-    run_dense_target_baseline_from_spec,
 )
 
 
@@ -124,7 +120,6 @@ def summarise(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         sums = defaultdict(list)
         for it in items:
             spec = it.get("spec", {})
-            base = it.get("baseline", {})
             for k in (
                 "target_prefill_calls",
                 "target_decoder_calls",
@@ -133,15 +128,14 @@ def summarise(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "dflash_prefill_calls",
                 "dflash_decode_calls",
                 "output_tokens",
+                "latency_s",
+                "tokens_per_second",
                 "overall_acceptance_rate",
                 "avg_accepted_per_round",
                 "num_rounds",
             ):
                 if k in spec and spec[k] is not None:
                     sums[f"spec_{k}"].append(float(spec[k]))
-            for k in ("target_prefill_calls", "target_decoder_calls"):
-                if k in base and base[k] is not None:
-                    sums[f"base_{k}"].append(float(base[k]))
         means = {k: (sum(v) / len(v)) for k, v in sums.items() if v}
         per_cat_summary[cat] = {"n": len(items), **means}
         for k, v in means.items():
@@ -299,7 +293,6 @@ def render_markdown(
             lines.append("")
             header_keys = [
                 "n",
-                "base_target_decoder_calls",
                 "spec_target_decoder_calls",
                 "spec_mtp_prefill_calls",
                 "spec_mtp_decode_calls",
@@ -309,6 +302,8 @@ def render_markdown(
                 "spec_overall_acceptance_rate",
                 "spec_avg_accepted_per_round",
                 "spec_output_tokens",
+                "spec_latency_s",
+                "spec_tokens_per_second",
             ]
             present = [k for k in header_keys if any(k in v for v in per_cat.values())]
             lines.append("| category | " + " | ".join(present) + " |")
@@ -331,7 +326,7 @@ def render_markdown(
 
         examples = per_mode_examples.get(mode, {})
         if examples:
-            lines.append("### Representative case per category (baseline vs draft)")
+            lines.append("### Representative case per category")
             lines.append("")
             for cat in CATEGORIES:
                 ex = examples.get(cat)
@@ -345,20 +340,7 @@ def render_markdown(
                 lines.append(ex["prompt"])
                 lines.append("```")
                 lines.append("")
-                base = ex.get("baseline_full") or ex.get("baseline", {})
-                baseline_counts = ex.get("baseline", {})
                 spec = ex.get("spec", {})
-                lines.append(
-                    f"- baseline same-output counts: decoder_calls={baseline_counts.get('target_decoder_calls')}, "
-                    f"prefill_calls={baseline_counts.get('target_prefill_calls')}, "
-                    f"output_tokens={baseline_counts.get('output_tokens')}"
-                )
-                if ex.get("baseline_full"):
-                    lines.append(
-                        f"- baseline actual run: decoder_calls={base.get('target_decoder_calls')}, "
-                        f"prefill_calls={base.get('target_prefill_calls')}, "
-                        f"output_tokens={base.get('output_tokens')}"
-                    )
                 draft_extra = ""
                 if "mtp_decode_calls" in spec:
                     draft_extra = (
@@ -373,16 +355,11 @@ def render_markdown(
                 lines.append(
                     f"- spec: target_decoder_calls={spec.get('target_decoder_calls')}, "
                     f"output_tokens={spec.get('output_tokens')}, "
+                    f"latency_s={spec.get('latency_s')}, "
+                    f"tokens_per_second={spec.get('tokens_per_second')}, "
                     f"overall_accept_rate={spec.get('overall_acceptance_rate'):.3f}"
                     f"{draft_extra}"
                 )
-                lines.append("")
-                lines.append("<details><summary>baseline output</summary>")
-                lines.append("")
-                lines.append("```text")
-                lines.append(base.get("text", ""))
-                lines.append("```")
-                lines.append("</details>")
                 lines.append("")
                 lines.append("<details><summary>spec output</summary>")
                 lines.append("")
@@ -405,6 +382,12 @@ def render_markdown(
 def run_bench(args: argparse.Namespace) -> None:
     dataset_path = Path(args.dataset)
     validate_shard_args(args.shard_index, args.num_shards)
+    if args.baseline_meta:
+        print(
+            f"[bench] ignoring deprecated --baseline-meta={args.baseline_meta}; "
+            "bench now reports spec-only generate metrics",
+            flush=True,
+        )
     auto_offload_max_memory = parse_auto_offload_max_memory(args.auto_offload_max_memory)
     prefill_auto_offload_max_memory = parse_auto_offload_max_memory(
         args.prefill_auto_offload_max_memory
@@ -458,19 +441,21 @@ def run_bench(args: argparse.Namespace) -> None:
                 f"{len(pending_cases)} cases remaining",
                 flush=True,
             )
-        if args.baseline_meta is None:
-            runtime, tokenizer, meta_info = load_dense_runtime_from_meta(
-                meta_path=args.meta,
-                dtype=args.dtype,
-                device=args.device,
-                exec_device=args.exec_device,
-                auto_offload_max_memory=auto_offload_max_memory,
-                prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
-                decode_auto_offload_max_memory=decode_auto_offload_max_memory,
-            )
-            if not isinstance(runtime, Qwen3_5SpecDecodeONNXModel):
-                raise TypeError(f"{args.meta} is not a dense spec-decode runtime.")
-            model_name = meta_info.get("model_name", args.meta)
+        runtime, tokenizer, meta_info = load_dense_runtime_from_meta(
+            meta_path=args.meta,
+            dtype=args.dtype,
+            device=args.device,
+            exec_device=args.exec_device,
+            auto_offload_max_memory=auto_offload_max_memory,
+            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
+            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+            enable_cuda_graph=args.enable_cuda_graph,
+            cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
+        )
+        if not isinstance(runtime, Qwen3_5SpecDecodeONNXModel):
+            raise TypeError(f"{args.meta} is not a dense spec-decode runtime.")
+        model_name = meta_info.get("model_name", args.meta)
         dump_progress_json(
             args.output_json,
             meta_path=args.meta,
@@ -506,40 +491,23 @@ def run_bench(args: argparse.Namespace) -> None:
                 )
                 t0 = time.time()
                 try:
-                    if runtime is not None:
-                        result = run_dense_spec_metrics_with_runtime(
-                            runtime=runtime,
-                            tokenizer=tokenizer,
-                            model_name=model_name,
-                            prompt=prompt,
-                            max_new_tokens=args.max_new_tokens,
-                            enable_thinking=et,
-                            repetition_penalty=args.repetition_penalty,
-                            presence_penalty=args.presence_penalty,
-                        )
-                    else:
-                        result = run_dense_spec_metrics(
-                            meta_path=args.meta,
-                            baseline_meta_path=args.baseline_meta,
-                            prompt=prompt,
-                            max_new_tokens=args.max_new_tokens,
-                            dtype=args.dtype,
-                            device=args.device,
-                            exec_device=args.exec_device,
-                            enable_thinking=et,
-                            repetition_penalty=args.repetition_penalty,
-                            presence_penalty=args.presence_penalty,
-                            auto_offload_max_memory=auto_offload_max_memory,
-                            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
-                            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
-                        )
+                    result = run_dense_spec_metrics_with_runtime(
+                        runtime=runtime,
+                        tokenizer=tokenizer,
+                        model_name=model_name,
+                        prompt=prompt,
+                        max_new_tokens=args.max_new_tokens,
+                        enable_thinking=et,
+                        repetition_penalty=args.repetition_penalty,
+                        presence_penalty=args.presence_penalty,
+                        include_baseline=False,
+                    )
                     row = {
                         "id": case_id,
                         "category": case.get("category"),
                         "char_length": case.get("char_length"),
                         "prompt": prompt,
                         "enable_thinking": et,
-                        "baseline": result.get("baseline", {}),
                         "spec": result.get("speculative", {}),
                         "wall_time_s": time.time() - t0,
                     }
@@ -578,47 +546,8 @@ def run_bench(args: argparse.Namespace) -> None:
                     current_mode=mode,
                     status="running",
                 )
-            if runtime is not None:
-                for cat, example_row in pick_examples(rows).items():
-                    if "baseline_full" in example_row or "baseline_full_error" in example_row:
-                        continue
-                    try:
-                        reset_dense_spec_runtime(runtime)
-                        example_row["baseline_full"] = run_dense_target_baseline_from_spec(
-                            runtime,
-                            tokenizer,
-                            example_row["prompt"],
-                            args.max_new_tokens,
-                            enable_thinking=et,
-                            repetition_penalty=args.repetition_penalty,
-                            presence_penalty=args.presence_penalty,
-                        )
-                        print(
-                            f"[think={mode}] baseline example ready cat={cat} id={example_row['id']}",
-                            flush=True,
-                        )
-                    except Exception as exc:  # pragma: no cover
-                        example_row["baseline_full_error"] = f"{type(exc).__name__}: {exc}"
-                        print(
-                            f"[think={mode}] baseline example traceback {example_row['id']}: "
-                            f"{traceback.format_exc(limit=5)}",
-                            flush=True,
-                        )
-                        print(
-                            f"[think={mode}] baseline example failed cat={cat} id={example_row['id']} err={example_row['baseline_full_error']}",
-                            flush=True,
-                        )
-                dump_progress_json(
-                    args.output_json,
-                    meta_path=args.meta,
-                    dataset=args.dataset,
-                    shard_index=args.shard_index,
-                    num_shards=args.num_shards,
-                    per_mode_rows={**per_mode_rows, mode: rows},
-                    think_modes_done=list(per_mode_rows.keys()),
-                    current_mode=mode,
-                    status="running",
-                )
+            # Baseline and spec output examples are captured during each case;
+            # do not run another private decode loop here.
         finally:
             if runtime is not None:
                 release_dense_runtime(runtime)
@@ -660,13 +589,17 @@ def run_bench(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--meta", required=True, help="path to spec-decode meta.json")
-    parser.add_argument("--baseline-meta", default=None, help="optional dense baseline meta")
+    parser.add_argument(
+        "--baseline-meta",
+        default=None,
+        help="deprecated and ignored; bench now reports spec-only generate metrics",
+    )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output-md", required=True)
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--think-mode", choices=["on", "off", "both"], default="both")
-    parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument("--dtype", default="fp16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--exec-device", default="cuda:0")
     parser.add_argument("--auto-offload-max-memory", dest="auto_offload_max_memory", default=None)
@@ -680,7 +613,10 @@ def main() -> None:
         dest="decode_auto_offload_max_memory",
         default=None,
     )
-    parser.add_argument("--repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--enable-cuda-graph", action="store_true")
+    parser.add_argument("--cuda-graph-warmup-runs", type=int, default=3)
+    parser.add_argument("--cuda-graph-graph-warmup-runs", type=int, default=6)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument("--limit", type=int, default=0, help="if >0, keep only this many balanced cases")
     parser.add_argument("--shard-index", type=int, default=0, help="0-based shard index")

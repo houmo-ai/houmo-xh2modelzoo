@@ -543,12 +543,16 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         )
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
         if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
-            # Verify mode needs rollback-able conv state for every possible
-            # accepted draft count. Export the continuous window
-            # [cache[1:], step_0, ..., step_K] whose length is
-            # (kernel_size - 1 + verify_steps), so runtime can slice
-            # [accepted_drafts : accepted_drafts + kernel_size].
-            conv_cache_out = hidden_states_new[..., 1:]
+            # Verify mode emits one conv state per draft step as a separate
+            # tensor of shape [B, conv_dim, kernel_size]. The runtime selects
+            # the snapshot matching ``accepted_steps`` by name without slicing.
+            # Per-step list (one tensor per verify step) — downstream flattens
+            # to ``conv_cache_out_{layer}_{t}`` ONNX outputs.
+            _kernel = int(self.conv_kernel_size)
+            conv_cache_out = tuple(
+                hidden_states_new[..., 1 + t : 1 + t + _kernel]
+                for t in range(self.input_sequence_length)
+            )
         else:
             conv_cache_out = self.conv_cache_slice(
                 hidden_states_new, current_input_length
@@ -928,7 +932,7 @@ class _Qwen3_5TextModel(DynamicModule):
         self.output_hidden_state_indices = cfg.get("output_hidden_state_indices", None)
         if self.output_hidden_state_indices is not None:
             self._output_hidden_set = set(self.output_hidden_state_indices)
-        self.output_pre_norm_hidden = cfg.get("output_pre_norm_hidden", False)
+        self.output_post_norm_hidden = cfg.get("output_post_norm_hidden", False)
 
         input_seq_len = cfg.input_sequence_length
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
@@ -1217,7 +1221,11 @@ class _Qwen3_5TextModel(DynamicModule):
                     past_conv_cache=_past_conv_cache,
                     past_recurrent_state=_past_recurrent_state,
                 )
-                conv_cache_out_list.append(conv_cache_out)
+                if isinstance(conv_cache_out, (list, tuple)):
+                    # Verify-intermediates: flatten per-step conv snapshots.
+                    conv_cache_out_list.extend(conv_cache_out)
+                else:
+                    conv_cache_out_list.append(conv_cache_out)
                 if isinstance(recurrent_state_out, (list, tuple)):
                     # Verify-intermediates: flatten per-step snapshots into the
                     # flat recurrent_state output list.
@@ -1250,15 +1258,6 @@ class _Qwen3_5TextModel(DynamicModule):
             if self.num_logits_to_keep != 0:
                 target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
 
-        # Save pre-norm hidden state for MTP
-        if self.output_pre_norm_hidden:
-            if self.num_logits_to_keep != 0:
-                pre_norm_hidden = self.llm_gather(
-                    hidden_states, current_input_length - 1
-                )
-            else:
-                pre_norm_hidden = hidden_states
-
         if self.num_logits_to_keep == 0:
             pass
         else:
@@ -1267,10 +1266,14 @@ class _Qwen3_5TextModel(DynamicModule):
             )
         hidden_states = self.norm(hidden_states)
 
+        # MTP draft consumes the POST-norm hidden state (vLLM/LMDeploy convention).
+        if self.output_post_norm_hidden:
+            post_norm_hidden = hidden_states
+
         if self.output_hidden_state_indices is not None:
             return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
-        elif self.output_pre_norm_hidden:
-            return hidden_states, conv_cache_out_list, recurrent_state_out_list, pre_norm_hidden
+        elif self.output_post_norm_hidden:
+            return hidden_states, conv_cache_out_list, recurrent_state_out_list, post_norm_hidden
         return hidden_states, conv_cache_out_list, recurrent_state_out_list
 
 
@@ -1332,7 +1335,7 @@ class _Qwen3_5ForConditionalGeneration(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_pre_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_post_norm_hidden", False)
 
     def forward(
         self,
@@ -1378,7 +1381,7 @@ class _Qwen3_5ForCausalLM(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_pre_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_post_norm_hidden", False)
 
     def forward(
         self,

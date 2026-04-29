@@ -602,7 +602,19 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(
             self.conv1d.weight.dtype
         )
-        conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
+        _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
+        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
+            # Verify mode emits one conv state per draft step as a separate
+            # tensor of shape [B, conv_dim, kernel_size]. Mirrors dense Phase 3.
+            _kernel = int(self.conv_kernel_size)
+            conv_cache_out = tuple(
+                hidden_states_new[..., 1 + t : 1 + t + _kernel]
+                for t in range(self.input_sequence_length)
+            )
+        else:
+            conv_cache_out = self.conv_cache_slice(
+                hidden_states_new, current_input_length
+            )
         conv_out = _manual_depthwise_conv1d_tail(
             hidden_states_new,
             self.conv1d_manual_weight,
@@ -638,23 +650,50 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             )
 
         if use_recurrent:
-            core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                mask_qkv=mask_qkv,
-                initial_state=recurrent_state,
-                output_final_state=self.use_cache,
-                use_qk_l2norm_in_kernel=True,
-                num_heads=self.chunk_num_heads,
-                k_head_dim=self.chunk_k_head_dim,
-                v_head_dim=self.chunk_v_head_dim,
-                batch_size=self.batch_size,
-                scale=self.chunk_scale,
-                sequence_length=1,
-            )
+            if _verify_intermediates and self.input_sequence_length > 1:
+                _recurrent_snapshots = []
+                _current_rs = recurrent_state
+                _core_parts = []
+                for _t in range(self.input_sequence_length):
+                    _out_t, _current_rs = torch_recurrent_gated_delta_rule(
+                        query[:, _t : _t + 1],
+                        key[:, _t : _t + 1],
+                        value[:, _t : _t + 1],
+                        g=g[:, _t : _t + 1],
+                        beta=beta[:, _t : _t + 1],
+                        mask_qkv=mask_qkv[:, _t : _t + 1],
+                        initial_state=_current_rs,
+                        output_final_state=True,
+                        use_qk_l2norm_in_kernel=True,
+                        num_heads=self.chunk_num_heads,
+                        k_head_dim=self.chunk_k_head_dim,
+                        v_head_dim=self.chunk_v_head_dim,
+                        batch_size=self.batch_size,
+                        scale=self.chunk_scale,
+                        sequence_length=1,
+                    )
+                    _core_parts.append(_out_t)
+                    _recurrent_snapshots.append(_current_rs)
+                core_attn_out = torch.cat(_core_parts, dim=1)
+                last_recurrent_state = _recurrent_snapshots[-1]
+            else:
+                core_attn_out, last_recurrent_state = torch_recurrent_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    mask_qkv=mask_qkv,
+                    initial_state=recurrent_state,
+                    output_final_state=self.use_cache,
+                    use_qk_l2norm_in_kernel=True,
+                    num_heads=self.chunk_num_heads,
+                    k_head_dim=self.chunk_k_head_dim,
+                    v_head_dim=self.chunk_v_head_dim,
+                    batch_size=self.batch_size,
+                    scale=self.chunk_scale,
+                    sequence_length=1,
+                )
         else:
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
                 query,
@@ -682,11 +721,16 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 cumsum_matmul=self.cumsum_matmul,
             )
 
-        recurrent_state_out = (
-            last_recurrent_state
-            if last_recurrent_state is not None
-            else recurrent_state
-        )
+        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
+            # Per-step list (one tensor per verify step) — downstream flattens to
+            # `recurrent_state_out_{layer}_{t}` ONNX outputs.
+            recurrent_state_out = tuple(_recurrent_snapshots)
+        else:
+            recurrent_state_out = (
+                last_recurrent_state
+                if last_recurrent_state is not None
+                else recurrent_state
+            )
 
         b_sz, s, n, h = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
@@ -709,6 +753,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.return_cache = cfg.get("return_cache", False)
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
+        self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
@@ -817,6 +862,10 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             "input_sequence_length", self.input_sequence_length
         )
         self.batch_size = cfg.get("batch_size", self.batch_size)
+        self._verify_output_intermediates = cfg.get(
+            "verify_output_intermediates",
+            getattr(self, "_verify_output_intermediates", False),
+        )
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1045,7 +1094,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         if self.output_hidden_state_indices is not None:
             self._output_hidden_set = set(self.output_hidden_state_indices)
         # Spec-decode: optionally return hidden states before final norm.
-        self.output_pre_norm_hidden = cfg.get("output_pre_norm_hidden", False)
+        self.output_post_norm_hidden = cfg.get("output_post_norm_hidden", False)
 
         input_seq_len = cfg.input_sequence_length
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
@@ -1139,8 +1188,8 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         )
         if self.output_hidden_state_indices is not None:
             self._output_hidden_set = set(self.output_hidden_state_indices)
-        self.output_pre_norm_hidden = cfg.get(
-            "output_pre_norm_hidden", self.output_pre_norm_hidden
+        self.output_post_norm_hidden = cfg.get(
+            "output_post_norm_hidden", self.output_post_norm_hidden
         )
         self.use_cache = cfg.get("use_cache", self.use_cache)
 
@@ -1255,8 +1304,14 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                     past_conv_cache=_past_conv_cache,
                     past_recurrent_state=_past_recurrent_state,
                 )
-                conv_cache_out_list.append(conv_cache_out)
-                recurrent_state_out_list.append(recurrent_state_out)
+                if isinstance(conv_cache_out, (list, tuple)):
+                    conv_cache_out_list.extend(conv_cache_out)
+                else:
+                    conv_cache_out_list.append(conv_cache_out)
+                if isinstance(recurrent_state_out, (list, tuple)):
+                    recurrent_state_out_list.extend(recurrent_state_out)
+                else:
+                    recurrent_state_out_list.append(recurrent_state_out)
             else:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -1293,14 +1348,14 @@ class _Qwen3_5MoeTextModel(DynamicModule):
             if self.num_logits_to_keep != 0:
                 target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
 
-        # Save pre-norm hidden states for MTP speculative decoding before the final norm.
-        pre_norm_out = hidden_states
+        # MTP draft consumes the POST-norm hidden state (vLLM/LMDeploy convention).
         hidden_states = self.norm(hidden_states)
+        post_norm_out = hidden_states
 
         if self.output_hidden_state_indices is not None:
             return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
-        if self.output_pre_norm_hidden:
-            return hidden_states, conv_cache_out_list, recurrent_state_out_list, pre_norm_out
+        if self.output_post_norm_hidden:
+            return hidden_states, conv_cache_out_list, recurrent_state_out_list, post_norm_out
         return hidden_states, conv_cache_out_list, recurrent_state_out_list
 
 
@@ -1320,7 +1375,7 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
         self.cfg = cfg
         self._has_extra_hidden_output = (
             cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_pre_norm_hidden", False)
+            or cfg.get("output_post_norm_hidden", False)
         )
 
     def forward(
@@ -1386,7 +1441,7 @@ class _Qwen3_5MoeForConditionalGeneration(DynamicModule):
         self.cfg = cfg
         self._has_extra_hidden_output = (
             cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_pre_norm_hidden", False)
+            or cfg.get("output_post_norm_hidden", False)
         )
         # if hasattr(self, "visual"):
         #     del self.visual

@@ -160,7 +160,7 @@ class MTPGatedAttention(nn.Module):
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, -1)
         attn_output = attn_output * torch.sigmoid(gate)
-        return self.o_proj(attn_output), present_k_cache, present_v_cache
+        return self.o_proj(attn_output)
 
 
 class MTPMLP(nn.Module):
@@ -252,7 +252,7 @@ class MTPDecoderLayerXH2a(nn.Module):
         past_v_cache: Optional[Tensor] = None,
     ) -> tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
         residual = hidden_states
-        attn_out, present_k_cache, present_v_cache = self.self_attn(
+        attn_out = self.self_attn(
             self.input_layernorm(hidden_states),
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
@@ -263,7 +263,7 @@ class MTPDecoderLayerXH2a(nn.Module):
         residual = hidden_states
         hidden_states = self.mlp(self.post_attention_layernorm(hidden_states))
         hidden_states = residual + hidden_states
-        return hidden_states, present_k_cache, present_v_cache
+        return hidden_states
 
 
 class MTPModelXH2a(nn.Module):
@@ -313,25 +313,26 @@ class MTPModelXH2a(nn.Module):
     def forward(
         self,
         next_token_embedding: Tensor,
-        pre_norm_hidden: Tensor,
+        post_norm_hidden: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
         past_key_cache: Optional[Tensor] = None,
         past_value_cache: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
+    ) -> Tuple[Tensor, Tensor]:
         embeds = self.pre_fc_norm_embedding(next_token_embedding)
-        hidden = self.pre_fc_norm_hidden(pre_norm_hidden)
+        hidden = self.pre_fc_norm_hidden(post_norm_hidden)
         hidden_states = self.fc(torch.cat([embeds, hidden], dim=-1))
-        hidden_states, present_k_cache, present_v_cache = self.layer(
+        hidden_states = self.layer(
             hidden_states,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             past_k_cache=past_key_cache,
             past_v_cache=past_value_cache,
         )
-        pre_norm_out = hidden_states
-        logits = self.lm_head(self.norm(hidden_states))
-        return logits, pre_norm_out, present_k_cache, present_v_cache
+        hidden_states = self.norm(hidden_states)
+        post_norm_out = hidden_states
+        logits = self.lm_head(hidden_states)
+        return logits, post_norm_out
 
     @staticmethod
     def from_pretrained(

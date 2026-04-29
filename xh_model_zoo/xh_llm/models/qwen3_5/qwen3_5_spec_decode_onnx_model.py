@@ -16,15 +16,14 @@
 
 """Speculative decoding runtime for Qwen3.5 with DFlash or MTP draft models on HMONNX."""
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import TextStreamer
 
-from xhquant.xhonnxruntime import HMONNXGrapInference
-
 from .qwen3_5_onnx_model import (
+    HMONNXSession,
     Qwen3_5ONNXModel,
     _alloc_cache_inputs,
     _as_cache_value,
@@ -38,6 +37,7 @@ from .qwen3_5_onnx_model import (
     _apply_repetition_penalty,
     _apply_presence_penalty,
 )
+from ..spec_decode_shared import SpecDecodeVerifyResult, run_spec_decode_loop
 from ..builder import MODELS
 
 
@@ -75,7 +75,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         draft,
         spec_decode_mode: str = "mtp",
         block_size: int = 4,
-        hidden_output_name: str = "pre_norm_hidden",
+        hidden_output_name: str = "post_norm_hidden",
         max_context_tokens: Optional[int] = None,
         auto_offload: bool = True,
         auto_offload_max_memory: Optional[
@@ -89,6 +89,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         ] = None,
         resource_tight_mode: bool = False,
         pad_token_id: int = 0,
+        enable_cuda_graph: bool = False,
+        cuda_graph_modules: Optional[Iterable[str]] = None,
+        cuda_graph_warmup_runs: int = 3,
+        cuda_graph_graph_warmup_runs: int = 6,
+        cuda_graph_clone_outputs: bool = True,
     ):
         super().__init__(
             prefill=prefill,
@@ -100,6 +105,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             decode_auto_offload_max_memory=decode_auto_offload_max_memory,
             resource_tight_mode=resource_tight_mode,
             pad_token_id=pad_token_id,
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
+            cuda_graph_clone_outputs=cuda_graph_clone_outputs,
         )
         if isinstance(draft, dict):
             self.draft_prefill_config = draft.get("prefill")
@@ -112,9 +122,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         self.spec_decode_mode = spec_decode_mode
         self.block_size = block_size
         self.hidden_output_name = hidden_output_name
-        self.draft_prefill_session: Optional[HMONNXGrapInference] = None
-        self.draft_context_session: Optional[HMONNXGrapInference] = None
-        self.draft_decode_session: Optional[HMONNXGrapInference] = None
+        self.draft_prefill_session: Optional[HMONNXSession] = None
+        self.draft_context_session: Optional[HMONNXSession] = None
+        self.draft_decode_session: Optional[HMONNXSession] = None
         self._create_draft_sessions()
         self._mtp_cache_state: Optional[Dict[str, torch.Tensor]] = None
         self._dflash_cache_state: Optional[Dict[str, torch.Tensor]] = None
@@ -142,26 +152,23 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                     session.to(device)
         return self
 
-    def _create_single_draft_session(self, cfg):
+    def _create_single_draft_session(self, cfg, session_name: str):
         if cfg is None:
             return None
         onnx_path = cfg["onnx"] if isinstance(cfg, dict) else cfg.onnx
-        session = HMONNXGrapInference(onnx_path)
-        if not self.auto_offload:
-            session.to(self.device)
-        session.exec_device = self.exec_device
+        session = self._create_hmonnx_session(onnx_path, session_name)
         self._apply_auto_offload(session, self.auto_offload_max_memory)
         return session
 
     def _create_draft_sessions(self):
         self.draft_prefill_session = self._create_single_draft_session(
-            self.draft_prefill_config
+            self.draft_prefill_config, "draft_prefill"
         )
         self.draft_context_session = self._create_single_draft_session(
-            self.draft_context_config
+            self.draft_context_config, "draft_context"
         )
         self.draft_decode_session = self._create_single_draft_session(
-            self.draft_decode_config
+            self.draft_decode_config, "draft_decode"
         )
 
     def _init_mtp_rope(self, rope_theta: float, rotary_dim: int, partial_rotary_factor: float):
@@ -237,6 +244,16 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for name, cache_tensor in list(cache_state.items()):
             if name.startswith("past_conv_cache_"):
                 idx = name.rsplit("_", 1)[-1]
+                # New per-step naming: conv_cache_out_{layer}_{t}. Pick the
+                # (accepted_steps-1)-th snapshot by name (NPU-friendly, no slice).
+                step = max(accepted_steps - 1, 0)
+                per_step_name = f"conv_cache_out_{idx}_{step}"
+                if per_step_name in output_map:
+                    cache_state[name] = _as_cache_value(
+                        cache_tensor, output_map[per_step_name]
+                    )
+                    continue
+                # Fallback to legacy continuous-window output that needs slicing.
                 out_name = f"conv_cache_out_{idx}"
                 if out_name not in output_map:
                     continue
@@ -285,11 +302,28 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
 
     def _run_draft_session(
         self,
-        session: HMONNXGrapInference,
+        session: HMONNXSession,
         input_feed: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         _, output_map = self._run_hmonnx(session, input_feed)
         return output_map
+
+    def get_cuda_graph_status(self) -> Dict[str, Dict[str, Union[bool, Optional[str]]]]:
+        status = super().get_cuda_graph_status()
+        status.update(
+            {
+                "draft_prefill": self._get_session_cuda_graph_status(
+                    self.draft_prefill_session
+                ),
+                "draft_context": self._get_session_cuda_graph_status(
+                    self.draft_context_session
+                ),
+                "draft_decode": self._get_session_cuda_graph_status(
+                    self.draft_decode_session
+                ),
+            }
+        )
+        return status
 
     def _embed_token_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
         if self.token_embedding is None:
@@ -311,7 +345,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             raise RuntimeError("MTP prefill session is not available.")
         actual_input_length = int(hidden_states.shape[1])
         prefill_seq_len = int(
-            self.draft_prefill_session.get_input("pre_norm_hidden").shape[1]
+            self.draft_prefill_session.get_input("post_norm_hidden").shape[1]
         )
         next_token_embedding = _pad_hidden_tensor(
             self._embed_token_ids(next_token_ids), prefill_seq_len
@@ -336,7 +370,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for name in self.draft_prefill_session.get_input_names():
             if name == "next_token_embedding":
                 feed[name] = next_token_embedding
-            elif name == "pre_norm_hidden":
+            elif name == "post_norm_hidden":
                 feed[name] = hidden_states
             elif name in ["past_seq_length", "valid_length"]:
                 feed[name] = past_seq_length
@@ -377,7 +411,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for name in self.draft_decode_session.get_input_names():
             if name == "next_token_embedding":
                 feed[name] = next_token_embedding
-            elif name == "pre_norm_hidden":
+            elif name == "post_norm_hidden":
                 feed[name] = hidden_state.to(device=self.device, dtype=self._dtype)
             elif name in ["past_seq_length", "valid_length"]:
                 feed[name] = past_seq_length
@@ -541,14 +575,14 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
     def _run_draft_mtp(
         self,
         next_tok: torch.Tensor,
-        pre_norm_hidden: torch.Tensor,
+        post_norm_hidden: torch.Tensor,
         past_seq_len: int,
         num_drafts: int,
     ) -> List[torch.Tensor]:
         """Generate num_drafts draft tokens using the MTP decode graph."""
         cache_state = self._ensure_mtp_cache_state()
         drafts = []
-        current_hidden = pre_norm_hidden  # [1, 1, H]
+        current_hidden = post_norm_hidden  # [1, 1, H]
 
         for j in range(num_drafts):
             draft_output_map = self._run_draft_session(
@@ -558,17 +592,17 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 ),
             )
             logits = draft_output_map["logits"]  # [1, 1, V]
-            pre_norm_out = draft_output_map.get("pre_norm_out")  # [1, 1, H]
-            if pre_norm_out is None:
+            post_norm_out = draft_output_map.get("post_norm_out")  # [1, 1, H]
+            if post_norm_out is None:
                 raise RuntimeError(
-                    "MTP draft graph must export pre_norm_out for autoregressive chaining."
+                    "MTP draft graph must export post_norm_out for autoregressive chaining."
                 )
 
             tok = torch.argmax(logits[:, -1:, :], dim=-1)  # [1, 1]
             drafts.append(tok)
 
             # Feed back for next step
-            current_hidden = pre_norm_out
+            current_hidden = post_norm_out
             next_tok = tok
 
         return drafts
@@ -589,7 +623,8 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         repetition_penalty: float = 1.0,
         presence_penalty: float = 0.0,
         stream_output: bool = False,
-    ) -> str:
+        return_stats: bool = False,
+    ) -> Union[str, Tuple[str, Dict[str, Union[int, float, List[int]]]]]:
         if max_new_tokens <= 0:
             return ""
         if input_ids.dim() != 2 or input_ids.shape[0] != 1:
@@ -696,7 +731,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 decode_cache_state[name] = prefill_cache_state[name]
 
         eos_token_id = tokenizer.eos_token_id
-        generated_ids: List[int] = []
         streamer: Optional[TextStreamer] = None
         if stream_output:
             streamer = TextStreamer(
@@ -708,12 +742,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             if streamer is not None:
                 streamer.end()
             return ""
-        generated_ids.append(token_val)
-        history_token_ids.append(token_val)
-        if streamer is not None:
-            streamer.put(next_token_id.detach().cpu())
-
-        current_token = next_token_id.to(self.device)  # [1, 1]
         mtp_past_seq_len = mtp_prefill_seq_len
         num_drafts = (
             self.block_size - 1
@@ -721,138 +749,135 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             else self.block_size
         )
 
-        total_draft_tokens = 0
-        total_accepted_tokens = 0
-        total_rounds = 0
+        def _on_token(token_id: int) -> None:
+            history_token_ids.append(token_id)
+            if streamer is not None:
+                streamer.put(torch.tensor([[token_id]], dtype=torch.long))
 
-        # --- Main speculative decoding loop ---
-        while len(generated_ids) < max_new_tokens:
-            total_rounds += 1
-
-            # --- Phase 2: Draft ---
+        def _run_round_draft(
+            current_token_id: int,
+            round_last_hidden: Optional[torch.Tensor],
+            round_past_seq_len: int,
+            round_mtp_past_seq_len: int,
+            round_num_drafts: int,
+        ) -> List[int]:
+            current_token = torch.tensor(
+                [[current_token_id]], dtype=torch.long, device=self.device
+            )
             if self.spec_decode_mode == "dflash":
-                draft_tokens = self._run_draft_dflash(
-                    current_token, past_seq_len
+                return [
+                    int(tok[0, 0].item())
+                    for tok in self._run_draft_dflash(current_token, round_past_seq_len)
+                ]
+            if round_last_hidden is None:
+                return []
+            return [
+                int(tok[0, 0].item())
+                for tok in self._run_draft_mtp(
+                    current_token,
+                    round_last_hidden,
+                    round_mtp_past_seq_len,
+                    round_num_drafts,
                 )
-            else:  
-                draft_tokens = self._run_draft_mtp(
-                    current_token, last_hidden, mtp_past_seq_len, num_drafts
-                )
+            ]
 
-            total_draft_tokens += len(draft_tokens)
-
-            # --- Phase 3: Batch verify [current_token, draft_0, ..., draft_{K-1}] ---
-            verify_tokens = [current_token] + draft_tokens
-            verify_input_ids = torch.cat(verify_tokens, dim=1)
-            initial_seq_len = past_seq_len
+        def _verify_round(
+            current_token_id: int,
+            draft_token_ids: List[int],
+            round_past_seq_len: int,
+        ) -> SpecDecodeVerifyResult:
+            verify_ids = [current_token_id] + draft_token_ids
+            verify_input_ids = torch.tensor(
+                [verify_ids], dtype=torch.long, device=self.device
+            )
             decode_feed = self._build_decode_feed(
                 verify_input_ids,
-                past_seq_len,
+                round_past_seq_len,
                 decode_cache_state,
                 current_input_length=verify_input_ids.shape[1],
             )
-            _, decode_output_map = self._run_hmonnx(
-                self.decode_session, decode_feed
-            )
+            _, decode_output_map = self._run_hmonnx(self.decode_session, decode_feed)
             verify_logits = _ensure_logits_shape(self._extract_logits(decode_output_map))
             verify_hidden_all = self._extract_hidden(decode_output_map)
+            predicted_token_ids = [
+                int(torch.argmax(verify_logits[:, j : j + 1, :], dim=-1)[0, 0].item())
+                for j in range(len(verify_ids))
+            ]
+            return SpecDecodeVerifyResult(
+                initial_seq_len=round_past_seq_len,
+                verify_token_ids=verify_ids,
+                predicted_token_ids=predicted_token_ids,
+                verify_hidden=verify_hidden_all,
+                raw_result=decode_output_map,
+            )
 
-            # Check acceptance: logits[j] should predict draft[j] (j=0..K-1)
-            accepted_count = 0
-            for j in range(len(draft_tokens)):
-                predicted = torch.argmax(
-                    verify_logits[:, j : j + 1, :], dim=-1
-                )  # [1, 1]
-                draft_j = draft_tokens[j]
-                if predicted[0, 0].item() != draft_j[0, 0].item():
-                    break
-                accepted_count += 1
-
-            total_accepted_tokens += accepted_count
-            accepted_steps = accepted_count + 1
+        def _apply_round_result(
+            verify_result: SpecDecodeVerifyResult,
+            accepted_steps: int,
+        ) -> None:
             self._apply_verify_linear_cache_outputs(
                 decode_cache_state,
-                decode_output_map,
+                verify_result.raw_result,
                 accepted_steps=accepted_steps,
             )
-            past_seq_len = initial_seq_len + accepted_steps
 
-            # Emit accepted draft tokens
-            eos_hit = False
-            for j in range(accepted_count):
-                token_val = int(draft_tokens[j][0, 0].item())
-                generated_ids.append(token_val)
-                history_token_ids.append(token_val)
-                if streamer is not None:
-                    streamer.put(draft_tokens[j].detach().cpu())
-                if eos_token_id is not None and token_val == eos_token_id:
-                    eos_hit = True
-                    break
-                if len(generated_ids) >= max_new_tokens:
-                    break
-            if eos_hit:
-                break
-            if len(generated_ids) >= max_new_tokens:
-                break
-
-            # Determine next token
-            if accepted_count < len(draft_tokens):
-                # Rejection: sample from logits at the rejection point
-                reject_logits = verify_logits[:, accepted_count : accepted_count + 1, :]
-                current_token = torch.argmax(
-                    reject_logits, dim=-1
-                ).to(self.device)
-            else:
-                # All accepted: bonus token from logits[K] (last verify position)
-                bonus_logits = verify_logits[:, -1:, :]
-                current_token = torch.argmax(
-                    bonus_logits, dim=-1
-                ).to(self.device)
-
-            # Use hidden state from the accepted point for next draft round
-            last_hidden = self._select_hidden_step(
-                verify_hidden_all, accepted_count
+        def _post_round(
+            verify_result: SpecDecodeVerifyResult,
+            accepted_count: int,
+            accepted_steps: int,
+            _next_token_id: int,
+            round_mtp_past_seq_len: int,
+        ) -> Tuple[Optional[torch.Tensor], int]:
+            next_hidden = self._select_hidden_step(
+                verify_result.verify_hidden, accepted_count
             )
             accepted_hidden = (
-                verify_hidden_all[:, :accepted_steps, :]
-                if verify_hidden_all is not None
+                verify_result.verify_hidden[:, :accepted_steps, :]
+                if verify_result.verify_hidden is not None
                 else None
             )
             if self.spec_decode_mode == "dflash":
-                assert accepted_hidden is not None, "DFlash mode requires hidden states from the verify step."
-                self._append_dflash_context(accepted_hidden, initial_seq_len)
-            else:
-                mtp_past_seq_len = mtp_past_seq_len + accepted_steps
+                assert (
+                    accepted_hidden is not None
+                ), "DFlash mode requires hidden states from the verify step."
+                self._append_dflash_context(
+                    accepted_hidden, verify_result.initial_seq_len
+                )
+                return next_hidden, round_mtp_past_seq_len
+            return next_hidden, round_mtp_past_seq_len + accepted_steps
 
-            # Commit current_token (rejection replacement or bonus)
-            token_val = int(current_token[0, 0].item())
-            if eos_token_id is not None and token_val == eos_token_id:
-                break
-            generated_ids.append(token_val)
-            history_token_ids.append(token_val)
-            if streamer is not None:
-                streamer.put(current_token.detach().cpu())
-            if len(generated_ids) >= max_new_tokens:
-                break
+        generated_ids, stats = run_spec_decode_loop(
+            max_new_tokens=max_new_tokens,
+            initial_token_id=token_val,
+            initial_past_seq_len=past_seq_len,
+            initial_last_hidden=last_hidden,
+            initial_mtp_past_seq_len=mtp_past_seq_len,
+            eos_token_id=eos_token_id,
+            num_drafts=num_drafts,
+            run_draft=_run_round_draft,
+            verify_round=_verify_round,
+            apply_verify_result=_apply_round_result,
+            post_verify=_post_round,
+            on_token=_on_token,
+        )
 
         out_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
         if streamer is not None:
             streamer.end()
-
-        # Stats
-        if total_rounds > 0:
-            avg_accepted = total_accepted_tokens / total_rounds
+        if stats["num_rounds"] > 0:
             print(
                 f"[SpecDecode] mode={self.spec_decode_mode} "
-                f"rounds={total_rounds} "
+                f"rounds={stats['num_rounds']} "
                 f"total_tokens={len(generated_ids)} "
-                f"draft_tokens={total_draft_tokens} "
-                f"accepted={total_accepted_tokens} "
-                f"avg_accepted_per_round={avg_accepted:.2f}"
+                f"draft_tokens={stats['draft_tokens_total']} "
+                f"accepted={stats['accepted_drafts_total']} "
+                f"avg_accepted_per_round={stats['avg_accepted_per_round']:.2f}"
             )
 
         if self.resource_tight_mode:
             self._release_decode_session()
+        if return_stats:
+            return out_text, stats
         return out_text
 
     # ---------------------------------------------------------------

@@ -1439,11 +1439,11 @@ def _export_impl(cfg, args):
         logger.info(f"DFlash target_layer_ids: {target_layer_ids}")
     elif spec_decode_mode == "mtp":
         spec_decode_prefill_cfg = {
-            "output_pre_norm_hidden": True,
+            "output_post_norm_hidden": True,
             "num_logits_to_keep": 0,
         }
         spec_decode_decode_cfg = {
-            "output_pre_norm_hidden": True,
+            "output_post_norm_hidden": True,
             "num_logits_to_keep": 0,
             "verify_output_intermediates": True,
             "input_sequence_length": spec_verify_length,
@@ -1484,7 +1484,7 @@ def _export_impl(cfg, args):
             meta_info.spec_decode_hidden_output_name = "target_hidden"
         elif spec_decode_mode == "mtp":
             meta_info.spec_decode_block_size = getattr(args, "num_draft_tokens", 4)
-            meta_info.spec_decode_hidden_output_name = "pre_norm_hidden"
+            meta_info.spec_decode_hidden_output_name = "post_norm_hidden"
         meta_info.spec_decode_verify_length = spec_verify_length
 
     release_dir = _run_golden_generation(cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger)

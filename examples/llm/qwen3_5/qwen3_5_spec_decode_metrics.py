@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 from typing import Any, Dict, List
@@ -17,10 +19,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from _runtime import load_token_embedding, parse_dtype, resolve_path
 from qwen3_5_mtp_benchmark import (
+    AfterNormCapture,
     DTYPE_MAP as FLOAT_DTYPE_MAP,
     ForcedDecodeContext,
     install_forced_decode_patch,
-    PreNormCapture,
     TEST_PROMPTS as MTP_TEST_PROMPTS,
     baseline_decode,
     build_mtp_head,
@@ -100,6 +102,165 @@ def encode_chat_prompt(tokenizer, prompt: str, enable_thinking: bool = False, sy
         **kwargs,
     )
     return tokenizer([text], return_tensors="pt").input_ids
+
+
+@contextmanager
+def _count_dense_spec_runtime_calls(runtime: Qwen3_5SpecDecodeONNXModel):
+    counts = {
+        "target_prefill_calls": 0,
+        "target_decoder_calls": 0,
+        "mtp_prefill_calls": 0,
+        "mtp_decode_calls": 0,
+        "dflash_prefill_calls": 0,
+        "dflash_decode_calls": 0,
+    }
+    original_run_hmonnx = runtime._run_hmonnx
+    original_run_draft_session = runtime._run_draft_session
+
+    def counted_run_hmonnx(session, input_feed):
+        if runtime.prefill_session is not None and session is runtime.prefill_session:
+            counts["target_prefill_calls"] += 1
+        elif runtime.decode_session is not None and session is runtime.decode_session:
+            counts["target_decoder_calls"] += 1
+        return original_run_hmonnx(session, input_feed)
+
+    def counted_run_draft_session(session, input_feed):
+        if runtime.spec_decode_mode == "mtp":
+            if runtime.draft_prefill_session is not None and session is runtime.draft_prefill_session:
+                counts["mtp_prefill_calls"] += 1
+            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
+                counts["mtp_decode_calls"] += 1
+        else:
+            if runtime.draft_context_session is not None and session is runtime.draft_context_session:
+                counts["dflash_prefill_calls"] += 1
+            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
+                counts["dflash_decode_calls"] += 1
+        return original_run_draft_session(session, input_feed)
+
+    runtime._run_hmonnx = counted_run_hmonnx  # type: ignore[assignment]
+    runtime._run_draft_session = counted_run_draft_session  # type: ignore[assignment]
+    try:
+        yield counts
+    finally:
+        runtime._run_hmonnx = original_run_hmonnx  # type: ignore[assignment]
+        runtime._run_draft_session = original_run_draft_session  # type: ignore[assignment]
+
+
+def run_dense_spec_generate_once(
+    *,
+    runtime: Qwen3_5SpecDecodeONNXModel,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    enable_thinking: bool = False,
+    repetition_penalty: float = 1.0,
+    presence_penalty: float = 0.0,
+) -> Dict[str, Any]:
+    reset_dense_spec_runtime(runtime)
+    input_ids = encode_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
+    with _count_dense_spec_runtime_calls(runtime) as counts:
+        started = time.perf_counter()
+        generated = runtime.generate(
+            input_ids,
+            tokenizer,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=1,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            stream_output=False,
+            return_stats=True,
+        )
+        latency_s = time.perf_counter() - started
+    if isinstance(generated, tuple):
+        text, stats = generated
+    else:  # Defensive fallback for older runtimes.
+        text, stats = generated, {}
+    output_tokens = int(stats.get("output_tokens", len(tokenizer.encode(text, add_special_tokens=False))))
+    return {
+        "text": text,
+        "token_ids": tokenizer.encode(text, add_special_tokens=False),
+        "output_tokens": output_tokens,
+        "latency_s": latency_s,
+        **counts,
+        **stats,
+    }
+
+
+def build_dense_spec_generate_metrics(
+    *,
+    prompt: str,
+    model_name: str,
+    draft_mode: str,
+    baseline: Dict[str, Any] | None,
+    spec: Dict[str, Any],
+    draft_capacity: int,
+) -> Dict[str, Any]:
+    num_rounds = int(spec.get("num_rounds", spec.get("target_decoder_calls", 0)))
+    total_accepted = int(spec.get("accepted_drafts_total", 0))
+    raw_accepts = spec.get("accepted_drafts_per_round")
+    accepted_drafts_per_round = (
+        [int(v) for v in raw_accepts]
+        if isinstance(raw_accepts, list)
+        else ([int(round(total_accepted / num_rounds))] * num_rounds if num_rounds > 0 and total_accepted > 0 else [0] * num_rounds)
+    )
+    extra_counts = (
+        {
+            "mtp_prefill_calls": int(spec.get("mtp_prefill_calls", 0)),
+            "mtp_decode_calls": int(spec.get("mtp_decode_calls", 0)),
+        }
+        if draft_mode == "mtp"
+        else {
+            "dflash_prefill_calls": int(spec.get("dflash_prefill_calls", 0)),
+            "dflash_decode_calls": int(spec.get("dflash_decode_calls", 0)),
+        }
+    )
+    result = finalise_spec_metrics(
+        prompt=prompt,
+        draft_mode=draft_mode,
+        model_name=model_name,
+        baseline_text=baseline.get("text", "") if baseline is not None else None,
+        baseline_decoder_calls=(
+            int(baseline.get("target_decoder_calls", 0)) if baseline is not None else None
+        ),
+        baseline_prefill_calls=(
+            int(baseline.get("target_prefill_calls", 0)) if baseline is not None else None
+        ),
+        baseline_output_tokens=(
+            int(baseline.get("output_tokens", 0)) if baseline is not None else None
+        ),
+        spec_text=spec.get("text", ""),
+        spec_output_tokens=int(spec.get("output_tokens", 0)),
+        target_prefill_calls=int(spec.get("target_prefill_calls", 0)),
+        target_decoder_calls=int(spec.get("target_decoder_calls", num_rounds)),
+        accepted_drafts_per_round=accepted_drafts_per_round,
+        draft_capacity=draft_capacity,
+        extra_counts=extra_counts,
+    )
+    result["verify_mode"] = "generate"
+    result["speculative"].update(
+        {
+            "latency_s": round(float(spec.get("latency_s", 0.0)), 4),
+            "tokens_per_second": round(
+                float(spec.get("output_tokens", 0)) / float(spec.get("latency_s", 0.0))
+                if float(spec.get("latency_s", 0.0)) > 0
+                else 0.0,
+                4,
+            ),
+            "accepted_drafts_total": total_accepted,
+            "draft_tokens_total": int(spec.get("draft_tokens_total", num_rounds * draft_capacity)),
+            "overall_acceptance_rate": round(
+                (total_accepted / int(spec.get("draft_tokens_total", 0)))
+                if int(spec.get("draft_tokens_total", 0)) > 0
+                else 0.0,
+                4,
+            ),
+            "avg_accepted_per_round": round(float(spec.get("avg_accepted_per_round", 0.0)), 4),
+        }
+    )
+    return result
 
 
 def thinking_mode_name(enable_thinking: bool | None) -> str:
@@ -352,6 +513,9 @@ def load_dense_runtime_from_meta(
     auto_offload_max_memory=None,
     prefill_auto_offload_max_memory=None,
     decode_auto_offload_max_memory=None,
+    enable_cuda_graph: bool = False,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
 ) -> tuple[Qwen3_5ONNXModel, AutoTokenizer, dict]:
     meta_file = Path(meta_path).resolve()
     model_dir = meta_file.parent
@@ -385,13 +549,16 @@ def load_dense_runtime_from_meta(
             },
             spec_decode_mode=spec_decode["mode"],
             block_size=int(spec_decode.get("block_size", 4)),
-            hidden_output_name=spec_decode.get("hidden_output_name", "pre_norm_hidden"),
+            hidden_output_name=spec_decode.get("hidden_output_name", "post_norm_hidden"),
             max_context_tokens=meta_info.get("max_context_tokens"),
             auto_offload=True,
             auto_offload_max_memory=auto_offload_max_memory,
             prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
             decode_auto_offload_max_memory=decode_auto_offload_max_memory,
             pad_token_id=pad_token_id,
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
         )
     else:
         runtime = Qwen3_5ONNXModel(
@@ -403,6 +570,9 @@ def load_dense_runtime_from_meta(
             prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
             decode_auto_offload_max_memory=decode_auto_offload_max_memory,
             pad_token_id=pad_token_id,
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
         )
 
     runtime.set_input_embeddings(token_embedding)
@@ -417,9 +587,9 @@ def finalise_spec_metrics(
     prompt: str,
     draft_mode: str,
     model_name: str,
-    baseline_text: str,
-    baseline_decoder_calls: int,
-    baseline_prefill_calls: int,
+    baseline_text: str | None,
+    baseline_decoder_calls: int | None,
+    baseline_prefill_calls: int | None,
     baseline_output_tokens: int | None = None,
     spec_text: str,
     spec_output_tokens: int,
@@ -432,21 +602,11 @@ def finalise_spec_metrics(
     total_accepted = sum(accepted_drafts_per_round)
     total_rounds = len(accepted_drafts_per_round)
     total_drafts = total_rounds * draft_capacity
-    return {
+    result = {
         "prompt": prompt,
         "model": model_name,
         "draft_mode": draft_mode,
         "verify_mode": "forced",
-        "baseline": {
-            "text": baseline_text,
-            "output_tokens": (
-                int(baseline_output_tokens)
-                if baseline_output_tokens is not None
-                else max(baseline_decoder_calls + 1, 0)
-            ),
-            "target_prefill_calls": baseline_prefill_calls,
-            "target_decoder_calls": baseline_decoder_calls,
-        },
         "speculative": {
             "text": spec_text,
             "output_tokens": spec_output_tokens,
@@ -464,8 +624,24 @@ def finalise_spec_metrics(
             "overall_acceptance_rate": round((total_accepted / total_drafts) if total_drafts else 0.0, 4),
             "avg_accepted_per_round": round((total_accepted / total_rounds) if total_rounds else 0.0, 4),
         },
-        "text_match": baseline_text == spec_text,
     }
+    if (
+        baseline_text is not None
+        and baseline_decoder_calls is not None
+        and baseline_prefill_calls is not None
+    ):
+        result["baseline"] = {
+            "text": baseline_text,
+            "output_tokens": (
+                int(baseline_output_tokens)
+                if baseline_output_tokens is not None
+                else max(baseline_decoder_calls + 1, 0)
+            ),
+            "target_prefill_calls": baseline_prefill_calls,
+            "target_decoder_calls": baseline_decoder_calls,
+        }
+        result["text_match"] = baseline_text == spec_text
+    return result
 
 
 def release_moe_runtime(runtime: Qwen3_5MoeSpecDecodeInference) -> None:
@@ -539,9 +715,9 @@ class CompatibleMTPHead:
         return_hidden: bool = False,
     ):
         next_token_embedding = self._embed(next_tok)
-        logits, hidden, present_k, present_v = self.model(
+        logits, hidden = self.model(
             next_token_embedding=next_token_embedding,
-            pre_norm_hidden=main_hidden.to(self._mtp_device),
+            post_norm_hidden=main_hidden.to(self._mtp_device),
             past_seq_length=torch.tensor([position], dtype=torch.int32, device=self._mtp_device),
             current_input_length=torch.tensor([1], dtype=torch.int32, device=self._mtp_device),
             past_key_cache=self._wrap_cache(
@@ -551,10 +727,6 @@ class CompatibleMTPHead:
                 kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype
             ),
         )
-        if present_k is not None:
-            kv_cache["key"] = self._unwrap_cache(present_k)
-        if present_v is not None:
-            kv_cache["value"] = self._unwrap_cache(present_v)
         if return_hidden:
             return logits, hidden
         return logits
@@ -569,9 +741,9 @@ class CompatibleMTPHead:
     ):
         seq_len = int(main_hidden.shape[1])
         next_token_embedding = self._embed(next_tok)
-        logits, hidden, present_k, present_v = self.model(
+        logits, hidden = self.model(
             next_token_embedding=next_token_embedding,
-            pre_norm_hidden=main_hidden.to(self._mtp_device),
+            post_norm_hidden=main_hidden.to(self._mtp_device),
             past_seq_length=torch.tensor([int(positions[0].item())], dtype=torch.int32, device=self._mtp_device),
             current_input_length=torch.tensor([seq_len], dtype=torch.int32, device=self._mtp_device),
             past_key_cache=self._wrap_cache(
@@ -581,10 +753,6 @@ class CompatibleMTPHead:
                 kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype
             ),
         )
-        if present_k is not None:
-            kv_cache["key"] = self._unwrap_cache(present_k)
-        if present_v is not None:
-            kv_cache["value"] = self._unwrap_cache(present_v)
         return logits, hidden
 
 
@@ -667,12 +835,12 @@ def run_float_mtp_metrics(
     }
     baseline_decoder_calls = max(int(baseline["num_tokens"]) - 1, 0)
 
-    cap = PreNormCapture(model)
+    cap = AfterNormCapture(model)
     cap.reset()
     outputs = model(**inputs, use_cache=True)
     past_kv = outputs.past_key_values
     next_tok = outputs.logits[:, -1:, :].argmax(dim=-1)
-    prefill_hidden = cap.hidden_states[0]
+    prefill_final_hidden = cap.hidden_states[0]
     committed_len = prompt_len
 
     mtp_prefill_calls = 0
@@ -680,7 +848,7 @@ def run_float_mtp_metrics(
     mtp_kv: dict = {}
     if prompt_len >= 2:
         mtp_head.forward_batch(
-            prefill_hidden[:, :-1, :],
+            prefill_final_hidden[:, :-1, :],
             prompt_ids[:, 1:],
             positions=torch.arange(prompt_len - 1, device=mtp_head._mtp_device),
             kv_cache=mtp_kv,
@@ -689,7 +857,7 @@ def run_float_mtp_metrics(
 
     drafts, _ = generate_drafts(
         mtp_head,
-        prefill_hidden[:, -1:, :],
+        prefill_final_hidden[:, -1:, :],
         next_tok,
         num_draft_tokens,
         position=committed_len - 1,
@@ -1008,6 +1176,9 @@ def run_dense_baseline_from_meta(
     auto_offload_max_memory=None,
     prefill_auto_offload_max_memory=None,
     decode_auto_offload_max_memory=None,
+    enable_cuda_graph: bool = False,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
 ) -> Dict[str, Any]:
     runtime, tokenizer, _ = load_dense_runtime_from_meta(
         meta_path=meta_path,
@@ -1017,6 +1188,9 @@ def run_dense_baseline_from_meta(
         auto_offload_max_memory=auto_offload_max_memory,
         prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
         decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+        enable_cuda_graph=enable_cuda_graph,
+        cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
     )
     prefill_calls = 0
     decode_calls = 0
@@ -1180,43 +1354,11 @@ def run_dense_spec_metrics(
     auto_offload_max_memory=None,
     prefill_auto_offload_max_memory=None,
     decode_auto_offload_max_memory=None,
+    enable_cuda_graph: bool = False,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
+    include_baseline: bool = True,
 ) -> Dict[str, Any]:
-    if baseline_meta_path:
-        baseline = run_dense_baseline_from_meta(
-            meta_path=baseline_meta_path,
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            dtype=dtype,
-            device=device,
-            exec_device=exec_device,
-            auto_offload_max_memory=auto_offload_max_memory,
-            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
-            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
-        )
-    else:
-        runtime_base, tokenizer, meta_info = load_dense_runtime_from_meta(
-            meta_path=meta_path,
-            dtype=dtype,
-            device=device,
-            exec_device=exec_device,
-            auto_offload_max_memory=auto_offload_max_memory,
-            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
-            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
-        )
-        if not isinstance(runtime_base, Qwen3_5SpecDecodeONNXModel):
-            raise TypeError(f"{meta_path} is not a dense spec-decode runtime.")
-        baseline = run_dense_target_baseline_from_spec(
-            runtime_base,
-            tokenizer,
-            prompt,
-            max_new_tokens,
-            enable_thinking=enable_thinking,
-            repetition_penalty=repetition_penalty,
-            presence_penalty=presence_penalty,
-        )
-        release_dense_runtime(runtime_base)
-        del runtime_base
-
     runtime, tokenizer, meta_info = load_dense_runtime_from_meta(
         meta_path=meta_path,
         dtype=dtype,
@@ -1225,259 +1367,58 @@ def run_dense_spec_metrics(
         auto_offload_max_memory=auto_offload_max_memory,
         prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
         decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+        enable_cuda_graph=enable_cuda_graph,
+        cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
     )
     if not isinstance(runtime, Qwen3_5SpecDecodeONNXModel):
         raise TypeError(f"{meta_path} is not a dense spec-decode runtime.")
-
-    draft_counts = {"mtp_prefill_calls": 0, "mtp_decode_calls": 0, "dflash_context_calls": 0, "dflash_decode_calls": 0}
-    original_run_draft_session = runtime._run_draft_session
-
-    def counted_run_draft_session(session, input_feed):
-        if runtime.spec_decode_mode == "mtp":
-            if runtime.draft_prefill_session is not None and session is runtime.draft_prefill_session:
-                draft_counts["mtp_prefill_calls"] += 1
-            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
-                draft_counts["mtp_decode_calls"] += 1
-        else:
-            if runtime.draft_context_session is not None and session is runtime.draft_context_session:
-                draft_counts["dflash_context_calls"] += 1
-            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
-                draft_counts["dflash_decode_calls"] += 1
-        return original_run_draft_session(session, input_feed)
-
-    runtime._run_draft_session = counted_run_draft_session  # type: ignore[assignment]
     try:
-        input_ids = encode_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
-        if runtime.max_context_tokens is not None and input_ids.shape[1] > runtime.max_context_tokens:
-            input_ids = input_ids[:, -runtime.max_context_tokens :]
-
-        total_prompt_len = int(input_ids.shape[1])
-        runtime._ensure_prefill_session()
-        prefill_cache_state = _alloc_cache_inputs(runtime.prefill_session, runtime.device)
-        prefill_chunk_len = int(runtime._prefill_inputs_info.shape[1])
-
-        last_prefill_logits = None
-        last_hidden = None
-        past_seq_len = 0
-        target_prefill_calls = 0
-        mtp_prefill_seq_len = 0
-        mtp_pending_hidden = None
-
-        for start in range(0, total_prompt_len, prefill_chunk_len):
-            end = min(start + prefill_chunk_len, total_prompt_len)
-            chunk_ids = input_ids[:, start:end]
-            valid_len = int(chunk_ids.shape[1])
-            target_prefill_calls += 1
-            prefill_feed = runtime._build_prefill_feed(chunk_ids, valid_len, past_seq_len, prefill_cache_state)
-            _, prefill_output_map = runtime._run_hmonnx(runtime.prefill_session, prefill_feed)
-            prefill_logits = runtime._extract_logits(prefill_output_map)
-            last_prefill_logits = _select_last_valid_logits(prefill_logits, valid_len)
-            prefill_hidden_all = runtime._extract_hidden(prefill_output_map)
-            if prefill_hidden_all is not None:
-                prefill_hidden_all = prefill_hidden_all[:, :valid_len, :]
-                last_hidden = runtime._select_hidden_step(prefill_hidden_all, valid_len - 1)
-                if runtime.spec_decode_mode == "dflash":
-                    runtime._append_dflash_context(prefill_hidden_all, past_seq_len)
-                else:
-                    hidden_parts = []
-                    token_parts = []
-                    if mtp_pending_hidden is not None:
-                        hidden_parts.append(mtp_pending_hidden)
-                        token_parts.append(chunk_ids[:, :1])
-                    if valid_len > 1:
-                        hidden_parts.append(prefill_hidden_all[:, : valid_len - 1, :])
-                        token_parts.append(chunk_ids[:, 1:valid_len])
-                    if hidden_parts:
-                        mtp_hidden = torch.cat(hidden_parts, dim=1)
-                        mtp_tokens = torch.cat(token_parts, dim=1)
-                        runtime._prefill_mtp_chunk(mtp_hidden, mtp_tokens, mtp_prefill_seq_len)
-                        mtp_prefill_seq_len += int(mtp_hidden.shape[1])
-                    mtp_pending_hidden = prefill_hidden_all[:, valid_len - 1 : valid_len, :]
-
-            runtime._update_linear_cache(prefill_cache_state, prefill_output_map)
-            past_seq_len += valid_len
-
-        if last_prefill_logits is None:
-            raise RuntimeError("Prefill did not produce logits.")
-
-        history_token_ids = input_ids[0].tolist()
-        next_token_id, _ = _select_greedy_token_with_penalties(
-            last_prefill_logits,
-            history_token_ids,
-            repetition_penalty,
-            presence_penalty,
-        )
-
-        runtime._ensure_decode_session()
-        decode_cache_state = _alloc_cache_inputs(runtime.decode_session, runtime.device)
-        for name in decode_cache_state:
-            if name in prefill_cache_state and (
-                _is_kv_cache_name(name) or name.startswith(("past_conv_cache_", "past_recurrent_state_"))
-            ):
-                decode_cache_state[name] = prefill_cache_state[name]
-
-        eos_token_id = tokenizer.eos_token_id
-        generated_ids: List[int] = []
-        token_val = int(next_token_id[0][0].item())
-        if eos_token_id is None or token_val != eos_token_id:
-            generated_ids.append(token_val)
-            history_token_ids.append(token_val)
-
-        current_token = next_token_id.to(runtime.device)
-        mtp_past_seq_len = mtp_prefill_seq_len
-        num_drafts = runtime.block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.block_size
-        total_rounds = 0
-        total_accepted_tokens = 0
-        accepted_drafts_per_round: List[int] = []
-        draft_capacity = num_drafts
-
-        while len(generated_ids) < max_new_tokens:
-            total_rounds += 1
-            if runtime.spec_decode_mode == "dflash":
-                draft_tokens = runtime._run_draft_dflash(current_token, past_seq_len)
-            else:
-                mtp_cache_snapshot = {
-                    name: _clone_cache_value(tensor)
-                    for name, tensor in runtime._ensure_mtp_cache_state().items()
-                }
-                draft_tokens = runtime._run_draft_mtp(current_token, last_hidden, mtp_past_seq_len, num_drafts)
-
-            verify_tokens = [current_token] + draft_tokens
-            verify_input_ids = torch.cat(verify_tokens, dim=1)
-            initial_seq_len = past_seq_len
-            decode_feed = runtime._build_decode_feed(
-                verify_input_ids,
-                past_seq_len,
-                decode_cache_state,
-                current_input_length=verify_input_ids.shape[1],
+        if include_baseline and baseline_meta_path:
+            baseline = run_dense_baseline_from_meta(
+                meta_path=baseline_meta_path,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                dtype=dtype,
+                device=device,
+                exec_device=exec_device,
+                auto_offload_max_memory=auto_offload_max_memory,
+                prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
+                decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+                enable_cuda_graph=enable_cuda_graph,
+                cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+                cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
             )
-            _, decode_output_map = runtime._run_hmonnx(runtime.decode_session, decode_feed)
-            verify_logits = _ensure_logits_shape(runtime._extract_logits(decode_output_map))
-            verify_hidden_all = runtime._extract_hidden(decode_output_map)
-
-            accepted_count = 0
-            running_history = list(history_token_ids)
-            current_token = None
-            for idx, draft_tok in enumerate(draft_tokens):
-                predicted, _ = _select_greedy_token_with_penalties(
-                    verify_logits[:, idx : idx + 1, :],
-                    running_history,
-                    repetition_penalty,
-                    presence_penalty,
-                )
-                if predicted[0, 0].item() != draft_tok[0, 0].item():
-                    current_token = predicted.to(runtime.device)
-                    break
-                accepted_count += 1
-                running_history.append(int(draft_tok[0, 0].item()))
-
-            accepted_drafts_per_round.append(accepted_count)
-            total_accepted_tokens += accepted_count
-            accepted_steps = accepted_count + 1
-            runtime._apply_verify_linear_cache_outputs(
-                decode_cache_state,
-                decode_output_map,
-                accepted_steps=accepted_steps,
+            spec = run_dense_spec_generate_once(
+                runtime=runtime,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                enable_thinking=enable_thinking,
+                repetition_penalty=repetition_penalty,
+                presence_penalty=presence_penalty,
             )
-            past_seq_len = initial_seq_len + accepted_steps
-
-            eos_hit = False
-            for idx in range(accepted_count):
-                token_val = int(draft_tokens[idx][0, 0].item())
-                generated_ids.append(token_val)
-                history_token_ids.append(token_val)
-                if eos_token_id is not None and token_val == eos_token_id:
-                    eos_hit = True
-                    break
-                if len(generated_ids) >= max_new_tokens:
-                    break
-            if eos_hit or len(generated_ids) >= max_new_tokens:
-                break
-
-            if accepted_count == len(draft_tokens):
-                current_token, _ = _select_greedy_token_with_penalties(
-                    verify_logits[:, -1:, :],
-                    running_history,
-                    repetition_penalty,
-                    presence_penalty,
-                )
-                current_token = current_token.to(runtime.device)
-
-            last_hidden = runtime._select_hidden_step(verify_hidden_all, accepted_count)
-            accepted_hidden = (
-                verify_hidden_all[:, :accepted_steps, :] if verify_hidden_all is not None else None
+            return build_dense_spec_generate_metrics(
+                prompt=prompt,
+                model_name=meta_info.get("model_name", meta_path),
+                draft_mode=runtime.spec_decode_mode,
+                baseline=baseline,
+                spec=spec,
+                draft_capacity=runtime.block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.block_size,
             )
-            if runtime.spec_decode_mode == "dflash":
-                if accepted_hidden is not None:
-                    runtime._append_dflash_context(accepted_hidden, initial_seq_len)
-            else:
-                runtime._mtp_cache_state = {
-                    name: _as_cache_value(tensor, tensor.clone())
-                    for name, tensor in mtp_cache_snapshot.items()
-                }
-                if accepted_hidden is not None:
-                    mtp_cache_state = runtime._ensure_mtp_cache_state()
-                    mtp_initial_seq_len = mtp_past_seq_len
-                    for step_idx in range(accepted_steps):
-                        next_token_for_cache = (
-                            verify_tokens[step_idx + 1]
-                            if step_idx < accepted_steps - 1
-                            else current_token
-                        )
-                        draft_output_map = runtime._run_draft_session(
-                            runtime.draft_decode_session,
-                            runtime._build_mtp_decode_feed(
-                                next_token_for_cache,
-                                accepted_hidden[:, step_idx : step_idx + 1, :],
-                                mtp_initial_seq_len + step_idx,
-                                mtp_cache_state,
-                            ),
-                        )
-                        for name in list(mtp_cache_state.keys()):
-                            present_name = name.replace("past_", "present_", 1)
-                            if present_name in draft_output_map:
-                                mtp_cache_state[name] = _as_cache_value(
-                                    mtp_cache_state[name],
-                                    draft_output_map[present_name],
-                                )
-                    mtp_past_seq_len = mtp_initial_seq_len + accepted_steps
-
-            token_val = int(current_token[0, 0].item())
-            if eos_token_id is not None and token_val == eos_token_id:
-                break
-            generated_ids.append(token_val)
-            history_token_ids.append(token_val)
-            if len(generated_ids) >= max_new_tokens:
-                break
-
-        extra_counts = (
-            {
-                "mtp_prefill_calls": draft_counts["mtp_prefill_calls"],
-                "mtp_decode_calls": draft_counts["mtp_decode_calls"],
-            }
-            if runtime.spec_decode_mode == "mtp"
-            else {
-                "dflash_prefill_calls": draft_counts["dflash_context_calls"],
-                "dflash_decode_calls": draft_counts["dflash_decode_calls"],
-            }
-        )
-        return finalise_spec_metrics(
-            prompt=prompt,
-            draft_mode=runtime.spec_decode_mode,
+        return run_dense_spec_metrics_with_runtime(
+            runtime=runtime,
+            tokenizer=tokenizer,
             model_name=meta_info.get("model_name", meta_path),
-            baseline_text=baseline["text"],
-            baseline_decoder_calls=int(baseline["target_decoder_calls"]),
-            baseline_prefill_calls=int(baseline["target_prefill_calls"]),
-            spec_text=tokenizer.decode(generated_ids, skip_special_tokens=True),
-            spec_output_tokens=len(generated_ids),
-            target_prefill_calls=target_prefill_calls,
-            target_decoder_calls=total_rounds,
-            accepted_drafts_per_round=accepted_drafts_per_round,
-            draft_capacity=draft_capacity,
-            extra_counts=extra_counts,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            enable_thinking=enable_thinking,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            include_baseline=include_baseline,
         )
     finally:
-        runtime._run_draft_session = original_run_draft_session  # type: ignore[assignment]
+        release_dense_runtime(runtime)
 
 
 @torch.no_grad()
@@ -1491,26 +1432,10 @@ def run_dense_spec_metrics_with_runtime(
     enable_thinking: bool = False,
     repetition_penalty: float = 1.0,
     presence_penalty: float = 0.0,
+    include_baseline: bool = True,
 ) -> Dict[str, Any]:
-    reset_dense_spec_runtime(runtime)
-    draft_counts = {"mtp_prefill_calls": 0, "mtp_decode_calls": 0, "dflash_context_calls": 0, "dflash_decode_calls": 0}
-    original_run_draft_session = runtime._run_draft_session
-
-    def counted_run_draft_session(session, input_feed):
-        if runtime.spec_decode_mode == "mtp":
-            if runtime.draft_prefill_session is not None and session is runtime.draft_prefill_session:
-                draft_counts["mtp_prefill_calls"] += 1
-            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
-                draft_counts["mtp_decode_calls"] += 1
-        else:
-            if runtime.draft_context_session is not None and session is runtime.draft_context_session:
-                draft_counts["dflash_context_calls"] += 1
-            elif runtime.draft_decode_session is not None and session is runtime.draft_decode_session:
-                draft_counts["dflash_decode_calls"] += 1
-        return original_run_draft_session(session, input_feed)
-
-    runtime._run_draft_session = counted_run_draft_session  # type: ignore[assignment]
-    try:
+    baseline = None
+    if include_baseline:
         baseline = run_dense_target_baseline_from_spec(
             runtime,
             tokenizer,
@@ -1520,253 +1445,23 @@ def run_dense_spec_metrics_with_runtime(
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
         )
-        reference_token_ids = list(baseline.get("token_ids", []))[:max_new_tokens]
-        if not reference_token_ids:
-            extra_counts = (
-                {
-                    "mtp_prefill_calls": draft_counts["mtp_prefill_calls"],
-                    "mtp_decode_calls": draft_counts["mtp_decode_calls"],
-                }
-                if runtime.spec_decode_mode == "mtp"
-                else {
-                    "dflash_prefill_calls": draft_counts["dflash_context_calls"],
-                    "dflash_decode_calls": draft_counts["dflash_decode_calls"],
-                }
-            )
-            return finalise_spec_metrics(
-                prompt=prompt,
-                draft_mode=runtime.spec_decode_mode,
-                model_name=model_name,
-                baseline_text=baseline["text"],
-                baseline_decoder_calls=int(baseline["target_decoder_calls"]),
-                baseline_prefill_calls=int(baseline["target_prefill_calls"]),
-                baseline_output_tokens=int(baseline["output_tokens"]),
-                spec_text="",
-                spec_output_tokens=0,
-                target_prefill_calls=int(baseline["target_prefill_calls"]),
-                target_decoder_calls=0,
-                accepted_drafts_per_round=[],
-                draft_capacity=runtime.block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.block_size,
-                extra_counts=extra_counts,
-            )
-
-        reset_dense_spec_runtime(runtime)
-        input_ids = encode_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
-        if runtime.max_context_tokens is not None and input_ids.shape[1] > runtime.max_context_tokens:
-            input_ids = input_ids[:, -runtime.max_context_tokens :]
-
-        total_prompt_len = int(input_ids.shape[1])
-        runtime._ensure_prefill_session()
-        prefill_cache_state = _alloc_cache_inputs(runtime.prefill_session, runtime.device)
-        prefill_chunk_len = int(runtime._prefill_inputs_info.shape[1])
-
-        last_prefill_logits = None
-        last_hidden = None
-        past_seq_len = 0
-        target_prefill_calls = 0
-        mtp_prefill_seq_len = 0
-        mtp_pending_hidden = None
-
-        for start in range(0, total_prompt_len, prefill_chunk_len):
-            end = min(start + prefill_chunk_len, total_prompt_len)
-            chunk_ids = input_ids[:, start:end]
-            valid_len = int(chunk_ids.shape[1])
-            target_prefill_calls += 1
-            prefill_feed = runtime._build_prefill_feed(chunk_ids, valid_len, past_seq_len, prefill_cache_state)
-            _, prefill_output_map = runtime._run_hmonnx(runtime.prefill_session, prefill_feed)
-            prefill_logits = runtime._extract_logits(prefill_output_map)
-            last_prefill_logits = _select_last_valid_logits(prefill_logits, valid_len)
-            prefill_hidden_all = runtime._extract_hidden(prefill_output_map)
-            if prefill_hidden_all is not None:
-                prefill_hidden_all = prefill_hidden_all[:, :valid_len, :]
-                last_hidden = runtime._select_hidden_step(prefill_hidden_all, valid_len - 1)
-                if runtime.spec_decode_mode == "dflash":
-                    runtime._append_dflash_context(prefill_hidden_all, past_seq_len)
-                else:
-                    hidden_parts = []
-                    token_parts = []
-                    if mtp_pending_hidden is not None:
-                        hidden_parts.append(mtp_pending_hidden)
-                        token_parts.append(chunk_ids[:, :1])
-                    if valid_len > 1:
-                        hidden_parts.append(prefill_hidden_all[:, : valid_len - 1, :])
-                        token_parts.append(chunk_ids[:, 1:valid_len])
-                    if hidden_parts:
-                        mtp_hidden = torch.cat(hidden_parts, dim=1)
-                        mtp_tokens = torch.cat(token_parts, dim=1)
-                        runtime._prefill_mtp_chunk(mtp_hidden, mtp_tokens, mtp_prefill_seq_len)
-                        mtp_prefill_seq_len += int(mtp_hidden.shape[1])
-                    mtp_pending_hidden = prefill_hidden_all[:, valid_len - 1 : valid_len, :]
-
-            runtime._update_linear_cache(prefill_cache_state, prefill_output_map)
-            past_seq_len += valid_len
-
-        if last_prefill_logits is None:
-            raise RuntimeError("Prefill did not produce logits.")
-
-        history_token_ids = input_ids[0].tolist()
-        next_token_id = torch.tensor(
-            [[reference_token_ids[0]]], dtype=torch.long, device=runtime.device
-        )
-
-        runtime._ensure_decode_session()
-        decode_cache_state = _alloc_cache_inputs(runtime.decode_session, runtime.device)
-        for name in decode_cache_state:
-            if name in prefill_cache_state and (
-                _is_kv_cache_name(name) or name.startswith(("past_conv_cache_", "past_recurrent_state_"))
-            ):
-                decode_cache_state[name] = prefill_cache_state[name]
-
-        eos_token_id = tokenizer.eos_token_id
-        generated_ids: List[int] = [reference_token_ids[0]]
-        history_token_ids.append(reference_token_ids[0])
-
-        current_token = next_token_id.to(runtime.device)
-        mtp_past_seq_len = mtp_prefill_seq_len
-        num_drafts = runtime.block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.block_size
-        total_rounds = 0
-        total_accepted_tokens = 0
-        accepted_drafts_per_round: List[int] = []
-        draft_capacity = num_drafts
-        reference_limit = len(reference_token_ids)
-        reference_index = 1
-
-        while reference_index < reference_limit:
-            total_rounds += 1
-            if runtime.spec_decode_mode == "dflash":
-                draft_tokens = runtime._run_draft_dflash(current_token, past_seq_len)
-            else:
-                mtp_cache_snapshot = {
-                    name: _clone_cache_value(tensor)
-                    for name, tensor in runtime._ensure_mtp_cache_state().items()
-                }
-                draft_tokens = runtime._run_draft_mtp(current_token, last_hidden, mtp_past_seq_len, num_drafts)
-
-            verify_tokens = [current_token] + draft_tokens
-            verify_input_ids = torch.cat(verify_tokens, dim=1)
-            initial_seq_len = past_seq_len
-            decode_feed = runtime._build_decode_feed(
-                verify_input_ids,
-                past_seq_len,
-                decode_cache_state,
-                current_input_length=verify_input_ids.shape[1],
-            )
-            _, decode_output_map = runtime._run_hmonnx(runtime.decode_session, decode_feed)
-            verify_logits = _ensure_logits_shape(runtime._extract_logits(decode_output_map))
-            verify_hidden_all = runtime._extract_hidden(decode_output_map)
-
-            accepted_count = 0
-            for idx, draft_tok in enumerate(draft_tokens):
-                if reference_index + idx >= reference_limit:
-                    break
-                if draft_tok[0, 0].item() != reference_token_ids[reference_index + idx]:
-                    break
-                accepted_count += 1
-
-            accepted_drafts_per_round.append(accepted_count)
-            total_accepted_tokens += accepted_count
-            accepted_steps = accepted_count + 1
-            runtime._apply_verify_linear_cache_outputs(
-                decode_cache_state,
-                decode_output_map,
-                accepted_steps=accepted_steps,
-            )
-            past_seq_len = initial_seq_len + accepted_steps
-
-            eos_hit = False
-            for idx in range(accepted_count):
-                token_val = int(reference_token_ids[reference_index])
-                generated_ids.append(token_val)
-                history_token_ids.append(token_val)
-                reference_index += 1
-                if eos_token_id is not None and token_val == eos_token_id:
-                    eos_hit = True
-                    break
-            if eos_hit or reference_index >= reference_limit:
-                break
-
-            current_token = torch.tensor(
-                [[reference_token_ids[reference_index]]],
-                dtype=torch.long,
-                device=runtime.device,
-            )
-
-            last_hidden = runtime._select_hidden_step(verify_hidden_all, accepted_count)
-            accepted_hidden = (
-                verify_hidden_all[:, :accepted_steps, :] if verify_hidden_all is not None else None
-            )
-            if runtime.spec_decode_mode == "dflash":
-                if accepted_hidden is not None:
-                    runtime._append_dflash_context(accepted_hidden, initial_seq_len)
-            else:
-                runtime._mtp_cache_state = {
-                    name: _as_cache_value(tensor, tensor.clone())
-                    for name, tensor in mtp_cache_snapshot.items()
-                }
-                if accepted_hidden is not None:
-                    mtp_cache_state = runtime._ensure_mtp_cache_state()
-                    mtp_initial_seq_len = mtp_past_seq_len
-                    for step_idx in range(accepted_steps):
-                        next_token_for_cache = (
-                            verify_tokens[step_idx + 1]
-                            if step_idx < accepted_steps - 1
-                            else current_token
-                        )
-                        draft_output_map = runtime._run_draft_session(
-                            runtime.draft_decode_session,
-                            runtime._build_mtp_decode_feed(
-                                next_token_for_cache,
-                                accepted_hidden[:, step_idx : step_idx + 1, :],
-                                mtp_initial_seq_len + step_idx,
-                                mtp_cache_state,
-                            ),
-                        )
-                        for name in list(mtp_cache_state.keys()):
-                            present_name = name.replace("past_", "present_", 1)
-                            if present_name in draft_output_map:
-                                mtp_cache_state[name] = _as_cache_value(
-                                    mtp_cache_state[name],
-                                    draft_output_map[present_name],
-                                )
-                    mtp_past_seq_len = mtp_initial_seq_len + accepted_steps
-
-            token_val = int(reference_token_ids[reference_index])
-            if eos_token_id is not None and token_val == eos_token_id:
-                break
-            generated_ids.append(token_val)
-            history_token_ids.append(token_val)
-            reference_index += 1
-
-        extra_counts = (
-            {
-                "mtp_prefill_calls": draft_counts["mtp_prefill_calls"],
-                "mtp_decode_calls": draft_counts["mtp_decode_calls"],
-            }
-            if runtime.spec_decode_mode == "mtp"
-            else {
-                "dflash_prefill_calls": draft_counts["dflash_context_calls"],
-                "dflash_decode_calls": draft_counts["dflash_decode_calls"],
-            }
-        )
-        return finalise_spec_metrics(
-            prompt=prompt,
-            draft_mode=runtime.spec_decode_mode,
-            model_name=model_name,
-            baseline_text=baseline["text"],
-            baseline_decoder_calls=int(baseline["target_decoder_calls"]),
-            baseline_prefill_calls=int(baseline["target_prefill_calls"]),
-            baseline_output_tokens=int(baseline["output_tokens"]),
-            spec_text=tokenizer.decode(generated_ids[:max_new_tokens], skip_special_tokens=True),
-            spec_output_tokens=len(generated_ids[:max_new_tokens]),
-            target_prefill_calls=target_prefill_calls,
-            target_decoder_calls=total_rounds,
-            accepted_drafts_per_round=accepted_drafts_per_round,
-            draft_capacity=draft_capacity,
-            extra_counts=extra_counts,
-        )
-    finally:
-        runtime._run_draft_session = original_run_draft_session  # type: ignore[assignment]
-        reset_dense_spec_runtime(runtime)
+    spec = run_dense_spec_generate_once(
+        runtime=runtime,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        enable_thinking=enable_thinking,
+        repetition_penalty=repetition_penalty,
+        presence_penalty=presence_penalty,
+    )
+    return build_dense_spec_generate_metrics(
+        prompt=prompt,
+        model_name=model_name,
+        draft_mode=runtime.spec_decode_mode,
+        baseline=baseline,
+        spec=spec,
+        draft_capacity=runtime.block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.block_size,
+    )
 
 
 @torch.no_grad()
@@ -2229,6 +1924,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dtype", default="fp16")
     p.add_argument("--device", default="cuda")
     p.add_argument("--exec-device", default="cuda")
+    p.add_argument("--enable-cuda-graph", action="store_true")
+    p.add_argument("--cuda-graph-warmup-runs", type=int, default=3)
+    p.add_argument("--cuda-graph-graph-warmup-runs", type=int, default=6)
 
     p = subparsers.add_parser("hmonnx-moe")
     p.add_argument("--meta", required=True)
@@ -2294,6 +1992,9 @@ def main() -> None:
             dtype=args.dtype,
             device=args.device,
             exec_device=args.exec_device,
+            enable_cuda_graph=args.enable_cuda_graph,
+            cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
         )
     else:
         result = run_moe_spec_metrics(
