@@ -63,7 +63,11 @@ class BaseLLMInputProcessor:
                 f"max input sequence length is {self.input_sequence_length} but got {seq_length}"
             )
             if self.input_sequence_length > seq_length:
-                padding_input_ids = torch.zeros((1, self.input_sequence_length - seq_length), dtype=torch.long)
+                padding_input_ids = torch.zeros(
+                    (1, self.input_sequence_length - seq_length),
+                    dtype=torch.long,
+                    device=input_ids.device,
+                )
                 padding_input_ids.fill_(self.pad_token_id)
                 input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
             inputs_embeds = self.embed_tokens(input_ids)
@@ -76,9 +80,12 @@ class BaseLLMInputProcessor:
             )
             if self.input_sequence_length > seq_length:
                 padding_token_id = self.pad_token_id
-                padding_input_ids = (
-                    torch.ones((1, self.input_sequence_length - seq_length), dtype=torch.long) * padding_token_id
+                padding_input_ids = torch.ones(
+                    (1, self.input_sequence_length - seq_length),
+                    dtype=torch.long,
+                    device=inputs_embeds.device,
                 )
+                padding_input_ids = padding_input_ids * padding_token_id
                 padding_embedding = self.embed_tokens(padding_input_ids)
                 inputs_embeds = torch.cat([inputs_embeds, padding_embedding], dim=1)
 

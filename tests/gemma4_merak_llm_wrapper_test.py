@@ -134,6 +134,106 @@ def test_gemma4_kvcache_uses_per_layer_head_dims_without_padding():
     assert {shape[-1] for shape in expected_shapes} == {16, 32}
 
 
+def test_gemma4_moe_with_mask_kvcache_uses_per_layer_head_dims_without_padding(tmp_path):
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4AudioConfig, Gemma4Config, Gemma4VisionConfig
+
+    from xhmodel_merak.xh_llm.models.gemma4_moe.gemma4_moe_with_mask_model import XHGemma4MoeWithMaskModel
+    from xhmodel_merak.xh_llm.models.gemma4_moe.xh_gemma4_moe_config import XHGemma4MoeWithMaskConfig
+
+    config = Gemma4Config()
+    text = config.text_config
+    if config.vision_config is None:
+        config.vision_config = Gemma4VisionConfig()
+    if config.audio_config is None:
+        config.audio_config = Gemma4AudioConfig()
+    vision = config.vision_config
+    audio = config.audio_config
+
+    text.hidden_size = 64
+    text.intermediate_size = 128
+    text.hidden_size_per_layer_input = 8
+    text.num_hidden_layers = 4
+    text.num_attention_heads = 4
+    text.num_key_value_heads = 2
+    text.head_dim = 16
+    text.global_head_dim = 32
+    text.num_global_key_value_heads = 1
+    text.num_kv_shared_layers = 0
+    text.sliding_window = 8
+    text.layer_types = ["sliding_attention", "full_attention", "sliding_attention", "full_attention"]
+    text.vocab_size = 128
+    text.max_position_embeddings = 64
+    text.bos_token_id = 2
+    text.eos_token_id = 1
+    text.pad_token_id = 0
+
+    vision.hidden_size = 32
+    vision.intermediate_size = 64
+    vision.num_hidden_layers = 1
+    vision.num_attention_heads = 4
+    vision.embedding_dim = 32
+
+    audio.hidden_size = 32
+    audio.intermediate_size = 64
+    audio.num_hidden_layers = 1
+    audio.num_attention_heads = 4
+    audio.num_key_value_heads = 4
+    audio.head_dim = 8
+    audio.input_dim = 128
+
+    config.image_token_id = 10
+    config.audio_token_id = 11
+    config.video_token_id = 12
+    config.boi_token_id = 13
+    config.eoi_token_id = 14
+    config.boa_token_id = 15
+    config.eoa_token_id = 16
+
+    hf_model_dir = tmp_path / "gemma4_moe_config"
+    config.save_pretrained(hf_model_dir)
+    hf_model = Gemma4ForConditionalGeneration(config).eval()
+
+    model = XHGemma4MoeWithMaskModel(
+        XHGemma4MoeWithMaskConfig(
+            model_name="tiny_gemma4_moe_with_mask",
+            model_type="Gemma4ForConditionalGeneration_with_mask",
+            hf_model=str(hf_model_dir),
+            context_max_length=16,
+            prefill_chunk_length=4,
+        )
+    )
+    wrap_model = model.init_wrap_model(hf_model)
+
+    expected_shapes = []
+    for layer in wrap_model.model.layers:
+        attn = layer.self_attn
+        expected_shapes.append([1, attn.k_proj.out_features // attn.head_dim, 16, attn.head_dim])
+
+    assert model.get_kvcache_mixin().layer_kv_shapes == expected_shapes
+    assert model.kvcache_config.num_layers == len(expected_shapes)
+    assert {shape[-1] for shape in expected_shapes} == {16, 32}
+
+    with model.get_kvcache_mixin().kv_cache_scope(device="cpu"):
+        actual_shapes = [list(cache.shape) for cache in model.past_key_caches]
+
+    assert actual_shapes == expected_shapes
+
+
+def test_gemma4_moe_with_mask_hmonnx_kvcache_mixin_uses_exported_layer_shapes():
+    from xhmodel_merak.xh_llm.models.gemma4_moe.gemma4_moe_hmonnx_inference import Gemma4MoeKVCacheMixinHMONNX
+    from xhmodel_merak.xh_llm.types import KVCacheConfig
+
+    layer_kv_shapes = [[1, 4, 16, 16], [1, 2, 16, 32]]
+    mixin = Gemma4MoeKVCacheMixinHMONNX(KVCacheConfig(num_layers=2, kv_cache_shape=layer_kv_shapes[0]), layer_kv_shapes)
+
+    with mixin.kv_cache_scope(device="cpu"):
+        key_shapes = [list(cache.shape) for cache in mixin.past_key_caches]
+        value_shapes = [list(cache.shape) for cache in mixin.past_value_caches]
+
+    assert key_shapes == layer_kv_shapes
+    assert value_shapes == layer_kv_shapes
+
+
 def test_gemma4_preprocess_externalizes_per_layer_inputs():
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
     from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig

@@ -319,7 +319,7 @@ class VLLMModelMeta(LLMModelMeta):
     ):
         super().__init__(**kwargs)
         self.visual_config = visual_config
-        if "_meta_path_" in kwargs:
+        if "_meta_path_" in kwargs and self.visual_config is not None and getattr(self.visual_config, "hmonnx", None):
             _meta_path_ = kwargs.get("_meta_path_")
             self.visual_config.hmonnx = str(Path(_meta_path_).parent / self.visual_config.hmonnx)
 
