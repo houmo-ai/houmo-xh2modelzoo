@@ -30,7 +30,57 @@ logger = logging.get_logger(__name__)
 
 class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
     def __init__(self, *args, **kwargs):
+        min_pixels = kwargs.get("min_pixels")
+        max_pixels = kwargs.get("max_pixels")
         super().__init__(*args, **kwargs)
+        if not hasattr(self, "min_pixels"):
+            self.min_pixels = 65536 if min_pixels is None else min_pixels
+        if not hasattr(self, "max_pixels"):
+            self.max_pixels = 16777216 if max_pixels is None else max_pixels
+
+    @staticmethod
+    def _to_torch_tensor(value):
+        if isinstance(value, torch.Tensor):
+            return value
+        return torch.from_numpy(np.array(value))
+
+    def _run_base_preprocess(
+        self,
+        images,
+        do_resize,
+        size,
+        resample,
+        do_rescale,
+        rescale_factor,
+        do_normalize,
+        image_mean,
+        image_std,
+        patch_size,
+        temporal_patch_size,
+        merge_size,
+        data_format,
+        do_convert_rgb,
+        input_data_format,
+    ):
+        processed = super().preprocess(
+            images=images,
+            do_resize=do_resize,
+            size=size,
+            resample=resample,
+            do_rescale=do_rescale,
+            rescale_factor=rescale_factor,
+            do_normalize=do_normalize,
+            image_mean=image_mean,
+            image_std=image_std,
+            patch_size=patch_size,
+            temporal_patch_size=temporal_patch_size,
+            merge_size=merge_size,
+            do_convert_rgb=do_convert_rgb,
+            return_tensors=None,
+            data_format=data_format,
+            input_data_format=input_data_format,
+        )
+        return processed["pixel_values"], processed["image_grid_thw"]
 
     def _hm_preprocess(
         self,
@@ -152,7 +202,7 @@ class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
         if images is not None:
             pixel_values, vision_grid_thws, hm_pixel_values = [], [], []
             for image in images:
-                patches, image_grid_thw = self._preprocess(
+                patches, image_grid_thw = self._run_base_preprocess(
                     image,
                     do_resize=do_resize,
                     size=size,
@@ -177,12 +227,16 @@ class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
                     data_format=data_format,
                     input_data_format=input_data_format,
                 )
+                patches = self._to_torch_tensor(patches)
+                image_grid_thw = self._to_torch_tensor(image_grid_thw)
+                if image_grid_thw.ndim == 1:
+                    image_grid_thw = image_grid_thw.unsqueeze(0)
                 hm_pixel_values.append(torch.from_numpy(hm_patches).unsqueeze(2).repeat(1, 1, self.temporal_patch_size, 1, 1))
-                pixel_values.extend(patches)
+                pixel_values.append(patches)
                 vision_grid_thws.append(image_grid_thw)
-            pixel_values = torch.from_numpy(np.array(pixel_values))
-            vision_grid_thws = torch.from_numpy(np.array(vision_grid_thws))
-            hm_pixel_values = torch.from_numpy(np.array(hm_pixel_values))
+            pixel_values = torch.cat(pixel_values, dim=0)
+            vision_grid_thws = torch.cat(vision_grid_thws, dim=0)
+            hm_pixel_values = torch.cat(hm_pixel_values, dim=0)
             data.update({"pixel_values": pixel_values, "image_grid_thw": vision_grid_thws, "hm_pixel_values": hm_pixel_values})
 
         # kept for BC only and should be removed after v5.0
@@ -196,7 +250,7 @@ class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
             videos = make_batched_videos(videos)
             pixel_values_videos, vision_grid_thws_videos = [], []
             for images in videos:
-                patches, video_grid_thw = self._preprocess(
+                patches, video_grid_thw = self._run_base_preprocess(
                     images,
                     do_resize=do_resize,
                     size=size,
@@ -213,12 +267,16 @@ class Qwen2_5_VLImageProcessor(Qwen2VLImageProcessor):
                     do_convert_rgb=do_convert_rgb,
                     input_data_format=input_data_format,
                 )
-                pixel_values_videos.extend(patches)
+                patches = self._to_torch_tensor(patches)
+                video_grid_thw = self._to_torch_tensor(video_grid_thw)
+                if video_grid_thw.ndim == 1:
+                    video_grid_thw = video_grid_thw.unsqueeze(0)
+                pixel_values_videos.append(patches)
                 vision_grid_thws_videos.append(video_grid_thw)
             data.update(
                 {
-                    "pixel_values_videos": np.array(pixel_values_videos),
-                    "video_grid_thw": np.array(vision_grid_thws_videos),
+                    "pixel_values_videos": torch.cat(pixel_values_videos, dim=0),
+                    "video_grid_thw": torch.cat(vision_grid_thws_videos, dim=0),
                 }
             )
         return data

@@ -18,6 +18,36 @@ from xhquant.api import CacheTensor, get_root_logger, xhquant_init
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
 
+def _build_prefill_fused_inputs(meta, captured_entry, inputs_embeds: torch.Tensor):
+    seq_len = int(inputs_embeds.shape[1])
+    batch = int(inputs_embeds.shape[0])
+    hidden_state_size = int(
+        meta.get(
+            "talker_hidden_state_size",
+            meta.get("talker_thinker_hidden_size", meta.get("talker_projection_in_features", inputs_embeds.shape[-1])),
+        )
+    )
+    if captured_entry is not None:
+        hidden_state = captured_entry.get("hidden_state")
+        role_mask = captured_entry.get("role_mask")
+        bypass_embeds = captured_entry.get("bypass_embeds")
+        bypass_mask = captured_entry.get("bypass_mask")
+        if all(isinstance(item, torch.Tensor) for item in (hidden_state, role_mask, bypass_embeds, bypass_mask)):
+            if int(hidden_state.shape[1]) >= seq_len and int(bypass_embeds.shape[1]) >= seq_len:
+                return (
+                    hidden_state[:, :seq_len, :].to(torch.float16).cpu(),
+                    role_mask[:, :seq_len, :].to(torch.float16).cpu(),
+                    bypass_embeds[:, :seq_len, :].to(torch.float16).cpu(),
+                    bypass_mask[:, :seq_len, :].to(torch.float16).cpu(),
+                )
+    return (
+        torch.zeros(batch, seq_len, hidden_state_size, dtype=torch.float16),
+        torch.zeros(batch, seq_len, 1, dtype=torch.float16),
+        inputs_embeds,
+        torch.ones(batch, seq_len, 1, dtype=torch.float16),
+    )
+
+
 def _run_talker_forward(meta, report):
     capture_path = Path(meta["_root_dir"]) / "talker_model_inputs.pth"
     if not capture_path.exists():
@@ -25,11 +55,17 @@ def _run_talker_forward(meta, report):
         return
 
     captured = torch.load(capture_path, map_location="cpu", weights_only=False)
-    inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
+    captured_entry = captured[0]
+    inputs_embeds = captured_entry["inputs_embeds"].to(torch.float16).cpu()
     kv_info = meta["talker_kv_cache"]
     kv_shape = kv_info["shape"]
     num_layers = kv_info["num_decoder_layers"]
-    thinker_hs = int(meta.get("talker_thinker_hidden_size", meta.get("talker_projection_in_features", 0)))
+    hidden_state_size = int(
+        meta.get(
+            "talker_hidden_state_size",
+            meta.get("talker_thinker_hidden_size", meta.get("talker_projection_in_features", 0)),
+        )
+    )
     past_key_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     past_value_caches = [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)]
     prefill = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_prefill_onnx"]))
@@ -37,18 +73,21 @@ def _run_talker_forward(meta, report):
 
     batch = int(inputs_embeds.shape[0])
     prefill_seq = int(inputs_embeds.shape[1])
+    prefill_hidden_state, prefill_role_mask, prefill_bypass_embeds, prefill_bypass_mask = _build_prefill_fused_inputs(
+        meta, captured_entry, inputs_embeds
+    )
     prefill_out = prefill.forward(
-        torch.zeros(batch, prefill_seq, thinker_hs, dtype=torch.float16),
-        torch.zeros(batch, prefill_seq, 1, dtype=torch.float16),
-        inputs_embeds,
-        torch.ones(batch, prefill_seq, 1, dtype=torch.float16),
+        prefill_hidden_state,
+        prefill_role_mask,
+        prefill_bypass_embeds,
+        prefill_bypass_mask,
         torch.tensor([0], dtype=torch.int32),
         torch.tensor([prefill_seq], dtype=torch.int32),
         *past_key_caches,
         *past_value_caches,
     )
     decode_out = decode.forward(
-        torch.zeros(batch, 1, thinker_hs, dtype=torch.float16),
+        torch.zeros(batch, 1, hidden_state_size, dtype=torch.float16),
         torch.zeros(batch, 1, 1, dtype=torch.float16),
         inputs_embeds[:, :1, :],
         torch.ones(batch, 1, 1, dtype=torch.float16),
@@ -57,13 +96,18 @@ def _run_talker_forward(meta, report):
         *past_key_caches,
         *past_value_caches,
     )
-    prefill_tensor = prefill_out[0] if isinstance(prefill_out, (list, tuple)) else prefill_out
-    decode_tensor = decode_out[0] if isinstance(decode_out, (list, tuple)) else decode_out
-    report["talker"] = {
+    prefill_outputs = list(prefill_out) if isinstance(prefill_out, (list, tuple)) else [prefill_out]
+    decode_outputs = list(decode_out) if isinstance(decode_out, (list, tuple)) else [decode_out]
+    talker_report = {
         "status": "ok",
-        "prefill_shape": list(prefill_tensor.shape),
-        "decode_shape": list(decode_tensor.shape),
+        "prefill_output_shapes": [list(tensor.shape) for tensor in prefill_outputs],
+        "decode_output_shapes": [list(tensor.shape) for tensor in decode_outputs],
+        "prefill_hidden_state_shape": list(prefill_hidden_state.shape),
     }
+    trailing_text_hidden = captured_entry.get("trailing_text_hidden")
+    if isinstance(trailing_text_hidden, torch.Tensor):
+        talker_report["style_guidance_hidden_shape"] = list(trailing_text_hidden.shape)
+    report["talker"] = talker_report
 
 
 def _run_talker_prediction_forward(meta, report):

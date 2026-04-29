@@ -1,6 +1,7 @@
 import json
 import time
 import types
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -37,6 +38,54 @@ HMONNXInference.__init__ = _hmonnx_init_cuda_exec
 SCRIPT_DIR = Path(__file__).resolve().parent
 _HMONNX_RUNTIME_FIX_CACHE: Dict[str, Path] = {}
 _GIB = 1024**3
+
+
+def _ensure_mistral_common_reasoning_effort():
+    try:
+        import mistral_common.protocol.instruct.request as request_module
+    except ImportError:
+        return
+
+    if hasattr(request_module, "ReasoningEffort"):
+        return
+
+    class ReasoningEffort(str, Enum):
+        none = "none"
+        high = "high"
+
+    request_module.ReasoningEffort = ReasoningEffort
+
+
+def _force_eager_moe_implementation(module, logger=None):
+    visited_configs = set()
+    updated = 0
+
+    def _visit_config(config):
+        nonlocal updated
+        if config is None:
+            return
+        config_id = id(config)
+        if config_id in visited_configs:
+            return
+        visited_configs.add(config_id)
+
+        if hasattr(config, "_experts_implementation") and getattr(config, "_experts_implementation") != "eager":
+            config._experts_implementation = "eager"
+            updated += 1
+
+        config_dict = getattr(config, "__dict__", None)
+        if not isinstance(config_dict, dict):
+            return
+        for value in config_dict.values():
+            if hasattr(value, "__dict__"):
+                _visit_config(value)
+
+    _visit_config(getattr(module, "config", None))
+    for submodule in module.modules():
+        _visit_config(getattr(submodule, "config", None))
+
+    if logger is not None and updated:
+        logger.info(f"forced {updated} config nodes to use eager MoE experts")
 
 
 def release_export_cuda_memory(logger=None, label: Optional[str] = None):
@@ -1124,10 +1173,12 @@ def run_dialogue_validation(
         **load_kwargs,
     )
     native_model.eval()
+    _force_eager_moe_implementation(native_model, logger)
     _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
     _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
     if hasattr(native_model, "code2wav"):
         _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
+    _ensure_mistral_common_reasoning_effort()
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
 
     if artifacts:
@@ -1281,6 +1332,7 @@ def run_text_hmonnx_chain_forward(
     save_golden: bool = False,
     golden_dir: Optional[Path] = None,
 ):
+    _ensure_mistral_common_reasoning_effort()
     processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
     if logger is not None and device_map != "cpu":
         logger.info(f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}")
@@ -1292,6 +1344,7 @@ def run_text_hmonnx_chain_forward(
         trust_remote_code=True,
     )
     native_model.eval()
+    _force_eager_moe_implementation(native_model, logger)
 
     conversation, use_audio_in_video = build_conversation(case)
     text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)

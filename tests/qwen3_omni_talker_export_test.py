@@ -1,9 +1,11 @@
 import importlib.util
+from importlib.machinery import ModuleSpec
 import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -28,6 +30,7 @@ def _load_export_module(
     fake_pipeline = types.ModuleType("_hmonnx_pipeline")
     fake_pipeline.run_dialogue_validation = run_dialogue_validation_fn
     fake_pipeline.save_json = lambda *args, **kwargs: None
+    fake_pipeline.discover_artifacts = lambda *args, **kwargs: {}
     fake_pipeline._resolve_validation_device_map = lambda device_map, logger=None: resolved_device_map
     fake_pipeline._build_safe_validation_max_memory = lambda logger=None: max_memory
     fake_pipeline._patch_runtime_device_property = lambda module, module_name, logger=None: None
@@ -109,6 +112,9 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
         Path(path).write_bytes(b"stub")
 
     fake_soundfile.write = _fake_write
+    fake_soundfile.available_formats = lambda: {}
+    fake_soundfile.available_subtypes = lambda *args, **kwargs: {}
+    fake_soundfile.__spec__ = ModuleSpec("soundfile", loader=None)
     monkeypatch.setitem(sys.modules, "soundfile", fake_soundfile)
 
     fake_api = types.ModuleType("xhquant.api")
@@ -132,6 +138,8 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
         "xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe"
     )
     fake_modeling._get_feat_extract_output_lengths = lambda value: value
+    fake_modeling.Qwen3OmniMoeTalkerCodePredictorOutputWithPast = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_modeling.Qwen3OmniMoeTalkerOutputWithPast = lambda **kwargs: SimpleNamespace(**kwargs)
     monkeypatch.setitem(
         sys.modules,
         "xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe",
@@ -191,6 +199,9 @@ def test_load_native_model_for_capture_uses_safe_single_gpu(monkeypatch):
             captured["eval_called"] = True
             return self
 
+        def modules(self):
+            return [self, self.talker, self.talker.code_predictor]
+
     class DummyModelClass:
         @staticmethod
         def from_pretrained(model_path, **kwargs):
@@ -235,6 +246,9 @@ def test_load_native_model_for_capture_passes_max_memory_when_auto_remains(monke
         def eval(self):
             return self
 
+        def modules(self):
+            return [self, self.talker, self.talker.code_predictor]
+
     class DummyModelClass:
         @staticmethod
         def from_pretrained(model_path, **kwargs):
@@ -267,17 +281,20 @@ def test_run_talker_dialogue_validation_passes_talker_token_limit(monkeypatch):
     )
     logger = SimpleNamespace(info=lambda *args, **kwargs: None)
     work_dir = Path("/tmp/qwen3omni_talker_validation")
+    golden_dir = work_dir / "golden"
     meta_file = work_dir / "meta_talker.json"
     meta_info = {"module": "talker_model"}
 
     module._run_talker_dialogue_validation(
         "/tmp/fake-model",
         work_dir,
+        golden_dir,
         logger,
         meta_info,
         meta_file,
         max_new_tokens=8,
         talker_max_new_tokens=128,
+        save_golden=False,
     )
 
     assert captured["args"][:3] == ("/tmp/fake-model", work_dir, logger)
@@ -286,6 +303,60 @@ def test_run_talker_dialogue_validation_passes_talker_token_limit(monkeypatch):
     assert captured["kwargs"]["talker_max_new_tokens"] == 128
     assert captured["kwargs"]["report_name"] == "talker_dialogue_validation.json"
     assert captured["kwargs"]["output_prefix"] == "talker_dialogue"
+
+
+def test_capture_talker_inputs_uses_multimodal_timing_kwargs(monkeypatch, tmp_path):
+    module, _ = _load_export_module(monkeypatch)
+    observed = {}
+
+    class FakeBatch(dict):
+        def to(self, *args, **kwargs):
+            return self
+
+    class DummyProcessor:
+        def apply_chat_template(self, conversation, add_generation_prompt=True, tokenize=False):
+            return "prompt"
+
+        def __call__(self, **kwargs):
+            observed["kwargs"] = kwargs
+            return FakeBatch({"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)})
+
+    class DummyTalker:
+        def __init__(self):
+            self.generate = lambda *args, **kwargs: None
+            self.forward = lambda *args, **kwargs: None
+
+    class DummyNativeModel:
+        def __init__(self):
+            self.talker = DummyTalker()
+            self._get_talker_user_parts = lambda *args, **kwargs: None
+            self._get_talker_assistant_parts = lambda *args, **kwargs: None
+
+        def generate(self, **kwargs):
+            raise RuntimeError("stop after processor call")
+
+    logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="stop after processor call"):
+        module._capture_talker_inputs(
+            DummyNativeModel(),
+            DummyProcessor(),
+            torch.device("cpu"),
+            torch.float16,
+            tmp_path,
+            logger,
+        )
+
+    assert observed["kwargs"]["seconds_per_chunk"] == 2.0
+    assert observed["kwargs"]["position_id_per_seconds"] == 13
+    assert observed["kwargs"]["use_audio_in_video"] is True
+
+
+def test_compute_talker_prefill_static_length_reserves_dialogue_headroom(monkeypatch):
+    module, _ = _load_export_module(monkeypatch)
+
+    assert module._compute_talker_prefill_static_length(118, 2048) == 150
+    assert module._compute_talker_prefill_static_length(2040, 2048) == 2048
 
 
 def test_run_dialogue_validation_uses_concrete_code2wav_device_when_module_is_meta(monkeypatch, tmp_path):

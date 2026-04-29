@@ -21,6 +21,7 @@ import time
 import sys
 import types
 from copy import deepcopy
+from enum import Enum
 from pathlib import Path
 
 import torch
@@ -67,6 +68,8 @@ from xhquant.api import (  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
+_TALKER_DIALOGUE_PREFILL_HEADROOM = 32
+
 try:
     from qwen_omni_utils import process_mm_info
 except ImportError:
@@ -83,6 +86,73 @@ except ImportError:
                 elif tp == "video":
                     videos.append(item.get("video"))
         return audios, images, videos
+
+
+def _clone_capture_value(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    return deepcopy(value)
+
+
+def _compute_talker_prefill_static_length(captured_input_sequence_length: int, context_length: int) -> int:
+    captured_input_sequence_length = int(captured_input_sequence_length)
+    context_length = int(context_length)
+    return min(context_length, captured_input_sequence_length + _TALKER_DIALOGUE_PREFILL_HEADROOM)
+
+
+def _pad_prefill_tensor(tensor: torch.Tensor, target_seq_len: int, fill_value: float = 0.0) -> torch.Tensor:
+    current_seq_len = int(tensor.shape[1])
+    if current_seq_len >= target_seq_len:
+        return tensor[:, :target_seq_len, ...]
+
+    pad_shape = (tensor.shape[0], target_seq_len - current_seq_len, *tensor.shape[2:])
+    pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype)
+    return torch.cat([tensor, pad], dim=1)
+
+
+def _load_first_talker_capture(work_dir: Path):
+    capture_path = work_dir / "talker_model_inputs.pth"
+    if not capture_path.exists():
+        return None
+    captured = torch.load(capture_path, map_location="cpu", weights_only=False)
+    if not captured:
+        return None
+    return captured[0]
+
+
+def _build_prefill_fused_inputs(captured_entry, inputs_embeds: torch.Tensor, meta_info):
+    seq_len = int(inputs_embeds.shape[1])
+    batch = int(inputs_embeds.shape[0])
+    hidden_state_size = int(
+        meta_info.get(
+            "talker_hidden_state_size",
+            meta_info.get("talker_thinker_hidden_size", inputs_embeds.shape[-1]),
+        )
+    )
+
+    if captured_entry is not None:
+        hidden_state = captured_entry.get("hidden_state")
+        role_mask = captured_entry.get("role_mask")
+        bypass_embeds = captured_entry.get("bypass_embeds")
+        bypass_mask = captured_entry.get("bypass_mask")
+        if all(isinstance(item, torch.Tensor) for item in (hidden_state, role_mask, bypass_embeds, bypass_mask)):
+            hidden_state = hidden_state.to(torch.float16).cpu()
+            role_mask = role_mask.to(torch.float16).cpu()
+            bypass_embeds = bypass_embeds.to(torch.float16).cpu()
+            bypass_mask = bypass_mask.to(torch.float16).cpu()
+            return (
+                _pad_prefill_tensor(hidden_state, seq_len, fill_value=0.0),
+                _pad_prefill_tensor(role_mask, seq_len, fill_value=0.0),
+                _pad_prefill_tensor(bypass_embeds, seq_len, fill_value=0.0),
+                _pad_prefill_tensor(bypass_mask, seq_len, fill_value=0.0),
+            )
+
+    return (
+        torch.zeros(batch, seq_len, hidden_state_size, dtype=torch.float16),
+        torch.zeros(batch, seq_len, 1, dtype=torch.float16),
+        inputs_embeds,
+        torch.ones(batch, seq_len, 1, dtype=torch.float16),
+    )
 
 
 def _load_native_model_for_capture(hf_model_path: str, logger):
@@ -107,6 +177,7 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
         hf_model_path,
         **load_kwargs,
     )
+    _force_eager_moe_implementation(native_model, logger)
     native_model.eval()
     _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
     _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
@@ -115,8 +186,58 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
     return native_model
 
 
+def _ensure_mistral_common_reasoning_effort():
+    try:
+        import mistral_common.protocol.instruct.request as request_module
+    except ImportError:
+        return
+
+    if hasattr(request_module, "ReasoningEffort"):
+        return
+
+    class ReasoningEffort(str, Enum):
+        none = "none"
+        high = "high"
+
+    request_module.ReasoningEffort = ReasoningEffort
+
+
+def _force_eager_moe_implementation(module, logger=None):
+    visited_configs = set()
+    updated = 0
+
+    def _visit_config(config):
+        nonlocal updated
+        if config is None:
+            return
+        config_id = id(config)
+        if config_id in visited_configs:
+            return
+        visited_configs.add(config_id)
+
+        if hasattr(config, "_experts_implementation") and getattr(config, "_experts_implementation") != "eager":
+            config._experts_implementation = "eager"
+            updated += 1
+
+        config_dict = getattr(config, "__dict__", None)
+        if not isinstance(config_dict, dict):
+            return
+        for value in config_dict.values():
+            if hasattr(value, "__dict__"):
+                _visit_config(value)
+
+    _visit_config(getattr(module, "config", None))
+    for submodule in module.modules():
+        _visit_config(getattr(submodule, "config", None))
+
+    if logger is not None and updated:
+        logger.info(f"forced {updated} config nodes to use eager MoE experts")
+
+
 def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture talker.forward inputs, or load from cache."""
+
+    capture_contract_version = 3
 
     class _TalkerInputsCaptured(RuntimeError):
         pass
@@ -124,7 +245,11 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
     capture_path = work_dir / "talker_model_inputs.pth"
     if capture_path.exists():
         logger.info(f"Loading cached talker inputs from {capture_path}")
-        return torch.load(capture_path, map_location="cpu", weights_only=False)
+        cached = torch.load(capture_path, map_location="cpu", weights_only=False)
+        cached_entry = cached[0] if cached else None
+        if isinstance(cached_entry, dict) and int(cached_entry.get("capture_contract_version", 0)) >= capture_contract_version:
+            return cached
+        logger.info("Cached talker inputs use a stale capture contract, recapturing with current processor kwargs")
 
     logger.info("Running full generate to capture talker inputs ...")
     image_path = str(SCRIPT_DIR / "data" / "cars.jpg")
@@ -148,6 +273,8 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
         videos=videos,
         return_tensors="pt",
         padding=True,
+        seconds_per_chunk=2.0,
+        position_id_per_seconds=13,
         use_audio_in_video=True,
     )
     inputs = inputs.to(device).to(dtype)
@@ -157,6 +284,101 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
         return
 
     native_model.talker._validate_model_kwargs = types.MethodType(_skip_validate, native_model.talker)
+
+    capture_ctx = {"generate_kwargs": {}, "segments": []}
+
+    original_generate = native_model.talker.generate
+    original_get_user_parts = native_model._get_talker_user_parts
+    original_get_assistant_parts = native_model._get_talker_assistant_parts
+
+    def generate_hook(self, *args, **kwargs):
+        if not capture_ctx["generate_kwargs"]:
+            for key in ("inputs_embeds", "trailing_text_hidden", "tts_pad_embed", "talker_input_ids"):
+                if key in kwargs:
+                    capture_ctx["generate_kwargs"][key] = _clone_capture_value(kwargs[key])
+        return original_generate(*args, **kwargs)
+
+    def user_parts_hook(self, im_start_index, segment_end_index, multimodal_mask, thinker_hidden, thinker_embed):
+        user_talker_part = original_get_user_parts(
+            im_start_index,
+            segment_end_index,
+            multimodal_mask,
+            thinker_hidden,
+            thinker_embed,
+        )
+        user_mm_mask = multimodal_mask[:, im_start_index:segment_end_index]
+        user_source = thinker_embed[:, im_start_index:segment_end_index].clone()
+        if user_mm_mask.any():
+            user_source[user_mm_mask] = thinker_hidden[:, im_start_index:segment_end_index][user_mm_mask]
+        capture_ctx["segments"].append(
+            {
+                "hidden_state": _clone_capture_value(user_source),
+                "role_mask": _clone_capture_value((~user_mm_mask).unsqueeze(-1).to(user_talker_part.dtype)),
+                "bypass_embeds": _clone_capture_value(torch.zeros_like(user_talker_part)),
+                "bypass_mask": _clone_capture_value(
+                    torch.zeros(*user_talker_part.shape[:2], 1, dtype=user_talker_part.dtype, device=user_talker_part.device)
+                ),
+            }
+        )
+        return user_talker_part
+
+    def assistant_parts_hook(
+        self,
+        im_start_index,
+        segment_end_index,
+        speaker_id,
+        thinker_embed,
+        tts_pad_embed,
+        tts_bos_embed,
+        tts_eos_embed,
+    ):
+        input_embeds, input_ids, trailing_text_hidden = original_get_assistant_parts(
+            im_start_index,
+            segment_end_index,
+            speaker_id,
+            thinker_embed,
+            tts_pad_embed,
+            tts_bos_embed,
+            tts_eos_embed,
+        )
+        assistant_source = torch.zeros(
+            input_embeds.shape[0],
+            input_embeds.shape[1],
+            thinker_embed.shape[-1],
+            dtype=thinker_embed.dtype,
+            device=thinker_embed.device,
+        )
+        assistant_role_mask = torch.ones(
+            input_embeds.shape[0], input_embeds.shape[1], 1, dtype=input_embeds.dtype, device=input_embeds.device
+        )
+        assistant_bypass_embeds = input_embeds.clone()
+        assistant_bypass_mask = torch.ones(
+            input_embeds.shape[0], input_embeds.shape[1], 1, dtype=input_embeds.dtype, device=input_embeds.device
+        )
+
+        projected_prefix = min(3, max(segment_end_index - im_start_index, 0))
+        if projected_prefix > 0:
+            assistant_source[:, :projected_prefix, :] = thinker_embed[
+                :, im_start_index : im_start_index + projected_prefix, :
+            ]
+            assistant_bypass_embeds[:, :projected_prefix, :] = 0
+            assistant_bypass_mask[:, :projected_prefix, :] = 0
+
+        capture_ctx["segments"].append(
+            {
+                "hidden_state": _clone_capture_value(assistant_source),
+                "role_mask": _clone_capture_value(assistant_role_mask),
+                "bypass_embeds": _clone_capture_value(assistant_bypass_embeds),
+                "bypass_mask": _clone_capture_value(assistant_bypass_mask),
+                "trailing_text_hidden": _clone_capture_value(trailing_text_hidden),
+                "assistant_input_ids": _clone_capture_value(input_ids),
+            }
+        )
+        return input_embeds, input_ids, trailing_text_hidden
+
+    native_model.talker.generate = types.MethodType(generate_hook, native_model.talker)
+    native_model._get_talker_user_parts = types.MethodType(user_parts_hook, native_model)
+    native_model._get_talker_assistant_parts = types.MethodType(assistant_parts_hook, native_model)
 
     # Hook talker.forward to capture inputs
     original_forward = native_model.talker.forward
@@ -173,7 +395,34 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
             for k, v in kwargs.items():
                 if k in ("past_key_values", "cache_position"):
                     continue
-                save_kwargs[k] = deepcopy(v) if isinstance(v, torch.Tensor) else v
+                save_kwargs[k] = _clone_capture_value(v)
+
+            for key, value in capture_ctx["generate_kwargs"].items():
+                save_kwargs.setdefault(key, value)
+
+            if capture_ctx["segments"]:
+                hidden_state = torch.cat([segment["hidden_state"] for segment in capture_ctx["segments"]], dim=1)
+                role_mask = torch.cat([segment["role_mask"] for segment in capture_ctx["segments"]], dim=1)
+                bypass_embeds = torch.cat([segment["bypass_embeds"] for segment in capture_ctx["segments"]], dim=1)
+                bypass_mask = torch.cat([segment["bypass_mask"] for segment in capture_ctx["segments"]], dim=1)
+                if int(hidden_state.shape[1]) == int(save_kwargs["inputs_embeds"].shape[1]):
+                    save_kwargs["hidden_state"] = hidden_state
+                    save_kwargs["role_mask"] = role_mask
+                    save_kwargs["bypass_embeds"] = bypass_embeds
+                    save_kwargs["bypass_mask"] = bypass_mask
+
+                trailing_text_hidden = next(
+                    (
+                        segment.get("trailing_text_hidden")
+                        for segment in capture_ctx["segments"]
+                        if isinstance(segment.get("trailing_text_hidden"), torch.Tensor)
+                    ),
+                    None,
+                )
+                if trailing_text_hidden is not None:
+                    save_kwargs.setdefault("trailing_text_hidden", trailing_text_hidden)
+
+            save_kwargs["capture_contract_version"] = capture_contract_version
             captured.append(save_kwargs)
             raise _TalkerInputsCaptured()
         return original_forward(*args, **kwargs)
@@ -192,6 +441,9 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
         logger.info("Captured first talker forward inputs, stopping generate early")
     finally:
         native_model.talker.forward = original_forward
+        native_model.talker.generate = original_generate
+        native_model._get_talker_user_parts = original_get_user_parts
+        native_model._get_talker_assistant_parts = original_get_assistant_parts
 
     if not captured:
         raise RuntimeError("Failed to capture talker inputs — generate produced no talker calls")
@@ -234,25 +486,26 @@ def _run_talker_dialogue_validation(
 def _build_talker_validation_inputs(work_dir: Path, meta_info):
     kv_cache_shape = meta_info["talker_kv_cache"]["shape"]
     num_hidden_layers = meta_info["talker_kv_cache"]["num_decoder_layers"]
-    capture_path = work_dir / "talker_model_inputs.pth"
-    if capture_path.exists():
-        captured = torch.load(capture_path, map_location="cpu", weights_only=False)
-        input_sequence_length = captured[0]["inputs_embeds"].shape[1]
-        inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
-        if inputs_embeds.shape[1] > input_sequence_length:
-            inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
+    static_input_sequence_length = int(meta_info["talker_input_sequence_length"])
+    captured_entry = _load_first_talker_capture(work_dir)
+    if captured_entry is not None:
+        actual_input_sequence_length = int(captured_entry["inputs_embeds"].shape[1])
+        inputs_embeds = captured_entry["inputs_embeds"].to(torch.float16).cpu()
+        if inputs_embeds.shape[1] > actual_input_sequence_length:
+            inputs_embeds = inputs_embeds[:, :actual_input_sequence_length, :]
+        inputs_embeds = _pad_prefill_tensor(inputs_embeds, static_input_sequence_length, fill_value=0.0)
     else:
         hidden_size = meta_info["talker_hidden_size"]
-        input_sequence_length = meta_info["talker_input_sequence_length"]
-        inputs_embeds = torch.zeros(1, input_sequence_length, hidden_size, dtype=torch.float16)
+        actual_input_sequence_length = static_input_sequence_length
+        inputs_embeds = torch.zeros(1, static_input_sequence_length, hidden_size, dtype=torch.float16)
 
     past_key_caches = [CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)]
     past_value_caches = [
         CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in range(num_hidden_layers)
     ]
     past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-    current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
-    return inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
+    current_input_length_t = torch.tensor([actual_input_sequence_length], dtype=torch.int32)
+    return inputs_embeds, captured_entry, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t
 
 
 def _reexec_with_phase(phase: str):
@@ -314,16 +567,16 @@ def main(args):
         logger.info("Talker HMONNX artifacts already exist, skipping export")
         with open(meta_file) as f:
             meta_info = json.load(f)
-        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 2 and meta_info.get("output_names") == [
+        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 4 and meta_info.get("output_names") == [
             "logits",
             "hidden_states",
         ]
         if not takeover_ready:
-            logger.info("Talker artifacts use legacy single-output contract, rebuilding for HMONNX takeover")
+            logger.info("Talker artifacts use a stale prefill contract, rebuilding for HMONNX takeover")
             artifacts_exist = False
 
     if artifacts_exist:
-        inputs_embeds, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
+        inputs_embeds, captured_entry, past_key_caches, past_value_caches, past_seq_length_t, current_input_length_t = (
             _build_talker_validation_inputs(work_dir, meta_info)
         )
     else:
@@ -331,6 +584,7 @@ def main(args):
         from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
         native_model = _load_native_model_for_capture(hf_model_path, logger)
+        _ensure_mistral_common_reasoning_effort()
         processor = Qwen3OmniMoeProcessor.from_pretrained(hf_model_path)
 
         device = next(native_model.parameters()).device
@@ -338,6 +592,7 @@ def main(args):
 
         # ---- 2. Capture talker inputs ----
         captured = _capture_talker_inputs(native_model, processor, device, dtype, work_dir, logger)
+        captured_entry = captured[0]
 
         # ---- 3. Register wrap modules and wrap talker ----
         from xh_model_zoo.xh_llm.models.qwen3_omni._talker_model import (
@@ -350,7 +605,8 @@ def main(args):
 
         batch_size = 1
         context_length = args.context_length
-        input_sequence_length = captured[0]["inputs_embeds"].shape[1]
+        actual_input_sequence_length = int(captured[0]["inputs_embeds"].shape[1])
+        input_sequence_length = _compute_talker_prefill_static_length(actual_input_sequence_length, context_length)
 
         talker_embedding = talker.model.get_input_embeddings()
 
@@ -386,11 +642,12 @@ def main(args):
         ]
 
         inputs_embeds = captured[0]["inputs_embeds"].to(torch.float16).cpu()
-        if inputs_embeds.shape[1] > input_sequence_length:
-            inputs_embeds = inputs_embeds[:, :input_sequence_length, :]
+        if inputs_embeds.shape[1] > actual_input_sequence_length:
+            inputs_embeds = inputs_embeds[:, :actual_input_sequence_length, :]
+        inputs_embeds = _pad_prefill_tensor(inputs_embeds, input_sequence_length, fill_value=0.0)
 
         past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor([int(inputs_embeds.shape[1])], dtype=torch.int32)
+        current_input_length_t = torch.tensor([actual_input_sequence_length], dtype=torch.int32)
 
         # Build calibration inputs for the fused graph (both projection heads
         # baked into prefill/decode). Calibration source uses randn in a
@@ -404,13 +661,16 @@ def main(args):
 
         torch.manual_seed(0)
         source_prefill = torch.randn(source_batch, source_seq, thinker_hs, dtype=torch.float16)
+        if actual_input_sequence_length < source_seq:
+            source_prefill[:, actual_input_sequence_length:, :] = 0
         role_mask_prefill = torch.zeros(source_batch, source_seq, 1, dtype=torch.float16)
         # Mark roughly half of positions as text-projection path so both heads
         # receive representative activations during calibration.
-        if source_seq > 1:
-            role_mask_prefill[:, source_seq // 2 :, :] = 1.0
+        if actual_input_sequence_length > 1:
+            role_mask_prefill[:, actual_input_sequence_length // 2 : actual_input_sequence_length, :] = 1.0
         bypass_embeds_prefill = inputs_embeds
-        bypass_mask_prefill = torch.ones(source_batch, source_seq, 1, dtype=torch.float16)
+        bypass_mask_prefill = torch.zeros(source_batch, source_seq, 1, dtype=torch.float16)
+        bypass_mask_prefill[:, :actual_input_sequence_length, :] = 1.0
 
         prefill_inputs = (
             source_prefill,
@@ -424,7 +684,7 @@ def main(args):
         )
 
         input_names = [
-            "source",
+            "hidden_state",
             "role_mask",
             "bypass_embeds",
             "bypass_mask",
@@ -497,7 +757,7 @@ def main(args):
         # ---- 8. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "artifact_contract_version": 2,
+            "artifact_contract_version": 4,
             "module": "talker_model",
             "model_name": model_name,
             "talker_prefill_onnx": str(prefill_file.relative_to(work_dir)),
@@ -507,10 +767,15 @@ def main(args):
             "talker_embedding_file": str(embed_file.relative_to(work_dir)),
             "talker_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
             "talker_hidden_size": int(inputs_embeds.shape[-1]),
+            "talker_hidden_state_size": int(thinker_hs),
             "talker_thinker_hidden_size": int(thinker_hs),
             "talker_input_sequence_length": int(input_sequence_length),
+            "talker_prefill_guidance_inputs": ["hidden_state", "role_mask", "bypass_embeds", "bypass_mask"],
             "fused_projection": True,
         }
+        trailing_text_hidden = captured_entry.get("trailing_text_hidden") if captured_entry is not None else None
+        if isinstance(trailing_text_hidden, torch.Tensor):
+            meta_info["talker_style_guidance_hidden_size"] = int(trailing_text_hidden.shape[-1])
         save_json(meta_file, meta_info)
         logger.info(f"Talker export complete. Meta saved to {meta_file}")
 
@@ -532,19 +797,26 @@ def main(args):
             logger.info("Validating talker HMONNX ...")
             from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
-            # Build fused-graph inputs for validation (bypass path, matches shadow).
+            # Build fused-graph inputs for validation. Prefer the real captured
+            # hidden_state mix so the style-guidance path is exercised; fall
+            # back to bypass-only when legacy captures do not contain it.
             prefill_batch = int(inputs_embeds.shape[0])
             prefill_seq = int(inputs_embeds.shape[1])
-            prefill_thinker_hs = int(meta_info.get("talker_thinker_hidden_size", inputs_embeds.shape[-1]))
-            prefill_source = torch.zeros(prefill_batch, prefill_seq, prefill_thinker_hs, dtype=torch.float16)
-            prefill_role_mask = torch.zeros(prefill_batch, prefill_seq, 1, dtype=torch.float16)
-            prefill_bypass_mask = torch.ones(prefill_batch, prefill_seq, 1, dtype=torch.float16)
+            prefill_thinker_hs = int(
+                meta_info.get(
+                    "talker_hidden_state_size",
+                    meta_info.get("talker_thinker_hidden_size", inputs_embeds.shape[-1]),
+                )
+            )
+            prefill_hidden_state, prefill_role_mask, prefill_bypass_embeds, prefill_bypass_mask = (
+                _build_prefill_fused_inputs(captured_entry, inputs_embeds, meta_info)
+            )
 
             session = HMONNXInference(str(prefill_file))
             output = session(
-                prefill_source,
+                prefill_hidden_state,
                 prefill_role_mask,
-                inputs_embeds,
+                prefill_bypass_embeds,
                 prefill_bypass_mask,
                 past_seq_length_t,
                 current_input_length_t,
@@ -607,7 +879,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Qwen3-Omni talker LM to HMONNX")
-    parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
     parser.add_argument("--quant-type", default="w8a8h0_sefp")
     parser.add_argument("--context-length", type=int, default=2048)

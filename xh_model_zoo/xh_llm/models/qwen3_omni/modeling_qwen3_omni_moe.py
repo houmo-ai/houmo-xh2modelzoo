@@ -49,7 +49,11 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import auto_docstring, can_return_tuple
 from transformers.utils.deprecation import deprecate_kwarg
-from transformers.utils.generic import OutputRecorder, TransformersKwargs, check_model_inputs
+try:
+    from transformers.utils.generic import OutputRecorder, TransformersKwargs, check_model_inputs
+except ImportError:
+    from transformers.utils.generic import TransformersKwargs, check_model_inputs
+    from transformers.utils.output_capturing import OutputRecorder
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
     Qwen3OmniMoeCode2WavConfig,
