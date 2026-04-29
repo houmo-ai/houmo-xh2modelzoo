@@ -1,0 +1,6 @@
+{
+  "export_dir": "examples/audio/paraformer/exports/mask_safe_static",
+  "encoder_onnx": "examples/audio/paraformer/exports/mask_safe_static/model.onnx",
+  "decoder_onnx": "examples/audio/paraformer/exports/mask_safe_static/decoder.onnx",
+  "raw_result": "examples/audio/paraformer/exports/mask_safe_static"
+}
