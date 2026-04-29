@@ -14,6 +14,28 @@
 
 ## 使用自己的模型生成校准集
 
+推荐使用参数化命令（支持你自己提供问题）：
+
+```bash
+python examples/xh_gen_data/gen_data.py \
+	--prefix-name example_data \
+	--model-path ./model/Qwen3-8B/ \
+	--gen-seqlen 512 \
+	--num-samples 512 \
+	--questions-file ./my_questions.txt
+```
+
+其中 `--questions-file` 支持：
+
+* `.txt`：每行一个问题
+* `.jsonl`：每行一个 JSON，字段可为 `question` / `prompt` / `text`
+
+脚本会生成固定 token 长度（`--gen-seqlen`）的数据，输出路径为：
+
+* `./gen_data/<prefix-name>/<gen-seqlen>.jsonl`
+
+兼容旧命令（仍可用）：
+
 ```
 python examples/xh_gen_data/gen_data.py ${文件名} ${浮点大模型对应路径} ${校准集数量，默认512}
 ```
@@ -23,7 +45,7 @@ python examples/xh_gen_data/gen_data.py ${文件名} ${浮点大模型对应路�
 python examples/xh_gen_data/gen_data.py example_data ./model/Qwen3-8B/ 512
 ```
 
-则在当前目录 `./gen_data`下会看到`example_data.jsonl`，里面每一行都是一条字典，以text为key，具体内容为value
+则会在当前目录 `./gen_data/example_data/512.jsonl` 看到输出文件，里面每一行都是一条字典，以 `text` 为 key。
 
 
 ## 校准集的使用
