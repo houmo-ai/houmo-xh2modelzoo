@@ -853,22 +853,34 @@ def _export_single_graph(
         }
         onnx_prefix = f"{cfg_name}_prefill"
     else:
+        decode_input_sequence_length = 1
+        if spec_decode_cfg is not None:
+            decode_input_sequence_length = int(
+                spec_decode_cfg.get("input_sequence_length", decode_input_sequence_length)
+            )
         qwen3_5_model.set_linear_attention_mode("recurrent")
-        qwen3_5_model.set_input_sequence_length(input_sequence_length)
-        decode_input_ids = input_ids[:, :input_sequence_length]
-        if decode_input_ids.shape[-1] < input_sequence_length:
+        qwen3_5_model.set_input_sequence_length(decode_input_sequence_length)
+        decode_input_ids = input_ids[:, :decode_input_sequence_length]
+        if decode_input_ids.shape[-1] < decode_input_sequence_length:
             decode_input_ids = torch.cat(
                 [
                     decode_input_ids,
                     torch.full(
-                        (decode_input_ids.shape[0], input_sequence_length - decode_input_ids.shape[-1]),
+                        (
+                            decode_input_ids.shape[0],
+                            decode_input_sequence_length - decode_input_ids.shape[-1],
+                        ),
                         tokenizer.pad_token_id,
                         dtype=torch.long,
                     ),
                 ],
                 dim=-1,
             )
-        decode_current_input_length = spec_decode_cfg.get("decode_current_input_length", 1) if spec_decode_cfg else 1
+        decode_current_input_length = (
+            spec_decode_cfg.get("decode_current_input_length", decode_input_sequence_length)
+            if spec_decode_cfg
+            else decode_input_sequence_length
+        )
         data_batch = {
             "input_ids": decode_input_ids,
             "past_seq_length": [input_ids.shape[-1]],
