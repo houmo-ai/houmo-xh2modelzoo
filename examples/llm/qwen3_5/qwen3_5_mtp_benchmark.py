@@ -1061,7 +1061,9 @@ def benchmark_speculative_decode(
 
 _forced_decode_active = False
 _intermediate_deltanet_states: dict[int, list[dict[str, torch.Tensor]]] = {}
-_original_deltanet_forward = None
+_original_deltanet_forwards: dict[type, callable] = {}
+_original_deltanet_instance_forwards: dict[int, tuple[object, str, callable]] = {}
+_DELTANET_CLASS_NAMES = {"Qwen3_5GatedDeltaNet", "Qwen3_5MoeGatedDeltaNet"}
 
 
 def _patched_deltanet_forward(self, hidden_states, cache_params=None, cache_position=None, attention_mask=None):
@@ -1085,7 +1087,7 @@ def _patched_deltanet_forward(self, hidden_states, cache_params=None, cache_posi
     )
 
     if not should_force:
-        return _original_deltanet_forward(self, hidden_states, cache_params, cache_position, attention_mask)
+        return _original_deltanet_forwards[type(self)](self, hidden_states, cache_params, cache_position, attention_mask)
 
     # Process tokens one-at-a-time through the decode path
     outputs = []
@@ -1093,7 +1095,7 @@ def _patched_deltanet_forward(self, hidden_states, cache_params=None, cache_posi
         tok_h = hidden_states[:, t : t + 1, :]
         tok_cp = cache_position[t : t + 1]
         # Call original forward with seq_len=1 → triggers the recurrent decode path
-        tok_out = _original_deltanet_forward(self, tok_h, cache_params, tok_cp, None)
+        tok_out = _original_deltanet_forwards[type(self)](self, tok_h, cache_params, tok_cp, None)
         outputs.append(tok_out)
 
         # Save state after each token except the last (for rollback)
@@ -1108,37 +1110,57 @@ def _patched_deltanet_forward(self, hidden_states, cache_params=None, cache_posi
     return torch.cat(outputs, dim=1)
 
 
-def install_forced_decode_patch():
+def _patch_deltanet_class(cls: type):
+    if cls not in _original_deltanet_forwards:
+        _original_deltanet_forwards[cls] = cls.forward
+        cls.forward = _patched_deltanet_forward
+
+
+def _patch_deltanet_instance(module):
+    _patch_deltanet_class(type(module))
+    attr = "_old_forward" if hasattr(module, "_old_forward") else None
+    if attr is None:
+        return
+    key = id(module)
+    if key not in _original_deltanet_instance_forwards:
+        _original_deltanet_instance_forwards[key] = (module, attr, getattr(module, attr))
+        setattr(module, attr, _patched_deltanet_forward.__get__(module, type(module)))
+
+
+def install_forced_decode_patch(model=None):
     """Monkey-patch Qwen3_5GatedDeltaNet.forward with forced-decode version.
 
-    Patches both dense (qwen3_5) and MoE (qwen3_5_moe) DeltaNet classes.
+    Patches both the canonical Transformers classes and any trust_remote_code
+    classes that were actually instantiated by ``AutoModel``.
     """
-    global _original_deltanet_forward
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
-
-    if _original_deltanet_forward is None:
-        _original_deltanet_forward = Qwen3_5GatedDeltaNet.forward
-    Qwen3_5GatedDeltaNet.forward = _patched_deltanet_forward
-
-    # Also patch MoE variant if available
     try:
-        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
-        Qwen3_5MoeGatedDeltaNet.forward = _patched_deltanet_forward
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+        _patch_deltanet_class(Qwen3_5GatedDeltaNet)
     except ImportError:
         pass
+
+    try:
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
+        _patch_deltanet_class(Qwen3_5MoeGatedDeltaNet)
+    except ImportError:
+        pass
+
+    if model is not None:
+        for module in model.modules():
+            cls = type(module)
+            if cls.__name__ in _DELTANET_CLASS_NAMES:
+                _patch_deltanet_instance(module)
 
 
 def remove_forced_decode_patch():
     """Restore original Qwen3_5GatedDeltaNet.forward."""
-    global _original_deltanet_forward
-    if _original_deltanet_forward is not None:
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
-        Qwen3_5GatedDeltaNet.forward = _original_deltanet_forward
-        try:
-            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
-            Qwen3_5MoeGatedDeltaNet.forward = _original_deltanet_forward
-        except ImportError:
-            pass
+    for _key, (module, attr, original_forward) in list(_original_deltanet_instance_forwards.items()):
+        setattr(module, attr, original_forward)
+    _original_deltanet_instance_forwards.clear()
+
+    for cls, original_forward in list(_original_deltanet_forwards.items()):
+        cls.forward = original_forward
+    _original_deltanet_forwards.clear()
 
 
 class ForcedDecodeContext:
@@ -1174,6 +1196,12 @@ def trim_full_attention_kv(past_kv, n_trim: int = 1):
         if past_kv.key_cache[layer_idx] is not None:
             past_kv.key_cache[layer_idx] = past_kv.key_cache[layer_idx][:, :, :-n_trim, :]
             past_kv.value_cache[layer_idx] = past_kv.value_cache[layer_idx][:, :, :-n_trim, :]
+
+
+def _is_moe_model(model) -> bool:
+    config = getattr(model, "config", None)
+    model_type = str(getattr(config, "model_type", "")).lower()
+    return "moe" in model_type or "moe" in type(model).__name__.lower() or "moe" in type(_get_text_model(model)).__name__.lower()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1264,8 +1292,10 @@ def speculative_decode_forced(
     inputs = tokenizer([text], return_tensors="pt").to(device)
     prompt_ids = inputs.input_ids
     prompt_len = prompt_ids.shape[1]
+    exact_verify = _is_moe_model(model)
 
-    install_forced_decode_patch()
+    if not exact_verify:
+        install_forced_decode_patch(model)
 
     # ── prefill (main model) ────────────────────────────────────
     cap = AfterNormCapture(model)
@@ -1307,34 +1337,82 @@ def speculative_decode_forced(
         num_rounds += 1
         num_main_fwd += 1
 
-        # ── batch verify: [next_tok, d0, ..., d_{K-1}] in 1 forward ──
-        all_toks = torch.cat([next_tok] + [d.to(device) for d in drafts], dim=1)  # [1, K+1]
-        kv_len = past_kv.get_seq_length()
-        mask = torch.ones(1, kv_len + K + 1, device=device, dtype=torch.long)
-
         torch.cuda.synchronize()
         _main_t0 = time.perf_counter()
-        with ForcedDecodeContext():
-            cap.reset()
-            out = model(
-                input_ids=all_toks,
-                attention_mask=mask,
-                past_key_values=past_kv,
-                use_cache=True,
-            )
+        replacement_tok = None
+        bonus_tok = None
+        if exact_verify:
+            # MoE under device_map uses Accelerate hooks and batched matmuls that
+            # are not bitwise-equivalent to single-token greedy decode.  Verify
+            # drafts with the exact recurrent path to preserve output identity.
+            accepted_count = 0
+            exact_fwd_calls = 0
+            hiddens = []
+            for j in range(K):
+                tok_j = next_tok if j == 0 else drafts[j - 1].to(device)
+                kv_len = past_kv.get_seq_length()
+                mask = torch.ones(1, kv_len + 1, device=device, dtype=torch.long)
+                cap.reset()
+                out_j = model(
+                    input_ids=tok_j,
+                    attention_mask=mask,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
+                exact_fwd_calls += 1
+                past_kv = out_j.past_key_values
+                hiddens.append(cap.hidden_states[0])
+                verified_j = out_j.logits[:, -1:, :].argmax(dim=-1)
+                if verified_j.item() == drafts[j].item():
+                    accepted_count += 1
+                else:
+                    replacement_tok = verified_j
+                    break
+
+            if accepted_count == K:
+                kv_len = past_kv.get_seq_length()
+                mask = torch.ones(1, kv_len + 1, device=device, dtype=torch.long)
+                cap.reset()
+                out_bonus = model(
+                    input_ids=drafts[-1].to(device),
+                    attention_mask=mask,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
+                exact_fwd_calls += 1
+                past_kv = out_bonus.past_key_values
+                hiddens.append(cap.hidden_states[0])
+                bonus_tok = out_bonus.logits[:, -1:, :].argmax(dim=-1)
+
+            num_main_fwd += exact_fwd_calls - 1
+            hidden_all = torch.cat(hiddens, dim=1)
+        else:
+            # ── batch verify: [next_tok, d0, ..., d_{K-1}] in 1 forward ──
+            all_toks = torch.cat([next_tok] + [d.to(device) for d in drafts], dim=1)  # [1, K+1]
+            kv_len = past_kv.get_seq_length()
+            mask = torch.ones(1, kv_len + K + 1, device=device, dtype=torch.long)
+
+            with ForcedDecodeContext():
+                cap.reset()
+                out = model(
+                    input_ids=all_toks,
+                    attention_mask=mask,
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
+            past_kv = out.past_key_values
+            hidden_all = cap.hidden_states[0]  # [1, K+1, H]
+
+            # Sequential acceptance check
+            accepted_count = 0
+            for j in range(K):
+                verified_j = out.logits[:, j, :].argmax(dim=-1, keepdim=True)  # [1, 1]
+                if verified_j.item() == drafts[j].item():
+                    accepted_count += 1
+                else:
+                    break
         torch.cuda.synchronize()
         main_model_time_acc += time.perf_counter() - _main_t0
-        past_kv = out.past_key_values
-        hidden_all = cap.hidden_states[0]  # [1, K+1, H]
-
-        # Sequential acceptance check
-        accepted_count = 0
-        for j in range(K):
-            verified_j = out.logits[:, j, :].argmax(dim=-1, keepdim=True)  # [1, 1]
-            if verified_j.item() == drafts[j].item():
-                accepted_count += 1
-            else:
-                break
             
         print(f"Round {num_rounds}: accepted {accepted_count}/{K} drafts")
 
@@ -1362,7 +1440,8 @@ def speculative_decode_forced(
                     position=old_committed + j, kv_cache=mtp_kv,
                 )
 
-            bonus_tok = out.logits[:, K, :].argmax(dim=-1, keepdim=True)
+            if bonus_tok is None:
+                bonus_tok = out.logits[:, K, :].argmax(dim=-1, keepdim=True)
             next_tok = bonus_tok
 
             # generate_drafts adds MTP KV at position old_committed+K with bonus_tok
@@ -1386,9 +1465,10 @@ def speculative_decode_forced(
             if any(drafts[j].item() == eos for j in range(accepted_count)):
                 break
 
-            # Rollback: restore DeltaNet to state after token[accepted_count]
-            rollback_deltanet_states(past_kv, rollback_idx=accepted_count)
-            trim_full_attention_kv(past_kv, n_trim=K - accepted_count)
+            if not exact_verify:
+                # Rollback: restore DeltaNet to state after token[accepted_count]
+                rollback_deltanet_states(past_kv, rollback_idx=accepted_count)
+                trim_full_attention_kv(past_kv, n_trim=K - accepted_count)
 
             # Update MTP KV for accepted positions
             torch.cuda.synchronize()
@@ -1401,7 +1481,7 @@ def speculative_decode_forced(
                 )
 
             # Replacement token from rejected position
-            replacement = out.logits[:, accepted_count, :].argmax(dim=-1, keepdim=True)
+            replacement = replacement_tok if replacement_tok is not None else out.logits[:, accepted_count, :].argmax(dim=-1, keepdim=True)
             next_tok = replacement
 
             # Generate next K drafts
@@ -1415,6 +1495,8 @@ def speculative_decode_forced(
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
     cap.remove()
+    if not exact_verify:
+        remove_forced_decode_patch()
 
     tokens = tokens[:max_new_tokens]
 
