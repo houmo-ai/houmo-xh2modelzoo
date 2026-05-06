@@ -1,14 +1,15 @@
-# Copyright 2025 HOUMO AI
+# -*- coding: utf-8 -*-
+# Copyright 2024 The QuaRot Authors. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
 #
-# File: hadamard_utils.py
-# Description:
-#   Hadamard Utils utility functions.
+# Modifications:
+# - Adapted QuaRot Hadamard utilities for xh2modelzoo quantization flows.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +17,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SPDX-License-Identifier: Apache-2.0
+# Source: https://github.com/spcl/QuaRot/blob/main/quarot/functional/hadamard.py
+# See licenses/quarot/LICENSE for the upstream Apache-2.0 license text.
+#
+# File: hadamard_utils.py
+# Description:
+#   QuaRot Hadamard transform utilities adapted for xh2modelzoo SD3 quantization.
 
 import math
 
@@ -24,6 +30,7 @@ import torch
 
 # import fast_hadamard_transform
 
+# QuaRot's upstream file retains this original attribution:
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 

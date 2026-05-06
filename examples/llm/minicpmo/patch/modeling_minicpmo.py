@@ -1,15 +1,10 @@
 # coding=utf-8
-# Copyright 2025 HOUMO AI
+# Copyright 2025 The OpenBMB Team. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
 #
-# File: modeling_minicpmo.py
-# Description:
-#   Local MiniCPM-o patch used by llm/minicpmo export and generation examples.
-#
-# Portions of this file are adapted from the OpenBMB MiniCPM / MiniCPM-V
-# codebase for MiniCPM-o compatibility and local export workflows.
-# Original project: https://github.com/OpenBMB/MiniCPM-V
-# Original license: Apache License, Version 2.0
-# Modifications by HOUMO AI: local patching for XH2A / HMONNX / example flows.
+# Modifications:
+# - Local patching for XH2A hardware export workflows
+# - Adapted for HMONNX compatibility and example flows
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +18,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SPDX-License-Identifier: Apache-2.0
+# File: modeling_minicpmo.py
+# Description:
+#   MiniCPM-o local model patch for xh2 deployment examples
 
 import json
 import logging

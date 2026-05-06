@@ -1,3 +1,31 @@
+# -*- coding: utf-8 -*-
+# Copyright 2024 DuQuant Authors. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
+#
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
+#
+# Upstream portions remain licensed under the MIT License; see licenses/duquant/LICENSE.
+# Licensed under the Apache License, Version 2.0 (the "License") for
+# HOUMO AI modifications;
+# you may not use the HOUMO AI modifications except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Source: https://github.com/Hsu1023/DuQuant
+# See licenses/duquant/LICENSE for the upstream MIT license text.
+#
+# File: parallel_utils.py
+# Description:
+#   Tensor / pipeline parallelism utilities adapted from DuQuant for xh2modelzoo develop.
+
 import torch
 import torch.nn as nn
 from typing import List

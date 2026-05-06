@@ -1,4 +1,5 @@
-# coding=utf-8
+# -*- coding: utf-8 -*-
+# Copyright 2024 Rockchip Electronics Co., Ltd. and the DeepSeek-AI Authors. All rights reserved.
 # Copyright 2025 HOUMO AI. All rights reserved.
 #
 # Modifications:
@@ -15,6 +16,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Source: https://github.com/airockchip/rknn-llm
+# See licenses/rknn-llm/LICENSE for the upstream Apache-2.0 license text.
+#
+# File: modeling_deepseekv2.py
+# Description:
+#   PyTorch DeepSeek-V2/V3 modeling code, adapted via the rknn-llm port for xh2modelzoo.
+
 """ PyTorch DeepSeek model and compatible with both DeepSeekV2 and DeepSeekV3"""
 import math
 import warnings

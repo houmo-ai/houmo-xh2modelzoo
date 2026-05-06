@@ -2,7 +2,7 @@
 #
 # File: base.py
 # Description:
-#   Base implementation.
+#   Abstract storage backend interface for xh2modelzoo file I/O.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

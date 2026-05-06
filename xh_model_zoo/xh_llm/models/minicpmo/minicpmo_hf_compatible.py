@@ -1,8 +1,9 @@
+
 # Copyright 2025 HOUMO AI
 #
 # File: minicpmo_hf_compatible.py
 # Description:
-#   Minicpmo Hf Compatible implementation.
+#   MiniCPM-O HuggingFace compatibility wrapper for xh2modelzoo inference.
 #
 # Portions of this file adapt or wrap upstream OpenBMB MiniCPM / MiniCPM-V
 # behavior for local HuggingFace compatibility, XH2A integration, and export

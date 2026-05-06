@@ -16,6 +16,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# File: modeling_qwen3_vl.py
+# Description:
+#   Modeling implementation for spirit_vla in HOUMO AI xh2modelzoo.
 
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union

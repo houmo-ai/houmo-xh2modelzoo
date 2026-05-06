@@ -1,32 +1,46 @@
 NOTICE
+
 This product includes software developed by HOUMO.AI.
-Project Name: xh2modelzoo
-Copyright © 2026 HOUMO.AI
+
+Project Name: <xh2modelzoo>
+Copyright © <2025> <HOUMO.AI>
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
+
     http://www.apache.org/licenses/LICENSE-2.0
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
 Additional Notice:
+
 This repository contains:
 - Model quantization, compilation, and inference example code
 - Model performance benchmarking code
 - Algorithm deployment and application examples
 - Model optimization examples
+
 This project may reference or integrate third-party models, datasets,
 toolchains, SDKs, or runtime libraries that are licensed separately.
+
 Such third-party components are NOT covered by the Apache License 2.0
 of this project. Their usage is subject to their original license terms.
-For third-party components requiring special emphasis, 
-please refer to the relevant information in THIRD_PARTY_NOTICE.
+
+For third-party components requiring special emphasis,
+please refer to the relevant information in THIRD_PARTY_NOTICES.
+
 Users are solely responsible for ensuring compliance with all applicable
 third-party licenses, usage restrictions, and legal requirements,
 including but not limited to commercial usage rights.
+
+
 Third-Party Software, Algorithm and Data Notices:
+
 # Software libraries
 half IEEE 754-based half-precision floating-point library (MIT) - https://github.com/suruoxi/half
 tokenizers-cpp (Apache-2.0) - https://github.com/mlc-ai/tokenizers-cpp
@@ -36,6 +50,14 @@ mingw-w64 getopt.h (ISC & BSD-2-Clause) - https://sourceforge.net/projects/mingw
 Numpy File I/O for C++ npy.hpp - https://github.com/llohse/libnpy
 Fast C++ Logging Library spdlog - https://github.com/gabime/spdlog
 Modern C++ Argument Parser argparse - https://github.com/p-ranav/argparse
+QuaRot (Apache-2.0) - https://github.com/spcl/QuaRot
+GPTQModel (Apache-2.0) - https://github.com/ModelCloud/GPTQModel
+fast-hadamard-transform (Apache-2.0) - https://github.com/Dao-AILab/fast-hadamard-transform
+transformers (Apache-2.0) - https://github.com/huggingface/transformers
+qwen_vl_utils (Apache-2.0) - https://github.com/QwenLM/Qwen3-VL/tree/main/qwen-vl-utils
+mmengine (Apache-2.0) - https://github.com/open-mmlab/mmengine
+TensorRT-LLM (Apache-2.0) - https://github.com/NVIDIA/TensorRT-LLM
+
 # Datasets
 CCPD Dataset (MIT) - https://github.com/detectRecog/CCPD
 VOC2012 Dataset (CC BY 4.0) - https://public.roboflow.com/object-detection/pascal-voc-2012
@@ -44,18 +66,21 @@ ImageNet 2012 Dataset - https://www.image-net.org/download?
 BDD100K Dataset (CC BY-NC-SA 4.0) - https://bair.berkeley.edu/blog/2018/05/30/bdd/
 nuScenes Dataset (CC BY-NC-SA 4.0) - https://www.nuscenes.org/
 WIDER FACE Dataset (CC BY-NC-ND 4.0) - https://shuoyang1213.me/WIDERFACE/
-# Algorithm
+
+# Algorithm (Only some)
 Whisper - https://github.com/openai/whisper
+FunASR - https://github.com/alibaba-damo-academy/FunASR
+CosyVoice3 - https://github.com/FunAudioLLM/CosyVoice
 bge-m3&bge-reranker-m3-v2 - https://github.com/FlagOpen/FlagEmbedding
 DeepSeek-R1-0528-Qwen3-8B - https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 gpt-oss-20b/120b - https://modelscope.cn/models/openai-mirror/gpt-oss-20b
 Qwen3 Series (4B/8B/14B/30B/32B) - https://modelscope.cn/organization/Qwen
 Qwen2.5-VL Series - https://modelscope.cn/models/Qwen/Qwen2.5-VL-7B-Instruct
 Qwen3-VL Series - https://www.modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct
-MiniCPM Series - https://github.com/OpenBMB/MiniCPM-V
+MiniCPM-V/o Series - https://github.com/OpenBMB/MiniCPM-V
 Llama 3 - https://github.com/meta-llama/llama3
-Flux - https://github.com/black-forest-labs/flux
 Stable Diffusion 3 - https://stability.ai/
+PaddleOCR-VL - https://github.com/PaddlePaddle/PaddleOCR
 Gemma 3 - https://github.com/google/gemma_pytorch
 YOLO Series (v3/v4/v5/v6/v10/v11) - https://github.com/ultralytics/ultralytics
 CogVLM - https://github.com/THUDM/CogVLM
@@ -66,4 +91,8 @@ SAM - https://github.com/facebookresearch/segment-anything
 OpenPose - https://github.com/CMU-Perceptual-Computing-Lab/openpose
 RT-DETR - https://github.com/lyuwenyu/RT-DETR
 PP-OCRv4 - https://github.com/PaddlePaddle/PaddleOCR
+gr00t / Isaac-GR00T (Non-Commercial license, implementation stubbed) - https://developer.nvidia.com/isaac/groot
+Eagle3 (license unclear, implementation stubbed) - https://github.com/NVlabs/EAGLE
+
 For detailed third-party citation notices, licenses, and precautions, please refer to THIRD_PARTY_NOTICES.
+

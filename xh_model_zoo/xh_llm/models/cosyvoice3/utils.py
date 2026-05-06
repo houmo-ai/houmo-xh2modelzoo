@@ -1,3 +1,29 @@
+# -*- coding: utf-8 -*-
+# Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
+#
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Source: https://github.com/QwenLM/Qwen/blob/main/qwen_generation_utils.py
+# See licenses/qwen1.5/LICENSE for the upstream Apache-2.0 license text.
+#
+# File: utils.py
+# Description:
+#   Qwen-style chat-context formatting helpers used by the CosyVoice3 LLM tokenizer.
+
 def make_context(
     tokenizer,
     query,

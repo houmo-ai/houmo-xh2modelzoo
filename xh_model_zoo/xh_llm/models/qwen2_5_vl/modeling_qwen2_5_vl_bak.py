@@ -15,6 +15,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# File: modeling_qwen2_5_vl_bak.py
+# Description:
+#   Modeling implementation for qwen2_5_vl in HOUMO AI xh2modelzoo.
 
 import math
 from dataclasses import dataclass

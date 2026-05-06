@@ -1,6 +1,8 @@
-#                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-#           This file was automatically generated from src/transformers/models/siglip2/modular_siglip2.py.
 # Copyright 2025 The HuggingFace Inc. team.
+# Copyright 2025 HOUMO AI. All rights reserved.
+#
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +15,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Source: lmms_engine 0.1.2 — https://files.pythonhosted.org/packages/aa/ce/93de60f3686ffed28a58135b2acbf22d10ffb5674867b1fd3144e2c34872/lmms_engine-0.1.2.tar.gz
+#
+# File: modeling_siglip2.py
+# Description:
+#   Modeling implementation for groot in HOUMO AI xh2modelzoo.
+
 import math
 import warnings
 from dataclasses import dataclass

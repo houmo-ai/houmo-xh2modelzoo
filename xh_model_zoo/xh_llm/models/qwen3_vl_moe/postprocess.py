@@ -2,7 +2,7 @@
 #
 # File: postprocess.py
 # Description:
-#   Postprocess implementation.
+#   Qwen3-VL-MoE logits postprocessing with vLLM-compatible presence penalties.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

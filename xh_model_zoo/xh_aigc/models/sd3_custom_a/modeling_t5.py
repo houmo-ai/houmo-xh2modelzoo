@@ -3,7 +3,7 @@
 # Copyright 2025 HOUMO AI. All rights reserved.
 #
 # Modifications:
-# - Portions of this file have been modified by HOUMO AI.
+# - Adapted HuggingFace Transformers T5 modeling code for xh2modelzoo SD3 custom flows.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Source: https://github.com/huggingface/transformers/tree/v4.48.0/src/transformers/models/t5
+# See licenses/transformers/LICENSE for the upstream Apache-2.0 license text.
+#
+# File: modeling_t5.py
+# Description:
+#   Modeling implementation for sd3_custom_a in HOUMO AI xh2modelzoo.
+
 """PyTorch T5 model."""
 
 import copy

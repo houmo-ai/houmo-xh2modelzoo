@@ -2,7 +2,7 @@
 #
 # File: base.py
 # Description:
-#   Base implementation.
+#   Abstract file handler interface for xh2modelzoo serialization utilities.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

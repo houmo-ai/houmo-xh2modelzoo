@@ -1,31 +1,22 @@
-# yolov5m官方模型
+# yolov5 ONNX Export Example (Removed)
 
-## 导出标准onnx
+The original Python source files in this directory were derived from
+[`ailia-models`](https://github.com/axinc-ai/ailia-models) wrappers around
+Ultralytics YOLOv5. The upstream YOLOv5 weights and inference scripts inherit
+**AGPL-3.0-only** from Ultralytics, which is incompatible with the
+redistribution terms of `xh2modelzoo`. Those files have been removed.
 
-```bash
-bash examples/cv/yolo/yolov5/generate_yolov5_onnx.sh
-```
+## How to use yolov5 with our quantization toolchain
 
-## 导出HMONNX
-
-```bash
-python examples/cv/yolo/yolov5/yolov5_export.py --onnx data/models/yolo/yolov5m.onnx
-```
-
-## GPU仿真
+If you accept the AGPL-3.0 obligations, install the upstream packages yourself:
 
 ```bash
-python examples/cv/yolo/yolov5/yolov5_hmonnx_test.py --hmonnx work_dirs/yolov5m/hmonnx/yolov5m_XH2a.onnx --image data/images/000000001490.jpg
+pip install ultralytics yolov5    # AGPL-3.0 — accept the license terms
 ```
 
-## 测试原浮点模型精度
+Then export YOLOv5 to ONNX following the upstream docs and feed the resulting
+ONNX into our quantization toolchain.
 
-``` bash
-python examples/cv/yolo/yolov5/yolov5_eval.py --model data/models/yolo/yolov5m.onnx --model-type onnx
-```
-
-## 测试量化后模型
-
-``` bash
-python examples/cv/yolo/yolov5/yolov5_eval.py --model work_dirs/yolov5m/hmonnx/yolov5m_XH2a.onnx --model-type hmonnx
-```
+> Note: this project does **not** redistribute Ultralytics / ailia-models
+> derived code. Users who opt into AGPL-3.0 do so under their own
+> responsibility.

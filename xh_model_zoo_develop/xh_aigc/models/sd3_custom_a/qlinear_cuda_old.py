@@ -1,3 +1,31 @@
+# -*- coding: utf-8 -*-
+# Copyright 2023 AutoGPTQ Contributors. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
+#
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
+#
+# Upstream portions remain licensed under the MIT License; see licenses/AutoGPTQ/LICENSE.
+# Licensed under the Apache License, Version 2.0 (the "License") for
+# HOUMO AI modifications;
+# you may not use the HOUMO AI modifications except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Source: https://github.com/AutoGPTQ/AutoGPTQ/blob/main/auto_gptq/nn_modules/qlinear/qlinear_cuda_old.py
+# See licenses/AutoGPTQ/LICENSE for the upstream MIT license text.
+#
+# File: qlinear_cuda_old.py
+# Description:
+#   GPTQ CUDA quantized linear layer adapted from AutoGPTQ for xh2modelzoo SD3 custom-A export.
+
 import math
 from logging import getLogger
 

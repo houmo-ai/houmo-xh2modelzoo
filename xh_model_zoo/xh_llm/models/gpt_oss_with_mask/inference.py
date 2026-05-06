@@ -2,7 +2,7 @@
 #
 # File: inference.py
 # Description:
-#   Inference implementation.
+#   GPT-OSS ONNX inference wrapper with causal mask preparation for xh2modelzoo.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

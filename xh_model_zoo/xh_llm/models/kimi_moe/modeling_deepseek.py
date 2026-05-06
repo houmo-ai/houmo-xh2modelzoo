@@ -1,11 +1,9 @@
 # coding=utf-8
-# Copy from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/modeling_deepseek.py
 # Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +16,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Source: OpenSeek 0.1 — https://github.com/FlagAI-Open/OpenSeek/archive/refs/tags/v0.1.tar.gz
+#
+# File: modeling_deepseek.py
+# Description:
+#   Modeling implementation for kimi_moe in HOUMO AI xh2modelzoo.
+
 """ PyTorch DeepSeek model."""
 import math
 import warnings

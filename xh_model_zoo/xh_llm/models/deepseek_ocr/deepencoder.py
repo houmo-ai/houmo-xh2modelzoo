@@ -2,7 +2,7 @@
 #
 # File: deepencoder.py
 # Description:
-#   Deepencoder implementation.
+#   DeepSeek OCR vision encoder and projector adapted for xh2modelzoo inference.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

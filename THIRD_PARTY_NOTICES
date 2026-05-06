@@ -199,9 +199,10 @@ Component Name: MiniCPM-O-2.6
 Source: https://github.com/OpenBMB/MiniCPM-V
 License: Apache License, Version 2.0
 Users are responsible for complying with the Apache License, Version 2.0.
-Local Paths:
-- examples/llm/minicpmo
-- xh_model_zoo/xh_llm/models/minicpmo
+Usage in this project:
+The following paths are used:
+    examples/llm/minicpmo
+    xh_model_zoo/xh_llm/models/minicpmo
 
 ----------------------------------------------------------------------
 Flux
@@ -301,3 +302,880 @@ PP-OCRv4
 Component Name: PP-OCRv4
 Source: https://github.com/PaddlePaddle/PaddleOCR
 License: Apache License, Version 2.0
+
+==============================================================================
+Additional third-party components (FossID compliance — Stage A)
+==============================================================================
+
+--------------------------------------------------------------------------------
+Component Name: AutoAWQ
+Version:        0.2.9
+Upstream URL:   https://github.com/casper-hansen/AutoAWQ/archive/refs/tags/v0.2.9.tar.gz
+License:        MIT
+License File:   licenses/AutoAWQ/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: AutoGPTQ
+Version:        0.7.0
+Upstream URL:   https://github.com/AutoGPTQ/AutoGPTQ/archive/refs/tags/v0.7.0.tar.gz
+License:        MIT
+License File:   licenses/AutoGPTQ/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: CosyVoice
+Version:        2.0
+Upstream URL:   https://github.com/FunAudioLLM/CosyVoice/archive/refs/tags/v2.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/CosyVoice/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: DEIMKit
+Version:        0.1.0
+Upstream URL:   https://github.com/dnth/DEIMKit/archive/refs/tags/v0.1.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/DEIMKit/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: DeepSparkInference
+Version:        24.09
+Upstream URL:   https://github.com/Deep-Spark/DeepSparkInference/archive/refs/tags/24.09.tar.gz
+License:        Apache-2.0
+License File:   licenses/DeepSparkInference/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: FastDeploy
+Version:        2.3.0-rc0
+Upstream URL:   https://github.com/PaddlePaddle/FastDeploy/archive/refs/tags/v2.3.0-rc0.tar.gz
+License:        Apache-2.0
+License File:   licenses/FastDeploy/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: FlagScale
+Version:        0.9.0
+Upstream URL:   https://github.com/FlagOpen/FlagScale/archive/refs/tags/v0.9.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/FlagScale/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: GPTQModel
+Version:        5.0.0
+Upstream URL:   https://github.com/ModelCloud/GPTQModel/archive/refs/tags/v5.0.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/GPTQModel/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: GuidedQuant
+Version:        1.0.0
+Upstream URL:   https://github.com/snu-mllab/GuidedQuant/archive/refs/tags/v1.0.0.tar.gz
+License:        MIT
+License File:   licenses/GuidedQuant/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: LLaMA-Factory
+Version:        0.7.1
+Upstream URL:   https://github.com/hiyouga/LLaMA-Factory/archive/refs/tags/v0.7.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/LLaMA-Factory/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: MiniCPM-V
+Version:        20250527
+Upstream URL:   https://github.com/OpenBMB/MiniCPM-V/archive/refs/tags/20250527.tar.gz
+License:        Apache-2.0
+License File:   licenses/MiniCPM-V/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: Nexus-Gen
+Version:        1.1
+Upstream URL:   https://github.com/modelscope/Nexus-Gen/archive/refs/tags/v1.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/Nexus-Gen/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: OmniQuant
+Version:        0.0.1
+Upstream URL:   n/a
+License:        MIT
+License File:   licenses/OmniQuant/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: OpenSeek
+Version:        0.1
+Upstream URL:   https://github.com/FlagAI-Open/OpenSeek/archive/refs/tags/v0.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/OpenSeek/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: PaddleX
+Version:        3.3.0
+Upstream URL:   https://github.com/PaddlePaddle/PaddleX/archive/refs/tags/v3.3.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/PaddleX/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: TensorRT-LLM
+Version:        0.10.0
+Upstream URL:   https://github.com/NVIDIA/TensorRT-LLM/archive/refs/tags/v0.10.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/TensorRT-LLM/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: VLMEvalKit
+Version:        0.3rc1
+Upstream URL:   https://github.com/open-compass/VLMEvalKit/archive/refs/tags/v0.3rc1.tar.gz
+License:        Apache-2.0
+License File:   licenses/VLMEvalKit/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: VeOmni
+Version:        0.1.3
+Upstream URL:   https://github.com/ByteDance-Seed/VeOmni/archive/refs/tags/v0.1.3.tar.gz
+License:        Apache-2.0
+License File:   licenses/VeOmni/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: aimet-model-zoo
+Version:        mobilenetedgetpu_tf1
+Upstream URL:   https://github.com/quic/aimet-model-zoo/archive/refs/tags/mobilenetedgetpu_tf1.tar.gz
+License:        Apache-2.0
+License File:   licenses/aimet-model-zoo/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: ao
+Version:        0.11.0-rc1
+Upstream URL:   https://github.com/pytorch/ao/archive/refs/tags/v0.11.0-rc1.tar.gz
+License:        BSD-3-Clause
+License File:   licenses/ao/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: auto-round
+Version:        0.3.1
+Upstream URL:   https://github.com/intel/auto-round/archive/refs/tags/v0.3.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/auto-round/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: bert4torch
+Version:        0.5.8
+Upstream URL:   https://github.com/Tongjilibo/bert4torch/archive/refs/tags/v0.5.8.tar.gz
+License:        MIT
+License File:   licenses/bert4torch/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: coat
+Version:        0.0.0-20250519221725-3dab6aba75ac
+Upstream URL:   https://proxy.golang.org/github.com/nvlabs/coat/@v/v0.0.0-20250519221725-3dab6aba75ac.zip
+License:        Apache-2.0
+License File:   licenses/coat/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: cosmos-predict2
+Version:        1.0.8
+Upstream URL:   https://github.com/nvidia-cosmos/cosmos-predict2/archive/refs/tags/v1.0.8.tar.gz
+License:        Apache-2.0
+License File:   licenses/cosmos-predict2/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: cosmos-predict2.5
+Version:        1.2.0
+Upstream URL:   https://github.com/nvidia-cosmos/cosmos-predict2.5/archive/refs/tags/v1.2.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/cosmos-predict2.5/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: cosmos-rl
+Version:        0.3.4
+Upstream URL:   https://github.com/nvidia-cosmos/cosmos-rl/archive/refs/tags/v0.3.4.tar.gz
+License:        Apache-2.0
+License File:   licenses/cosmos-rl/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: cosmos-transfer1
+Version:        migrate-to-T2.5
+Upstream URL:   https://github.com/nvidia-cosmos/cosmos-transfer1/archive/refs/tags/migrate-to-T2.5.tar.gz
+License:        Apache-2.0
+License File:   licenses/cosmos-transfer1/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: cosmos-transfer2.5
+Version:        1.2.0
+Upstream URL:   https://github.com/nvidia-cosmos/cosmos-transfer2.5/archive/refs/tags/v1.2.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/cosmos-transfer2.5/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: deepseek-vl2
+Version:        0.0.0-20241226143845-a8341f36dd3a
+Upstream URL:   https://proxy.golang.org/github.com%2Fdeepseek-ai%2Fdeepseek-vl2/@v/v0.0.0-20241226143845-a8341f36dd3a.zip
+License:        MIT
+License File:   licenses/deepseek-vl2/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: dequantor
+Version:        0.1.1
+Upstream URL:   https://files.pythonhosted.org/packages/3c/ed/c9cb35ec5e959da589e2c1a43d02aa31783dfee2e003f13fd17e0403293b/dequantor-0.1.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/dequantor/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: diffusers
+Version:        0.16.1-0.20251113072622-cd3bbe291066
+Upstream URL:   https://proxy.golang.org/github.com/huggingface/diffusers/@v/v0.16.1-0.20251113072622-cd3bbe291066.zip
+License:        Apache-2.0
+License File:   licenses/diffusers/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: duquant
+Version:        0.0.0-20241003202154-62c5844638f9
+Upstream URL:   https://proxy.golang.org/github.com/hsu1023/duquant/@v/v0.0.0-20241003202154-62c5844638f9.zip
+License:        MIT
+License File:   licenses/duquant/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: funasr
+Version:        0.3.1-0.20240822060750-000d43b7747a
+Upstream URL:   https://proxy.golang.org/github.com%2Falibaba%2Ffunasr/@v/v0.3.1-0.20240822060750-000d43b7747a.zip
+License:        MIT
+License File:   licenses/funasr/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: ablkit
+Version:        0.2.0
+Upstream URL:   https://github.com/AbductiveLearning/ABLkit
+License:        MIT
+License File:   licenses/ablkit/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: grouped_gemm
+Version:        1.1.3
+Upstream URL:   https://github.com/fanshiqing/grouped_gemm/archive/refs/tags/v1.1.3.tar.gz
+License:        Apache-2.0
+License File:   licenses/grouped_gemm/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: lerobot
+Version:        0.4.0
+Upstream URL:   https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/lerobot/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: lmms_engine
+Version:        0.1.2
+Upstream URL:   https://files.pythonhosted.org/packages/aa/ce/93de60f3686ffed28a58135b2acbf22d10ffb5674867b1fd3144e2c34872/lmms_engine-0.1.2.tar.gz
+License:        Apache-2.0
+License File:   licenses/lmms_engine/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: maxtext
+Version:        maxtext-tutorial-v1.2.0
+Upstream URL:   https://github.com/AI-Hypercomputer/maxtext/archive/refs/tags/maxtext-tutorial-v1.2.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/maxtext/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: mmcv
+Version:        2.0.1
+Upstream URL:   https://github.com/open-mmlab/mmcv/archive/refs/tags/v2.0.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/mmcv/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: mmengine
+Version:        0.1.0
+Upstream URL:   https://github.com/open-mmlab/mmengine/archive/refs/tags/v0.1.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/mmengine/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: mmengine-config
+Version:        0.10.8
+Upstream URL:   https://files.pythonhosted.org/packages/a0/7a/4f215f6a585cc91500f6e12e2a9b0c8b07fa2f93477a3f04f66b9c56ed7d/mmengine_config-0.10.8-py3-none-any.whl
+License:        Apache-2.0
+License File:   licenses/mmengine-config/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: nunchaku
+Version:        1.0.0dev20250830
+Upstream URL:   https://github.com/nunchaku-tech/nunchaku/archive/refs/tags/v1.0.0dev20250830.tar.gz
+License:        Apache-2.0
+License File:   licenses/nunchaku/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: onnx2torch
+Version:        1.0.0
+Upstream URL:   https://github.com/ENOT-AutoDL/onnx2torch/archive/refs/tags/v1.0.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/onnx2torch/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: optimum-habana
+Version:        1.18.1
+Upstream URL:   https://github.com/huggingface/optimum-habana/archive/refs/tags/v1.18.1.tar.gz
+License:        Apache-2.0
+License File:   licenses/optimum-habana/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: ostquant
+Version:        0.0.0-20250408134005-ab64362da147
+Upstream URL:   https://proxy.golang.org/github.com/brotherhappy/ostquant/@v/v0.0.0-20250408134005-ab64362da147.zip
+License:        Apache-2.0
+License File:   licenses/ostquant/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: pytorch
+Version:        2.4.0-rc1
+Upstream URL:   https://github.com/pytorch/pytorch/archive/refs/tags/v2.4.0-rc1.tar.gz
+License:        BSD-3-Clause
+License File:   licenses/pytorch/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: qllm
+Version:        0.0.0-20240311025542-653a329e4a5b
+Upstream URL:   https://proxy.golang.org/github.com/modeltc/qllm/@v/v0.0.0-20240311025542-653a329e4a5b.zip
+License:        Apache-2.0
+License File:   licenses/qllm/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: quarot
+Version:        0.0.0-20241126110825-5008669b08c1
+Upstream URL:   https://proxy.golang.org/github.com/spcl/quarot/@v/v0.0.0-20241126110825-5008669b08c1.zip
+License:        Apache-2.0
+License File:   licenses/quarot/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: qwen-vl-utils
+Version:        0.0.11
+Upstream URL:   https://files.pythonhosted.org/packages/42/9f/1229a40ebd49f689a0252144126f3865f31bb4151e942cf781a2936f0c4d/qwen_vl_utils-0.0.11.tar.gz
+License:        Apache-2.0
+License File:   licenses/qwen-vl-utils/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: qwen1.5
+Version:        0.0.0-20251013040415-fbf3bc853789
+Upstream URL:   https://proxy.golang.org/github.com/qwenlm/qwen1.5/@v/v0.0.0-20251013040415-fbf3bc853789.zip
+License:        Apache-2.0
+License File:   licenses/qwen1.5/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: rknn-llm
+Version:        release-v1.2.3
+Upstream URL:   https://github.com/airockchip/rknn-llm/archive/refs/tags/release-v1.2.3.tar.gz
+License:        BSD-3-Clause
+License File:   licenses/rknn-llm/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: rolora
+Version:        0.0.0-20240924190128-0118cb2decbc
+Upstream URL:   https://proxy.golang.org/github.com%2Fhuangowen%2Frolora/@v/v0.0.0-20240924190128-0118cb2decbc.zip
+License:        Apache-2.0
+License File:   licenses/rolora/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: rsq
+Version:        0.0.0-20250519184416-50fdf69c7a95
+Upstream URL:   https://proxy.golang.org/github.com/ylsung/rsq/@v/v0.0.0-20250519184416-50fdf69c7a95.zip
+License:        Apache-2.0
+License File:   licenses/rsq/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: sglang
+Version:        gateway-v0.2.2
+Upstream URL:   https://github.com/sgl-project/sglang/archive/refs/tags/gateway-v0.2.2.tar.gz
+License:        Apache-2.0
+License File:   licenses/sglang/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: sophon-demo
+Version:        0.2.8
+Upstream URL:   https://github.com/sophgo/sophon-demo/archive/refs/tags/0.2.8.tar.gz
+License:        BSD-2-Clause
+License File:   licenses/sophon-demo/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: streambp
+Version:        1.0
+Upstream URL:   https://files.pythonhosted.org/packages/2a/9b/f40c2afbae571ac6d902a9e89ca245d82476da83709898b99b9acad5b83d/streambp-1.0.tar.gz
+License:        MIT
+License File:   licenses/streambp/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: transformers
+Version:        4.48.0
+Upstream URL:   https://github.com/huggingface/transformers/archive/refs/tags/v4.48.0.tar.gz
+License:        Apache-2.0
+License File:   licenses/transformers/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: transformers.v4
+Version:        4.33.2-0.20250129194509-7547f55e5d93
+Upstream URL:   https://proxy.golang.org/gopkg.in/huggingface/transformers.v4/@v/v4.33.2-0.20250129194509-7547f55e5d93.zip
+License:        Apache-2.0
+License File:   licenses/transformers.v4/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: transformers-mcw
+Version:        4.52.0.dev0
+Upstream URL:   https://files.pythonhosted.org/packages/aa/d8/72e50c8e3691c56821a709bd70dc3ac561d92a10826395d6f3367eeddd43/transformers_mcw-4.52.0.dev0.tar.gz
+License:        Apache-2.0
+License File:   licenses/transformers-mcw/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: tt-metal
+Version:        0.0.0-dev20251006
+Upstream URL:   https://github.com/tenstorrent/tt-metal/archive/refs/tags/v0.0.0-dev20251006.tar.gz
+License:        Apache-2.0
+License File:   licenses/tt-metal/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: vllm
+Version:        0.6.5
+Upstream URL:   https://github.com/vllm-project/vllm/archive/refs/tags/v0.6.5.tar.gz
+License:        Apache-2.0
+License File:   licenses/vllm/LICENSE
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Component Name: xh2modelzoo
+Version:        1.2.0
+Upstream URL:   n/a
+License:        Apache-2.0
+License File:   licenses/xh2modelzoo/LICENSE
+--------------------------------------------------------------------------------
+
+----------------------------------------------------------------------
+InternVL
+----------------------------------------------------------------------
+Component Name: InternVL
+Version: 1.1
+Source:
+https://github.com/OpenGVLab/InternVL
+License:
+MIT
+License Text:
+licenses/InternVL/LICENSE
+
+----------------------------------------------------------------------
+lmms-eval
+----------------------------------------------------------------------
+Component Name: lmms-eval
+Version: 0.2.4
+Source:
+https://github.com/EvolvingLMMs-Lab/lmms-eval
+License:
+MIT
+License Text:
+licenses/lmms-eval/LICENSE
+
+----------------------------------------------------------------------
+lm-evaluation-harness
+----------------------------------------------------------------------
+Component Name: lm-evaluation-harness
+Version: 0.4.5
+Source:
+https://github.com/EleutherAI/lm-evaluation-harness
+License:
+MIT
+License Text:
+licenses/lm-evaluation-harness/LICENSE
+
+----------------------------------------------------------------------
+juxtapose
+----------------------------------------------------------------------
+Component Name: juxtapose
+Version: 0.0.4
+Source:
+https://github.com/ziqinyeow/juxtapose
+License:
+MIT
+License Text:
+licenses/juxtapose/LICENSE
+
+----------------------------------------------------------------------
+unsloth
+----------------------------------------------------------------------
+Component Name: unsloth
+Version: September-2025-v2
+Source:
+https://github.com/unslothai/unsloth
+License:
+Apache-2.0
+License Text:
+licenses/unsloth/LICENSE
+
+----------------------------------------------------------------------
+nncf
+----------------------------------------------------------------------
+Component Name: nncf
+Version: 2.12.0
+Source:
+https://github.com/openvinotoolkit/nncf
+License:
+Apache-2.0
+License Text:
+licenses/nncf/LICENSE
+
+----------------------------------------------------------------------
+attention-gym
+----------------------------------------------------------------------
+Component Name: attention-gym
+Version: 1.0.0
+Source:
+https://github.com/RiseAI-Sys/attention-gym
+License:
+Apache-2.0
+License Text:
+licenses/attention-gym/LICENSE
+
+----------------------------------------------------------------------
+EcoFormer
+----------------------------------------------------------------------
+Component Name: EcoFormer
+Version: 1.0
+Source:
+https://github.com/ziplab/EcoFormer
+License:
+Apache-2.0
+License Text:
+licenses/EcoFormer/LICENSE
+
+----------------------------------------------------------------------
+ever
+----------------------------------------------------------------------
+Component Name: ever
+Version: 0.5.3
+Source:
+https://github.com/Z-Zheng/ever
+License:
+Apache-2.0
+License Text:
+licenses/ever/LICENSE
+
+----------------------------------------------------------------------
+how_to_optimize_in_gpu
+----------------------------------------------------------------------
+Component Name: how_to_optimize_in_gpu
+Version: 0.0.0-20230729055232-5d2def3e082c
+Source:
+https://github.com/liu-xiandong/how_to_optimize_in_gpu
+License:
+Apache-2.0
+License Text:
+licenses/how_to_optimize_in_gpu/LICENSE
+
+----------------------------------------------------------------------
+mlonmcu
+----------------------------------------------------------------------
+Component Name: mlonmcu
+Version: 0.3.0
+Source:
+https://github.com/tum-ei-eda/mlonmcu
+License:
+Apache-2.0
+License Text:
+licenses/mlonmcu/LICENSE
+
+----------------------------------------------------------------------
+mmdeploy
+----------------------------------------------------------------------
+Component Name: mmdeploy
+Version: 0.1.0alpha
+Source:
+https://github.com/open-mmlab/mmdeploy
+License:
+Apache-2.0
+License Text:
+licenses/mmdeploy/LICENSE
+
+----------------------------------------------------------------------
+onnx2pytorch
+----------------------------------------------------------------------
+Component Name: onnx2pytorch
+Version: 0.4.0
+Source:
+https://github.com/Talmaj/onnx2pytorch
+License:
+Apache-2.0
+License Text:
+licenses/onnx2pytorch/LICENSE
+
+----------------------------------------------------------------------
+OnnxSlim
+----------------------------------------------------------------------
+Component Name: OnnxSlim
+Version: 0.1.17
+Source:
+https://github.com/tsingmicro-toolchain/OnnxSlim
+License:
+MIT
+License Text:
+licenses/OnnxSlim/LICENSE
+
+----------------------------------------------------------------------
+xpu_graph
+----------------------------------------------------------------------
+Component Name: xpu_graph
+Version: 0.5.1.alpha
+Source:
+https://github.com/XPU-Forces/xpu_graph
+License:
+Apache-2.0
+License Text:
+licenses/xpu_graph/LICENSE
+
+----------------------------------------------------------------------
+timm
+----------------------------------------------------------------------
+Component Name: timm
+Version: 1.0.17
+Source:
+https://github.com/huggingface/pytorch-image-models
+License:
+Apache-2.0
+License Text:
+licenses/timm/LICENSE
+
+----------------------------------------------------------------------
+neural-compressor
+----------------------------------------------------------------------
+Component Name: neural-compressor
+Version: 3.1
+Source:
+https://github.com/intel/neural-compressor
+License:
+Apache-2.0
+License Text:
+licenses/neural-compressor/LICENSE
+
+----------------------------------------------------------------------
+mmengine-open
+----------------------------------------------------------------------
+Component Name: mmengine-open
+Version: 0.10.4
+Source:
+https://github.com/open-mmlab/mmengine
+License:
+Apache-2.0
+License Text:
+licenses/mmengine-open/LICENSE
+
+----------------------------------------------------------------------
+onnx2torch-py313
+----------------------------------------------------------------------
+Component Name: onnx2torch-py313
+Version: 1.6.0
+Source:
+https://github.com/ENOT-AutoDL/onnx2torch
+License:
+Apache-2.0
+License Text:
+licenses/onnx2torch-py313/LICENSE
+
+----------------------------------------------------------------------
+onnxsim-lm
+----------------------------------------------------------------------
+Component Name: onnxsim-lm
+Version: 0.1.1
+Source:
+https://github.com/daquexian/onnx-simplifier
+License:
+Apache-2.0
+License Text:
+licenses/onnxsim-lm/LICENSE
+
+----------------------------------------------------------------------
+fast-hadamard-transform / QuaRot
+----------------------------------------------------------------------
+Component Name: QuaRot (Quantization via Rotation)
+Version: derived from commit c2bc545 (2024-12)
+Source:
+https://github.com/spcl/QuaRot
+Copyright Statement:
+Copyright (c) 2024 The QuaRot Authors
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/spcl/QuaRot/blob/main/LICENSE
+QuaRot provides rotation-based quantization for LLMs. We use the 
+fast-hadamard-transform and GPTQ utilities from this repository.
+Usage in this project:
+The following paths are used:
+    xh_model_zoo*/xh_llm/quantization/quarot/
+    examples/audio/funasr/hadamard/
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+GPTQModel
+----------------------------------------------------------------------
+Component Name: GPTQModel
+Version: 1.x (derived)
+Source:
+https://github.com/ModelCloud/GPTQModel
+Copyright Statement:
+Copyright (c) 2024 ModelCloud
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE
+GPTQModel provides GPTQ quantization utilities used in quarot integration.
+Usage in this project:
+The following paths are used:
+    xh_model_zoo*/xh_llm/quantization/quarot/gptq_utils.py
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+PaddleOCR-VL
+----------------------------------------------------------------------
+Component Name: PaddleOCR-VL
+Version: derived from v2.8
+Source:
+https://github.com/PaddlePaddle/PaddleOCR
+Copyright Statement:
+Copyright (c) 2025 PaddlePaddle Authors
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE
+PaddleOCR-VL provides vision-language OCR capabilities.
+Usage in this project:
+The following paths are used:
+    xh_model_zoo*/xh_llm/models/paddleocr_vl*/
+    examples/llm/paddleocr_vl*/
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+CosyVoice / CosyVoice3
+----------------------------------------------------------------------
+Component Name: CosyVoice
+Version: derived from v3
+Source:
+https://github.com/FunAudioLLM/CosyVoice
+Copyright Statement:
+Copyright (c) 2024 Alibaba Inc. (FunAudioLLM Team)
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/FunAudioLLM/CosyVoice/blob/main/LICENSE
+CosyVoice provides audio generation capabilities.
+Usage in this project:
+The following paths are used:
+    examples/audio/Cosyvoice3/
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+UI-TARS
+----------------------------------------------------------------------
+Component Name: UI-TARS (uitars1_5)
+Version: 1.5
+Source:
+https://github.com/bytedance/UI-TARS
+Copyright Statement:
+Copyright (c) 2025 ByteDance Ltd.
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/bytedance/UI-TARS/blob/main/LICENSE
+UI-TARS provides UI understanding and automation.
+Usage in this project:
+The following paths are used:
+    examples/llm/uitars1_5/
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+Isaac-GR00T (gr00t N1.6-release) [IMPLEMENTATION STUBBED]
+----------------------------------------------------------------------
+Component Name: Isaac-GR00T
+Version: N1.6-release (stub only)
+Source:
+https://github.com/NVIDIA/Isaac-GR00T
+Copyright Statement:
+Copyright (c) 2025 NVIDIA Corporation
+License:
+**Non-Commercial License** (NVIDIA Isaac GR00T License)
+License Text:
+https://github.com/NVIDIA/Isaac-GR00T/blob/n1.6-release/LICENSE
+**IMPORTANT**: The actual implementation is STUBBED and NOT provided in this
+repository due to upstream license restrictions. Only interface stubs with
+NotImplementedError are included for API compatibility. Users MUST NOT deploy
+gr00t models in production without obtaining appropriate license from NVIDIA.
+Usage in this project:
+The following paths are used:
+    xh_model_zoo*/xh_llm/models/groot/ (stub only)
+Users are responsible for verifying license compliance before any use.
+
+----------------------------------------------------------------------
+eagle3 / starforce [IMPLEMENTATION STUBBED]
+----------------------------------------------------------------------
+Component Name: eagle3 / starforce
+Version: (stub only)
+Source:
+(upstream license unclear)
+License:
+**License Status: Unclear** - implementation stubbed pending clarification.
+**IMPORTANT**: The actual implementation is STUBBED and NOT provided in this
+repository. Only interface stubs with NotImplementedError are included.
+Users MUST NOT use eagle3/starforce models without verifying upstream license.
+Usage in this project:
+The following paths are used:
+    (stub implementations only)
+Users are responsible for verifying license compliance before any use.

@@ -1,3 +1,26 @@
+# Copyright 2018-2025 The Hugging Face Team. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
+#
+# Modifications:
+# - Adapted HuggingFace transformers Qwen2 implementation for xh2 hardware
+# - Modified for CosyVoice3 LLM integration and HMONNX export
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# File: qwen2_hf_compatible.py
+# Description:
+#   Qwen2 HuggingFace compatibility layer for CosyVoice3
+
 from typing import Any, Optional, Union
 
 import torch

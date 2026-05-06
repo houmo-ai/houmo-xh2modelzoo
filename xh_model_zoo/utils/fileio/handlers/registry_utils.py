@@ -1,14 +1,15 @@
+# -*- coding: utf-8 -*-
 # Copyright 2025 HOUMO AI
 #
 # File: registry_utils.py
 # Description:
-#   Registry Utils utility functions.
+#   Registry utilities for HOUMO AI xh2modelzoo.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +19,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# from ...misc import is_list_of
 from .base import BaseFileHandler
 from .json_handler import JsonHandler
 from .pickle_handler import PickleHandler

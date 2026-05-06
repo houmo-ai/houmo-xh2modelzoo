@@ -15,6 +15,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# File: image_processing_qwen2_vl.py
+# Description:
+#   Image processing utilities for qwen3_vl in HOUMO AI xh2modelzoo.
 
 import math
 from typing import Optional, Union

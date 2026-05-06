@@ -1,48 +1,34 @@
-# MiniCPM-o model integration notes
+# MiniCPM-O 模型适配说明
 
-This directory contains the local MiniCPM-o integration used by
-`xh_model_zoo` for wrapping, conversion, and HMONNX export flows.
+## 特别事项
 
-## Code license
+本项目使用从 ModelScope 下载的预训练模型、配置文件和脚本：
 
-- The local integration code in this directory is intended to be distributed
-  under **Apache-2.0**.
-- Several implementation files adapt or wrap upstream MiniCPM / MiniCPM-V
-  model behavior and therefore carry additional provenance notes in their file
-  headers.
+- 模型名称: MiniCPM-o-2_6
+- 来源: https://modelscope.cn/openbmb/MiniCPM-o-2_6
+- 许可: Apache License 2.0 （https://www.apache.org/licenses/LICENSE-2.0）
 
-## Upstream relationship
+预训练模型、配置文件和脚本在运行时下载，工程发布**不包含**该下载包。
+同时，原有的预处理代码 image_processing_minicpmv.py、preocessing_minicpmo.py 等模块已进行适配性修改，并包含在项目提交文件中。特此声明。
 
-- Upstream project: <https://github.com/OpenBMB/MiniCPM-V>
-- Repository notice entry: see `THIRD_PARTY_NOTICES` under
-  `MiniCPM-O-2.6 / MiniCPM Series`
+## 1 模型说明
 
-Important distinction:
+**MiniCPM-O** 是由 OpenBMB 团队开发的端到端全模态（Omni-modal）大语言模型，支持：
+- **视觉理解**: 图像理解、OCR、视觉问答
+- **语音交互**: 实时语音输入/输出、TTS 合成
+- **文本生成**: 多语言（中文、英文等）文本生成
 
-- local wrapper / converter / compatibility code can be reviewed as repository
-  source code;
-- upstream checkpoints, tokenizer files, media samples, and other bundled
-  assets remain separate compliance objects and may have additional
-  redistribution requirements.
+### 1.1 架构特点
+- **基座模型**: Qwen/Llama 架构，支持 4B/8B/14B 等多种规模
+- **多模态融合**: 采用统一 token 空间实现视觉/音频/文本跨模态对齐
+- **高效推理**: 优化后单卡可跑 8B 模型（FP16/BF16）
 
-## Reviewer notes
+### 1.2 本地支持范围
+- xh2a 硬件加速（NPU 卸载）
+- HMONNX 模型导出（视觉 encoder、LLM decoder、TTS 模块）
+- Batch 推理与流式生成
 
-The following files are the primary upstream-adaptation surfaces and should
-retain provenance comments when modified:
+## 4 免责声明
 
-- `minicpmo_hf_compatible.py`
-- `_audio_model_impl.py`
-- `_llm_model_impl.py`
-- `_vision_model_impl.py`
-- `_tts_model_impl.py`
-- `_tts_dvae_model_impl.py`
-- `_tts_vocos_model_impl.py`
+您明确了解并同意，以下链接中的软件、数据或者模型由第三方提供并负责维护。在以下链接中出现的任何第三方的名称、商标、标识、产品或服务并不构成明示或暗示与该第三方或其软件、数据或模型的相关背书、担保或推荐行为。您进一步了解并同意，使用任何第三方软件、数据或者模型，包括您提供的任何信息或个人数据（不论是有意或无意地），应受相关使用条款、许可协议、隐私政策或其他此类协议的约束。因此，使用链接中的软件、数据或者模型可能导致的所有风险将由您自行承担。
 
-## Remaining cleanup items
-
-These items are not changed automatically here because they may affect imports
-or release packaging, but they should be reviewed before an external release:
-
-- `minicpmo_tts_convert copy.py` — suspicious duplicate/backup-style file name
-- ` utils.py` — path appears to contain a leading space in the file name
-- `__pycache__/` artifacts — should not be part of source release payloads

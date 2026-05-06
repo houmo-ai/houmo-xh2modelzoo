@@ -1,15 +1,17 @@
-# Copyright 2025 HOUMO AI
+# -*- coding: utf-8 -*-
+# Copyright 2024 ABLkit Authors. All rights reserved.
+# Copyright 2025 HOUMO AI. All rights reserved.
 #
-# File: manager.py
-# Description:
-#   Manager metaclass for singleton pattern implementation.
-#   This module provides the ManagerMeta metaclass for managing global instances.
+# Modifications:
+# - Portions of this file have been modified by HOUMO AI.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# Upstream portions remain licensed under the MIT License; see licenses/ablkit/LICENSE.
+# Licensed under the Apache License, Version 2.0 (the "License") for
+# HOUMO AI modifications;
+# you may not use the HOUMO AI modifications except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +19,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SPDX-License-Identifier: Apache-2.0
+# Source: https://github.com/AbductiveLearning/ABLkit
+# See licenses/ablkit/LICENSE for the upstream MIT license text.
+#
+# File: manager.py
+# Description:
+#   Thread-safe named-instance manager mixin, adapted from ABLkit for xh2modelzoo utilities.
+
 import inspect
 import threading
 import warnings
