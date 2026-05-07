@@ -355,7 +355,10 @@ class _Glm4MoeLiteAttention(DynamicModule):
 
         # q_pe 恢复形状 -> [B, S, H, D]
         q_pe = q_pe.transpose(1, 2)
-        
+
+        query_states = torch.cat((q_content, q_pe), dim=-1).transpose(1,2) * self.kv_scale
+        k_rot = k_rot.squeeze(1)
+        key_states = torch.cat((k_latent, k_rot), dim=-1)
 
         # =================================================================
         # 4. KV Cache 管理 (极低显存占用)
@@ -363,8 +366,9 @@ class _Glm4MoeLiteAttention(DynamicModule):
         if self.use_cache:
             # k_rot用于RoPE计算，存储在k_cache中
             # [B, S, H, D]
-            k_rot = self.k_cache(k_rot, past_seq_length, current_input_length, past_k_cache)
-            k_rot = k_rot.squeeze(1)
+            key_states = key_states.unsqueeze(1)
+            key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
+            key_states = key_states.transpose(2, 3)
 
             # k_latent用于Content计算和Value投影，存储在v_cache中
             # k_latent原始形状 [B, S, LatentDim]
@@ -374,9 +378,6 @@ class _Glm4MoeLiteAttention(DynamicModule):
             k_latent = self.v_cache(k_latent, past_seq_length, current_input_length, past_v_cache)
             k_latent = k_latent.squeeze(1) # 恢复为 [B, S_total, LatentDim]
 
-        query_states = torch.cat((q_content, q_pe), dim=-1).transpose(1,2) * self.kv_scale
-        key_states = torch.cat((k_latent, k_rot), dim=-1).unsqueeze(1).transpose(2, 3)
-        
         # MQA/MLA 优化：因为unsqueeze(1)之后对应的维度大小为 1，直接利用 Matmul 的原生广播（Broadcasting）免去 repeat_interleave
         
         # xh_pragma_fx(
@@ -504,12 +505,18 @@ class _Glm4MoeLiteAttention(DynamicModule):
         _kv_scale = 1 / math.sqrt(self.qk_head_dim)
         self.kv_scale = _kv_scale
 
+        def _maybe_register_quant_weight(linear: torch.nn.Linear, quant_weight: torch.Tensor | None):
+            if quant_weight is not None:
+                assert quant_weight.dtype == torch.int8
+                linear.register_buffer("quant_weight", quant_weight.contiguous())
+
         with torch.no_grad(): # 将kv_b_proj融合到q_absorbed_proj 和 o_proj中
             # ========================================================================
             # 第一步：拆分 kv_a_proj_with_mqa 
             # ========================================================================
             if hasattr(self, "kv_a_proj_with_mqa"):
                 W_KV_A = self.kv_a_proj_with_mqa.weight # [Latent + Rope, Hidden]
+                W_KV_A_quant = getattr(self.kv_a_proj_with_mqa, "quant_weight", None)
                 has_bias = self.kv_a_proj_with_mqa.bias is not None
                 proj_dtype = W_KV_A.dtype
                 
@@ -520,6 +527,12 @@ class _Glm4MoeLiteAttention(DynamicModule):
                 W_Latent = W_KV_A[:split_idx, :].contiguous()
                 self.kv_a_proj_latent = torch.nn.Linear(self.hidden_size, self.kv_lora_rank, bias=has_bias)
                 self.kv_a_proj_latent.weight = torch.nn.Parameter(W_Latent.to(dtype=proj_dtype))
+                _maybe_register_quant_weight(
+                    self.kv_a_proj_latent,
+                    None
+                    if W_KV_A_quant is None
+                    else W_KV_A_quant[:split_idx, :].to(device=self.kv_a_proj_latent.weight.device),
+                )
                 if has_bias:
                     self.kv_a_proj_latent.bias = torch.nn.Parameter(
                         self.kv_a_proj_with_mqa.bias[:split_idx].contiguous().to(dtype=proj_dtype)
@@ -529,6 +542,12 @@ class _Glm4MoeLiteAttention(DynamicModule):
                 W_Rope = W_KV_A[split_idx:, :].contiguous()
                 self.kv_a_proj_rope = torch.nn.Linear(self.hidden_size, self.qk_rope_head_dim, bias=has_bias)
                 self.kv_a_proj_rope.weight = torch.nn.Parameter(W_Rope.to(dtype=proj_dtype))
+                _maybe_register_quant_weight(
+                    self.kv_a_proj_rope,
+                    None
+                    if W_KV_A_quant is None
+                    else W_KV_A_quant[split_idx:, :].to(device=self.kv_a_proj_rope.weight.device),
+                )
                 if has_bias:
                     self.kv_a_proj_rope.bias = torch.nn.Parameter(
                         self.kv_a_proj_with_mqa.bias[split_idx:].contiguous().to(dtype=proj_dtype)
@@ -543,16 +562,24 @@ class _Glm4MoeLiteAttention(DynamicModule):
             weight_dtype = self.kv_b_proj.weight.dtype
             fusion_dtype = torch.float32
             W_Up = self.kv_b_proj.weight.to(device=device, dtype=fusion_dtype)
+            W_Up_quant = getattr(self.kv_b_proj, "quant_weight", None)
             D_latent = W_Up.shape[1]
             
             # View 成 [NumHeads, NopeDim + VDim, LatentDim]
             W_Up_view = W_Up.view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, D_latent)
+            W_Up_quant_view = (
+                W_Up_quant.to(device=device).view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, D_latent)
+                if W_Up_quant is not None
+                else None
+            )
             
             # 提取 W_UK (用于 Q 融合) -> [NumHeads, NopeDim, LatentDim]
             W_UK = W_Up_view[:, :self.qk_nope_head_dim, :].clone()
+            W_UK_quant = W_Up_quant_view[:, :self.qk_nope_head_dim, :].clone() if W_Up_quant_view is not None else None
             
             # 提取 W_UV (用于 O 融合) -> [NumHeads, VDim, LatentDim]
             W_UV = W_Up_view[:, self.qk_nope_head_dim:, :].clone()
+            W_UV_quant = W_Up_quant_view[:, self.qk_nope_head_dim:, :].clone() if W_Up_quant_view is not None else None
 
             # ========================================================================
             # 第三步：处理 q_b_proj (依赖 W_UK)
@@ -560,43 +587,79 @@ class _Glm4MoeLiteAttention(DynamicModule):
             W_Q_all = self.q_b_proj.weight.to(
                 device=device, dtype=fusion_dtype
             )  # [NumHeads * (NopeDim + RopeDim), Hidden]
+            W_Q_all_quant = getattr(self.q_b_proj, "quant_weight", None)
             D_in = W_Q_all.shape[1]
             
             # View 成 [NumHeads, NopeDim + RopeDim, Hidden]
             W_Q_view = W_Q_all.view(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, D_in)
+            W_Q_quant_view = (
+                W_Q_all_quant.to(device=device).view(self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, D_in)
+                if W_Q_all_quant is not None
+                else None
+            )
             
             # 拆分 Nope (Content) 和 Rope
             W_Q_nope = W_Q_view[:, :self.qk_nope_head_dim, :] # [H, NopeDim, Hidden]
             W_Q_rope = W_Q_view[:, self.qk_nope_head_dim:, :] # [H, RopeDim, Hidden]
+            W_Q_nope_quant = (
+                W_Q_quant_view[:, :self.qk_nope_head_dim, :]
+                if W_Q_quant_view is not None
+                else None
+            )
+            W_Q_rope_quant = W_Q_quant_view[:, self.qk_nope_head_dim:, :].clone() if W_Q_quant_view is not None else None
             
             # --- 2.1 构造 RoPE 专用层 ---
             # 直接展平 W_Q_rope -> [H * RopeDim, Hidden]
             W_Q_rope_flat = W_Q_rope.reshape(-1, D_in).contiguous()
             self.q_rope_proj = torch.nn.Linear(D_in, self.num_heads * self.qk_rope_head_dim, bias=False)
             self.q_rope_proj.weight = torch.nn.Parameter(W_Q_rope_flat.to(device=device, dtype=weight_dtype))
+            _maybe_register_quant_weight(
+                self.q_rope_proj,
+                None if W_Q_rope_quant is None else W_Q_rope_quant.reshape(-1, D_in).to(device=device),
+            )
             
             # --- 2.2 构造 Content (Absorbed) 专用层 ---
             # 融合公式: W_Fused = W_UK^T * W_Q_nope
             # 维度: [H, Latent, Hidden] = [H, Nope, Hidden] * [H, Nope, Latent] (转置后)
             # Einsum: "hni, hnc -> hci" (h=Head, n=NopeDim, i=Hidden, c=Latent)
             W_Q_absorbed = torch.einsum("hni, hnc -> hci", W_Q_nope, W_UK)
+            W_Q_absorbed_quant = (
+                torch.einsum("hni, hnc -> hci", W_Q_nope_quant, W_UK_quant)
+                if W_Q_nope_quant is not None and W_UK_quant is not None
+                else None
+            )
             
             # 展平 -> [H * LatentDim, Hidden]
             W_Q_absorbed_flat = W_Q_absorbed.reshape(-1, D_in).contiguous()
             self.q_absorbed_proj = torch.nn.Linear(D_in, self.num_heads * self.kv_lora_rank, bias=False)
             self.q_absorbed_proj.weight = torch.nn.Parameter(W_Q_absorbed_flat.to(device=device, dtype=weight_dtype))
+            _maybe_register_quant_weight(
+                self.q_absorbed_proj,
+                None if W_Q_absorbed_quant is None else W_Q_absorbed_quant.reshape(-1, D_in).to(device=device),
+            )
 
             # ========================================================================
             # 第四步：处理 o_proj (依赖 W_UV)
             # ========================================================================
             W_O = self.o_proj.weight.to(device=device, dtype=fusion_dtype) # [Hidden, NumHeads * VDim]
+            W_O_quant = getattr(self.o_proj, "quant_weight", None)
             
             # View 成 [Hidden, NumHeads, VDim]
             W_O_view = W_O.view(self.hidden_size, self.num_heads, self.v_head_dim)
+            W_O_quant_view = (
+                W_O_quant.to(device=device).view(self.hidden_size, self.num_heads, self.v_head_dim)
+                if W_O_quant is not None
+                else None
+            )
             
             # 融合公式: W_Fused = W_O * W_UV
             # Einsum: "xhd, hdc -> xhc" (x=Hidden, h=Head, d=VDim, c=Latent)
             W_Fused_VO = torch.einsum("xhd,hdc->xhc", W_O_view, W_UV)
+            W_Fused_VO_quant = (
+                torch.einsum("xhd,hdc->xhc", W_O_quant_view, W_UV_quant)
+                if W_O_quant_view is not None and W_UV_quant is not None
+                else None
+            )
             
             # 展平 -> [Hidden, NumHeads * LatentDim]
             new_in_features = self.num_heads * self.kv_lora_rank
@@ -607,8 +670,16 @@ class _Glm4MoeLiteAttention(DynamicModule):
             old_bias = self.o_proj.bias
             self.o_proj = torch.nn.Linear(new_in_features, self.hidden_size, bias=has_bias)
             self.o_proj.weight = torch.nn.Parameter(W_Fused_Flat.to(device=device, dtype=weight_dtype))
+            _maybe_register_quant_weight(
+                self.o_proj,
+                None if W_Fused_VO_quant is None else W_Fused_VO_quant.reshape(self.hidden_size, new_in_features).to(device=device),
+            )
             if has_bias:
-                self.o_proj.bias = old_bias.to(device=device, dtype=weight_dtype) if old_bias is not None else None
+                self.o_proj.bias = (
+                    torch.nn.Parameter(old_bias.to(device=device, dtype=weight_dtype))
+                    if old_bias is not None
+                    else None
+                )
 
             # ========================================================================
             # 第五步：清理旧层
@@ -715,139 +786,80 @@ class _Glm4MoeLiteTopkRouter(DynamicModule):
     }
 )
 class _Glm4MoeLiteNaiveMoe(DynamicModule):
-    def graph_forward(self, hidden_states, routing_weights):
+    def graph_forward(self, hidden_states, routing_weights=None, selected_experts=None):
+        if routing_weights is None:
+            raise ValueError("routing_weights must be provided when MoeBlock.topk_outside is enabled")
         out = self.moeblock(
             hidden_states,
             routing_weights,
+            selected_experts,
         )
         return out
 
     def _setup(self, cfg: dict | None = None):
         self.input_seq_len = cfg.input_sequence_length
         self.batch_size = cfg.batch_size
-        self.device = self.down_proj.device
         has_expert_modules = not isinstance(self.down_proj, nn.Parameter)
 
-        has_gate_quant = has_expert_modules and all(
-            hasattr(expert.gate_proj, "quant_weight") and expert.gate_proj.quant_weight is not None
-            for expert in self.experts
-        )
-        has_up_quant = has_expert_modules and all(
-            hasattr(expert.up_proj, "quant_weight") and expert.up_proj.quant_weight is not None
-            for expert in self.experts
-        )
-        has_down_quant = has_expert_modules and all(
-            hasattr(expert.down_proj, "quant_weight") and expert.down_proj.quant_weight is not None
-            for expert in self.experts
-        )
+        def _stack_expert_attr(proj_name: str, attr_name: str) -> torch.Tensor | None:
+            values = [getattr(getattr(expert, proj_name), attr_name, None) for expert in self.experts]
+            if any(value is None for value in values):
+                return None
+            return torch.cat([value.detach().to(self.device).unsqueeze(0) for value in values], dim=0)
 
-        self.moeblock = MoeBlock(self.act_fn._get_name().lower(), self.config.num_experts_per_tok, False)
-
-        self.moeblock.expert_gate_proj_weight = torch.nn.Parameter(
-            torch.zeros(
-                self.num_experts,
-                int(self.gate_up_proj.shape[1] // 2),
-                self.gate_up_proj.shape[2],
-                device=self.device,
-                dtype=self.gate_up_proj.dtype,
-            )
-        )
-        if has_gate_quant:
-            self.moeblock.expert_gate_proj_quant_weight = torch.zeros(
-                self.num_experts,
-                self.experts[0].gate_proj.quant_weight.shape[0],
-                self.experts[0].gate_proj.quant_weight.shape[1],
-                device=self.device,
-                dtype=self.experts[0].gate_proj.quant_weight.dtype,
-            )
-
-        self.moeblock.expert_up_proj_weight = torch.nn.Parameter(
-            torch.zeros(
-                self.num_experts,
-                int(self.gate_up_proj.shape[1] // 2),
-                self.gate_up_proj.shape[2],
-                device=self.device,
-                dtype=self.gate_up_proj.dtype,
-            )
-        )
-        if has_up_quant:
-            self.moeblock.expert_up_proj_quant_weight = torch.zeros(
-                self.num_experts,
-                self.experts[0].up_proj.quant_weight.shape[0],
-                self.experts[0].up_proj.quant_weight.shape[1],
-                device=self.device,
-                dtype=self.experts[0].up_proj.quant_weight.dtype,
-            )
-
-        self.moeblock.expert_down_proj_weight = torch.nn.Parameter(
-            torch.zeros(
-                self.num_experts,
-                self.down_proj.shape[1],
-                self.down_proj.shape[2],
-                device=self.device,
-                dtype=self.down_proj.dtype,
-            )
-        )
-        if has_down_quant:
-            self.moeblock.expert_down_proj_quant_weight = torch.zeros(
-                self.num_experts,
-                self.experts[0].down_proj.quant_weight.shape[0],
-                self.experts[0].down_proj.quant_weight.shape[1],
-                device=self.device,
-                dtype=self.experts[0].down_proj.quant_weight.dtype,
-            )
-
-        with torch.no_grad():
-            if isinstance(self.down_proj, nn.Parameter):
-                gate_proj, up_proj = self.gate_up_proj.chunk(2, dim=1)
-                self.moeblock.expert_gate_proj_weight.copy_(gate_proj)
-                self.moeblock.expert_up_proj_weight.copy_(up_proj)
-                self.moeblock.expert_down_proj_weight.copy_(self.down_proj)
+        if has_expert_modules:
+            self.device = self.experts[0].down_proj.weight.device
+            gate_weight = _stack_expert_attr("gate_proj", "weight")
+            up_weight = _stack_expert_attr("up_proj", "weight")
+            down_weight = _stack_expert_attr("down_proj", "weight")
+            gate_quant_weight = _stack_expert_attr("gate_proj", "quant_weight")
+            up_quant_weight = _stack_expert_attr("up_proj", "quant_weight")
+            down_quant_weight = _stack_expert_attr("down_proj", "quant_weight")
+        else:
+            self.device = self.down_proj.device
+            gate_weight, up_weight = self.gate_up_proj.detach().to(self.device).chunk(2, dim=1)
+            down_weight = self.down_proj.detach().to(self.device)
+            gate_up_quant_weight = getattr(self, "gate_up_proj_quant_weight", None)
+            if gate_up_quant_weight is not None:
+                gate_quant_weight, up_quant_weight = gate_up_quant_weight.detach().to(self.device).chunk(2, dim=1)
             else:
-                self.moeblock.expert_gate_proj_weight.copy_(
-                    torch.cat(
-                        [expert.gate_proj.weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                        dim=0,
-                    )
-                )
-                if has_gate_quant:
-                    self.moeblock.expert_gate_proj_quant_weight.copy_(
-                        torch.cat(
-                            [expert.gate_proj.quant_weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                            dim=0,
-                        )
-                    )
+                gate_quant_weight = None
+                up_quant_weight = None
+            down_proj_quant_weight = getattr(self, "down_proj_quant_weight", None)
+            down_quant_weight = None if down_proj_quant_weight is None else down_proj_quant_weight.detach().to(self.device)
 
-                self.moeblock.expert_up_proj_weight.copy_(
-                    torch.cat(
-                        [expert.up_proj.weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                        dim=0,
-                    )
+        def _register_expert_linear(name: str, weight: torch.Tensor, quant_weight: torch.Tensor | None = None):
+            setattr(
+                self.moeblock,
+                f"expert_{name}_weight",
+                torch.nn.Parameter(weight.contiguous(), requires_grad=False),
+            )
+            if quant_weight is not None:
+                assert quant_weight.dtype == torch.int8
+                self.moeblock.register_buffer(
+                    f"expert_{name}_quant_weight",
+                    quant_weight.contiguous(),
                 )
-                if has_up_quant:
-                    self.moeblock.expert_up_proj_quant_weight.copy_(
-                        torch.cat(
-                            [expert.up_proj.quant_weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                            dim=0,
-                        )
-                    )
 
-                self.moeblock.expert_down_proj_weight.copy_(
-                    torch.cat(
-                        [expert.down_proj.weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                        dim=0,
-                    )
-                )
-                if has_down_quant:
-                    self.moeblock.expert_down_proj_quant_weight.copy_(
-                        torch.cat(
-                            [expert.down_proj.quant_weight.data.to(self.device).unsqueeze(0) for expert in self.experts],
-                            dim=0,
-                        )
-                    )
+        self.moeblock = MoeBlock(
+            self.act_fn._get_name().lower(),
+            self.config.num_experts_per_tok,
+            False,
+            topk_outside=True,
+        )
 
-        del self.gate_up_proj
-        del self.down_proj
+        _register_expert_linear("gate_proj", gate_weight, gate_quant_weight)
+        _register_expert_linear("up_proj", up_weight, up_quant_weight)
+        _register_expert_linear("down_proj", down_weight, down_quant_weight)
+
+        if hasattr(self, "gate_up_proj"):
+            del self.gate_up_proj
+        if hasattr(self, "down_proj"):
+            del self.down_proj
+        if hasattr(self, "gate_up_proj_quant_weight"):
+            del self.gate_up_proj_quant_weight
+        if hasattr(self, "down_proj_quant_weight"):
+            del self.down_proj_quant_weight
         # The expert module list is only used to pack MoeBlock weights above.
         # Keeping it would retain an extra full copy of expert tensors.
         if hasattr(self, "experts"):
@@ -874,41 +886,54 @@ class _Glm4MoeLiteMoE(DynamicModule):
         hidden_dim = hidden_states.size(2)
 
         router_logits = self.gate(hidden_states)
+        routing_scores = router_logits.sigmoid().view(batch_size, seq_length, -1)
         topk_indices, topk_weights = self.route_tokens_to_experts(router_logits)
 
-        routing_weights = (router_logits * 0).view(-1, self.n_routed_experts)
-        routing_weights = self.scatter_routing_weights(routing_weights, topk_indices, topk_weights)
+        selected_experts = topk_indices.view(batch_size, seq_length, -1)
 
-        # hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        hidden_states = self.experts(hidden_states, routing_weights).view(batch_size, seq_length, hidden_dim)
+        # bug fix
+        routing_weights = self.zero_routing(routing_scores, 0)
+        routing_weights = self.scatter_routing(
+            routing_weights,
+            selected_experts,
+            topk_weights.view(batch_size, seq_length, -1),
+        )
+        # bug fix end
+
+
+        hidden_states = self.experts(
+            hidden_states,
+            # bug fix
+            routing_weights=routing_weights,
+            selected_experts=selected_experts,
+        ).view(
+            batch_size,
+            seq_length,
+            hidden_dim,
+        )
         hidden_states = hidden_states + self.shared_experts(residuals)
         return hidden_states
 
     def route_tokens_to_experts(self, router_logits):
         router_logits = router_logits.sigmoid()
-        router_logits_for_choice = router_logits + self.gate.e_score_correction_bias
-        reshaped = router_logits_for_choice.view(-1, self.n_group, self.group_scores_last_dim)
-        top2_values = self.topk_2(reshaped)[0]
-        group_scores = top2_values.sum(dim=-1)
-        # group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
-        group_idx = self.topk_group(group_scores)[1]
-
-        # group_mask = torch.zeros_like(group_scores)
-        group_mask = group_scores * 0
-        ones = group_scores * 0 + 1.0
-        group_mask = self.scatter_group_mask(group_mask, group_idx, ones)
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(-1, self.n_group, self.group_scores_last_dim)
-            .reshape(-1, self.n_routed_experts)
-        )
-
-        scores_for_choice = router_logits_for_choice * score_mask
-        # scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
+        scores_for_choice = router_logits + self.gate.e_score_correction_bias
+        if self.use_group_filter:
+            reshaped = scores_for_choice.view(
+                -1, self.n_group, self.group_scores_last_dim
+            )
+            group_scores = self.topk_2(reshaped)[0].sum(dim=-1)
+            group_idx = self.topk_group(group_scores)[1]
+            group_mask = group_scores * 0
+            ones = group_scores * 0 + 1.0
+            group_mask = self.scatter_group_mask(group_mask, group_idx, ones)
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(-1, self.n_group, self.group_scores_last_dim)
+                .reshape(-1, self.n_routed_experts)
+            )
+            scores_for_choice = scores_for_choice * score_mask
 
         topk_indices = self.topk_score(scores_for_choice)[1]
-        # topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
-
         topk_weights = self.gather_weights(router_logits, topk_indices)
         if self.norm_topk_prob:
             denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
@@ -917,15 +942,22 @@ class _Glm4MoeLiteMoE(DynamicModule):
         return topk_indices, topk_weights
 
     def _setup(self, cfg):
-        self.topk_group = xhnn.TopK(self.topk_group, axis=-1)
-        self.topk_score = xhnn.TopK(self.top_k, axis=-1)
-        self.topk_2 = xhnn.TopK(2, axis=-1)
+        # 与 Nemotron (_NemotronHTopkRouter) 对齐：
+        # 只在 topk_group < n_group 时才真正做 group-filter；
+        # GLM-4.7-Flash 默认 n_group=topk_group=1，此时 route 里只剩一个 TopK。
+        self.use_group_filter = self.topk_group < self.n_group
         self.group_scores_last_dim = self.n_routed_experts // self.n_group
-
-        # 使用fx兼容的ScatterElements和GatherElements替代in-place操作
-        self.scatter_routing_weights = xhnn.ScatterElements(axis=1)
-        self.scatter_group_mask = xhnn.ScatterElements(axis=1)
+        self.topk_score = xhnn.TopK(self.top_k, axis=-1)
         self.gather_weights = xhnn.GatherElements(axis=1)
+        if self.use_group_filter:
+            self.topk_2 = xhnn.TopK(2, axis=-1)
+            self.topk_group = xhnn.TopK(self.topk_group, axis=-1)
+            self.scatter_group_mask = xhnn.ScatterElements(axis=1)
+        
+        # bug fix
+        self.zero_routing = xhnn.Mul()
+        self.scatter_routing = xhnn.ScatterElements(axis=2)
+        
 
         return self
 

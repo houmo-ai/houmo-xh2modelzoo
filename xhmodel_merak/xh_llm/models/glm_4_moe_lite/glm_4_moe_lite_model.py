@@ -9,7 +9,6 @@ from xhmodel_merak.configuration_utils import BaseAttrDict
 from ...builder import register_llm_model
 from ...text_llm_model import TextLLMModel, TextLLMModelConfig
 from ...types import LLMModelMeta
-from .cache import Glm4MoeLiteKVCacheConfig, Glm4MoeLiteKVCacheMixin
 from .glm_4_moe_lite_hmonnx_inference import XHGlm4MoeLiteHMONNXModel
 
 
@@ -18,7 +17,7 @@ class XHGlm4MoeLiteModelConfig(TextLLMModelConfig):
 
 
 class XHGlm4MoeLiteModelMeta(LLMModelMeta):
-    KVCACHE_CONFOG_CLS = Glm4MoeLiteKVCacheConfig
+    pass
 
 
 @register_llm_model("Glm4MoeLiteForCausalLM")
@@ -32,9 +31,6 @@ class XHGlm4MoeLiteModel(TextLLMModel):
 
     def __init__(self, config: XHGlm4MoeLiteModelConfig):
         super().__init__(config)
-        self._kvcache_config = Glm4MoeLiteKVCacheConfig()
-        self._kvcache_mixin = Glm4MoeLiteKVCacheMixin(self.kvcache_config)
-        self.use_cache = config.use_cache
         self.wrap_cfg["kv_cache"] = BaseAttrDict(self.kvcache_config.to_dict())
 
     def init_wrap_model(self, hf_model: Any) -> Any:
@@ -68,22 +64,23 @@ class XHGlm4MoeLiteModel(TextLLMModel):
             first_attn = llm_model.layers[0].self_attn
             qk_rope_head_dim = int(getattr(llm_model.config, "qk_rope_head_dim", first_attn.qk_rope_head_dim))
             kv_lora_rank = int(getattr(llm_model.config, "kv_lora_rank", first_attn.kv_lora_rank))
+            compress_kv_dim = kv_lora_rank + qk_rope_head_dim
             batch_size = self.config.batch_size
 
             self.kvcache_config.num_layers = num_decoder_layers
-            self.kvcache_config.key_cache_shape = [
+            key_cache_shape = [
                 batch_size,
                 1,
                 self.config.context_max_length,
-                qk_rope_head_dim,
+                compress_kv_dim,
             ]
-            self.kvcache_config.value_cache_shape = [
+            value_cache_shape = [
                 batch_size,
                 1,
                 self.config.context_max_length,
                 kv_lora_rank,
             ]
-            self.kvcache_config.kv_cache_shape = self.kvcache_config.value_cache_shape
+            self.kvcache_config.kv_cache_shape = [key_cache_shape, value_cache_shape]
             self.kvcache_config.batch_size = batch_size
             self.wrap_cfg["kv_cache"] = BaseAttrDict(self.kvcache_config.to_dict())
 

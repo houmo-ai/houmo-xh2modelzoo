@@ -569,6 +569,8 @@ class XHBaseModel(DeviceMixin):
 
         trust_remote_code = bool(kwargs.pop("trust_remote_code", True))
         backend = kwargs.pop("backend", "torch")
+        if "dtype" not in kwargs:
+            kwargs["dtype"] = cls.get_hf_model_dtype()
         valid_string_device_maps = {
             "auto",
             "balanced",
@@ -998,6 +1000,13 @@ class XHBaseModel(DeviceMixin):
             )
             native_hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
             cls._dequantize_gptqmodel_hf_model(native_hf_model)
+            """
+            GPTQModel在量化某些模型时，会调整模型结构，这导致gptqmodel量化模型和原始hf模型结构不一致，
+            无法进行后续Wrap和Fronted等转换，postprocess_gptqmodel_structure函数的作用是对伪量化后
+            的gptqmodel模型结构进行调整，使其与原始hf模型结构一致。如果适配的新模型也存在类似问题，需要
+            实现自己的postprocess_gptqmodel_structure函数，覆盖基类行为
+            """
+            native_hf_model = cls.postprocess_gptqmodel_structure(native_hf_model, hf_model_dir, **kwargs)
             return native_hf_model
 
         if quant_weight is not None and len(quant_weight) > 0:
