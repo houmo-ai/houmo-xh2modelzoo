@@ -414,13 +414,13 @@ except ImportError:
         return audios, images, videos
 
 
-def build_conversation(case: str):
+def build_conversation(case: str, text_prompt: Optional[str] = None):
     image_path = str(SCRIPT_DIR / "data" / "cars.jpg")
     audio_path = str(SCRIPT_DIR / "data" / "cough.wav")
 
     if case == "text":
         return [
-            {"role": "user", "content": [{"type": "text", "text": "请用一句话介绍你自己。"}]},
+            {"role": "user", "content": [{"type": "text", "text": text_prompt or "请用一句话介绍你自己。"}]},
         ], False
     if case == "vision":
         return [
@@ -428,7 +428,7 @@ def build_conversation(case: str):
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_path},
-                    {"type": "text", "text": "请描述这张图。"},
+                    {"type": "text", "text": text_prompt or "请描述这张图。"},
                 ],
             },
         ], False
@@ -438,7 +438,7 @@ def build_conversation(case: str):
                 "role": "user",
                 "content": [
                     {"type": "audio", "audio": audio_path},
-                    {"type": "text", "text": "请描述你听到了什么。"},
+                    {"type": "text", "text": text_prompt or "请描述你听到了什么。"},
                 ],
             },
         ], False
@@ -448,7 +448,7 @@ def build_conversation(case: str):
             "content": [
                 {"type": "image", "image": image_path},
                 {"type": "audio", "audio": audio_path},
-                {"type": "text", "text": "What can you see and hear? Answer in one short sentence."},
+                {"type": "text", "text": text_prompt or "What can you see and hear? Answer in one short sentence."},
             ],
         },
     ], True
@@ -1154,6 +1154,7 @@ def run_dialogue_validation(
     talker_max_new_tokens: Optional[int] = None,
     save_golden: bool = False,
     golden_dir: Optional[Path] = None,
+    validation_prompt: Optional[str] = None,
 ):
     device_map = _resolve_validation_device_map(device_map, logger)
     if device_map == "auto" and max_memory is None:
@@ -1184,7 +1185,7 @@ def run_dialogue_validation(
     if artifacts:
         apply_artifact_replacements(native_model, artifacts, logger)
 
-    conversation, use_audio_in_video = build_conversation(case)
+    conversation, use_audio_in_video = build_conversation(case, text_prompt=validation_prompt)
     text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
     inputs = processor(
@@ -1240,6 +1241,9 @@ def run_dialogue_validation(
     report = {
         "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "case": case,
+        "validation_prompt": validation_prompt,
+        "max_new_tokens": max_new_tokens,
+        "talker_max_new_tokens": talker_max_new_tokens,
         "output_text": output_text,
         "input_ids_shape": list(inputs["input_ids"].shape),
         "applied_artifacts": sorted(list(artifacts.keys())) if artifacts else [],

@@ -5,14 +5,16 @@ from torch import Tensor
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     Qwen3OmniMoeRMSNorm,
     Qwen3OmniMoeRotaryEmbedding,
-    Qwen3OmniMoeTextRMSNorm,
     Qwen3OmniMoeTalkerCodePredictorAttention,
     Qwen3OmniMoeTalkerCodePredictorDecoderLayer,
     Qwen3OmniMoeTalkerCodePredictorModel,
     Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration,
+    Qwen3OmniMoeTextRMSNorm,
 )
+
 from xhquant.utils.registry import DynamicModule
 
+from ..builder import XHLLM_TRACEABLE_MODULES
 from ._text_model import (
     _Qwen3MoeAttention,
     _Qwen3MoeDecoderLayer,
@@ -20,7 +22,6 @@ from ._text_model import (
     _Qwen3MoeRMSNorm,
     _Qwen3MoeRotaryEmbedding,
 )
-from ..builder import XHLLM_TRACEABLE_MODULES
 
 
 class _Qwen3OmniTalkerDynamicModule(DynamicModule):
@@ -37,23 +38,17 @@ class _Qwen3OmniMoeTalkerCodePredictorAttention(_Qwen3MoeAttention):
     """Register code predictor attention wrapper."""
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3OmniMoeRMSNorm: "Qwen3OmniMoeRMSNorm"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3OmniMoeRMSNorm: "Qwen3OmniMoeRMSNorm"})
 class _Qwen3OmniTalkerRMSNorm(_Qwen3MoeRMSNorm):
     """Register RMSNorm wrapper for code predictor stack."""
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3OmniMoeTextRMSNorm: "Qwen3OmniMoeTextRMSNorm"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3OmniMoeTextRMSNorm: "Qwen3OmniMoeTextRMSNorm"})
 class _Qwen3OmniTalkerTextRMSNorm(_Qwen3MoeRMSNorm):
     """Register text RMSNorm wrapper for code predictor stack."""
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3OmniMoeRotaryEmbedding: "Qwen3OmniMoeRotaryEmbedding"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3OmniMoeRotaryEmbedding: "Qwen3OmniMoeRotaryEmbedding"})
 class _Qwen3OmniTalkerRotaryEmbedding(_Qwen3MoeRotaryEmbedding):
     """Register rotary embedding wrapper for code predictor stack."""
 
@@ -65,9 +60,7 @@ class _Qwen3OmniMoeTalkerCodePredictorDecoderLayer(_Qwen3MoeDecoderLayer):
     """Register code predictor decoder layer wrapper."""
 
 
-@XHLLM_TRACEABLE_MODULES.register_module(
-    {Qwen3OmniMoeTalkerCodePredictorModel: "Qwen3OmniMoeTalkerCodePredictorModel"}
-)
+@XHLLM_TRACEABLE_MODULES.register_module({Qwen3OmniMoeTalkerCodePredictorModel: "Qwen3OmniMoeTalkerCodePredictorModel"})
 class _Qwen3OmniMoeTalkerPrediction(_Qwen3MoeModel):
     """Register code predictor model wrapper."""
 
@@ -90,8 +83,9 @@ class _Qwen3OmniMoeTalkerPrediction(_Qwen3MoeModel):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
-        Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration:
-        "Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration"
+        Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration: (
+            "Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration"
+        )
     }
 )
 class _Qwen3OmniMoeTalkerCodePredictorForConditionalGeneration(_Qwen3OmniTalkerDynamicModule):
@@ -131,7 +125,20 @@ class _Qwen3OmniMoeTalkerCodePredictorForConditionalGeneration(_Qwen3OmniTalkerD
         all_logits = torch.stack(head_logits_list, dim=2)
         # head_mask: [B, S, num_heads, 1] -> broadcast over V
         selected_logits = (all_logits * head_mask).sum(dim=2)
-        return selected_logits, hidden_states
+        # HF generate later consumes ``predictor_result.hidden_states[*][0]``
+        # as the residual codec embedding that is summed back into the
+        # talker decode input. In the native path that tensor is the model
+        # input embedding for the current residual-code step, not the final
+        # transformer hidden state. Keep the second HMONNX output aligned
+        # with that contract; runtime still names it ``hidden_states`` for
+        # backward-compatible metadata.
+        # Materialize a distinct graph value instead of returning the input
+        # alias directly. Otherwise ONNX export can reuse the transformer's
+        # internal ``hidden_states`` input name for the second output, leaving
+        # the first HMONNX input renamed but internal nodes still reading the
+        # old name.
+        residual_inputs_embeds = inputs_embeds + inputs_embeds.sum(dim=-1, keepdim=True) * 0.0
+        return selected_logits, residual_inputs_embeds
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

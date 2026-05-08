@@ -17,16 +17,16 @@ being emitted as many loose files.
 
 import argparse
 import json
-import os.path as osp
 import os
-import time
+import os.path as osp
 import sys
+import time
 import types
 from copy import deepcopy
 from pathlib import Path
 
 import torch
-import torch.nn as nn
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -41,6 +41,29 @@ from _hmonnx_pipeline import (
     save_json,
 )
 
+
+try:
+    from _hmonnx_pipeline import _ensure_mistral_common_reasoning_effort
+except ImportError:
+
+    def _ensure_mistral_common_reasoning_effort():
+        try:
+            import mistral_common.protocol.instruct.request as request_module
+        except ImportError:
+            return
+
+        if hasattr(request_module, "ReasoningEffort"):
+            return
+
+        from enum import Enum
+
+        class ReasoningEffort(str, Enum):
+            none = "none"
+            high = "high"
+
+        request_module.ReasoningEffort = ReasoningEffort
+
+
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
 except ImportError:
@@ -52,6 +75,7 @@ except ImportError:
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
 
+
 from xhquant.api import (  # isort:skip
     CacheTensor,
     Config,
@@ -59,7 +83,6 @@ from xhquant.api import (  # isort:skip
     DeviceType,
     QuantScheme,
     convert_fx_model_to_quanted_model,
-    convert_onnx_to_hmonnx,
     convert_quanted_model_to_hmonnx,
     create_quant_config,
     get_root_logger,
@@ -86,8 +109,16 @@ except ImportError:
         return audios, images, videos
 
 
+def _clone_capture_value(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    return deepcopy(value)
+
+
 def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, logger):
     """Run a full generate to capture code_predictor.model.forward inputs, or load from cache."""
+
+    capture_contract_version = 2
 
     class _PredictorInputsCaptured(RuntimeError):
         pass
@@ -95,7 +126,14 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
     capture_path = work_dir / "talker_prediction_inputs.pth"
     if capture_path.exists():
         logger.info(f"Loading cached predictor inputs from {capture_path}")
-        return torch.load(capture_path, map_location="cpu", weights_only=False)
+        cached = torch.load(capture_path, map_location="cpu", weights_only=False)
+        cached_entry = cached[0] if cached else None
+        if (
+            isinstance(cached_entry, dict)
+            and int(cached_entry.get("capture_contract_version", 0)) >= capture_contract_version
+        ):
+            return cached
+        logger.info("Cached predictor inputs use a stale capture contract, recapturing with current processor kwargs")
 
     logger.info("Running full generate to capture predictor inputs ...")
     image_path = str(SCRIPT_DIR / "data" / "cars.jpg")
@@ -119,6 +157,8 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
         videos=videos,
         return_tensors="pt",
         padding=True,
+        seconds_per_chunk=2.0,
+        position_id_per_seconds=13,
         use_audio_in_video=True,
     )
     inputs = inputs.to(device).to(dtype)
@@ -136,7 +176,9 @@ def _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, 
 
     def forward_hook(*args, **kwargs):
         if not captured:
-            captured.append({k: deepcopy(v) for k, v in kwargs.items()})
+            save_kwargs = {k: _clone_capture_value(v) for k, v in kwargs.items()}
+            save_kwargs["capture_contract_version"] = capture_contract_version
+            captured.append(save_kwargs)
             raise _PredictorInputsCaptured()
         return original_forward(*args, **kwargs)
 
@@ -272,7 +314,6 @@ def main(args):
     native_model = None
     processor = None
     captured = None
-    code_predictor_model = None
     wrapped_model = None
     quanted_model = None
 
@@ -293,7 +334,7 @@ def main(args):
             meta_info = json.load(f)
         legacy_layout = "codec_embedding_dir" in meta_info or "lm_head_dir" in meta_info
         new_layout_ready = "talker_prediction_assets_file" in meta_info and asset_file.exists()
-        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 2 and meta_info.get("output_names") == [
+        takeover_ready = meta_info.get("artifact_contract_version", 1) >= 4 and meta_info.get("output_names") == [
             "logits",
             "hidden_states",
         ]
@@ -312,6 +353,7 @@ def main(args):
             _build_predictor_validation_inputs(work_dir, meta_info)
         )
     else:
+        _ensure_mistral_common_reasoning_effort()
         from transformers import Qwen3OmniMoeProcessor
 
         native_model = _load_native_model_for_capture(hf_model_path, logger)
@@ -447,13 +489,14 @@ def main(args):
         # ---- 8. Save meta ----
         meta_info = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "artifact_contract_version": 2,
+            "artifact_contract_version": 4,
             "module": "talker_prediction",
             "model_name": model_name,
             "talker_prediction_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_prediction_decode_onnx": str(decode_file.relative_to(work_dir)),
             "talker_prediction_assets_file": str(asset_file.relative_to(work_dir)),
             "output_names": output_names,
+            "hidden_states_output_contract": "predictor_input_embeds_for_talker_residual_sum",
             "codec_embedding_count": int(asset_payload["num_codec_embeddings"]),
             "lm_head_count": num_lm_heads,
             "talker_prediction_kv_cache": {"shape": kv_cache_shape, "num_decoder_layers": num_hidden_layers},
@@ -466,7 +509,6 @@ def main(args):
 
     quanted_model = None
     wrapped_model = None
-    code_predictor_model = None
     code_predictor = None
     captured = None
     processor = None
@@ -497,7 +539,12 @@ def main(args):
 
             session = HMONNXInference(str(prefill_file))
             output = session(
-                inputs_embeds, head_mask_prefill, past_seq_length_t, current_input_length_t, *past_key_caches, *past_value_caches
+                inputs_embeds,
+                head_mask_prefill,
+                past_seq_length_t,
+                current_input_length_t,
+                *past_key_caches,
+                *past_value_caches,
             )
             outputs = list(output) if isinstance(output, (list, tuple)) else [output]
             logger.info(

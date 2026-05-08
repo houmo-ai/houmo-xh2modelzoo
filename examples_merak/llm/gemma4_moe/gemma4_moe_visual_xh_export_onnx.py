@@ -381,7 +381,7 @@ def main() -> None:
     parser.add_argument("--upsample-token", type=str2bool, default=False)
     parser.add_argument("--fuse-norm", type=str2bool, default=True)
     parser.add_argument("--device", type=str, default="cuda:0" if __import__("torch").cuda.is_available() else "cpu")
-    parser.add_argument("--golden", action="store_true")
+    parser.add_argument("--golden", type=str2bool, default=True)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--metadata-only", action="store_true", help="Smoke mode: write metadata without loading weights.")

@@ -1,7 +1,7 @@
 import importlib.util
-from importlib.machinery import ModuleSpec
 import sys
 import types
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,12 +11,15 @@ from torch import nn
 
 
 EXPORT_MODULE_PATH = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_talker_model.py")
+PRED_EXPORT_MODULE_PATH = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_talker_prediction.py")
 PIPELINE_MODULE_PATH = Path("examples/llm/qwen3omni/_hmonnx_pipeline.py")
 
 
 def _load_export_module(
     monkeypatch,
     *,
+    module_path=EXPORT_MODULE_PATH,
+    module_name="qwen3_omni_xh2a_export_talker_model_testmod",
     resolved_device_map="cuda:2",
     max_memory=None,
     patch_calls=None,
@@ -25,7 +28,9 @@ def _load_export_module(
     if patch_calls is None:
         patch_calls = []
     if run_dialogue_validation_fn is None:
-        run_dialogue_validation_fn = lambda *args, **kwargs: {}
+
+        def run_dialogue_validation_fn(*args, **kwargs):
+            return {}
 
     fake_pipeline = types.ModuleType("_hmonnx_pipeline")
     fake_pipeline.run_dialogue_validation = run_dialogue_validation_fn
@@ -34,8 +39,8 @@ def _load_export_module(
     fake_pipeline._resolve_validation_device_map = lambda device_map, logger=None: resolved_device_map
     fake_pipeline._build_safe_validation_max_memory = lambda logger=None: max_memory
     fake_pipeline._patch_runtime_device_property = lambda module, module_name, logger=None: None
-    fake_pipeline._patch_inputs_embeds_generation_device = (
-        lambda module, module_name, logger=None: patch_calls.append((module, module_name))
+    fake_pipeline._patch_inputs_embeds_generation_device = lambda module, module_name, logger=None: patch_calls.append(
+        (module, module_name)
     )
     monkeypatch.setitem(sys.modules, "_hmonnx_pipeline", fake_pipeline)
 
@@ -82,6 +87,7 @@ def _load_export_module(
     fake_api.DeviceType = SimpleNamespace(XH2a="XH2a")
     fake_api.QuantScheme = lambda **kwargs: kwargs
     fake_api.convert_fx_model_to_quanted_model = lambda *args, **kwargs: None
+    fake_api.convert_onnx_to_hmonnx = lambda *args, **kwargs: None
     fake_api.convert_quanted_model_to_hmonnx = lambda *args, **kwargs: None
     fake_api.create_quant_config = lambda quant_scheme: quant_scheme
     fake_api.get_root_logger = lambda: None
@@ -92,8 +98,8 @@ def _load_export_module(
     monkeypatch.setitem(sys.modules, "xhquant.api", fake_api)
 
     spec = importlib.util.spec_from_file_location(
-        "qwen3_omni_xh2a_export_talker_model_testmod",
-        EXPORT_MODULE_PATH,
+        module_name,
+        module_path,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -134,9 +140,7 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
     fake_hmonnx_module.HMONNXInference = DummyHMONNXInference
     monkeypatch.setitem(sys.modules, "xhquant.xhonnxruntime.hmonnx_inference", fake_hmonnx_module)
 
-    fake_modeling = types.ModuleType(
-        "xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe"
-    )
+    fake_modeling = types.ModuleType("xh_model_zoo.xh_llm.models.qwen3_omni.modeling_qwen3_omni_moe")
     fake_modeling._get_feat_extract_output_lengths = lambda value: value
     fake_modeling.Qwen3OmniMoeTalkerCodePredictorOutputWithPast = lambda **kwargs: SimpleNamespace(**kwargs)
     fake_modeling.Qwen3OmniMoeTalkerOutputWithPast = lambda **kwargs: SimpleNamespace(**kwargs)
@@ -146,9 +150,7 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
         fake_modeling,
     )
 
-    fake_monkey_patch = types.ModuleType(
-        "xh_model_zoo.xh_llm.models.qwen3_omni.monkey_patch"
-    )
+    fake_monkey_patch = types.ModuleType("xh_model_zoo.xh_llm.models.qwen3_omni.monkey_patch")
     fake_monkey_patch.Qwen3OmniMoeThinkerForConditionalGeneration_forward = lambda self, *args, **kwargs: None
     monkeypatch.setitem(
         sys.modules,
@@ -156,9 +158,7 @@ def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class)
         fake_monkey_patch,
     )
 
-    fake_processing = types.ModuleType(
-        "xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe"
-    )
+    fake_processing = types.ModuleType("xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe")
     fake_processing.Qwen3OmniMoeProcessor = processor_class
     monkeypatch.setitem(
         sys.modules,
@@ -339,6 +339,62 @@ def test_capture_talker_inputs_uses_multimodal_timing_kwargs(monkeypatch, tmp_pa
 
     with pytest.raises(RuntimeError, match="stop after processor call"):
         module._capture_talker_inputs(
+            DummyNativeModel(),
+            DummyProcessor(),
+            torch.device("cpu"),
+            torch.float16,
+            tmp_path,
+            logger,
+        )
+
+    assert observed["kwargs"]["seconds_per_chunk"] == 2.0
+    assert observed["kwargs"]["position_id_per_seconds"] == 13
+    assert observed["kwargs"]["use_audio_in_video"] is True
+
+
+def test_capture_predictor_inputs_uses_multimodal_timing_kwargs(monkeypatch, tmp_path):
+    module, _ = _load_export_module(
+        monkeypatch,
+        module_path=PRED_EXPORT_MODULE_PATH,
+        module_name="qwen3_omni_xh2a_export_talker_prediction_testmod",
+    )
+    observed = {}
+
+    class FakeBatch(dict):
+        def to(self, *args, **kwargs):
+            return self
+
+    class DummyProcessor:
+        def apply_chat_template(self, conversation, add_generation_prompt=True, tokenize=False):
+            return "prompt"
+
+        def __call__(self, **kwargs):
+            observed["kwargs"] = kwargs
+            return FakeBatch({"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)})
+
+    class DummyPredictorModel:
+        def __init__(self):
+            self.forward = lambda *args, **kwargs: None
+
+    class DummyCodePredictor:
+        def __init__(self):
+            self.model = DummyPredictorModel()
+
+    class DummyTalker:
+        def __init__(self):
+            self.code_predictor = DummyCodePredictor()
+
+    class DummyNativeModel:
+        def __init__(self):
+            self.talker = DummyTalker()
+
+        def generate(self, **kwargs):
+            raise RuntimeError("stop after processor call")
+
+    logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="stop after processor call"):
+        module._capture_predictor_inputs(
             DummyNativeModel(),
             DummyProcessor(),
             torch.device("cpu"),

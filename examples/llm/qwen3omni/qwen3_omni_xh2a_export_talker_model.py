@@ -15,10 +15,10 @@ then uses those inputs to wrap / trace / quant / export the talker module.
 """
 
 import argparse
-import os.path as osp
 import os
-import time
+import os.path as osp
 import sys
+import time
 import types
 from copy import deepcopy
 from enum import Enum
@@ -26,19 +26,21 @@ from pathlib import Path
 
 import torch
 
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import (
     _build_safe_validation_max_memory,
-    discover_artifacts,
     _patch_inputs_embeds_generation_device,
     _patch_runtime_device_property,
     _resolve_validation_device_map,
+    discover_artifacts,
     run_dialogue_validation,
     save_json,
 )
+
 
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
@@ -50,6 +52,7 @@ except ImportError:
 
 from xh_model_zoo.xh_llm.models.base_converter import BaseConverter
 from xh_model_zoo.xh_llm.models.builder import wrap_llm_model
+
 
 from xhquant.api import (  # isort:skip
     CacheTensor,
@@ -69,6 +72,10 @@ from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 _TALKER_DIALOGUE_PREFILL_HEADROOM = 32
+_DEFAULT_LONG_DIALOGUE_PROMPT = (
+    "What can you see and hear? Please answer in four complete sentences, "
+    "with enough detail to make the synthesized speech noticeably longer."
+)
 
 try:
     from qwen_omni_utils import process_mm_info
@@ -215,7 +222,7 @@ def _force_eager_moe_implementation(module, logger=None):
             return
         visited_configs.add(config_id)
 
-        if hasattr(config, "_experts_implementation") and getattr(config, "_experts_implementation") != "eager":
+        if hasattr(config, "_experts_implementation") and config._experts_implementation != "eager":
             config._experts_implementation = "eager"
             updated += 1
 
@@ -247,7 +254,10 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
         logger.info(f"Loading cached talker inputs from {capture_path}")
         cached = torch.load(capture_path, map_location="cpu", weights_only=False)
         cached_entry = cached[0] if cached else None
-        if isinstance(cached_entry, dict) and int(cached_entry.get("capture_contract_version", 0)) >= capture_contract_version:
+        if (
+            isinstance(cached_entry, dict)
+            and int(cached_entry.get("capture_contract_version", 0)) >= capture_contract_version
+        ):
             return cached
         logger.info("Cached talker inputs use a stale capture contract, recapturing with current processor kwargs")
 
@@ -316,7 +326,9 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
                 "role_mask": _clone_capture_value((~user_mm_mask).unsqueeze(-1).to(user_talker_part.dtype)),
                 "bypass_embeds": _clone_capture_value(torch.zeros_like(user_talker_part)),
                 "bypass_mask": _clone_capture_value(
-                    torch.zeros(*user_talker_part.shape[:2], 1, dtype=user_talker_part.dtype, device=user_talker_part.device)
+                    torch.zeros(
+                        *user_talker_part.shape[:2], 1, dtype=user_talker_part.dtype, device=user_talker_part.device
+                    )
                 ),
             }
         )
@@ -463,6 +475,7 @@ def _run_talker_dialogue_validation(
     max_new_tokens: int,
     talker_max_new_tokens: int,
     save_golden: bool,
+    validation_prompt: str | None = None,
 ):
     dialogue_artifacts = {"talker": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
     sibling_artifacts = discover_artifacts(work_dir.parent)
@@ -480,6 +493,7 @@ def _run_talker_dialogue_validation(
         output_prefix="talker_dialogue",
         save_golden=save_golden,
         golden_dir=golden_dir,
+        validation_prompt=validation_prompt,
     )
 
 
@@ -581,7 +595,7 @@ def main(args):
         )
     else:
         # ---- 1. Load full HF model ----
-        from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
+        from transformers import Qwen3OmniMoeProcessor
 
         native_model = _load_native_model_for_capture(hf_model_path, logger)
         _ensure_mistral_common_reasoning_effort()
@@ -650,27 +664,20 @@ def main(args):
         current_input_length_t = torch.tensor([actual_input_sequence_length], dtype=torch.int32)
 
         # Build calibration inputs for the fused graph (both projection heads
-        # baked into prefill/decode). Calibration source uses randn in a
-        # reasonable fp16 range so both projection heads get meaningful
-        # activations; bypass path is exercised by routing the captured
-        # ``inputs_embeds`` through ``bypass_embeds`` with ``bypass_mask=1``.
+        # baked into prefill/decode). Use the captured HF talker input mix so
+        # projection, bypass, and role masks follow the standard Qwen3-Omni
+        # prefill path instead of calibrating mostly on an all-bypass shadow.
         source_batch = int(inputs_embeds.shape[0])
-        source_seq = int(inputs_embeds.shape[1])
-        talker_hs = int(inputs_embeds.shape[-1])
         thinker_hs = int(talker.hidden_projection.linear_fc1.in_features)
 
-        torch.manual_seed(0)
-        source_prefill = torch.randn(source_batch, source_seq, thinker_hs, dtype=torch.float16)
-        if actual_input_sequence_length < source_seq:
-            source_prefill[:, actual_input_sequence_length:, :] = 0
-        role_mask_prefill = torch.zeros(source_batch, source_seq, 1, dtype=torch.float16)
-        # Mark roughly half of positions as text-projection path so both heads
-        # receive representative activations during calibration.
-        if actual_input_sequence_length > 1:
-            role_mask_prefill[:, actual_input_sequence_length // 2 : actual_input_sequence_length, :] = 1.0
-        bypass_embeds_prefill = inputs_embeds
-        bypass_mask_prefill = torch.zeros(source_batch, source_seq, 1, dtype=torch.float16)
-        bypass_mask_prefill[:, :actual_input_sequence_length, :] = 1.0
+        source_prefill, role_mask_prefill, bypass_embeds_prefill, bypass_mask_prefill = _build_prefill_fused_inputs(
+            captured_entry,
+            inputs_embeds,
+            {
+                "talker_hidden_state_size": thinker_hs,
+                "talker_thinker_hidden_size": thinker_hs,
+            },
+        )
 
         prefill_inputs = (
             source_prefill,
@@ -801,7 +808,6 @@ def main(args):
             # hidden_state mix so the style-guidance path is exercised; fall
             # back to bypass-only when legacy captures do not contain it.
             prefill_batch = int(inputs_embeds.shape[0])
-            prefill_seq = int(inputs_embeds.shape[1])
             prefill_thinker_hs = int(
                 meta_info.get(
                     "talker_hidden_state_size",
@@ -874,6 +880,7 @@ def main(args):
                 max_new_tokens=args.max_new_tokens,
                 talker_max_new_tokens=args.talker_max_new_tokens,
                 save_golden=args.save_golden,
+                validation_prompt=args.validation_prompt,
             )
 
 
@@ -885,12 +892,18 @@ if __name__ == "__main__":
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--valid", action="store_true", default=True, help="validate exported HMONNX")
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument(
         "--talker-max-new-tokens",
         type=int,
-        default=16,
-        help="cap talker audio tokens during dialogue validation",
+        default=96,
+        help="cap talker audio tokens during dialogue validation; increase this for longer generated speech",
+    )
+    parser.add_argument(
+        "--validation-prompt",
+        type=str,
+        default=_DEFAULT_LONG_DIALOGUE_PROMPT,
+        help="prompt used by dialogue validation; use a longer prompt/request to produce longer speech",
     )
     parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
     parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")

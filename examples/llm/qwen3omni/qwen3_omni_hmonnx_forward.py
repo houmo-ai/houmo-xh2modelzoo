@@ -3,17 +3,19 @@
 """Forward sanity suite for exported Qwen3-Omni HMONNX artifacts."""
 
 import argparse
+import sys
 import time
 from pathlib import Path
-import sys
 
 import torch
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import discover_artifacts, run_text_hmonnx_chain_forward, save_json
+
 from xhquant.api import CacheTensor, get_root_logger, xhquant_init
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
@@ -151,12 +153,13 @@ def _run_talker_prediction_forward(meta, report):
         *past_key_caches,
         *past_value_caches,
     )
-    prefill_tensor = prefill_out[0] if isinstance(prefill_out, (list, tuple)) else prefill_out
-    decode_tensor = decode_out[0] if isinstance(decode_out, (list, tuple)) else decode_out
+    prefill_outputs = list(prefill_out) if isinstance(prefill_out, (list, tuple)) else [prefill_out]
+    decode_outputs = list(decode_out) if isinstance(decode_out, (list, tuple)) else [decode_out]
     report["talker_prediction"] = {
         "status": "ok",
-        "prefill_shape": list(prefill_tensor.shape),
-        "decode_shape": list(decode_tensor.shape),
+        "prefill_output_shapes": [list(tensor.shape) for tensor in prefill_outputs],
+        "decode_output_shapes": [list(tensor.shape) for tensor in decode_outputs],
+        "residual_hidden_contract": "second output should match predictor input embeddings for talker residual sum",
     }
 
 
@@ -230,8 +233,12 @@ if __name__ == "__main__":
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
     parser.add_argument("--case", type=str, default="multimodal", choices=["text", "vision", "audio", "multimodal"])
     parser.add_argument("--device-map", type=str, default="auto", choices=["auto", "cpu", "cuda:0"])
-    parser.add_argument("--quick", action="store_true", help="run only a fast text-chain sanity check and skip extra module forwards")
-    parser.add_argument("--max-new-tokens", type=int, default=None, help="override generated token count for text-chain validation")
+    parser.add_argument(
+        "--quick", action="store_true", help="run only a fast text-chain sanity check and skip extra module forwards"
+    )
+    parser.add_argument(
+        "--max-new-tokens", type=int, default=None, help="override generated token count for text-chain validation"
+    )
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(args)

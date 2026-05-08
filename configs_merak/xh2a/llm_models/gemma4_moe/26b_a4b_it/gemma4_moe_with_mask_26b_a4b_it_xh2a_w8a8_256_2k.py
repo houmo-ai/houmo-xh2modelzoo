@@ -14,7 +14,7 @@ model = dict(
     use_cache=True,
     num_logits_to_keep=1,
     quant_scheme=dict(
-        quant_type="w8a8h1_sefp",
+        quant_type="w4a8h1_sefp",
         ops={},
     ),
     visual_config=dict(
