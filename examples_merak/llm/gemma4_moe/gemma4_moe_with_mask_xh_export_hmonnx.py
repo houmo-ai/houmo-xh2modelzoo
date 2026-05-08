@@ -158,7 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--force", default=True, action="store_true", help="Whether to force export even if the model exists.")
     parser.add_argument(
         "--valid",
-        default=True,
+        default=False,
         action="store_true",
         help="Wrap only the first decoder block for a fast smoke export.",
     )

@@ -58,9 +58,95 @@ def _load_prompt_inputs(hf_model_dir: str, prompt: str, enable_thinking: bool = 
     return _load_prompt_inputs_from_tokenizer(tokenizer, prompt, enable_thinking)
 
 
+def _load_json_file(path: str | Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _resolve_meta_path(meta_path: str | Path, referenced_path: str | Path) -> Path:
+    resolved_path = Path(referenced_path)
+    if resolved_path.is_absolute():
+        return resolved_path
+    return Path(meta_path).resolve().parent / resolved_path
+
+
+def _load_hf_config_from_runtime_meta(runtime_meta_path: str | Path, runtime_meta: dict) -> dict:
+    hf_config = runtime_meta.get("hf_config")
+    if not hf_config:
+        return {}
+    hf_config_path = _resolve_meta_path(runtime_meta_path, hf_config)
+    if hf_config_path.is_dir():
+        hf_config_path = hf_config_path / "config.json"
+    if not hf_config_path.exists():
+        return {}
+    return _load_json_file(hf_config_path)
+
+
+def _load_hf_generation_config_from_runtime_meta(runtime_meta_path: str | Path, runtime_meta: dict) -> dict:
+    hf_config = runtime_meta.get("hf_config")
+    if not hf_config:
+        return {}
+    hf_config_path = _resolve_meta_path(runtime_meta_path, hf_config)
+    if not hf_config_path.is_dir():
+        hf_config_path = hf_config_path.parent
+    generation_config_path = hf_config_path / "generation_config.json"
+    if not generation_config_path.exists():
+        return {}
+    return _load_json_file(generation_config_path)
+
+
+def _load_hf_config_from_model_dir(hf_model_dir: str | Path) -> dict:
+    config_path = Path(hf_model_dir) / "config.json"
+    if not config_path.exists():
+        return {}
+    return _load_json_file(config_path)
+
+
+def _load_hf_generation_config_from_model_dir(hf_model_dir: str | Path) -> dict:
+    generation_config_path = Path(hf_model_dir) / "generation_config.json"
+    if not generation_config_path.exists():
+        return {}
+    return _load_json_file(generation_config_path)
+
+
+def _append_token_ids(token_ids: list[int], value) -> None:
+    if value is None:
+        return
+    if isinstance(value, int):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = value
+    else:
+        return
+    for token_id in candidates:
+        token_id = int(token_id)
+        if token_id not in token_ids:
+            token_ids.append(token_id)
+
+
+def _resolve_eos_token_id(tokenizer, *configs: dict) -> int | list[int] | None:
+    token_ids: list[int] = []
+    for config in configs:
+        _append_token_ids(token_ids, config.get("eos_token_id"))
+    _append_token_ids(token_ids, tokenizer.eos_token_id)
+
+    for token in (getattr(tokenizer, "eot_token", None), "<turn|>"):
+        if token is None:
+            continue
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id != tokenizer.unk_token_id and token_id not in token_ids:
+            token_ids.append(int(token_id))
+
+    if not token_ids:
+        return None
+    if len(token_ids) == 1:
+        return token_ids[0]
+    return token_ids
+
+
 def _resolve_runtime_meta_path(meta_path: str) -> Path:
     resolved_meta_path = Path(meta_path).resolve()
-    meta = json.load(open(resolved_meta_path, encoding="utf-8"))
+    meta = _load_json_file(resolved_meta_path)
     if meta.get("model_config", {}).get("model_type"):
         return resolved_meta_path
 
@@ -103,8 +189,20 @@ def run_hf(args) -> None:
         attn_implementation="eager",
     ).eval().to(device)
     inputs = {k: v.to(device) for k, v in inputs.items()}
+    eos_token_id = _resolve_eos_token_id(
+        tokenizer,
+        _load_hf_generation_config_from_model_dir(args.hf_model_dir),
+        _load_hf_config_from_model_dir(args.hf_model_dir),
+    )
+    generation_kwargs = {
+        **inputs,
+        "max_new_tokens": args.max_decode_steps,
+        "do_sample": False,
+    }
+    if eos_token_id is not None:
+        generation_kwargs["eos_token_id"] = eos_token_id
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=args.max_decode_steps, do_sample=False)
+        out = model.generate(**generation_kwargs)
     print(tokenizer.decode(out[0], skip_special_tokens=True))
 
 
@@ -117,6 +215,7 @@ def run_weight_only(args) -> None:
 def run_hmonnx(args) -> None:
     logger = get_xhquant_logger()
     runtime_meta_path = _resolve_runtime_meta_path(args.model_config)
+    runtime_meta = _load_json_file(runtime_meta_path)
     hmonnx_model = AutoLLMHONNXModel.from_pretrained(str(runtime_meta_path))
 
     device = args.device
@@ -147,6 +246,14 @@ def run_hmonnx(args) -> None:
     }
     if streamer is not None:
         generation_kwargs["streamer"] = streamer
+    eos_token_id = _resolve_eos_token_id(
+        tokenizer,
+        _load_hf_generation_config_from_runtime_meta(runtime_meta_path, runtime_meta),
+        _load_hf_config_from_runtime_meta(runtime_meta_path, runtime_meta),
+    )
+    if eos_token_id is not None:
+        generation_kwargs["eos_token_id"] = eos_token_id
+        logger.info("Using eos_token_id for generation: %s", eos_token_id)
 
     contexts = [
         TimeProfiler("gemma4_moe_with_mask_hmonnx_generate", logger),

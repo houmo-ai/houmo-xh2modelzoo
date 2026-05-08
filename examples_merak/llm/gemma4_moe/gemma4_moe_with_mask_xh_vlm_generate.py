@@ -59,6 +59,54 @@ def load_hf_config(llm_meta: dict, llm_meta_path: str | Path) -> dict:
     return load_meta(hf_config_path)
 
 
+def load_hf_generation_config(llm_meta: dict, llm_meta_path: str | Path) -> dict:
+    hf_config = llm_meta.get("hf_config")
+    if not hf_config:
+        return {}
+    hf_config_path = resolve_meta_path(llm_meta_path, hf_config)
+    if not hf_config_path.is_dir():
+        hf_config_path = hf_config_path.parent
+    generation_config_path = hf_config_path / "generation_config.json"
+    if not generation_config_path.exists():
+        return {}
+    return load_meta(generation_config_path)
+
+
+def _append_token_ids(token_ids: list[int], value) -> None:
+    if value is None:
+        return
+    if isinstance(value, int):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = value
+    else:
+        return
+    for token_id in candidates:
+        token_id = int(token_id)
+        if token_id not in token_ids:
+            token_ids.append(token_id)
+
+
+def resolve_eos_token_id(tokenizer, llm_meta: dict, llm_meta_path: str | Path) -> int | list[int] | None:
+    token_ids: list[int] = []
+    _append_token_ids(token_ids, load_hf_generation_config(llm_meta, llm_meta_path).get("eos_token_id"))
+    _append_token_ids(token_ids, load_hf_config(llm_meta, llm_meta_path).get("eos_token_id"))
+    _append_token_ids(token_ids, tokenizer.eos_token_id)
+
+    for token in (getattr(tokenizer, "eot_token", None), "<turn|>"):
+        if token is None:
+            continue
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id != tokenizer.unk_token_id and token_id not in token_ids:
+            token_ids.append(int(token_id))
+
+    if not token_ids:
+        return None
+    if len(token_ids) == 1:
+        return token_ids[0]
+    return token_ids
+
+
 def resolve_llm_runtime_meta(llm_meta_path: str | Path) -> tuple[Path, dict]:
     resolved_meta_path = Path(llm_meta_path).resolve()
     llm_meta = load_meta(resolved_meta_path)
@@ -477,9 +525,10 @@ def main() -> None:
         generation_kwargs["image_embeds"] = image_embeds.to(device=device, dtype=runtime_model.dtype)
     if streamer is not None:
         generation_kwargs["streamer"] = streamer
-    eos_token_id = tokenizer.eos_token_id
+    eos_token_id = resolve_eos_token_id(tokenizer, llm_runtime_meta, runtime_meta_path)
     if eos_token_id is not None:
         generation_kwargs["eos_token_id"] = eos_token_id
+        logger.info("Using eos_token_id for generation: %s", eos_token_id)
 
     contexts = [
         TimeProfiler("gemma4_moe_vlm_generate", logger),

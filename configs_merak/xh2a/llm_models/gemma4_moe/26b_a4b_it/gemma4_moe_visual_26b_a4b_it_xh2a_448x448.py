@@ -2,7 +2,7 @@ _base_ = [
     "../../../_base_/xh2a_base.py",
 ]
 
-hf_model_dir = "/data01/datasets/gemma-4-26B-A4B-it"
+hf_model_dir = "./model/gemma-4-26B-A4B-it"
 
 model = dict(
     model_type="Gemma4ForConditionalGeneration_visual",
