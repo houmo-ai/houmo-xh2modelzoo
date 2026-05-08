@@ -1169,7 +1169,7 @@ class SD3Converter:
         pipe = StableDiffusion3Pipeline.from_pretrained(
             pretrained_model_path,
             torch_dtype=torch.float16,
-            device_map="cpu",
+            # device_map="cpu",
         )
         return pipe
 

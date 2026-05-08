@@ -21,20 +21,46 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-import torch.nn as nn
 from diffusers import StableDiffusion3Pipeline
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.clip.modeling_clip import CLIPTextModelOutput
+
 from xhquant.api import HMONNXInference
 
+from ....utils.device_dtype_mixin import DeviceDtypeMixin
 from .sd3_inference import SD3Inference
 
 
-class Clip(nn.Module):
-    def __init__(self, clip: HMONNXInference):
+class HMONNXModule(DeviceDtypeMixin):
+    def __init__(self, runtime: HMONNXInference):
         super().__init__()
-        self.clip = clip
+        self.runtime = runtime
+        self._set_device(getattr(runtime, "device", torch.device("cpu")))
+        self._set_exec_device(self.device)
+        self._set_dtype(getattr(runtime, "dtype", torch.float16))
+
+    def to(self, *args, **kwargs):
+        device, dtype = torch._C._nn._parse_to(*args, **kwargs)[:2]
+        if device is not None:
+            device = torch.device(device)
+            if hasattr(self.runtime, "to"):
+                self.runtime.to(device)
+            self._set_device(device)
+            self._set_exec_device(device)
+        if dtype is not None:
+            self._set_dtype(dtype)
+        return self
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+
+class Clip(HMONNXModule):
+    def __init__(self, clip: HMONNXInference):
+        super().__init__(clip)
+        self.clip = self.runtime
 
     @property
     def dtype(self):
@@ -63,10 +89,10 @@ class Clip(nn.Module):
         return outputs
 
 
-class T5(nn.Module):
+class T5(HMONNXModule):
     def __init__(self, t5: HMONNXInference):
-        super().__init__()
-        self.t5 = t5
+        super().__init__(t5)
+        self.t5 = self.runtime
 
     @property
     def dtype(self):
@@ -87,10 +113,10 @@ class T5(nn.Module):
         return (text_embeds,)
 
 
-class MMDIT(nn.Module):
+class MMDIT(HMONNXModule):
     def __init__(self, mmdit: HMONNXInference):
-        super().__init__()
-        self.mmdit = mmdit
+        super().__init__(mmdit)
+        self.mmdit = self.runtime
 
     @property
     def dtype(self):
@@ -119,10 +145,10 @@ class MMDIT(nn.Module):
         return Transformer2DModelOutput(sample=output)
 
 
-class VAE(nn.Module):
+class VAE(HMONNXModule):
     def __init__(self, vae: HMONNXInference):
-        super().__init__()
-        self.vae = vae
+        super().__init__(vae)
+        self.vae = self.runtime
 
     def forward(
         self,

@@ -22,15 +22,18 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from xhquant.api import HMONNXInference
+from xhquant.api import HMONNXGoldenInference as HMONNXInference
 
 from ....utils import DeviceDtypeMixin
 
 
 class SD3Inference(DeviceDtypeMixin):
-    def __init__(self, model_config_file: Path, fast_mode: bool = False):
+    def __init__(self, model_config_file: Path, fast_mode: bool = False, save_golden=False):
         super().__init__()
         self.fast_mode = fast_mode
+        self.save_golden = save_golden
+        if save_golden:
+            assert not fast_mode, "save_golden mode must be used with fast_mode=False, but got fast_mode=True"
         model_dir = Path(model_config_file).parent
         meta_info = json.load(open(model_config_file, "r"))
         self.meta_info = meta_info
@@ -53,15 +56,6 @@ class SD3Inference(DeviceDtypeMixin):
         self.init_vae()
         self.init_t5()
 
-    def init_clip(self):
-        if self.clip_session is not None:
-            return
-        self.clip_session = HMONNXInference(self.clip_hmonnx_file)
-        if self.fast_mode:
-            self.clip_session.to_fast_mode()
-        self.clip_session.exec_device = self._exec_device
-        self.clip_session.to(self.device)
-
     @property
     def width(self):
         return self.meta_info["width"]
@@ -80,6 +74,11 @@ class SD3Inference(DeviceDtypeMixin):
         self.mmdit_session = HMONNXInference(self.mmdit_hmonnx_file)
         if self.fast_mode:
             self.mmdit_session.to_fast_mode()
+        if self.save_golden:
+            self.mmdit_session.save_golden = True
+            self.mmdit_session.golden_dir = str(Path(self.mmdit_hmonnx_file).parent / "golden" / "mmdit")
+            self.mmdit_session.reset_step()
+
         self.mmdit_session.exec_device = self._exec_device
         self.mmdit_session.to(self.device)
 
@@ -89,6 +88,9 @@ class SD3Inference(DeviceDtypeMixin):
         self.clip_l_session = HMONNXInference(self.clip_l_hmonnx_file)
         if self.fast_mode:
             self.clip_l_session.to_fast_mode()
+        if self.save_golden:
+            self.clip_l_session.save_golden = True
+            self.clip_l_session.golden_dir = str(Path(self.clip_l_hmonnx_file).parent / "golden" / "clip_l")
         self.clip_l_session.exec_device = self._exec_device
         self.clip_l_session.to(self.device)
 
@@ -98,6 +100,10 @@ class SD3Inference(DeviceDtypeMixin):
         self.clip_session = HMONNXInference(self.clip_hmonnx_file)
         if self.fast_mode:
             self.clip_session.to_fast_mode()
+        if self.save_golden:
+            self.clip_session.save_golden = True
+            self.clip_session.golden_dir = str(Path(self.clip_hmonnx_file).parent / "golden" / "clip")
+
         self.clip_session.exec_device = self._exec_device
         self.clip_session.to(self.device)
 
@@ -107,6 +113,9 @@ class SD3Inference(DeviceDtypeMixin):
         self.vae_session = HMONNXInference(self.vae_hmonnx_file)
         if self.fast_mode:
             self.vae_session.to_fast_mode()
+        if self.save_golden:
+            self.vae_session.save_golden = True
+            self.vae_session.golden_dir = str(Path(self.vae_hmonnx_file).parent / "golden" / "vae")
         self.vae_session.exec_device = self._exec_device
         self.vae_session.to(self.device)
 
@@ -116,5 +125,8 @@ class SD3Inference(DeviceDtypeMixin):
         self.t5_session = HMONNXInference(self.t5_hmonnx_file)
         if self.fast_mode:
             self.t5_session.to_fast_mode()
+        if self.save_golden:
+            self.t5_session.save_golden = True
+            self.t5_session.golden_dir = str(Path(self.t5_hmonnx_file).parent / "golden" / "t5")
         self.t5_session.exec_device = self._exec_device
         self.t5_session.to(self.device)

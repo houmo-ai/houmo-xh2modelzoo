@@ -24,10 +24,9 @@ from typing import List
 
 import torch
 from PIL import ImageDraw
-from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
-from xh_model_zoo.utils.time_profiler import TimeProfiler
 from xh_model_zoo.xh_aigc.models.sd3 import SD3HFCompatible, SD3Inference
+from xhquant.api import get_root_logger, set_random_seed, xhquant_init
 
 
 def main(args):
@@ -35,7 +34,7 @@ def main(args):
     torch.set_grad_enabled(False)
     logger = get_root_logger()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    sd3_inference = SD3Inference(args.config, fast_mode=args.fast)
+    sd3_inference = SD3Inference(args.config, fast_mode=args.fast, save_golden=args.save_golden)
     sd3_inference.to(device)
     set_random_seed(args.seed, deterministic=False)
     pipe = SD3HFCompatible.to_hf_compatible(args.hf_model)
@@ -86,6 +85,11 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument(
         "--output", type=str, default="work_dirs/stable-diffusion-3-medium-diffusers_XH2a_512x512/tests/sd3-test.png"
+    )
+    parser.add_argument(
+        "--save-golden",
+        action="store_true",
+        help="Whether to save golden outputs for all HMONNX sessions, only supported in aligned mode (i.e., fast_mode=False)",
     )
     args = parser.parse_args()
     main(args)
