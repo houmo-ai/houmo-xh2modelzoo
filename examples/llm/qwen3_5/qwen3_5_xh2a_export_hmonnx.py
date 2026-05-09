@@ -439,6 +439,97 @@ def _cleanup_hmonnx_in_golden(golden_dir: Path, release_prefix: str, logger) -> 
             fpath.unlink()
 
 
+def _generate_draft_golden_for_onnx(
+    onnx_file: str,
+    golden_dir: Path,
+    token_embedding: nn.Module,
+    pad_token_id: int,
+    input_ids_full: torch.Tensor,
+    is_decode: bool,
+    device: torch.device,
+    multi_gpu: bool,
+    golden_max_memory: Optional[Dict],
+    logger,
+) -> None:
+    """Run inference on a draft ONNX model and save golden output activations.
+
+    Uses zeroed cache inputs and builds embeddings from input_ids for floating-point
+    sequence inputs. Unknown inputs fall back to zero tensors of the correct shape.
+    """
+    golden_dir.mkdir(exist_ok=True, parents=True)
+    valid_len = input_ids_full.shape[1]
+    past_seq_val = valid_len if is_decode else 0
+
+    session = _create_golden_session(onnx_file, golden_dir, device, multi_gpu, golden_max_memory, logger)
+    if hasattr(session, "legacy_mode"):
+        session.legacy_mode = False
+
+    cache_inputs = _alloc_cache_inputs(session, device)
+
+    # Detect the primary sequence-length from the 3-D float input (embeddings / hidden states)
+    float3d_names = [
+        n for n in session.get_input_names()
+        if session.get_input(n).dtype in (torch.float16, torch.float32, torch.bfloat16)
+        and len(session.get_input(n).shape) == 3
+        and n not in cache_inputs
+    ]
+    model_seq_len = session.get_input(float3d_names[0]).shape[1] if float3d_names else 1
+
+    input_feed: Dict[str, torch.Tensor] = {}
+    for name in session.get_input_names():
+        if name in cache_inputs:
+            input_feed[name] = cache_inputs[name]
+            continue
+
+        info = session.get_input(name)
+
+        if name in ("past_seq_length", "valid_length"):
+            b = info.shape[0] if info.shape else 1
+            input_feed[name] = torch.tensor([past_seq_val] * b, dtype=info.dtype, device=device)
+        elif name in ("current_input_length", "current_length"):
+            b = info.shape[0] if info.shape else 1
+            input_feed[name] = torch.tensor([model_seq_len] * b, dtype=info.dtype, device=device)
+        elif name in ("linear_attn_mask", "attention_mask", "attn_mask"):
+            # All-ones mask: all sequence positions are valid (simplest correct mask)
+            input_feed[name] = torch.ones(info.shape, dtype=info.dtype, device=device)
+        elif info.dtype in (torch.float16, torch.float32, torch.bfloat16) and len(info.shape) == 3:
+            embed_dim = token_embedding.weight.shape[1]
+            if info.shape[2] == embed_dim:
+                seq_len = info.shape[1]
+                input_feed[name] = _build_inputs_embeds(
+                    token_embedding, input_ids_full, seq_len, pad_token_id, device, info.dtype
+                )
+            else:
+                # Dimension mismatch (e.g., target_hidden concatenating multiple layers)
+                input_feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=device)
+        elif info.dtype in (torch.int32, torch.int64) and len(info.shape) == 2:
+            seq_len = info.shape[1]
+            if seq_len <= input_ids_full.shape[1]:
+                ids = input_ids_full[:, :seq_len].to(device=device, dtype=info.dtype)
+            else:
+                pad_ids = torch.full(
+                    (input_ids_full.shape[0], seq_len - input_ids_full.shape[1]),
+                    pad_token_id, dtype=info.dtype, device=device,
+                )
+                ids = torch.cat([input_ids_full.to(device=device, dtype=info.dtype), pad_ids], dim=1)
+            input_feed[name] = ids
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+            numel = 1
+            for d in info.shape:
+                numel *= d
+            pos = torch.arange(past_seq_val, past_seq_val + numel, device=device, dtype=info.dtype)
+            input_feed[name] = pos.reshape(info.shape)
+        else:
+            t = torch.zeros(info.shape, dtype=info.dtype, device=device)
+            if _is_cache_input_name(name):
+                t = _ensure_cache_tensor(t)
+            input_feed[name] = t
+
+    _run_hmonnx_with_golden(session, input_feed)
+    del session
+    cleanup_memory()
+
+
 def _load_token_embedding(embed_path: Path) -> nn.Module:
     try:
         obj = torch.load(str(embed_path), map_location="cpu", weights_only=False)
@@ -497,6 +588,8 @@ def _generate_golden(
     prefill_onnx_file: str,
     decode_onnx_file: str,
     logger,
+    draft_onnx_files: Optional[Dict[str, str]] = None,
+    spec_decode_mode: Optional[str] = None,
 ) -> Path:
     multi_gpu = getattr(args, "golden_multi_gpu", False)
     golden_max_memory = getattr(args, "golden_max_memory", None)
@@ -667,7 +760,10 @@ def _generate_golden(
             decode_input_feed[name] = decode_linear_attn_mask
         elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
             info = decode_session.get_input(name)
-            decode_pos = torch.tensor([valid_len], device=device, dtype=info.dtype).reshape(info.shape)
+            n_decode_tokens = decode_inputs_info.shape[1]
+            decode_pos = torch.arange(valid_len, valid_len + n_decode_tokens, device=device, dtype=info.dtype).reshape(
+                info.shape
+            )
             decode_input_feed[name] = decode_pos
         elif name.startswith("past_conv_cache_"):
             idx = name.split("_")[-1]
@@ -709,6 +805,59 @@ def _generate_golden(
     _cleanup_hmonnx_in_golden(prefill_dir, release_prefix, logger)
     _cleanup_hmonnx_in_golden(decode_dir, release_prefix, logger)
 
+    # ── Spec draft golden (MTP / DFlash) ────────────────────────────────────
+    # MTP:   draft_prefill/ + draft_decode/
+    # DFlash: draft_context/ + draft_decode/
+    draft_golden_paths: Dict[str, Path] = {}
+    if draft_onnx_files and spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode == "mtp":
+            draft_items: List[Tuple[str, str, bool]] = [
+                ("draft_prefill_onnx", "draft_prefill", False),
+                ("draft_decode_onnx", "draft_decode", True),
+            ]
+        else:  # dflash
+            draft_items = [
+                ("draft_context_onnx", "draft_context", False),
+                ("draft_decode_onnx", "draft_decode", True),
+            ]
+
+        for onnx_key, dir_name, is_decode_step in draft_items:
+            onnx_path_str = draft_onnx_files.get(onnx_key)
+            if not onnx_path_str:
+                logger.warning(f"[draft golden] '{onnx_key}' not found in draft_onnx_files, skipping.")
+                continue
+            onnx_path = Path(onnx_path_str)
+            if not onnx_path.exists():
+                logger.warning(f"[draft golden] ONNX not on disk: {onnx_path}, skipping.")
+                continue
+
+            draft_golden_dir = release_dir / dir_name
+            draft_golden_dir.mkdir(exist_ok=True, parents=True)
+
+            named_draft_onnx = draft_golden_dir / f"{release_prefix}_{dir_name}_with_act.onnx"
+            if not named_draft_onnx.exists():
+                _copy_path(onnx_path, named_draft_onnx)
+            draft_ext = _find_external_data(onnx_path)
+            if draft_ext is not None:
+                _copy_path(draft_ext, draft_golden_dir / draft_ext.name)
+
+            logger.info(f"Generating draft golden [{dir_name}] from {onnx_path.name} ...")
+            _generate_draft_golden_for_onnx(
+                onnx_file=str(onnx_path),
+                golden_dir=draft_golden_dir,
+                token_embedding=token_embedding,
+                pad_token_id=pad_token_id,
+                input_ids_full=input_ids_full,
+                is_decode=is_decode_step,
+                device=device,
+                multi_gpu=multi_gpu,
+                golden_max_memory=golden_max_memory,
+                logger=logger,
+            )
+            _cleanup_hmonnx_in_golden(draft_golden_dir, release_prefix, logger)
+            draft_golden_paths[dir_name] = draft_golden_dir
+            logger.info(f"Draft golden [{dir_name}] saved: {draft_golden_dir}")
+
     golden_meta = {
         "release_prefix": release_prefix,
         "zip_name": f"{release_prefix}.zip",
@@ -719,7 +868,14 @@ def _generate_golden(
         "quant_embedding": "quant_embedding.pt",
         "prefill_onnx": str(named_prefill_onnx.relative_to(release_dir)) if named_prefill_onnx.exists() else None,
         "decode_onnx": str(named_decode_onnx.relative_to(release_dir)) if named_decode_onnx.exists() else None,
+        "spec_decode_mode": spec_decode_mode,
     }
+    for dir_name, dir_path in draft_golden_paths.items():
+        golden_meta[f"{dir_name}_golden_dir"] = dir_name
+        named_onnx = dir_path / f"{release_prefix}_{dir_name}_with_act.onnx"
+        golden_meta[f"{dir_name}_onnx"] = (
+            str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
+        )
     with (release_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
         json.dump(golden_meta, fout, ensure_ascii=False, indent=2)
 
@@ -1354,6 +1510,8 @@ def _run_golden_generation(
     prefill_onnx_file: str,
     decode_onnx_file: str,
     logger,
+    draft_onnx_files: Optional[Dict[str, str]] = None,
+    spec_decode_mode: Optional[str] = None,
 ):
     if not getattr(args, "golden", False):
         logger.info("Skip HMONNX golden generation (enable with --golden or --golden_only)")
@@ -1362,7 +1520,11 @@ def _run_golden_generation(
     logger.info("=" * 60)
     logger.info("Generating HMONNX golden (prefill + decode)")
     logger.info("=" * 60)
-    release_dir = _generate_golden(cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger)
+    release_dir = _generate_golden(
+        cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger,
+        draft_onnx_files=draft_onnx_files,
+        spec_decode_mode=spec_decode_mode,
+    )
     if getattr(args, "package_release", False):
         _package_release_dir(release_dir, logger)
     return release_dir
@@ -1399,8 +1561,42 @@ def _golden_only_impl(cfg, args):
     logger.info(f"Reusing existing prefill ONNX: {prefill_onnx_file}")
     logger.info(f"Reusing existing decode ONNX: {decode_onnx_file}")
 
+    # Resolve draft ONNX files for spec decode modes from export_meta_info
+    spec_decode_mode = export_meta_info.get("spec_decode_mode", None)
+    draft_onnx_files: Optional[Dict[str, str]] = None
+    if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode == "mtp":
+            draft_meta_keys = [
+                ("draft_prefill_onnx_file", "draft_prefill_onnx"),
+                ("draft_decode_onnx_file", "draft_decode_onnx"),
+            ]
+        else:  # dflash
+            draft_meta_keys = [
+                ("draft_context_onnx_file", "draft_context_onnx"),
+                ("draft_decode_onnx_file", "draft_decode_onnx"),
+            ]
+        draft_onnx_files = {}
+        for meta_key, onnx_key in draft_meta_keys:
+            rel_path = export_meta_info.get(meta_key)
+            if rel_path:
+                candidate = work_dir / rel_path
+                if candidate.exists():
+                    draft_onnx_files[onnx_key] = str(candidate.resolve())
+                    logger.info(f"Found draft ONNX [{onnx_key}]: {candidate}")
+                else:
+                    logger.warning(f"Draft ONNX '{meta_key}' not found on disk: {candidate}")
+            else:
+                logger.warning(f"Draft ONNX key '{meta_key}' missing from export_meta_info.json")
+        if not draft_onnx_files:
+            draft_onnx_files = None
+            spec_decode_mode = None
+
     tokenizer, input_ids = _prepare_golden_only_context(cfg, args, logger)
-    _run_golden_generation(cfg, args, input_ids, tokenizer, str(prefill_onnx_file), str(decode_onnx_file), logger)
+    _run_golden_generation(
+        cfg, args, input_ids, tokenizer, str(prefill_onnx_file), str(decode_onnx_file), logger,
+        draft_onnx_files=draft_onnx_files,
+        spec_decode_mode=spec_decode_mode,
+    )
 
 
 def _export_impl(cfg, args):
@@ -1478,12 +1674,14 @@ def _export_impl(cfg, args):
 
     # Export draft model for speculative decoding
     spec_decode_mode = getattr(args, "spec_decode_mode", None)
+    draft_onnx_files_for_golden: Optional[Dict[str, str]] = None
     if spec_decode_mode and spec_decode_mode != "none":
         draft_onnx_dir = Path(cfg.work_dir) / "draft_onnx"
         draft_onnx_dir.mkdir(exist_ok=True, parents=True)
         draft_onnx_files = _export_draft_model(
             cfg, args, spec_decode_mode, draft_onnx_dir, logger
         )
+        draft_onnx_files_for_golden = dict(draft_onnx_files)
         for key, value in draft_onnx_files.items():
             meta_info[f"{key}_file"] = str(Path(value).relative_to(cfg.work_dir))
         if "draft_decode_onnx" in draft_onnx_files:
@@ -1499,7 +1697,11 @@ def _export_impl(cfg, args):
             meta_info.spec_decode_hidden_output_name = "post_norm_hidden"
         meta_info.spec_decode_verify_length = spec_verify_length
 
-    release_dir = _run_golden_generation(cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger)
+    release_dir = _run_golden_generation(
+        cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger,
+        draft_onnx_files=draft_onnx_files_for_golden,
+        spec_decode_mode=spec_decode_mode if spec_decode_mode and spec_decode_mode != "none" else None,
+    )
     if release_dir is not None:
         meta_info.release_dir = str(Path(release_dir).relative_to(cfg.work_dir))
 

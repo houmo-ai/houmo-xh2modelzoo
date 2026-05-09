@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+from transformers import AutoConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
 
 from ..base_model import BaseModel
@@ -104,15 +107,71 @@ class XHQwen3_5VisionModel(BaseModel):
             setattr(module_ref, attr_name, nn.Parameter(param.clone()))
         return module
 
-    def get_hf_model(self, device_map="cpu", **kwargs) -> Qwen3_5ForConditionalGeneration:
-        assert self.hf_model_dir is not None
-        hf_model = Qwen3_5ForConditionalGeneration.from_pretrained(
+    def _load_hf_model(self, device_map="cpu", **kwargs) -> Qwen3_5ForConditionalGeneration:
+        config = AutoConfig.from_pretrained(self.hf_model_dir, trust_remote_code=True)
+        quantization_config = getattr(config, "quantization_config", None)
+        quant_method = getattr(quantization_config, "quant_method", None)
+        if isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method", quant_method)
+
+        if self.is_gptqmodel or str(quant_method).lower() == "gptq":
+            return self._load_gptqmodel(device_map, **kwargs)
+
+        if "torch_dtype" not in kwargs:
+            kwargs["torch_dtype"] = torch.float16
+
+        return Qwen3_5ForConditionalGeneration.from_pretrained(
             self.hf_model_dir,
-            torch_dtype=torch.float16,
             trust_remote_code=True,
             device_map=device_map,
             **kwargs,
         ).eval()
+
+    def _load_gptqmodel(self, device_map="cpu", **kwargs) -> Qwen3_5ForConditionalGeneration:
+        from gptqmodel import GPTQModel
+        
+        trust_remote_code = bool(kwargs.pop("trust_remote_code", True))
+        backend = kwargs.pop("backend", "torch")
+        valid_string_device_maps = {"auto", "balanced", "balanced_low_0", "sequential"}
+        load_kwargs = {
+            "backend": backend,
+            "trust_remote_code": trust_remote_code,
+            **kwargs,
+        }
+
+        if isinstance(device_map, dict):
+            load_kwargs["device_map"] = device_map
+        elif isinstance(device_map, str):
+            if device_map in valid_string_device_maps:
+                load_kwargs["device_map"] = device_map
+            elif device_map != "meta":
+                load_kwargs["device"] = device_map
+        elif device_map is not None:
+            load_kwargs["device"] = device_map
+
+        if "device_map" in load_kwargs and "device" not in load_kwargs:
+            load_kwargs["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        try:
+            q_model = GPTQModel.load(self.hf_model_dir, **load_kwargs)
+        except TypeError:
+            load_kwargs.pop("backend", None)
+            q_model = GPTQModel.load(self.hf_model_dir, **load_kwargs)
+
+        hf_model = q_model.model.eval()
+        qcfg = getattr(hf_model.config, "quantization_config", None)
+        if isinstance(qcfg, dict):
+            try:
+                from transformers.utils.quantization_config import GPTQConfig
+
+                hf_model.config.quantization_config = GPTQConfig.from_dict(qcfg)
+            except Exception:
+                pass
+        return hf_model
+
+    def get_hf_model(self, device_map="cpu", **kwargs) -> Qwen3_5ForConditionalGeneration:
+        assert self.hf_model_dir is not None
+        hf_model = self._load_hf_model(device_map, **kwargs)
         return hf_model
 
     def init_wrap_model(self, hf_model=None):

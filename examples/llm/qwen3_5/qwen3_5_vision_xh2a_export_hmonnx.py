@@ -409,7 +409,7 @@ class ONNXWrapModel(nn.Module):
         device = pixel_values.device
         pixel_values = pixel_values.float().cpu().numpy()
         out = self.session.run(None, {"pixel_values": pixel_values})
-        image_embeds = torch.from_numpy(out[0]).to(dtype=dtype, device=device)
+        image_embeds = torch.from_numpy(out[0][0]).to(dtype=dtype, device=device)
         return BaseModelOutputWithPooling(last_hidden_state=None, pooler_output=image_embeds)
 
 
@@ -609,7 +609,7 @@ def _prepare_inputs(hf_model_dir, args):
         }
     ]
 
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     image_inputs, video_inputs = process_vision_info(messages, image_patch_size=args.patch_size)
 
     inputs = processor(
