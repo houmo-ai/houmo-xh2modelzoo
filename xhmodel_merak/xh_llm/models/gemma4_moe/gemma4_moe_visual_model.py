@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,17 +35,64 @@ def _build_position_ids(height: int, width: int, patch_size: int, device: torch.
     return torch.stack(patch_grid, dim=-1).reshape(-1, 2)
 
 
-def _image_to_patches(image: Any, patch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _get_aspect_ratio_preserving_size(
+    height: int,
+    width: int,
+    patch_size: int,
+    max_patches: int,
+    pooling_kernel_size: int,
+) -> tuple[int, int]:
+    target_pixels = max_patches * patch_size**2
+    scale = math.sqrt(target_pixels / (height * width))
+    side_multiple = pooling_kernel_size * patch_size
+    target_height = int(math.floor((height * scale) / side_multiple)) * side_multiple
+    target_width = int(math.floor((width * scale) / side_multiple)) * side_multiple
+
+    if target_height == 0 and target_width == 0:
+        raise ValueError(
+            "Attempting to resize to a 0 x 0 image. "
+            f"Resized dimensions must be divisible by {side_multiple}."
+        )
+
+    max_side_length = (max_patches // pooling_kernel_size**2) * side_multiple
+    if target_height == 0:
+        target_height = side_multiple
+        target_width = min(int(math.floor(width / height)) * side_multiple, max_side_length)
+    elif target_width == 0:
+        target_width = side_multiple
+        target_height = min(int(math.floor(height / width)) * side_multiple, max_side_length)
+
+    if target_height * target_width > target_pixels:
+        raise ValueError(
+            f"Resizing [{height}x{width}] to [{target_height}x{target_width}] exceeds "
+            f"{max_patches} patches with patch_size {patch_size}."
+        )
+    return target_height, target_width
+
+
+def _image_to_patches(
+    image: Any,
+    patch_size: int,
+    max_soft_tokens: int,
+    pooling_kernel_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     from PIL import Image
 
     if not isinstance(image, Image.Image):
         image = Image.open(image)
     image = image.convert("RGB")
     width, height = image.size
-    if width % patch_size or height % patch_size:
-        width = width // patch_size * patch_size
-        height = height // patch_size * patch_size
-        image = image.resize((width, height))
+    max_patches = max_soft_tokens * pooling_kernel_size**2
+    height, width = _get_aspect_ratio_preserving_size(
+        height=height,
+        width=width,
+        patch_size=patch_size,
+        max_patches=max_patches,
+        pooling_kernel_size=pooling_kernel_size,
+    )
+    if image.size != (width, height):
+        resample = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
+        image = image.resize((width, height), resample)
     data = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
     data = data.reshape(height, width, 3).permute(2, 0, 1).float() / 255.0
     num_channels, image_height, image_width = data.shape
@@ -114,7 +162,12 @@ class XHGemma4MoeVisualProcessor:
         pooling_kernel_size = self.image_processor.pooling_kernel_size
         max_patches = self.image_processor.max_soft_tokens * pooling_kernel_size**2
         for image in images:
-            patches, positions = _image_to_patches(image, patch_size)
+            patches, positions = _image_to_patches(
+                image,
+                patch_size,
+                self.image_processor.max_soft_tokens,
+                pooling_kernel_size,
+            )
             num_soft_tokens_per_image.append(patches.shape[0] // pooling_kernel_size**2)
             if patches.shape[0] < max_patches:
                 padding = max_patches - patches.shape[0]

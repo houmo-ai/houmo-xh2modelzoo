@@ -61,6 +61,8 @@ dependencies = [
   "gguf (>=0.17.1,<0.18.0)",
   "qwen-vl-utils (>=0.0.14,<0.0.15)",
   "datasets (>=4.5.0,<5.0.0)",
+  "evalscope (>=1.4.2,<2.0.0)",
+  "gradio (>=6.12.0,<7.0.0)",
   "sentencepiece (>=0.2.1)",
   "transformers (>=4.57.0,<4.58.0)",
   "peft (>=0.17.0)",
@@ -76,7 +78,7 @@ version = "1.0.0"
 
 [tool.poetry]
 package-mode = true
-packages = [{ include = "xh_model_zoo" }, { include = "xhmodel_merak" }]
+packages = [{ include = "xh_model_zoo" }, { include = "xhmodel_merak" }, { include = "hm_eval" }]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
@@ -134,7 +136,7 @@ url = "https://download.pytorch.org/whl/cu128"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["xh_model_zoo*", "xhmodel_merak*"]
+include = ["xh_model_zoo*", "xhmodel_merak*", "hm_eval*"]
 where = ["."]
 
 [tool.setuptools.package-data]
@@ -155,6 +157,12 @@ xhmodel_merak = [
   "**/*.so",
   "**/*.pt",
   "**/*.bin",
+]
+hm_eval = [
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.json",
+  "**/*.md",
 ]
 
 [build-system]

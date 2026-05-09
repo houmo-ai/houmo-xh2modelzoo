@@ -210,5 +210,8 @@ examples/llm/whisper/data/models/whisper-medium
 examples/llm/paddle_ocr_v5/PPOCRv3/*
 examples/llm/paddle_ocr_v5/houmo/*
 .omx/
+hm_eval/logs/
+hm_eval/outputs/
+hm_eval/tasks/
 # Added by code-review-graph
 .code-review-graph/

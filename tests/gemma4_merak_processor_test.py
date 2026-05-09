@@ -235,3 +235,27 @@ def test_gemma4_processor_resizes_audio_placeholder_count_after_feature_truncati
     assert expected_audio_token_count == 100
     assert actual_audio_token_count == expected_audio_token_count
     assert model_inputs["mm_token_type_ids"].shape == model_inputs["input_ids"].shape
+
+
+def test_gemma4_moe_visual_processor_contract_without_upsample():
+    from xhmodel_merak.xh_llm.models.gemma4_moe.gemma4_moe_visual_model import XHGemma4MoeVisualProcessor
+
+    processor = XHGemma4MoeVisualProcessor(pooling_kernel_size=1, image_seq_length=256)
+    model_inputs = processor(images=Image.new("RGB", (448, 448), color="white"), return_tensors="pt")
+    valid_mask = ~(model_inputs["image_position_ids"] == -1).all(dim=-1)
+
+    assert model_inputs["pixel_values"].shape == (1, 280, 768)
+    assert int(valid_mask.sum().item()) == 256
+    assert model_inputs["num_soft_tokens_per_image"] == [256]
+
+
+def test_gemma4_moe_visual_processor_contract_with_upsample():
+    from xhmodel_merak.xh_llm.models.gemma4_moe.gemma4_moe_visual_model import XHGemma4MoeVisualProcessor
+
+    processor = XHGemma4MoeVisualProcessor(pooling_kernel_size=3, image_seq_length=280)
+    model_inputs = processor(images=Image.new("RGB", (448, 448), color="white"), return_tensors="pt")
+    valid_mask = ~(model_inputs["image_position_ids"] == -1).all(dim=-1)
+
+    assert model_inputs["pixel_values"].shape == (1, 2520, 768)
+    assert int(valid_mask.sum().item()) == 2304
+    assert model_inputs["num_soft_tokens_per_image"] == [256]

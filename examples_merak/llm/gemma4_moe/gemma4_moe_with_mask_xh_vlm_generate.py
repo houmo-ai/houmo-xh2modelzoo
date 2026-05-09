@@ -383,6 +383,12 @@ def build_image_embeds(
         )
     if image_embeds.dim() == 3 and image_embeds.shape[0] == 1:
         image_embeds = image_embeds[0]
+    expected_output_length = vision_meta.get("output_length")
+    if expected_output_length is not None and int(image_embeds.shape[0]) != int(expected_output_length):
+        raise ValueError(
+            f"Vision output token count mismatch: expected {int(expected_output_length)}, "
+            f"got {int(image_embeds.shape[0])}. Use the matching vision export_meta_info.json."
+        )
     return image_embeds
 
 
@@ -464,6 +470,7 @@ def main() -> None:
     image_token_id = resolve_image_token_id(args.image_token_id, llm_runtime_meta, runtime_meta_path)
 
     image_embeds = None
+    vision_meta = None
     if args.image:
         vision_meta = load_meta(args.vision_config)
         image_embeds = build_image_embeds(
@@ -505,6 +512,12 @@ def main() -> None:
             int(input_ids.shape[-1]),
             "image_tokens=",
             int(mm_token_type_ids.sum().item()),
+            "vision_upsample=",
+            None if vision_meta is None else bool(vision_meta.get("upsample_token", False)),
+            "vision_input_tokens=",
+            None if vision_meta is None else vision_meta.get("n_input_tokens"),
+            "vision_output_length=",
+            None if vision_meta is None else vision_meta.get("output_length"),
             "llm_sliding=",
             llm_runtime_meta.get("sliding_window_cfg", {}).get("sliding_window"),
         )

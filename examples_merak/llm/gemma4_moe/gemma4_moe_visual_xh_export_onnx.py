@@ -52,9 +52,10 @@ _bootstrap_gemma4_transformers()
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import Gemma4ForConditionalGeneration
+from transformers import AutoProcessor, Gemma4ForConditionalGeneration
 
 from examples_merak.llm.gemma4_moe.gemma4_moe_visual_preprocess import (
+    configure_gemma4_visual_processor,
     extract_valid_patch_tokens,
     prepare_visual_input_image,
     resolve_visual_output_dir,
@@ -191,6 +192,10 @@ def _create_default_image() -> Path:
 def _load_cfg(args: argparse.Namespace) -> tuple[str, Config]:
     if args.config:
         cfg = Config.fromfile(args.config)
+        if args.upsample_token is not None:
+            cfg.model.upsample_token = args.upsample_token
+        if args.fuse_norm is not None:
+            cfg.model.fuse_norm = args.fuse_norm
         return Path(args.config).stem, cfg
     if not args.model:
         raise ValueError("Either --config or --model must be specified.")
@@ -205,8 +210,8 @@ def _load_cfg(args: argparse.Namespace) -> tuple[str, Config]:
                 quant_scheme=dict(quant_type="w8a8h1_sefp", ops={}),
                 max_size_w=args.image_size_w,
                 max_size_h=args.image_size_h,
-                upsample_token=args.upsample_token,
-                fuse_norm=args.fuse_norm,
+                upsample_token=False if args.upsample_token is None else args.upsample_token,
+                fuse_norm=True if args.fuse_norm is None else args.fuse_norm,
             )
         )
     )
@@ -238,14 +243,32 @@ def export_visual(args: argparse.Namespace) -> Path:
     device = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
 
     if args.metadata_only:
-        processor = xh_visual_model.get_tf_processor()
+        processor = AutoProcessor.from_pretrained(xh_visual_model.hf_model_dir, trust_remote_code=True)
+        processor_pooling_kernel_size = configure_gemma4_visual_processor(
+            processor,
+            xh_visual_model.config.upsample_token,
+        )
         image_path = Path(args.image) if args.image else _create_default_image()
         processed_image, preprocess_meta = prepare_visual_input_image(
             image_path,
             upsample_token=xh_visual_model.config.upsample_token,
             target_image_size=(xh_visual_model.config.max_size_w, xh_visual_model.config.max_size_h),
         )
-        inputs = processor(images=processed_image, return_tensors="pt")
+        inputs = processor.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": processed_image},
+                        {"type": "text", "text": "Describe."},
+                    ],
+                }
+            ],
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
         _, _, valid_mask = extract_valid_patch_tokens(inputs["pixel_values"], inputs["image_position_ids"])
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -257,7 +280,7 @@ def export_visual(args: argparse.Namespace) -> Path:
             "image_preprocess": preprocess_meta,
             "vision_config": {
                 "patch_size": processor.image_processor.patch_size,
-                "processor_pooling_kernel_size": processor.image_processor.pooling_kernel_size,
+                "processor_pooling_kernel_size": processor_pooling_kernel_size,
             },
             "image_embeds_shape": [],
             "valid_mask": valid_mask.tolist(),
@@ -280,8 +303,11 @@ def export_visual(args: argparse.Namespace) -> Path:
         attn_implementation="eager",
     ).eval()
 
-    processor = xh_visual_model.get_tf_processor()
-    processor_pooling_kernel_size = processor.image_processor.pooling_kernel_size
+    processor = AutoProcessor.from_pretrained(xh_visual_model.hf_model_dir, trust_remote_code=True)
+    processor_pooling_kernel_size = configure_gemma4_visual_processor(
+        processor,
+        xh_visual_model.config.upsample_token,
+    )
     vision_tower = model.model.vision_tower
     embed_vision = model.model.embed_vision
     vision_config = model.config.vision_config
@@ -296,7 +322,21 @@ def export_visual(args: argparse.Namespace) -> Path:
         upsample_token=xh_visual_model.config.upsample_token,
         target_image_size=(xh_visual_model.config.max_size_w, xh_visual_model.config.max_size_h),
     )
-    inputs = processor(images=processed_image, return_tensors="pt")
+    inputs = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": processed_image},
+                    {"type": "text", "text": "Describe."},
+                ],
+            }
+        ],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
     pixel_values = inputs["pixel_values"].to(device=device, dtype=dtype)
     image_position_ids = inputs["image_position_ids"].to(device=device)
     with torch.no_grad():
@@ -378,8 +418,8 @@ def main() -> None:
     parser.add_argument("--image", type=str, default="data/images/bee.jpg")
     parser.add_argument("--image-size-w", type=int, default=448)
     parser.add_argument("--image-size-h", type=int, default=448)
-    parser.add_argument("--upsample-token", type=str2bool, default=False)
-    parser.add_argument("--fuse-norm", type=str2bool, default=True)
+    parser.add_argument("--upsample-token", type=str2bool, default=None)
+    parser.add_argument("--fuse-norm", type=str2bool, default=None)
     parser.add_argument("--device", type=str, default="cuda:0" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--golden", type=str2bool, default=True)
     parser.add_argument("--force", action="store_true")
