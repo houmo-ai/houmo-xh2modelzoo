@@ -4,7 +4,7 @@ from typing import Any, Optional, cast
 
 import torch
 from torch import nn
-from transformers import AutoModelForImageTextToText
+from transformers import AutoConfig, AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration
@@ -146,6 +146,23 @@ def _trim_masked_multimodal_features(
     )
 
 
+def _get_visual_export_mode(llm_model: Any) -> str:
+    visual = getattr(llm_model, "visual", None)
+    if visual is not None and getattr(visual, "export_mode", None) is not None:
+        return visual.export_mode
+
+    model_config = getattr(llm_model, "config", None)
+    visual_config = getattr(model_config, "visual_config", None)
+    if visual_config is not None and getattr(visual_config, "export_mode", None) is not None:
+        return visual_config.export_mode
+
+    visual_meta = getattr(llm_model, "visual_meta", None)
+    if visual_meta is not None and getattr(visual_meta, "export_mode", None) is not None:
+        return visual_meta.export_mode
+
+    return "full"
+
+
 class _Gemma4HFCompatible(TextLLMHFCompatible):
     def _setup(self: Gemma4ForConditionalGeneration, text_llm_model: "XHGemma4Model"):
         model = super()._setup(text_llm_model)
@@ -242,10 +259,13 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
 
         image_embeds = None
         if pixel_values is not None and getattr(self._llm_model, "visual", None) is not None:
-            image_outputs = self._llm_model.visual.forward(
-                pixel_values.to(self._llm_model.visual.device, self._llm_model.visual.dtype),
-                image_position_ids.to(self._llm_model.visual.device) if image_position_ids is not None else None,
-            )
+            visual_model = self._llm_model.visual
+            visual_inputs = [
+                pixel_values.to(visual_model.device, visual_model.dtype),
+            ]
+            if _get_visual_export_mode(self._llm_model) != "compact":
+                visual_inputs.append(image_position_ids.to(visual_model.device) if image_position_ids is not None else None)
+            image_outputs = visual_model.forward(*visual_inputs)
             image_embed_mask = None
             if isinstance(image_outputs, (tuple, list)) and len(image_outputs) == 2:
                 image_embeds, image_embed_mask = image_outputs
@@ -384,6 +404,7 @@ class XHGemma4Model(VisionLLMModel):
         super()._wraped_post(hf_model)
         language_model = self._get_language_model(self._wrap_model)
         text_config = language_model.config
+        self.pad_token_id = text_config.pad_token_id
         layer_kv_shapes: list[list[int]] = []
         if self.use_cache:
             for layer in language_model.layers:
@@ -427,9 +448,33 @@ class XHGemma4Model(VisionLLMModel):
             processor.config.max_size_h = self.visual.config.max_size_h
             processor.config.max_size_w = self.visual.config.max_size_w
             processor.config.patch_size = self.visual.config.patch_size
+            processor.config.export_mode = self.visual.config.export_mode
         if self.audio is not None:
             processor.config.sampling_rate = self.audio.config.sampling_rate
         return processor
+
+    def get_prefill_dummy_inputs(self) -> dict[str, torch.Tensor | int]:
+        image_token_id = getattr(self.config, "image_token_id", -1)
+        if self.visual is None or image_token_id < 0:
+            return super().get_prefill_dummy_inputs()
+
+        text_config = AutoConfig.from_pretrained(self.hf_model_dir, trust_remote_code=True).get_text_config()
+        image_token_count = min(self.config.prefill_chunk_length, self.visual.config.image_seq_length)
+        input_ids = torch.full((1, image_token_count), image_token_id, dtype=torch.long)
+        mm_token_type_ids = torch.ones_like(input_ids)
+        generator = torch.Generator(device="cpu").manual_seed(0)
+        image_embeds = torch.randn(
+            image_token_count,
+            text_config.hidden_size,
+            generator=generator,
+            dtype=torch.float32,
+        ) * 0.55
+        return {
+            "input_ids": input_ids,
+            "mm_token_type_ids": mm_token_type_ids,
+            "image_embeds": image_embeds,
+            "past_seq_length": 0,
+        }
 
     def get_quant_cfg(self):
         return super().get_quant_cfg()
@@ -495,6 +540,8 @@ class XHGemma4Model(VisionLLMModel):
             self.visual.config.model_name = f"{exported_info.model_name}_visual"
             visual_meta = self.visual.export_hmonnx(visual_output_dir)
             visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+            if getattr(visual_meta, "onnx", None):
+                visual_meta.onnx = str(Path(visual_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
             meta_info.visual_config = visual_meta
 
         if self.audio is not None:
@@ -502,6 +549,8 @@ class XHGemma4Model(VisionLLMModel):
             self.audio.config.model_name = f"{exported_info.model_name}_audio"
             audio_meta = self.audio.export_hmonnx(audio_output_dir)
             audio_meta.hmonnx = str(Path(audio_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+            if getattr(audio_meta, "onnx", None):
+                audio_meta.onnx = str(Path(audio_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
             meta_info.audio_config = audio_meta
 
         if self.per_layer_input_builder is not None:

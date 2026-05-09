@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import numpy as np
+import onnxruntime as ort
 import torch
 from transformers import AutoConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
@@ -22,6 +24,11 @@ def _cast_hmonnx_int_args(args):
 
 
 class VisualHMONNXModel(HMONNXModel):
+    def __init__(self, hmonnx: str, *, export_mode: str = "full", output_scale: float = 1.0):
+        super().__init__(hmonnx)
+        self.export_mode = export_mode
+        self.output_scale = float(output_scale)
+
     @staticmethod
     def _patch_visual_session_precision(graph_session) -> int:
         node_modules = getattr(graph_session, "node_modules", None)
@@ -39,6 +46,8 @@ class VisualHMONNXModel(HMONNXModel):
         return patched
 
     def forward(self, *args):
+        if getattr(self, "export_mode", "full") == "compact" and len(args) > 1:
+            args = args[:1]
         args = _cast_hmonnx_int_args(args)
         self.hmonnx_session._set_session_env()
         graph_session = getattr(self.hmonnx_session, "_session", None)
@@ -47,7 +56,14 @@ class VisualHMONNXModel(HMONNXModel):
         self._patch_visual_session_precision(graph_session)
         out = graph_session.forward(*args)
         if isinstance(out, (tuple, list)) and len(out) == 1:
-            return out[0]
+            out = out[0]
+        output_scale = getattr(self, "output_scale", 1.0)
+        if output_scale != 1.0:
+            if isinstance(out, tuple):
+                return (out[0] * output_scale, *out[1:])
+            if isinstance(out, list):
+                return [out[0] * output_scale, *out[1:]]
+            return out * output_scale
         return out
 
 
@@ -57,6 +73,137 @@ class AudioHMONNXModel(HMONNXModel):
         if isinstance(out, (tuple, list)) and len(out) == 1:
             return out[0]
         return out
+
+
+class AudioONNXModel:
+    def __init__(self, onnx_path: str):
+        self.onnx_path = onnx_path
+        self._dtype = torch.float16
+        self._device = torch.device("cpu")
+        self._session = None
+        self._session_providers = None
+
+    def _set_device(self, device):
+        self._device = torch.device(device)
+        self._session = None
+        self._session_providers = None
+        return self
+
+    def _set_dtype(self, dtype):
+        self._dtype = dtype
+        return self
+
+    def to(self, device):
+        return self._set_device(device)
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    def _get_providers(self):
+        providers: list = ["CPUExecutionProvider"]
+        available = ort.get_available_providers()
+        if self._device.type == "cuda" and "CUDAExecutionProvider" in available:
+            device_id = self._device.index or 0
+            providers = [("CUDAExecutionProvider", {"device_id": device_id}), "CPUExecutionProvider"]
+        return providers
+
+    def _get_session(self):
+        providers = self._get_providers()
+        if self._session is None or self._session_providers != providers:
+            self._session = ort.InferenceSession(self.onnx_path, providers=providers)
+            self._session_providers = providers
+        return self._session
+
+    def forward(self, *args):
+        input_features, input_features_mask = _cast_hmonnx_int_args(args)
+        session = self._get_session()
+        outputs = session.run(
+            None,
+            {
+                "input_features": input_features.detach().float().cpu().numpy().astype(np.float32, copy=False),
+                "input_features_mask": input_features_mask.detach().cpu().numpy(),
+            },
+        )
+        audio_embeds = torch.from_numpy(outputs[0]).to(self._device, self._dtype)
+        audio_embeds_mask = torch.from_numpy(outputs[1]).to(self._device)
+        return audio_embeds, audio_embeds_mask
+
+
+class VisualONNXModel:
+    def __init__(self, onnx_path: str):
+        self.onnx_path = onnx_path
+        self._dtype = torch.float16
+        self._device = torch.device("cpu")
+        self._session = None
+        self._session_providers = None
+
+    def _set_device(self, device):
+        self._device = torch.device(device)
+        self._session = None
+        self._session_providers = None
+        return self
+
+    def _set_dtype(self, dtype):
+        self._dtype = dtype
+        return self
+
+    def to(self, device):
+        return self._set_device(device)
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    def _get_providers(self):
+        providers: list = ["CPUExecutionProvider"]
+        available = ort.get_available_providers()
+        if self._device.type == "cuda" and "CUDAExecutionProvider" in available:
+            device_id = self._device.index or 0
+            providers = [("CUDAExecutionProvider", {"device_id": device_id}), "CPUExecutionProvider"]
+        return providers
+
+    def _get_session(self):
+        providers = self._get_providers()
+        if self._session is None or self._session_providers != providers:
+            self._session = ort.InferenceSession(self.onnx_path, providers=providers)
+            self._session_providers = providers
+        return self._session
+
+    def forward(self, *args):
+        session = self._get_session()
+        input_metas = session.get_inputs()
+        if len(args) < len(input_metas):
+            raise ValueError(f"Gemma4 visual ONNX expects {len(input_metas)} inputs, got {len(args)}.")
+
+        feeds = {}
+        for value, input_meta in zip(args, input_metas):
+            array = value.detach().cpu().numpy()
+            if "float" in input_meta.type:
+                array = array.astype(np.float32, copy=False)
+            elif input_meta.type == "tensor(int32)" and array.dtype == np.int64:
+                array = array.astype(np.int32, copy=False)
+            feeds[input_meta.name] = array
+
+        outputs = []
+        for output in session.run(None, feeds):
+            tensor = torch.from_numpy(output)
+            if tensor.is_floating_point():
+                tensor = tensor.to(self._device, self._dtype)
+            else:
+                tensor = tensor.to(self._device)
+            outputs.append(tensor)
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
 
 
 class Gemma4KVCacheMixinHMONNX(KVCacheMixin):
@@ -83,12 +230,39 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
 
     @staticmethod
     def _build_audio_runtime(audio_meta):
+        onnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(audio_meta, "onnx", None))
+        if onnx_path is not None:
+            if not Path(onnx_path).exists():
+                raise FileNotFoundError(f"Gemma4 audio ONNX artifact not found: {onnx_path}")
+            return AudioONNXModel(onnx_path)
         hmonnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(audio_meta, "hmonnx", None))
         if hmonnx_path is None:
             raise ValueError("Gemma4 audio runtime requires an exported HMONNX artifact.")
         if not Path(hmonnx_path).exists():
             raise FileNotFoundError(f"Gemma4 audio HMONNX artifact not found: {hmonnx_path}")
         return AudioHMONNXModel(hmonnx_path)
+
+    @staticmethod
+    def _build_visual_runtime(visual_meta):
+        onnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(visual_meta, "onnx", None))
+        export_mode = getattr(visual_meta, "export_mode", "full")
+        if export_mode == "compact" and onnx_path is not None:
+            if not Path(onnx_path).exists():
+                raise FileNotFoundError(f"Gemma4 visual ONNX artifact not found: {onnx_path}")
+            return VisualONNXModel(onnx_path)
+        hmonnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(visual_meta, "hmonnx", None))
+        if hmonnx_path is not None:
+            if not Path(hmonnx_path).exists():
+                raise FileNotFoundError(f"Gemma4 visual HMONNX artifact not found: {hmonnx_path}")
+            output_scale = float(getattr(visual_meta, "output_scale", 1.0) or 1.0)
+            return VisualHMONNXModel(hmonnx_path, export_mode=export_mode, output_scale=output_scale)
+        if onnx_path is not None:
+            if not Path(onnx_path).exists():
+                raise FileNotFoundError(f"Gemma4 visual ONNX artifact not found: {onnx_path}")
+            return VisualONNXModel(onnx_path)
+        if hmonnx_path is None:
+            raise ValueError("Gemma4 visual runtime requires an exported artifact.")
+        raise ValueError("Gemma4 visual runtime requires an exported artifact.")
 
     @staticmethod
     def _disable_kvcache_fast_mode(hmonnx_model: HMONNXModel) -> int:
@@ -141,7 +315,7 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
         super().__init__(meta_info, **kwargs)
         self.visual_meta = getattr(meta_info, "visual_config", None)
         self.audio_meta = getattr(meta_info, "audio_config", None)
-        self.visual = VisualHMONNXModel(self.visual_meta.hmonnx) if self.visual_meta else None
+        self.visual = self._build_visual_runtime(self.visual_meta) if self.visual_meta else None
         self.audio = self._build_audio_runtime(self.audio_meta) if self.audio_meta else None
         layer_kv_shapes = getattr(meta_info, "layer_kv_shapes", [])
         if layer_kv_shapes:
@@ -192,6 +366,7 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
             processor.config.max_size_h = model_config.visual_config.max_size_h
             processor.config.max_size_w = model_config.visual_config.max_size_w
             processor.config.patch_size = model_config.visual_config.patch_size
+            processor.config.export_mode = getattr(model_config.visual_config, "export_mode", "full")
         if getattr(model_config, "audio_config", None) is not None:
             processor.config.sampling_rate = model_config.audio_config.sampling_rate
             processor.config.audio_feature_length = getattr(model_config.audio_config, "input_feature_length", None)

@@ -2,6 +2,8 @@ import re
 from typing import Any
 
 import torch
+from PIL import Image
+from transformers import AutoProcessor
 from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
 from xhmodel_merak.configuration_utils import BaseConfig
 
@@ -14,6 +16,7 @@ class Gemma4ProcessorConfig(BaseConfig):
         self.patch_size: int = 16
         self.sampling_rate: int = 16000
         self.audio_feature_length: int | None = None
+        self.export_mode: str = "full"
 
 
 class XHGemma4Processor(Gemma4Processor):
@@ -27,8 +30,50 @@ class XHGemma4Processor(Gemma4Processor):
         )
         self.config = Gemma4ProcessorConfig()
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, trust_remote_code: bool = True, **kwargs):
+        processor = AutoProcessor.from_pretrained(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+        if isinstance(processor, cls):
+            return processor
+        return cls(
+            feature_extractor=processor.feature_extractor,
+            image_processor=processor.image_processor,
+            tokenizer=processor.tokenizer,
+            video_processor=processor.video_processor,
+            chat_template=getattr(processor, "chat_template", None),
+            image_seq_length=getattr(processor, "image_seq_length", 280),
+            audio_seq_length=getattr(processor, "audio_seq_length", 750),
+            audio_ms_per_token=getattr(processor, "audio_ms_per_token", 40),
+        )
+
+    def _resize_image_for_compact_export(self, image: Any) -> Any:
+        if self.config.export_mode != "compact" or not isinstance(image, Image.Image):
+            return image
+        target_size = (self.config.max_size_w, self.config.max_size_h)
+        if image.size == target_size:
+            return image
+        return image.convert("RGB").resize(target_size, Image.Resampling.BICUBIC)
+
+    def _prepare_vision_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if "images" not in kwargs or kwargs["images"] is None:
+            return kwargs
+
+        prepared = dict(kwargs)
+        images = prepared["images"]
+        if isinstance(images, (list, tuple)):
+            prepared["images"] = [self._resize_image_for_compact_export(image) for image in images]
+        else:
+            prepared["images"] = self._resize_image_for_compact_export(images)
+        return prepared
+
     def __call__(self, *args, **kwargs):
+        kwargs = self._prepare_vision_kwargs(kwargs)
         model_inputs = super().__call__(*args, **kwargs)
+        model_inputs = self._trim_compact_image_patches_if_needed(model_inputs)
         feature_length = self.config.audio_feature_length
         if (
             feature_length is not None
@@ -57,6 +102,39 @@ class XHGemma4Processor(Gemma4Processor):
                 model_inputs["input_features"] = torch.cat([input_features, feature_pad], dim=1)
                 model_inputs["input_features_mask"] = torch.cat([input_features_mask, mask_pad], dim=1)
             model_inputs = self._retokenize_audio_placeholders_if_needed(model_inputs, kwargs)
+        return model_inputs
+
+    def _trim_compact_image_patches_if_needed(self, model_inputs):
+        if self.config.export_mode != "compact":
+            return model_inputs
+        pixel_values = model_inputs.get("pixel_values")
+        image_position_ids = model_inputs.get("image_position_ids")
+        if pixel_values is None or image_position_ids is None:
+            return model_inputs
+
+        if image_position_ids.dim() == 2:
+            valid_positions = ~(image_position_ids == -1).all(dim=-1)
+            real_patch_count = int(valid_positions.sum().item())
+        else:
+            valid_positions = ~(image_position_ids == -1).all(dim=-1)
+            real_patch_counts = valid_positions.to(torch.int64).sum(dim=1)
+            max_real_patch_count = int(real_patch_counts.max().item())
+            min_real_patch_count = int(real_patch_counts.min().item())
+            if min_real_patch_count != max_real_patch_count:
+                raise ValueError(
+                    "Compact Gemma4 vision export requires a uniform real patch count across the batch, "
+                    f"got {real_patch_counts.tolist()}."
+                )
+            real_patch_count = max_real_patch_count
+
+        if pixel_values.shape[1] == real_patch_count:
+            return model_inputs
+
+        model_inputs["pixel_values"] = pixel_values[:, :real_patch_count, :]
+        if image_position_ids.dim() == 2:
+            model_inputs["image_position_ids"] = image_position_ids[:real_patch_count, :]
+        else:
+            model_inputs["image_position_ids"] = image_position_ids[:, :real_patch_count, :]
         return model_inputs
 
     def _compute_audio_soft_token_count_from_feature_frames(self, num_feature_frames: int) -> int:
@@ -138,11 +216,11 @@ class XHGemma4Processor(Gemma4Processor):
             return "model"
         return role
 
-    def _render_messages(self, messages: list[dict[str, Any]], add_generation_prompt: bool) -> tuple[str, list, list, int]:
+    def _render_messages_fallback(self, messages: list[dict[str, Any]], add_generation_prompt: bool) -> str:
         rendered_messages: list[str] = []
-        images: list[Any] = []
-        audios: list[Any] = []
-        sampling_rate = self.config.sampling_rate
+        bos_token = self.tokenizer.bos_token or ""
+        if bos_token:
+            rendered_messages.append(bos_token)
 
         for message in messages:
             role = self._normalize_role(message.get("role", "user"))
@@ -154,24 +232,40 @@ class XHGemma4Processor(Gemma4Processor):
                 for item in content:
                     item_type = item.get("type", "text")
                     if item_type in ("image", "image_url"):
-                        parts.append("\n\n<|image|>\n\n")
-                        images.append(item.get("image", item.get("url", item.get("image_url"))))
+                        parts.append("<|image|>")
                     elif item_type == "audio":
                         parts.append("<|audio|>")
-                        audios.append(item.get("audio"))
-                        sampling_rate = int(item.get("sampling_rate", sampling_rate))
                     elif item_type == "video":
-                        parts.append("\n\n<|video|>\n\n")
+                        parts.append("<|video|>")
                     else:
                         parts.append(item.get("text", "").strip())
                 body = "".join(parts)
-
             rendered_messages.append(f"<|turn>{role}\n{body}<turn|>\n")
 
         if add_generation_prompt:
             rendered_messages.append("<|turn>model\n")
+        return "".join(rendered_messages)
 
-        return "".join(rendered_messages), images, audios, sampling_rate
+    def _render_messages(self, messages: list[dict[str, Any]], add_generation_prompt: bool) -> tuple[str, list, list, int]:
+        images: list[Any] = []
+        audios: list[Any] = []
+        sampling_rate = self.config.sampling_rate
+
+        for message in messages:
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                for item in content:
+                    item_type = item.get("type", "text")
+                    if item_type in ("image", "image_url"):
+                        images.append(item.get("image", item.get("url", item.get("image_url"))))
+                    elif item_type == "audio":
+                        audios.append(item.get("audio"))
+                        sampling_rate = int(item.get("sampling_rate", sampling_rate))
+        if getattr(self, "chat_template", None):
+            rendered = super().apply_chat_template(messages, add_generation_prompt=add_generation_prompt, tokenize=False)
+        else:
+            rendered = self._render_messages_fallback(messages, add_generation_prompt)
+        return rendered, images, audios, sampling_rate
 
     def apply_chat_template(self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs):
         text, images, audios, sampling_rate = self._render_messages(messages, add_generation_prompt)

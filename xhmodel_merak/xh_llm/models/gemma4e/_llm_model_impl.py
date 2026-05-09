@@ -12,7 +12,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextModel,
     Gemma4TextRotaryEmbedding,
 )
-from xhquant.nn import LLMCacheV2, MaskedAdd, SoftmaxPlus
+from xhquant.nn import LLMCacheV2, MaskedAdd, RMSNorm, SoftmaxPlus
 from xhquant.utils.registry import DynamicModule
 
 from ...register import XHLLM_TRACEABLE_MODULES
@@ -62,13 +62,32 @@ def _apply_rotary_pos_emb_with_constant_dim(
 @XHLLM_TRACEABLE_MODULES.register_module({Gemma4RMSNorm: "Gemma4RMSNorm"})
 class _Gemma4RMSNorm(DynamicModule):
     def _setup(self, cfg=None):
+        if getattr(self, "with_scale", True) and hasattr(self, "weight"):
+            hidden_size = self.weight.shape[0]
+            device = self.weight.device
+        elif hasattr(self, "_head_dim_hint"):
+            hidden_size = self._head_dim_hint
+            device = None
+        elif hasattr(self, "dim"):
+            hidden_size = self.dim
+            device = None
+        else:
+            hidden_size = getattr(cfg, "hidden_size", 1) if cfg is not None else 1
+            device = None
+        self.norm = RMSNorm(hidden_size, self.eps)
+        if device is not None:
+            self.norm = self.norm.to(device)
+        if getattr(self, "with_scale", True) and hasattr(self, "weight"):
+            self.norm.weight = nn.Parameter(self.weight.detach().clone())
+        else:
+            self.norm.weight = nn.Parameter(
+                torch.ones(hidden_size, dtype=torch.float32, device=device),
+                requires_grad=False,
+            )
         return self
 
     def forward(self, hidden_states: torch.Tensor):
-        normed_output = hidden_states * torch.rsqrt(hidden_states.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        if getattr(self, "with_scale", True) and hasattr(self, "weight"):
-            normed_output = normed_output * self.weight
-        return normed_output
+        return self.norm(hidden_states)
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Gemma4TextRotaryEmbedding: "Gemma4TextRotaryEmbedding"})
@@ -115,6 +134,10 @@ class _Gemma4TextAttention(DynamicModule):
         self.rotary_half_dim = self.head_dim // 2
         self.num_attention_heads = self.q_proj.weight.shape[0] // self.head_dim
         self.num_key_value_heads = self.k_proj.weight.shape[0] // self.head_dim
+        for norm_name in ("q_norm", "k_norm", "v_norm"):
+            norm = getattr(self, norm_name, None)
+            if norm is not None and not getattr(norm, "with_scale", True):
+                norm._head_dim_hint = self.head_dim
         self.rope = xhnn.Rope()
         self.k_repeat_interleave = xhnn.RepeatInterleave()
         self.v_repeat_interleave = xhnn.RepeatInterleave()

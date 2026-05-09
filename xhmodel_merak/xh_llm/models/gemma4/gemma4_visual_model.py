@@ -336,12 +336,18 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
             rope_cos = torch.cat(all_cos, dim=-1).to(dtype=torch.bfloat16)
             rope_sin = torch.cat(all_sin, dim=-1).to(dtype=torch.bfloat16)
 
-        # Pre-compute position embeddings (zero pixel_values → result = pos_embed only)
+        # Pre-compute pure positional embeddings.
+        # NOTE: do NOT use ``pe(zero_pixel_values, ids, no_pad)`` to derive this — the
+        # patch-embedder normalizes inputs as ``2*(x-0.5)`` *before* ``input_proj``, so
+        # zero pixel_values map to ``-1`` and ``input_proj(-ones)`` is a non-zero per-channel
+        # constant that contaminates ``pos_embed``. The adapter forward already applies the
+        # same normalization and ``input_proj`` to real pixel_values, so we must add the
+        # *pure* positional contribution here. Calling ``_position_embeddings`` directly
+        # gives that contribution and bumps single-image cos vs HF from ~0.87 to ~0.99996.
         pe = vt.patch_embedder
         with torch.no_grad():
-            zero_pv = torch.zeros(1, num_patches, 3 * pe.patch_size**2, dtype=torch.bfloat16)
             no_padding = torch.zeros(1, num_patches, dtype=torch.bool)
-            pos_embed = pe(zero_pv, pid_cpu, no_padding)
+            pos_embed = pe._position_embeddings(pid_cpu, no_padding).to(dtype=torch.bfloat16)
 
         # Attention mask: fully bidirectional (no padding to mask out)
         attn_mask_4d = torch.zeros(1, 1, num_patches, num_patches)

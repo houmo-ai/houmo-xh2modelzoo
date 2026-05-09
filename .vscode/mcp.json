@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "code-review-graph": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "code-review-graph",
+        "serve"
+      ]
+    },
+    "jira-assistant": {
+      "type": "stdio",
+      "command": "/data01/home/huxing/jira_agents/scripts/start-mcp.sh",
+      "args": [],
+      "cwd": "/data01/home/huxing/jira_agents",
+      "env": {}
+    }
+  }
+}

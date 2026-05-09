@@ -106,6 +106,30 @@ def test_gemma4_llm_wrap_and_preprocess_smoke():
     ]
 
 
+def test_gemma4_wrapped_rmsnorm_matches_hf_float32_norm():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
+
+    hf_model = _build_tiny_gemma4_model()
+    hf_norm = hf_model.model.language_model.layers[0].input_layernorm
+    hidden_states = torch.randn(2, 5, hf_model.config.text_config.hidden_size, dtype=torch.float16) * 8
+    expected = hf_norm(hidden_states)
+
+    model = XHGemma4Model(
+        XHGemma4ModelConfig(
+            model_name="tiny_gemma4",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=str(MODEL_DIR),
+            context_max_length=16,
+            prefill_chunk_length=4,
+        )
+    )
+    wrap_model = model.init_wrap_model(hf_model)
+
+    actual = wrap_model.language_model.layers[0].input_layernorm(hidden_states)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-3)
+
+
 def test_gemma4_kvcache_uses_per_layer_head_dims_without_padding():
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
     from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
@@ -254,25 +278,30 @@ def test_gemma4_preprocess_externalizes_per_layer_inputs():
         preprocess = model._get_data_preprocessor()
         model_inputs = preprocess(
             {
-                "input_ids": torch.tensor([[1, 10, 2, 11]], dtype=torch.long),
+                "input_ids": torch.tensor([[1, 10, 2, 11, 12]], dtype=torch.long),
                 "image_embeds": torch.randn(1, 64),
                 "audio_embeds": torch.randn(1, 64),
+                "video_embeds": torch.randn(1, 64),
                 "past_seq_length": 0,
             }
         )
 
     llm_input_ids = preprocess._build_llm_input_ids(
-        preprocess._pad_input_ids(torch.tensor([[1, 10, 2, 11]], dtype=torch.long))
+        preprocess._pad_input_ids(torch.tensor([[1, 10, 2, 11, 12]], dtype=torch.long))
     )
-    inputs_embeds = model_inputs[1]
+    expected_inputs_embeds = model_inputs[1]
     expected_per_layer_inputs = wrap_model.language_model._project_per_layer_inputs(
-        inputs_embeds,
+        expected_inputs_embeds,
         wrap_model.language_model._get_per_layer_inputs(llm_input_ids),
     )
 
     assert model_inputs[0].shape == (1, 4, 5, 8)
     assert model_inputs[0].shape[1] == hf_model.config.text_config.num_hidden_layers
     assert model_inputs[0].shape[2] == model.wrap_cfg.input_sequence_length
+    assert torch.equal(llm_input_ids, torch.tensor([[1, 0, 2, 0, 0]], dtype=torch.long))
+    assert not torch.allclose(model_inputs[1][0, 1], wrap_model.language_model.embed_tokens(llm_input_ids)[0, 1])
+    assert not torch.allclose(model_inputs[1][0, 3], wrap_model.language_model.embed_tokens(llm_input_ids)[0, 3])
+    assert not torch.allclose(model_inputs[1][0, 4], wrap_model.language_model.embed_tokens(llm_input_ids)[0, 4])
     torch.testing.assert_close(model_inputs[0], expected_per_layer_inputs, rtol=0.0, atol=5e-3)
     assert model.get_export_cfg()["input_names"][:5] == [
         "per_layer_inputs",
@@ -285,6 +314,41 @@ def test_gemma4_preprocess_externalizes_per_layer_inputs():
         "local_attention_mask",
         "global_attention_mask",
     ]
+
+
+def test_gemma4_wrap_uses_text_pad_token_for_multimodal_placeholders():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
+
+    hf_model = _build_tiny_gemma4_model()
+    model = XHGemma4Model(
+        XHGemma4ModelConfig(
+            model_name="tiny_gemma4",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=str(MODEL_DIR),
+            context_max_length=16,
+            prefill_chunk_length=5,
+        )
+    )
+    model.init_wrap_model(hf_model)
+
+    preprocess = model._get_data_preprocessor()
+
+    assert model.pad_token_id == hf_model.config.text_config.pad_token_id
+    assert torch.equal(
+        preprocess._build_llm_input_ids(torch.tensor([[1, 10, 2, 11, 12]], dtype=torch.long)),
+        torch.tensor(
+            [
+                [
+                    1,
+                    hf_model.config.text_config.pad_token_id,
+                    2,
+                    hf_model.config.text_config.pad_token_id,
+                    hf_model.config.text_config.pad_token_id,
+                ]
+            ]
+        ),
+    )
 
 
 def test_gemma4_frontend_conversion_accepts_externalized_per_layer_inputs():
@@ -855,3 +919,64 @@ def test_gemma4_hf_compatible_trims_visual_features_with_exported_mask():
     )
 
     assert outputs.logits.shape == (1, 4, 16)
+
+
+def test_gemma4_hf_compatible_compact_visual_omits_position_ids():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import build_gemma4_hf_compatible_model
+
+    recorded = {}
+
+    class _CompactVisualStub:
+        device = torch.device("cpu")
+        dtype = torch.float32
+        export_mode = "compact"
+
+        def forward(self, pixel_values):
+            recorded["pixel_values_shape"] = tuple(pixel_values.shape)
+            return torch.zeros((256, 8), dtype=torch.float32)
+
+    class _DataProcessorStub:
+        def __call__(self, data):
+            recorded["image_embeds_shape"] = tuple(data["image_embeds"].shape)
+            return (
+                torch.zeros((1, 4), dtype=torch.int32),
+                torch.zeros((1, 4, 8), dtype=torch.float32),
+                torch.zeros((1, 4), dtype=torch.int32),
+                torch.tensor([0], dtype=torch.int32),
+                torch.tensor([4], dtype=torch.int32),
+                torch.zeros((1, 1, 4, 8), dtype=torch.float32),
+                torch.zeros((1, 1, 4, 8), dtype=torch.float32),
+                [],
+                [],
+            )
+
+    class _StubXHModel:
+        def __init__(self):
+            self.visual = _CompactVisualStub()
+            self.audio = None
+            self.data_processor = _DataProcessorStub()
+            self.config = SimpleNamespace(visual_config=SimpleNamespace(export_mode="compact"))
+
+        def get_input_embeddings(self):
+            return nn.Embedding(128, 8)
+
+        def get_data_preprocessor(self):
+            return self.data_processor
+
+        def get_input_sequence_length(self):
+            return 4
+
+        def forward(self, *args):
+            return torch.zeros((1, 4, 16), dtype=torch.float32)
+
+    compatible_model = build_gemma4_hf_compatible_model(_build_tiny_gemma4_model(), _StubXHModel())
+
+    outputs = compatible_model.forward(
+        input_ids=torch.tensor([[10, 10, 1, 10]], dtype=torch.long),
+        pixel_values=torch.zeros((1, 2304, 8), dtype=torch.float32),
+        image_position_ids=torch.zeros((1, 2304, 2), dtype=torch.long),
+    )
+
+    assert outputs.logits.shape == (1, 4, 16)
+    assert recorded["pixel_values_shape"] == (1, 2304, 8)
+    assert recorded["image_embeds_shape"] == (256, 8)

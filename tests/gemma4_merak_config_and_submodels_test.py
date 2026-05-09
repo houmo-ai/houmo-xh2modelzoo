@@ -34,8 +34,33 @@ def test_gemma4_model_config_builds_visual_and_audio_subconfigs():
     assert config.audio_config.hf_model == str(MODEL_DIR)
     assert config.visual_config.patch_size == 16
     assert config.visual_config.image_seq_length == 280
+    assert config.visual_config.pooling_kernel_size == 3
+    assert config.visual_config.export_mode == "full"
     assert config.audio_config.sampling_rate == 16000
     assert config.audio_config.feature_size == 128
+
+
+def test_gemma4_model_config_supports_compact_visual_export_via_auto_llm_config():
+    from xhmodel_merak.xh_llm import AutoLLMConfig
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
+
+    config = AutoLLMConfig.from_pretrained(
+        {
+            "model_name": "gemma4_e",
+            "model_type": "Gemma4ForConditionalGeneration",
+            "hf_model": str(MODEL_DIR),
+            "visual_config": {
+                "export_mode": "compact",
+            },
+            "audio_config": {},
+        }
+    )
+
+    assert isinstance(config, XHGemma4ModelConfig)
+    assert config.visual_config.export_mode == "compact"
+    assert config.visual_config.max_size_w == 224
+    assert config.visual_config.max_size_h == 224
+    assert config.visual_config.image_seq_length == 256
 
 
 def test_gemma4_vision_submodel_contracts():
@@ -63,6 +88,152 @@ def test_gemma4_vision_submodel_contracts():
     assert meta.image_size_w == config.max_size_w
     assert meta.patch_size == config.patch_size
     assert meta.image_seq_length == config.image_seq_length
+    assert meta.onnx is None
+    assert meta.output_scale == pytest.approx(768 ** -0.25)
+
+
+def test_gemma4_compact_vision_submodel_contracts():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+
+    config = XHGemma4VisualConfig(model_name="gemma4_visual", hf_model=str(MODEL_DIR), export_mode="compact")
+    model = XHGemma4VisionModel(config)
+
+    dummy_inputs = model.get_dummy_inputs()
+    assert set(dummy_inputs) == {"image"}
+    assert dummy_inputs["image"].shape[1] == 2304
+    processed_inputs = model.get_data_preprocessor()(dummy_inputs)
+    assert len(processed_inputs) == 1
+    assert processed_inputs[0].shape == dummy_inputs["image"].shape
+
+    export_cfg = model.get_export_cfg()
+    assert export_cfg["input_names"] == ["pixel_values"]
+    assert export_cfg["output_names"] == ["image_embeds"]
+
+    meta = model.create_export_metadata("work_dirs/gemma4_visual_meta")
+    assert meta.image_size_h == 224
+    assert meta.image_size_w == 224
+    assert meta.patch_size == config.patch_size
+    assert meta.image_seq_length == 256
+    assert meta.export_mode == "compact"
+    assert meta.num_image_tokens == 256
+    assert meta.onnx is None
+
+
+def test_gemma4_llm_prefill_dummy_inputs_include_visual_embeds_for_calibration():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
+
+    config = XHGemma4ModelConfig(
+        model_name="gemma4_e",
+        model_type="Gemma4ForConditionalGeneration",
+        hf_model=str(MODEL_DIR),
+        prefill_chunk_length=512,
+        visual_config={},
+        audio_config=None,
+    )
+    model = XHGemma4Model(config)
+    model.config.image_token_id = 258880
+    model.config.audio_token_id = 258881
+    model.config.video_token_id = 258884
+
+    dummy_inputs = model.get_prefill_dummy_inputs()
+
+    assert "image_embeds" in dummy_inputs
+    assert "mm_token_type_ids" in dummy_inputs
+    image_token_count = int((dummy_inputs["input_ids"] == model.config.image_token_id).sum().item())
+    assert image_token_count > 0
+    assert dummy_inputs["image_embeds"].shape == (image_token_count, 2560)
+    assert int((dummy_inputs["mm_token_type_ids"] == 1).sum().item()) == image_token_count
+    assert dummy_inputs["input_ids"].shape[1] <= config.prefill_chunk_length
+
+
+def test_gemma4_visual_export_hmonnx_preserves_plain_onnx_sidecar(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.base_vision_model import BaseVisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+
+    config = XHGemma4VisualConfig(model_name="gemma4_visual", hf_model=str(MODEL_DIR), export_mode="compact")
+    model = XHGemma4VisionModel(config)
+
+    def _fake_export(self, output_dir: str):
+        self.config.work_dir = str(output_dir)
+        output_path = Path(output_dir) / "gemma4_visual_hm.onnx"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        onnx_dir = Path(output_dir) / "onnx"
+        onnx_dir.mkdir(parents=True, exist_ok=True)
+        (onnx_dir / "gemma4_visual.onnx").write_bytes(b"fake-onnx")
+        (onnx_dir / "gemma4_visual.onnx.data").write_bytes(b"fake-external-data")
+        output_path.touch()
+        return str(output_path)
+
+    monkeypatch.setattr(BaseVisionModel, "_export_hmonnx", _fake_export)
+
+    export_dir = tmp_path / "final_visual"
+    meta = model.export_hmonnx(str(export_dir))
+
+    assert meta.hmonnx == str(export_dir / "gemma4_visual_hm.onnx")
+    assert meta.onnx == str(export_dir / "onnx" / "gemma4_visual.onnx")
+    assert (export_dir / "onnx" / "gemma4_visual.onnx").exists()
+    assert (export_dir / "onnx" / "gemma4_visual.onnx.data").exists()
+
+
+def test_gemma4_visual_plain_onnx_sidecar_reuses_cached_onnx_after_quantized(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+    from xhmodel_merak.xh_llm.types import LLMModelState
+
+    config = XHGemma4VisualConfig(model_name="gemma4_visual", hf_model=str(MODEL_DIR))
+    model = XHGemma4VisionModel(config)
+    model.work_dir = str(tmp_path / "cached_visual")
+    cached_onnx_dir = Path(model.work_dir) / "onnx"
+    cached_onnx_dir.mkdir(parents=True)
+    (cached_onnx_dir / "gemma4_visual.onnx").write_bytes(b"cached-onnx")
+    (cached_onnx_dir / "gemma4_visual_external_data").write_bytes(b"cached-external-data")
+
+    model._wrap_model = None
+    model._state = LLMModelState.QUANTED_ALIGNED
+
+    export_dir = tmp_path / "final_visual"
+    onnx_path = model._export_plain_onnx_sidecar(str(export_dir))
+
+    assert onnx_path == export_dir / "onnx" / "gemma4_visual.onnx"
+    assert onnx_path.read_bytes() == b"cached-onnx"
+    assert (export_dir / "onnx" / "gemma4_visual_external_data").read_bytes() == b"cached-external-data"
+
+
+def test_gemma4_visual_export_hmonnx_reuses_preexport_cached_sidecar_after_work_dir_changes(
+    monkeypatch, tmp_path
+):
+    from xhmodel_merak.xh_llm.base_vision_model import BaseVisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+    from xhmodel_merak.xh_llm.types import LLMModelState
+
+    config = XHGemma4VisualConfig(model_name="gemma4_visual", hf_model=str(MODEL_DIR))
+    model = XHGemma4VisionModel(config)
+    model.work_dir = str(tmp_path / "frontend_cache")
+    cached_onnx_dir = Path(model.work_dir) / "onnx"
+    cached_onnx_dir.mkdir(parents=True)
+    (cached_onnx_dir / "gemma4_visual.onnx").write_bytes(b"cached-onnx")
+    (cached_onnx_dir / "gemma4_visual_external_data").write_bytes(b"cached-external-data")
+
+    def _fake_export(self, output_dir: str):
+        self.config.work_dir = str(output_dir)
+        self._state = LLMModelState.QUANTED_ALIGNED
+        output_path = Path(output_dir) / "gemma4_visual_hm.onnx"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.touch()
+        return str(output_path)
+
+    monkeypatch.setattr(BaseVisionModel, "_export_hmonnx", _fake_export)
+
+    export_dir = tmp_path / "final_visual"
+    meta = model.export_hmonnx(str(export_dir))
+
+    assert meta.onnx == str(export_dir / "onnx" / "gemma4_visual.onnx")
+    assert (export_dir / "onnx" / "gemma4_visual.onnx").read_bytes() == b"cached-onnx"
+    assert (export_dir / "onnx" / "gemma4_visual_external_data").read_bytes() == b"cached-external-data"
 
 
 def test_gemma4_audio_submodel_contracts():
@@ -98,7 +269,7 @@ def test_gemma4_audio_submodel_contracts():
     assert meta.onnx is None
 
 
-def test_gemma4_audio_export_hmonnx_removes_plain_onnx_sidecar(monkeypatch, tmp_path):
+def test_gemma4_audio_export_hmonnx_preserves_plain_onnx_sidecar(monkeypatch, tmp_path):
     from xhmodel_merak.xh_llm.base_vision_model import BaseVisionModel
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_audio_model import XHGemma4AudioModel
     from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4AudioConfig
@@ -127,8 +298,9 @@ def test_gemma4_audio_export_hmonnx_removes_plain_onnx_sidecar(monkeypatch, tmp_
     meta = model.export_hmonnx(str(export_dir))
 
     assert meta.hmonnx == str(export_dir / "gemma4_audio_hm.onnx")
-    assert meta.onnx is None
-    assert not (export_dir / "onnx").exists()
+    assert meta.onnx == str(export_dir / "onnx" / "gemma4_audio.onnx")
+    assert (export_dir / "onnx" / "gemma4_audio.onnx").exists()
+    assert (export_dir / "onnx" / "gemma4_audio_external_data").exists()
 
 
 def test_gemma4_audio_export_bridge_preserves_output_mask():
@@ -221,6 +393,88 @@ def test_gemma4_visual_hmonnx_casts_int64_inputs_to_int32(monkeypatch):
     assert captured["args"][1].dtype == torch.int32
 
 
+def test_gemma4_visual_hmonnx_applies_output_scale():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_hmonnx_inference import VisualHMONNXModel
+
+    def _fake_set_session_env():
+        return None
+
+    def _fake_forward(*args):
+        del args
+        return (torch.ones(1, 2, 4), torch.tensor([[True, False]]))
+
+    model = object.__new__(VisualHMONNXModel)
+    model.export_mode = "full"
+    model.output_scale = 0.25
+    model.hmonnx_session = SimpleNamespace(
+        _set_session_env=_fake_set_session_env,
+        _session=SimpleNamespace(forward=_fake_forward, node_modules=[]),
+    )
+
+    outputs = VisualHMONNXModel.forward(model, torch.randn(1, 2, 4), torch.zeros((1, 2, 2), dtype=torch.int64))
+
+    assert torch.allclose(outputs[0], torch.full((1, 2, 4), 0.25))
+    assert torch.equal(outputs[1], torch.tensor([[True, False]]))
+
+
+def test_gemma4_full_vision_attention_mask_keeps_padded_queries_finite():
+    from xhmodel_merak.xh_llm.models.gemma4e._vision_model_impl import _Gemma4VisionModel
+
+    valid_positions = torch.tensor([[True, True, False, False]])
+
+    mask = _Gemma4VisionModel._build_bidirectional_attention_mask(valid_positions)
+
+    assert mask.shape == (1, 1, 4, 4)
+    assert torch.equal(mask[0, 0, 0], valid_positions[0])
+    assert torch.equal(mask[0, 0, 1], valid_positions[0])
+    assert torch.equal(mask[0, 0, 2], valid_positions[0])
+    assert torch.equal(mask[0, 0, 3], valid_positions[0])
+    assert mask[0, 0].any(dim=-1).all()
+
+
+def test_gemma4_full_vision_wrap_replaces_pow_based_rmsnorm():
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
+    import xhquant.nn.modules as xhnn
+
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+
+    model = XHGemma4VisionModel(XHGemma4VisualConfig(model_name="gemma4_visual", hf_model=str(MODEL_DIR)))
+    hf_model = model.get_native_model()
+    wrapped = model.init_wrap_model(hf_model)
+
+    assert not any(isinstance(module, Gemma4RMSNorm) for module in wrapped.vision_tower.modules())
+    assert any(isinstance(module, xhnn.RMSNorm) for module in wrapped.vision_tower.modules())
+
+
+def test_gemma4_visual_hmonnx_compact_mode_ignores_position_ids():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_hmonnx_inference import VisualHMONNXModel
+
+    captured = {}
+
+    def _fake_set_session_env():
+        return None
+
+    def _fake_forward(*args):
+        captured["args"] = args
+        return args
+
+    model = object.__new__(VisualHMONNXModel)
+    model.export_mode = "compact"
+    model.hmonnx_session = SimpleNamespace(
+        _set_session_env=_fake_set_session_env,
+        _session=SimpleNamespace(forward=_fake_forward, node_modules=[]),
+    )
+
+    VisualHMONNXModel.forward(
+        model,
+        torch.randn(1, 2304, 768),
+        torch.zeros((1, 2304, 2), dtype=torch.int64),
+    )
+
+    assert len(captured["args"]) == 1
+
+
 def test_gemma4_visual_hmonnx_runs_reducesum_in_fast_mode():
     from xhquant.common import PrecisionMode
 
@@ -239,27 +493,101 @@ def test_gemma4_visual_hmonnx_runs_reducesum_in_fast_mode():
     assert matmul_module.precision_mode == PrecisionMode.ALIGNED
 
 
-def test_gemma4_audio_runtime_uses_hmonnx_artifact(monkeypatch, tmp_path):
+def test_gemma4_audio_runtime_prefers_plain_onnx_artifact(monkeypatch, tmp_path):
     from xhmodel_merak.xh_llm.models.gemma4e import gemma4_hmonnx_inference as inference_mod
 
     created = {}
     audio_dir = tmp_path / "audio"
     hmonnx_path = audio_dir / "gemma4_audio_hm.onnx"
+    onnx_dir = audio_dir / "onnx"
+    onnx_path = onnx_dir / "gemma4_audio.onnx"
     audio_dir.mkdir(parents=True)
+    onnx_dir.mkdir(parents=True)
     hmonnx_path.touch()
+    onnx_path.touch()
 
     class _FakeAudioHMONNXModel:
         def __init__(self, path: str):
             created["hmonnx"] = path
 
+    class _FakeAudioONNXModel:
+        def __init__(self, path: str):
+            created["onnx"] = path
+
     monkeypatch.setattr(inference_mod, "AudioHMONNXModel", _FakeAudioHMONNXModel)
+    monkeypatch.setattr(inference_mod, "AudioONNXModel", _FakeAudioONNXModel)
 
     runtime = inference_mod.XHGemma4_HMONNXModel._build_audio_runtime(
-        SimpleNamespace(hmonnx=str(hmonnx_path), onnx=str(audio_dir / "onnx" / "gemma4_audio.onnx")),
+        SimpleNamespace(hmonnx=str(hmonnx_path), onnx=str(onnx_path)),
     )
 
-    assert isinstance(runtime, _FakeAudioHMONNXModel)
-    assert created["hmonnx"] == str(hmonnx_path)
+    assert isinstance(runtime, _FakeAudioONNXModel)
+    assert created["onnx"] == str(onnx_path)
+
+
+def test_gemma4_visual_runtime_prefers_plain_onnx_artifact(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4e import gemma4_hmonnx_inference as inference_mod
+
+    created = {}
+    visual_dir = tmp_path / "visual"
+    hmonnx_path = visual_dir / "gemma4_visual_hm.onnx"
+    onnx_dir = visual_dir / "onnx"
+    onnx_path = onnx_dir / "gemma4_visual.onnx"
+    visual_dir.mkdir(parents=True)
+    onnx_dir.mkdir(parents=True)
+    hmonnx_path.touch()
+    onnx_path.touch()
+
+    class _FakeVisualHMONNXModel:
+        def __init__(self, path: str, *, export_mode: str = "full", output_scale: float = 1.0):
+            created["hmonnx"] = (path, export_mode, output_scale)
+
+    class _FakeVisualONNXModel:
+        def __init__(self, path: str):
+            created["onnx"] = path
+
+    monkeypatch.setattr(inference_mod, "VisualHMONNXModel", _FakeVisualHMONNXModel)
+    monkeypatch.setattr(inference_mod, "VisualONNXModel", _FakeVisualONNXModel)
+
+    runtime = inference_mod.XHGemma4_HMONNXModel._build_visual_runtime(
+        SimpleNamespace(hmonnx=str(hmonnx_path), onnx=str(onnx_path), export_mode="compact"),
+    )
+
+    assert isinstance(runtime, _FakeVisualONNXModel)
+    assert created["onnx"] == str(onnx_path)
+
+
+def test_gemma4_visual_runtime_prefers_hmonnx_for_full_export(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4e import gemma4_hmonnx_inference as inference_mod
+
+    created = {}
+    visual_dir = tmp_path / "visual"
+    hmonnx_path = visual_dir / "gemma4_visual_hm.onnx"
+    onnx_dir = visual_dir / "onnx"
+    onnx_path = onnx_dir / "gemma4_visual.onnx"
+    visual_dir.mkdir(parents=True)
+    onnx_dir.mkdir(parents=True)
+    hmonnx_path.touch()
+    onnx_path.touch()
+
+    class _FakeVisualHMONNXModel:
+        def __init__(self, path: str, *, export_mode: str = "full", output_scale: float = 1.0):
+            created["hmonnx"] = (path, export_mode, output_scale)
+
+    class _FakeVisualONNXModel:
+        def __init__(self, path: str):
+            created["onnx"] = path
+
+    monkeypatch.setattr(inference_mod, "VisualHMONNXModel", _FakeVisualHMONNXModel)
+    monkeypatch.setattr(inference_mod, "VisualONNXModel", _FakeVisualONNXModel)
+
+    runtime = inference_mod.XHGemma4_HMONNXModel._build_visual_runtime(
+        SimpleNamespace(hmonnx=str(hmonnx_path), onnx=str(onnx_path), export_mode="full", output_scale=0.25),
+    )
+
+    assert isinstance(runtime, _FakeVisualHMONNXModel)
+    assert created["hmonnx"] == (str(hmonnx_path), "full", 0.25)
+    assert "onnx" not in created
 
 
 def test_gemma4_audio_runtime_requires_existing_hmonnx_artifact():

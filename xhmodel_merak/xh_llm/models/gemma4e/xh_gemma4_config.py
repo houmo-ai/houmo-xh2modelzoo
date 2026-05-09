@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from transformers import AutoConfig
@@ -36,6 +37,7 @@ def _get_visual_defaults(hf_model: str | None) -> dict[str, int]:
         "max_size_h": 448,
         "patch_size": 16,
         "image_seq_length": 280,
+        "pooling_kernel_size": 3,
     }
     processor_config = _load_processor_config(hf_model)
     if processor_config:
@@ -48,7 +50,17 @@ def _get_visual_defaults(hf_model: str | None) -> dict[str, int]:
     vision_config = getattr(config, "vision_config", None)
     if vision_config is not None:
         defaults["patch_size"] = getattr(vision_config, "patch_size", defaults["patch_size"])
+        defaults["pooling_kernel_size"] = getattr(
+            vision_config, "pooling_kernel_size", defaults["pooling_kernel_size"]
+        )
     return defaults
+
+
+def _normalize_visual_export_mode(export_mode: str | None) -> str:
+    normalized = "full" if export_mode is None else export_mode.lower()
+    if normalized not in {"full", "compact"}:
+        raise ValueError(f"Unsupported Gemma4 visual export mode: {export_mode}")
+    return normalized
 
 
 def _get_audio_defaults(hf_model: str | None) -> dict[str, int]:
@@ -75,18 +87,29 @@ class XHGemma4VisualConfig(HFModelConfig):
     def __init__(
         self,
         *,
+        export_mode: str | None = None,
         max_size_w: int | None = None,
         max_size_h: int | None = None,
         patch_size: int | None = None,
         image_seq_length: int | None = None,
+        pooling_kernel_size: int | None = None,
         **kwargs,
     ):
+        export_mode = _normalize_visual_export_mode(export_mode)
         defaults = _get_visual_defaults(kwargs.get("hf_model"))
+        if export_mode == "compact":
+            defaults["max_size_w"] = 224
+            defaults["max_size_h"] = 224
+            defaults["image_seq_length"] = 256
         super().__init__(**kwargs)
+        self.export_mode = export_mode
         self.max_size_w = defaults["max_size_w"] if max_size_w is None else max_size_w
         self.max_size_h = defaults["max_size_h"] if max_size_h is None else max_size_h
         self.patch_size = defaults["patch_size"] if patch_size is None else patch_size
         self.image_seq_length = defaults["image_seq_length"] if image_seq_length is None else image_seq_length
+        self.pooling_kernel_size = (
+            defaults["pooling_kernel_size"] if pooling_kernel_size is None else pooling_kernel_size
+        )
 
 
 class XHGemma4AudioConfig(HFModelConfig):
@@ -141,6 +164,8 @@ class Gemma4ModelMeta(LLMModelMeta):
             meta_path = Path(kwargs["_meta_path_"]).parent
             if self.visual_config is not None and getattr(self.visual_config, "hmonnx", None):
                 self.visual_config.hmonnx = str(meta_path / self.visual_config.hmonnx)
+            if self.visual_config is not None and getattr(self.visual_config, "onnx", None):
+                self.visual_config.onnx = str(meta_path / self.visual_config.onnx)
             if self.audio_config is not None and getattr(self.audio_config, "hmonnx", None):
                 self.audio_config.hmonnx = str(meta_path / self.audio_config.hmonnx)
             if self.audio_config is not None and getattr(self.audio_config, "onnx", None):
@@ -185,13 +210,15 @@ class XHGemma4ModelConfig(VisionLLMModelConfig):
             use_cache=use_cache,
             **kwargs,
         )
-        if isinstance(visual_config, dict):
+        if isinstance(visual_config, Mapping) and not isinstance(visual_config, XHGemma4VisualConfig):
+            visual_config = dict(visual_config)
             if "model_name" not in visual_config:
                 visual_config["model_name"] = f"{model_name}_visual"
             if "hf_model" not in visual_config:
                 visual_config["hf_model"] = hf_model
             visual_config = XHGemma4VisualConfig(**visual_config)
-        if isinstance(audio_config, dict):
+        if isinstance(audio_config, Mapping) and not isinstance(audio_config, XHGemma4AudioConfig):
+            audio_config = dict(audio_config)
             if "model_name" not in audio_config:
                 audio_config["model_name"] = f"{model_name}_audio"
             if "hf_model" not in audio_config:

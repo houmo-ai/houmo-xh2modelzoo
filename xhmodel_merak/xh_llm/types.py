@@ -308,6 +308,7 @@ class VisualModelMeta(ModelMeta):
         self.image_size_w = image_size_w
         self.image_size_h = image_size_h
         self.hmonnx: str = None
+        self.onnx: str = None
 
 
 class VLLMModelMeta(LLMModelMeta):

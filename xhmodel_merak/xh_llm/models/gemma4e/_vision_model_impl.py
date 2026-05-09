@@ -48,7 +48,8 @@ class _Gemma4VisionModel(DynamicModule):
 
     @staticmethod
     def _build_bidirectional_attention_mask(valid_positions: torch.Tensor) -> torch.Tensor:
-        return valid_positions[:, None, :, None] & valid_positions[:, None, None, :]
+        batch_size, seq_length = valid_positions.shape
+        return valid_positions[:, None, None, :].expand(batch_size, 1, seq_length, seq_length)
 
     @staticmethod
     def _avg_pool_by_positions(

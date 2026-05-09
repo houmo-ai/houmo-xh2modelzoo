@@ -17,9 +17,11 @@ class _Gemma4PerLayerInputRMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        normed_output = hidden_states * torch.rsqrt(hidden_states.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        normed_output = normed_output * self.weight
-        return normed_output
+        input_dtype = hidden_states.dtype
+        normed_output = hidden_states.float()
+        normed_output = normed_output * torch.rsqrt(normed_output.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        normed_output = normed_output * self.weight.float()
+        return normed_output.to(input_dtype)
 
 
 class Gemma4PerLayerInputBuilder(nn.Module):
@@ -64,7 +66,12 @@ class Gemma4PerLayerInputBuilder(nn.Module):
         )
         builder.embed_tokens_per_layer.load_state_dict(language_model.embed_tokens_per_layer.state_dict())
         builder.per_layer_model_projection.load_state_dict(language_model.per_layer_model_projection.state_dict())
-        builder.per_layer_projection_norm.load_state_dict(language_model.per_layer_projection_norm.state_dict())
+        per_layer_norm_state = {
+            name: tensor
+            for name, tensor in language_model.per_layer_projection_norm.state_dict().items()
+            if not name.startswith("norm.")
+        }
+        builder.per_layer_projection_norm.load_state_dict(per_layer_norm_state)
         builder.to(dtype=language_model.per_layer_model_projection.weight.dtype)
         return builder.eval()
 
@@ -258,25 +265,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                 sliding_mask[0, 0, q, sw_start:causal_end] = 0
             else:
                 sliding_mask[0, 0, q, 0] = 0
-
-        if mm_token_type_ids.numel() > 0:
-            mm = mm_token_type_ids[:current_input_length]
-            is_vision = (mm == 1) | (mm == 2)
-            cache_offset = max(0, past_seq_length - clamped_past)
-            group_start = None
-            for idx in range(current_input_length):
-                if bool(is_vision[idx]) and group_start is None:
-                    group_start = idx
-                if group_start is not None and (idx == current_input_length - 1 or not bool(is_vision[idx + 1])):
-                    group_end = idx + 1
-                    abs_start = past_seq_length + group_start
-                    abs_end = past_seq_length + group_end
-                    full_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
-                    c_start = max(0, abs_start - cache_offset)
-                    c_end = min(slide_ctx, abs_end - cache_offset)
-                    if c_start < slide_ctx and c_end > 0:
-                        sliding_mask[0, 0, group_start:group_end, c_start:c_end] = 0
-                    group_start = None
 
         return full_mask, sliding_mask
 

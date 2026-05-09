@@ -3,9 +3,12 @@ import wave
 
 import numpy as np
 from PIL import Image
+import torch
 
 
-MODEL_DIR = Path("/data01/datasets/gemma-4-E4B")
+MODEL_DIR = Path("/data01/datasets/gemma-4-E4B-it")
+if not MODEL_DIR.exists():
+    MODEL_DIR = Path("/data01/datasets/gemma-4-E4B")
 
 
 def _load_wav_mono_float32(path: Path) -> np.ndarray:
@@ -56,6 +59,55 @@ def test_gemma4_processor_expands_image_placeholders():
     assert model_inputs["image_position_ids"].shape[-1] == 2
 
 
+def test_gemma4_processor_full_mode_keeps_rectangular_image_tokens():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
+
+    processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
+    model_inputs = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": Image.new("RGB", (320, 224), color="white")},
+                    {"type": "text", "text": "Describe the image briefly."},
+                ],
+            }
+        ]
+    )
+
+    image_token_count = int((model_inputs["input_ids"] == processor.tokenizer.image_token_id).sum().item())
+
+    assert image_token_count == 280
+
+
+def test_gemma4_processor_compact_mode_forces_square_image_contract():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
+
+    processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
+    processor.config.export_mode = "compact"
+    processor.config.max_size_h = 224
+    processor.config.max_size_w = 224
+    model_inputs = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": Image.new("RGB", (320, 224), color="white")},
+                    {"type": "text", "text": "Describe the image briefly."},
+                ],
+            }
+        ]
+    )
+
+    image_token_count = int((model_inputs["input_ids"] == processor.tokenizer.image_token_id).sum().item())
+    real_patch_count = int((~(model_inputs["image_position_ids"] == -1).all(dim=-1)).sum().item())
+
+    assert image_token_count == 256
+    assert model_inputs["pixel_values"].shape[1] == 2304
+    assert model_inputs["image_position_ids"].shape[1] == 2304
+    assert real_patch_count == 2304
+
+
 def test_gemma4_processor_uses_official_turn_tokens_without_double_bos():
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
 
@@ -75,24 +127,58 @@ def test_gemma4_processor_uses_official_turn_tokens_without_double_bos():
 
 
 def test_gemma4_processor_renders_image_blocks_like_official_template():
+    from transformers import AutoProcessor
+
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
 
     processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
+    official_processor = AutoProcessor.from_pretrained(str(MODEL_DIR), trust_remote_code=True)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": Image.new("RGB", (448, 448), color="white")},
+                {"type": "text", "text": "Describe the image briefly."},
+            ],
+        }
+    ]
 
-    rendered, _, _, _ = processor._render_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": Image.new("RGB", (448, 448), color="white")},
-                    {"type": "text", "text": "Describe the image briefly."},
-                ],
-            }
-        ],
+    rendered, _, _, _ = processor._render_messages(messages, add_generation_prompt=True)
+    official_rendered = official_processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+    assert rendered == official_rendered
+
+
+def test_gemma4_processor_matches_official_audio_template_tokenization():
+    from transformers import AutoProcessor
+
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
+
+    processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
+    official_processor = AutoProcessor.from_pretrained(str(MODEL_DIR), trust_remote_code=True)
+    audio = np.zeros(16000, dtype=np.float32)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio": audio, "sampling_rate": 16000},
+                {"type": "text", "text": "Transcribe this audio."},
+            ],
+        }
+    ]
+
+    model_inputs = processor.apply_chat_template(messages)
+    official_inputs = official_processor.apply_chat_template(
+        messages,
         add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
     )
 
-    assert rendered == "<|turn>user\n\n\n<|image|>\n\nDescribe the image briefly.<turn|>\n<|turn>model\n"
+    assert torch.equal(model_inputs["input_ids"], official_inputs["input_ids"])
+    assert torch.equal(model_inputs["attention_mask"], official_inputs["attention_mask"])
+    assert torch.equal(model_inputs["mm_token_type_ids"], official_inputs["mm_token_type_ids"])
 
 
 def test_gemma4_processor_expands_audio_placeholders():

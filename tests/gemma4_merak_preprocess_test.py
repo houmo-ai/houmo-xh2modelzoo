@@ -77,6 +77,8 @@ def test_gemma4_preprocess_injects_multimodal_features():
     assert torch.equal(per_layer_input_builder.input_ids[0, :4], torch.tensor([1, 0, 2, 0]))
     assert torch.allclose(inputs_embeds[0, 1], image_embed[0])
     assert torch.allclose(inputs_embeds[0, 3], audio_embed[0])
+    assert torch.allclose(per_layer_input_builder.inputs_embeds[0, 1], image_embed[0])
+    assert torch.allclose(per_layer_input_builder.inputs_embeds[0, 3], audio_embed[0])
     assert torch.allclose(per_layer_inputs[0, 0, 1], image_embed[0])
     assert torch.allclose(per_layer_inputs[0, 0, 3], audio_embed[0])
 
@@ -176,6 +178,50 @@ def test_gemma4_preprocess_can_emit_legacy_attention_masks():
     global_attention_mask = outputs[6]
     assert local_attention_mask.shape == (1, 1, 6, 16)
     assert global_attention_mask.shape == (1, 1, 6, 32)
+
+
+def test_gemma4_preprocess_keeps_vision_attention_causal():
+    from xhmodel_merak.xh_llm.models.gemma4e.data_preprocess import (
+        Gemma4DataPreprocess,
+        Gemma4InputProcessorConfig,
+    )
+
+    embed_tokens = nn.Embedding(32, 4)
+
+    class PassthroughPerLayerInputBuilder(nn.Module):
+        def forward(self, input_ids, inputs_embeds):
+            del input_ids
+            return inputs_embeds
+
+    config = Gemma4InputProcessorConfig(
+        embed_tokens=embed_tokens,
+        input_sequence_length=6,
+        context_max_length=16,
+        sliding_window=8,
+        image_token_id=9,
+        audio_token_id=-1,
+        video_token_id=-1,
+        past_key_caches=CacheList([torch.zeros((1, 2, 16, 8), dtype=torch.float16)]),
+        past_value_caches=CacheList([torch.zeros((1, 2, 16, 8), dtype=torch.float16)]),
+        per_layer_input_builder=PassthroughPerLayerInputBuilder(),
+        pad_token_id=0,
+    )
+    preprocess = Gemma4DataPreprocess(config)
+
+    outputs = preprocess(
+        {
+            "input_ids": torch.tensor([[1, 9, 9, 2]], dtype=torch.long),
+            "mm_token_type_ids": torch.tensor([[0, 1, 1, 0]], dtype=torch.long),
+            "past_seq_length": 0,
+        }
+    )
+
+    local_attention_mask = outputs[5]
+    global_attention_mask = outputs[6]
+
+    assert global_attention_mask[0, 0, 1, 2] < 0
+    assert local_attention_mask[0, 0, 1, 2] < 0
+    assert local_attention_mask[0, 0, 2, 1] == 0
 
 
 def test_gemma4_preprocess_preserves_sequence_metadata_without_attention_masks():

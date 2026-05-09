@@ -161,8 +161,14 @@ class XHGemma4AudioModel(BaseVisionModel):
     def export_hmonnx(self, output_dir: str) -> Gemma4AudioModelMeta:
         meta_info = self.create_export_metadata(output_dir)
         exported_hmonnx_file = super()._export_hmonnx(output_dir)
-        shutil.rmtree(Path(output_dir) / "onnx", ignore_errors=True)
         meta_info.hmonnx = str(exported_hmonnx_file)
+        source_onnx_dir = Path(self.config.work_dir) / "onnx"
+        target_onnx_dir = Path(output_dir) / "onnx"
+        if source_onnx_dir.exists():
+            if source_onnx_dir.resolve() != target_onnx_dir.resolve():
+                shutil.rmtree(target_onnx_dir, ignore_errors=True)
+                shutil.copytree(source_onnx_dir, target_onnx_dir)
+            meta_info.onnx = str(target_onnx_dir / "gemma4_audio.onnx")
         return meta_info
 
     def create_export_metadata(self, output_dir: str) -> Gemma4AudioModelMeta:

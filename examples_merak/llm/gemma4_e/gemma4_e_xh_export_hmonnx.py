@@ -6,6 +6,14 @@ from xhquant.api import Config, xhquant_init
 
 
 def _build_cfg_from_model(args):
+    visual_config = {
+        "export_mode": args.vision_export_mode,
+    }
+    if args.image_width is not None:
+        visual_config["max_size_w"] = args.image_width
+    if args.image_height is not None:
+        visual_config["max_size_h"] = args.image_height
+
     cfg = dict(
         chip_arch=args.chip_arch,
         model=dict(
@@ -19,10 +27,7 @@ def _build_cfg_from_model(args):
             quant_scheme=dict(
                 quant_type=args.quant_type,
             ),
-            visual_config=dict(
-                max_size_w=args.image_width,
-                max_size_h=args.image_height,
-            ),
+            visual_config=visual_config,
             audio_config=dict(
                 sampling_rate=args.audio_sampling_rate,
             ),
@@ -54,8 +59,9 @@ if __name__ == "__main__":
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--prefill-chunk-length", type=int, default=256)
     parser.add_argument("--quant-type", type=str, default="w8a8h1_sefp")
-    parser.add_argument("--image-width", type=int, default=448)
-    parser.add_argument("--image-height", type=int, default=448)
+    parser.add_argument("--vision-export-mode", type=str, default="full", choices=["full", "compact"])
+    parser.add_argument("--image-width", type=int, default=None)
+    parser.add_argument("--image-height", type=int, default=None)
     parser.add_argument("--audio-sampling-rate", type=int, default=16000)
     parser.add_argument("--debug", action="store_true")
     main(parser.parse_args())
