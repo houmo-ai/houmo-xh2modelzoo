@@ -16,12 +16,6 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from xhquant import nn as xhnn
-from xhquant.api import ConfigDict
-from xhquant.utils.registry import DynamicModule
-
-from ...register import XHLLM_TRACEABLE_MODULES
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionAttention,
     Qwen3_5MoeVisionBlock,
@@ -30,6 +24,12 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionPatchMerger,
     rotate_half,
 )
+
+from xhquant import nn as xhnn
+from xhquant.api import ConfigDict
+from xhquant.utils.registry import DynamicModule
+
+from ...register import XHLLM_TRACEABLE_MODULES
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(

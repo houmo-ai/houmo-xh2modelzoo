@@ -8,9 +8,9 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -120,10 +120,10 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_embeds = image_embeds.squeeze(0)
 
-        seq_length = inputs_embeds.shape[1]
+        # seq_length = inputs_embeds.shape[1]
         data_processor = self._llm_model.get_data_preprocessor()
-        net_input_seq_len = self._llm_model.get_input_sequence_length()
-        steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
+        # net_input_seq_len = self._llm_model.get_input_sequence_length()
+        # steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
 
         data_batch = {
             "input_ids": input_ids,
@@ -280,8 +280,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             return inference_model
 
     def set_prefill(self):
-        if self._llm_prefill:
-            return
         self.wrap_cfg["linear_attention_mode"] = "chunk"
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("prefill")
@@ -290,8 +288,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         super().set_prefill()
 
     def set_decode(self):
-        if self._llm_prefill is False:
-            return
         self.wrap_cfg["linear_attention_mode"] = "recurrent"
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("decode")
@@ -373,22 +369,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.pad_token_id = llm_model.config.eos_token_id
         self.layer_types = list(text_config.layer_types)
 
-        # if self.config.only_first_block:
-        #     self.linear_attention_layer_indices = []
-        #     for idx, layer_type in enumerate(self.layer_types):
-        #         if layer_type == "full_attention":
-        #             self.full_attention_layer_indices = [idx]
-        #             break
-        #         else:
-        #             self.linear_attention_layer_indices.append(idx)
-        #     self.config.max_layers = len(self.full_attention_layer_indices) + len(self.linear_attention_layer_indices)
-        # else:
-        #     self.full_attention_layer_indices = [
-        #         idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
-        #     ]
-        #     self.linear_attention_layer_indices = [
-        #         idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
-        #     ]
         self_attn = llm_model.layers[self.full_attention_layer_indices[0]].self_attn
         linear_attn = llm_model.layers[self.linear_attention_layer_indices[0]].linear_attn
 
@@ -418,7 +398,8 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         from ._llm_model_impl import register_wrap_modules
 
         register_wrap_modules()
-        return super().init_wrap_model(hf_model)
+        wrap_model = super().init_wrap_model(hf_model)
+        return wrap_model
 
     def forward(self, *args, **kwargs):
         logits, conv_cache_out_list, recurrent_state_out_list = super().forward(*args, **kwargs)
@@ -493,26 +474,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         for cache_idx in range(linear_num_layers):
             export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}")
         return export_cfg
-
-    # def convert_to_quant_graph(self, target_device: str = "xh2a"):
-    #     from xhquant.nn import MatMul
-
-    #     if self._frontend_model is not None:
-    #         cumsum_quant_cfg = self.wrap_cfg.get("cumsum_matmul_quant_config", None)
-    #         if cumsum_quant_cfg is None:
-    #             cumsum_quant_cfg = dict(
-    #                 act_schema=dict(fp_mode="sefp", man_bit=16),
-    #                 act_schema_2=dict(fp_mode="fp16", man_bit=8),
-    #             )
-
-    #         for node in self._frontend_model.graph.nodes:
-    #             if node.op != "call_module":
-    #                 continue
-    #             module = self._frontend_model.get_submodule(node.target)
-    #             if isinstance(module, MatMul) and "cumsum_matmul" in node.target:
-    #                 node.meta["quant_config"] = deepcopy(cumsum_quant_cfg)
-
-    #     return super().convert_to_quant_graph(target_device)
 
     def export_llm_hmonnx(self, output_dir):
         super().export_hmonnx(output_dir)

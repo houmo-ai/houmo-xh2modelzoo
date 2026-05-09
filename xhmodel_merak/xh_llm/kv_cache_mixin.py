@@ -22,12 +22,15 @@ class KVCacheMixin:
         self.past_value_caches: CacheList[Tensor | CacheTensor] = CacheList()
         self._device = None
         self._dtype = None
+        self._cache_initialized = False
 
     @property
     def use_cache(self) -> bool:
         return self.kvcache_config.use_cache
 
     def prepare_kv_cache(self):
+        if self._cache_initialized:
+            return
         if not self.use_cache:
             return
         if self.kvcache_config.num_layers <= 0:
@@ -44,12 +47,14 @@ class KVCacheMixin:
         for _i in range(num_decoder_layers):
             self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(k_cache_shape, dtype=torch.float16)))
             self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(v_cache_shape, dtype=torch.float16)))
+        self._cache_initialized = True
 
     def clear_kv_cache(self):
         self.past_key_caches.clear()
         self.past_value_caches.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        self._cache_initialized = False
 
     def prepare_other_cache(self):
         pass

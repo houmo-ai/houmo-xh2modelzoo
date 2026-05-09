@@ -434,6 +434,7 @@ class XHBaseModel(DeviceMixin):
 
         check_wraped(self._wrap_model)
         self._wraped_post(hf_model)
+        hf_model.to(self._dtype)
         return self._wrap_model
 
     @classmethod
@@ -772,20 +773,22 @@ class XHBaseModel(DeviceMixin):
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model
-    
+
     @classmethod
     def _dequantize_gptqmodel(cls, native_hf_model: nn.Module) -> nn.Module:
         """
         Dequantize a GPTQ model loaded via GPTQModel library.
         This handles models loaded through `_load_gptqmodel` which contain QuantLinear layers.
         """
-        from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-        
+
+        from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
+
         hf_model = native_hf_model
         torch_linear_cls = [PackableQuantLinear]
         try:
             from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+
             torch_linear_cls.append(TorchFusedQuantLinear)
         except Exception:
             pass
@@ -806,12 +809,12 @@ class XHBaseModel(DeviceMixin):
         # Clear quantization metadata
         if hasattr(hf_model, "config") and hasattr(hf_model.config, "quantization_config"):
             hf_model.config.quantization_config = None
-        
+
         if hasattr(hf_model, "quantization_method"):
             hf_model.quantization_method = None
         if hasattr(hf_model, "_is_hf_initialized"):
             hf_model._is_hf_initialized = False
-            
+
         return hf_model
 
     @classmethod
@@ -1097,7 +1100,8 @@ class XHBaseModel(DeviceMixin):
             return
         enable_auto_offload = self.config.enable_auto_offload
         if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
-            hf_auto_offload(inference_model)
+            if self.config.enable_auto_offload:
+                hf_auto_offload(inference_model)
         elif self._state in [
             LLMModelState.FRONTED,
             LLMModelState.QUANTED_DISABLE,
@@ -1128,7 +1132,8 @@ class XHBaseModel(DeviceMixin):
         if self._inference_model is not None and self._inference_model == inference_model:
             return
         if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
-            hf_auto_offload(inference_model)
+            if self.config.enable_auto_offload:
+                hf_auto_offload(inference_model)
         elif self._state in [
             LLMModelState.FRONTED,
             LLMModelState.QUANTED_DISABLE,
@@ -1267,11 +1272,21 @@ class XHBaseModel(DeviceMixin):
                     inference_model.to(device)
 
     def _set_dtype(self, dtype: torch.dtype | str | None):
+        if dtype is None:
+            return
+        self._dtype = dtype
         inference_model = self.get_inference_model()
-        if inference_model is not None:
-            if dtype is not None:
-                self._dtype = dtype
+        if inference_model is None:
+            return
+        if self._state in [
+            LLMModelState.WRAP,
+            LLMModelState.EAGER_FAST,
+            LLMModelState.EAGER_ALIGNED,
+        ]:
+            if not self.config.enable_auto_offload:
                 inference_model = inference_model.to(dtype)
+        else:
+            inference_model = inference_model.to(dtype)
 
     # 模型导出
     @classmethod

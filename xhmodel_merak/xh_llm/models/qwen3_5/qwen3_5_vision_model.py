@@ -12,7 +12,6 @@ from typing import Any, cast
 
 import onnx
 import torch
-import torch.fx as fx
 from PIL import Image
 from transformers import AutoConfig, AutoModelForImageTextToText
 

@@ -8,12 +8,6 @@ from .qwen3_5_moe_vision_model import XHQwen3_5MoeVisionModel
 from .xh_qwen3_5_moe_config import XHQwen3_5Moe_VisualConfig, XHQwen3_5MoeModelConfig
 
 
-# try:
-#     AutoConfig.register("qwen3_5", Qwen3_5Config)
-# except ValueError:
-#     pass
-
-
 __all__ = [
     # "Qwen3_5Config",
     "Qwen3_5MoeForConditionalGeneration",
