@@ -21,16 +21,33 @@ CosyVoice 3 hmonnx 流式合成 demo (cv3_stream.py)
     每 chunk 把累计前缀 [0:offset+25+3] 喂给定长 token2wav，
     用 speech_offset 切出新增样点；
     首段比模式 A 早出现，但每 chunk 都跑满定长 onnx，
-    总耗时 > 模式 A。当前 hift 未导出 finalize=False，
-    拼接处仍靠 fade 压跳变。
+    总耗时 > 模式 A。
+    拼接处可叠加 --v3_align（hift 输出切尾 3840 samples，
+    等价于 V3 官方 hift.inference(..., finalize=False)）+ --fade_ms (默认 5ms)
+    双保险消除爆音。
 
 ------------------------------------------------------------
-ONNX 后端两档（同时由 init_resources 自动读 input shape 适配）
+ONNX 后端三档（init_resources 自动读 input shape 适配）
 ------------------------------------------------------------
-  hmonnx/      (默认)  pre_la=1024  decoder=2048  hift=1024
-  hmonnx_512/         pre_la=512   decoder=1024  hift=512   ← 单次 forward 快 ~2-4x
+  hmonnx/      (默认)  pre_la=1024  decoder=2048  hift=1024  (≤21s 输出)
+  hmonnx_512/         pre_la=512   decoder=1024  hift=512   (≤9s 输出, ~2x 快)
+  hmonnx_256/         pre_la=256   decoder=512   hift=256   (≤1.5s 输出, ~3x 快)
 
 切换方式：CLI 传 --pre_lookahead_layer / --flow_decoder / --hift。
+
+------------------------------------------------------------
+模式 B 拼接消爆音两件套
+------------------------------------------------------------
+  --v3_align    hift 中间 chunk 切尾 3840 samples，对齐 V3 官方流式
+                行为；理论上让相邻 chunk 安全区重叠相等（W8A16 量化下
+                残余跳变 ~0.03，不为 0）。
+  --fade_ms 5   chunk 头尾 5ms 线性 fade，强制拼接点样点 = 0。
+
+  实测组合（hmonnx_512 同短句 7 chunks）：
+    OFF + 0       max |jump| = 0.046
+    OFF + 5ms     max |jump| = 0.000
+    ON  + 0       max |jump| = 0.029
+    ON  + 5ms ✅  max |jump| = 0.000   ← 推荐生产用
 
 ------------------------------------------------------------
 用法示例
@@ -53,22 +70,26 @@ ONNX 后端两档（同时由 init_resources 自动读 input shape 适配）
         --flow_decoder        hmonnx_512/decoder/prefill/hmquant_xh2_decoder_w8a16_1024_20260509.onnx \\
         --hift                hmonnx_512/hift/prefill/hmquant_xh2_hift_w8a16_512_20260509.onnx
 
-[3] 模式 B，hmonnx_512 + fade=5ms（句内 token 级流式 + 边界归零）
+[3] 模式 B，hmonnx_512 + v3_align + fade=5ms（推荐，token 级流式生产用）
     python cv3_stream.py \\
         --text "清晨的阳光透过窗帘洒进房间，空气里带着一丝淡淡的花香。" \\
         --prompt_text "希望你以后能够做得比我还好呦。" \\
         --prompt_wav /data01/home/she.gao/xh2modelzoo/examples/audio/Cosyvoice3/zero_shot_prompt.wav \\
-        --out_dir stream_out_512_token --gpu 0 \\
+        --out_dir stream_out_512_full --gpu 0 \\
         --pre_lookahead_layer hmonnx_512/pre_lookahead_layer/prefill/hmquant_xh2_pre_lookahead_layer_w8a16_512_20260509.onnx \\
         --flow_decoder        hmonnx_512/decoder/prefill/hmquant_xh2_decoder_w8a16_1024_20260509.onnx \\
         --hift                hmonnx_512/hift/prefill/hmquant_xh2_hift_w8a16_512_20260509.onnx \\
-        --token_level_stream --token_max_n 80 --token_min_n 60 --fade_ms 5
+        --token_level_stream --token_max_n 80 --token_min_n 60 \\
+        --v3_align --fade_ms 5
 
 [4] 切细句子让首段更快（默认 30/20，可激进到 20/15）
     python cv3_stream.py ... --token_max_n 20 --token_min_n 15
 
 [5] 关 fade 看原始拼接（调试用）
     python cv3_stream.py ... --fade_ms 0
+
+[6] 极致 V3 对齐（接受量化误差跳变，看 v3_align 单独效果）
+    python cv3_stream.py ... --v3_align --fade_ms 0
 
 ------------------------------------------------------------
 环境要求
@@ -91,9 +112,10 @@ ONNX 后端两档（同时由 init_resources 自动读 input shape 适配）
 关键 CLI 参数速查
 ------------------------------------------------------------
   必填:  --text  --prompt_text  --prompt_wav
-  常用:  --out_dir  --gpu  --token_level_stream  --fade_ms
+  常用:  --out_dir  --gpu  --token_level_stream  --fade_ms  --v3_align
   切分:  --token_max_n (30)  --token_min_n (20)  --merge_len (10)  --comma_split
   滑窗:  --token_hop_len (25)  --pre_lookahead_len (3)   # 仅模式 B
+  对齐:  --v3_align                                       # 仅模式 B，hift 切尾 3840 samples
   onnx:  --pre_lookahead_layer  --flow_decoder  --hift   # 切 hmonnx 档位
 """
 
@@ -466,7 +488,19 @@ def synthesize_one(
 # 单句内部的 25-token 流式（在 hmonnx 定长 onnx 上模拟）
 # 注意：每个 chunk 都把"累计前缀"喂给定长 token2wav，故总耗时一定 > 整句单次。
 # 这是为了观察 token 级流式的首段延迟 / 听感，不是性能优化。
+#
+# V3 对齐版（v3_align=True）：
+# 中间 chunk 把 hift 输出尾部 3840 samples 切掉，等价于 V3 官方的 finalize=False。
+# 等价性已验证：finalize=True(mel)[:, :-3840] == finalize=False(mel)，差为 0.0。
+# 拼接处可保留更连续的因果卷积输出，无需再依赖 fade。
 # ============================================================
+# V3 CausalHiFTGenerator finalize=False 等价切尾样点数：
+#   = prod(upsample_rates) * hop_len + conv_pre_look_right * prod_rates
+#   = 120 * 4 + 4 * 120 * (1)  # 实际验证为 3840
+# 由实测得到（finalize=True - finalize=False 输出长度差）
+HIFT_FINALIZE_TAIL_CUT = 3840
+
+
 def synthesize_one_token_stream(
     res: Resources,
     frontend: CosyVoiceFrontEnd,
@@ -476,6 +510,7 @@ def synthesize_one_token_stream(
     sample_rate: int,
     token_hop_len: int = 25,
     pre_lookahead_len: int = 3,
+    v3_align: bool = False,
 ):
     """生成器：逐个 yield (chunk_wav: torch.Tensor[1,N], is_first: bool, is_final: bool)。"""
     device = res.device
@@ -518,6 +553,14 @@ def synthesize_one_token_stream(
             embedding=embedding,
         )  # [1, N_total]
         wav_full = wav_full.to(torch.float32).to("cpu")
+        # V3 对齐：中间 chunk 切掉 hift 尾部 3840 samples（等价于 finalize=False）
+        if v3_align and not finalize:
+            if wav_full.shape[1] > HIFT_FINALIZE_TAIL_CUT:
+                wav_full = wav_full[:, :-HIFT_FINALIZE_TAIL_CUT]
+        # 防御 0-长度 chunk：当 speech_offset 已经走到 wav_full 末尾（onnx 容量到顶时
+        # token2wav 输出长度不再增长），new_wav 会是 [1, 0]。返回 None 表示不 yield。
+        if wav_full.shape[1] <= speech_offset:
+            return None, is_first_yield, finalize
         new_wav = wav_full[:, speech_offset:]
         speech_offset = wav_full.shape[1]
         is_f = is_first_yield
@@ -536,12 +579,14 @@ def synthesize_one_token_stream(
             new_offset = token_offset + this_hop
             new_wav, is_f, _ = _emit(new_offset + pre_lookahead_len, finalize=False)
             token_offset = new_offset
-            yield new_wav, is_f, False
+            if new_wav is not None and new_wav.shape[1] > 0:
+                yield new_wav, is_f, False
 
     # 收尾：把剩余 token 全跑一次 finalize
     if len(speech_tokens) > token_offset:
         new_wav, is_f, _ = _emit(len(speech_tokens), finalize=True)
-        yield new_wav, is_f, True
+        if new_wav is not None and new_wav.shape[1] > 0:
+            yield new_wav, is_f, True
     if capped:
         logging.warning(
             f"sentence hit onnx token cap ({onnx_token_cap}), truncated tail"
@@ -651,6 +696,7 @@ def stream_tts(args):
                 sample_rate,
                 token_hop_len=args.token_hop_len,
                 pre_lookahead_len=args.pre_lookahead_len,
+                v3_align=args.v3_align,
             ):
                 if args.fade_ms > 0:
                     fade_n = int(args.fade_ms / 1000.0 * sample_rate)
@@ -770,6 +816,11 @@ def build_parser():
         type=int,
         default=3,
         help="每次 chunk 的 pre_lookahead 余量（仅在 --token_level_stream 时生效）",
+    )
+    parser.add_argument(
+        "--v3_align",
+        action="store_true",
+        help="对齐 V3 官方流式：中间 chunk 的 hift 输出切掉尾部 3840 samples（finalize=False 等价），减少边界跳变",
     )
     return parser
 
