@@ -11,6 +11,7 @@
 """Export Qwen3-Omni thinker text module to HMONNX."""
 
 import argparse
+import json
 import os.path as osp
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _hmonnx_pipeline import discover_artifacts, run_text_hmonnx_chain_forward
+from _thinker_gptq_view import is_qwen3_omni_gptq_checkpoint, prepare_qwen3_omni_thinker_gptq_view
 
 try:
     from _hmonnx_pipeline import release_export_cuda_memory
@@ -33,6 +35,7 @@ from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen3_omni import Qwen3OmniMoeConvertConfig
 
 from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init  # isort:skip
+from xhquant.api.quant_type import parse_quant_format  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
@@ -42,22 +45,23 @@ def main(args):
     model_name = Path(hf_model_path).name
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
-    quant_scheme = QuantScheme(target_device=target_device, quant_type=quant_type)
+    use_qwen3omni_gptq_view = is_qwen3_omni_gptq_checkpoint(hf_model_path)
+    if use_qwen3omni_gptq_view:
+        quant_format = parse_quant_format(quant_type)
+        if quant_format.weight_bit is not None and quant_format.weight_bit > 8:
+            raise ValueError(
+                f"GPTQ thinker export does not support quant_type={quant_type}: "
+                "GPTQ-backed linear weights are exported through ssfp and currently require weight mantissa bits <= 8. "
+                "Use a GPTQ-friendly profile such as w4a8_ssfp or w8a8h1_sefp."
+            )
 
-    config = Qwen3OmniMoeConvertConfig(
-        batch_size=1,
-        context_length=args.context_length,
-        input_sequence_length=args.input_sequence_length,
-        quant_scheme=quant_scheme,
-        quant_weight=args.quant_weight,
-        num_logits_to_keep=args.num_logits_to_keep,
-        export_audio_encoder=False,
-        export_vision_encoder=False,
-        export_talker_model=False,
-        export_talker_prediction=False,
-    )
+    quant_scheme = QuantScheme(target_device=target_device, quant_type=quant_type)
+    if use_qwen3omni_gptq_view and args.quant_weight is not None:
+        raise ValueError("GPTQ checkpoint model cannot be combined with external --quant-weight")
 
     prefix = f"{model_name}-{target_device}-text-{args.context_length // 1024}k-{quant_type}"
+    if use_qwen3omni_gptq_view:
+        prefix += "-gptq"
     work_dir = Path(args.work_dir) / prefix
     golden_root = Path(args.golden_root)
     if not golden_root.is_absolute():
@@ -82,12 +86,54 @@ def main(args):
         / f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}_decoder.onnx"
     )
 
-    if meta_file.exists() and prefill_file.exists() and decode_file.exists():
+    reuse_existing = meta_file.exists() and prefill_file.exists() and decode_file.exists()
+    if reuse_existing and use_qwen3omni_gptq_view:
+        try:
+            existing_meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            existing_meta = {}
+        if not existing_meta.get("gptq_expert_qzeros_normalized", False):
+            logger.info(f"Rebuilding stale GPTQ text export artifacts in {work_dir}")
+            reuse_existing = False
+
+    if reuse_existing:
         logger.info(f"Reusing existing text export artifacts in {work_dir}")
     else:
-        logger.info(f"Exporting thinker text module from {hf_model_path}")
+        if use_qwen3omni_gptq_view:
+            gptq_view_dir = prepare_qwen3_omni_thinker_gptq_view(
+                hf_model_path,
+                work_dir / "_thinker_gptq_view" / model_name,
+            )
+            export_model_path = str(gptq_view_dir)
+            export_architecture = "Qwen3OmniMoeThinkerTextForCausalLM"
+            export_config = Qwen3OmniMoeConvertConfig(
+                batch_size=1,
+                context_length=args.context_length,
+                input_sequence_length=args.input_sequence_length,
+                quant_scheme=quant_scheme,
+                quant_weight=None,
+                num_logits_to_keep=args.num_logits_to_keep,
+            )
+            logger.info(f"Exporting thinker text module from GPTQ thinker view {export_model_path}")
+        else:
+            export_model_path = hf_model_path
+            export_architecture = "Qwen3OmniMoeForConditionalGeneration"
+            export_config = Qwen3OmniMoeConvertConfig(
+                batch_size=1,
+                context_length=args.context_length,
+                input_sequence_length=args.input_sequence_length,
+                quant_scheme=quant_scheme,
+                quant_weight=args.quant_weight,
+                num_logits_to_keep=args.num_logits_to_keep,
+                export_audio_encoder=False,
+                export_vision_encoder=False,
+                export_talker_model=False,
+                export_talker_prediction=False,
+            )
+            logger.info(f"Exporting thinker text module from {hf_model_path}")
+
         with TimeProfiler("convert_text", logger), MemoryTracker("cuda:0", "convert_text", logger):
-            LLMConverter.from_pretrained(hf_model_path, "Qwen3OmniMoeForConditionalGeneration", config, str(work_dir))
+            LLMConverter.from_pretrained(export_model_path, export_architecture, export_config, str(work_dir))
         logger.info(f"Text module export complete. Artifacts in {work_dir}")
         release_export_cuda_memory(logger, "text export")
 
@@ -115,14 +161,14 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Qwen3-Omni thinker text to HMONNX")
-    parser.add_argument("--model", type=str, default="/data02/datasets/Qwen3-Omni-30B-A3B-Instruct/")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-Omni-30B-A3B-Instruct-llm-gptq-4bit-64g")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
-    parser.add_argument("--quant-type", default="w8a8h0_sefp", help="quantization type")
+    parser.add_argument("--quant-type", default="w4a8_ssfp", help="quantization type")
     parser.add_argument("--context-length", type=int, default=512)
-    parser.add_argument("--input-sequence-length", type=int, default=32)
+    parser.add_argument("--input-sequence-length", type=int, default=64)
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
-    parser.add_argument("--quant-weight", type=str, default=None, help="path to quant weight (gptq/quarot)")
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--quant-weight", type=str, default=None, help="path to external quant weight (gptq/quarot)")
+    parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
     parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
     parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")

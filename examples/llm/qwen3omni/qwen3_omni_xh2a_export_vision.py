@@ -50,6 +50,37 @@ from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 
+def _run_vision_dialogue_validation(
+    hf_model_path: str,
+    work_dir: Path,
+    golden_dir: Path,
+    logger,
+    meta_info,
+    meta_file: Path,
+    *,
+    case: str,
+    max_new_tokens: int,
+    talker_max_new_tokens: int,
+    valid_device: str,
+    save_golden: bool,
+):
+    dialogue_artifacts = {"vision": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
+    return run_dialogue_validation(
+        hf_model_path,
+        work_dir,
+        logger,
+        case=case,
+        max_new_tokens=max_new_tokens,
+        talker_max_new_tokens=talker_max_new_tokens,
+        device_map=valid_device,
+        artifacts=dialogue_artifacts,
+        report_name="vision_dialogue_validation.json",
+        output_prefix="vision_dialogue",
+        save_golden=save_golden,
+        golden_dir=golden_dir,
+    )
+
+
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -241,19 +272,18 @@ def main(args):
             try:
                 # Keep only vision in artifacts so encoder runs on HMONNX,
                 # while thinker/talker/code2wav stay on HF path.
-                dialogue_artifacts = {"vision": {**meta_info, "_root_dir": str(work_dir), "_meta_path": str(meta_file)}}
-                dialogue_report = run_dialogue_validation(
+                dialogue_report = _run_vision_dialogue_validation(
                     hf_model_path,
                     work_dir,
+                    golden_dir,
                     logger,
+                    meta_info,
+                    meta_file,
                     case=args.case,
                     max_new_tokens=args.max_new_tokens,
-                    device_map=args.valid_device,
-                    artifacts=dialogue_artifacts,
-                    report_name="vision_dialogue_validation.json",
-                    output_prefix="vision_dialogue",
+                    talker_max_new_tokens=args.talker_max_new_tokens,
+                    valid_device=args.valid_device,
                     save_golden=args.save_golden,
-                    golden_dir=golden_dir,
                 )
                 output_text = dialogue_report.get("output_text", [])
                 applied_artifacts = dialogue_report.get("applied_artifacts", [])
@@ -308,6 +338,12 @@ if __name__ == "__main__":
     parser.add_argument("--case", type=str, default="vision", choices=["text", "vision", "audio", "multimodal"])
     parser.add_argument("--valid-device", type=str, default="auto", choices=["auto", "cpu"])
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--talker-max-new-tokens",
+        type=int,
+        default=96,
+        help="cap talker audio tokens during end-to-end demo validation",
+    )
     parser.add_argument("--golden-root", type=str, default="work_dirs/qwen3omni_no_projection")
     parser.add_argument("--save-golden", action="store_true", default=True, help="save golden outputs after validation")
     parser.add_argument("--no-save-golden", action="store_false", dest="save_golden", help="skip golden output save")

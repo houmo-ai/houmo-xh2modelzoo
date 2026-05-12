@@ -47,3 +47,16 @@ def test_talker_prediction_export_uses_single_asset_bundle_meta():
     assert "talker_prediction_assets_file" in text
     assert 'codec_dir = work_dir / "codec_embedding"' not in text
     assert 'lm_head_dir = work_dir / "lm_head"' not in text
+
+
+def test_text_export_defaults_use_validated_gptq_profile():
+    export_file = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_text.py")
+    text = export_file.read_text(encoding="utf-8")
+    assert 'parser.add_argument("--quant-type", default="w4a8_ssfp"' in text
+    assert 'parser.add_argument("--input-sequence-length", type=int, default=64)' in text
+
+
+def test_text_export_validation_defaults_to_short_smoke_run():
+    export_file = Path("examples/llm/qwen3omni/qwen3_omni_xh2a_export_text.py")
+    text = export_file.read_text(encoding="utf-8")
+    assert 'parser.add_argument("--max-new-tokens", type=int, default=4)' in text

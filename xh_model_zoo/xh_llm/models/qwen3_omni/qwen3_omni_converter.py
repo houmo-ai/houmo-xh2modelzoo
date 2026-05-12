@@ -1,16 +1,23 @@
 import gc
 import json
+import re
 import shutil
 import time
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import Qwen3OmniMoeForConditionalGeneration
+from safetensors import safe_open
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import Qwen3MoeForCausalLM
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeThinkerConfig
+from transformers.utils.quantization_config import QuantizationMethod
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
+from .modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeThinkerForConditionalGeneration
 from .qwen3_omni_convert_config import Qwen3OmniMoeConvertConfig
 
 from xhquant.api import (  # isort:skip
@@ -37,6 +44,51 @@ def _release_cuda_memory(logger=None, label: Optional[str] = None):
         logger.info(f"released converter resources and cleared CUDA cache{suffix}")
 
 
+def _normalize_text_rope_scaling(config) -> None:
+    text_config = getattr(config, "text_config", None)
+    if text_config is None and hasattr(config, "thinker_config"):
+        text_config = getattr(config.thinker_config, "text_config", None)
+    if text_config is None:
+        return
+
+    rope_scaling = getattr(text_config, "rope_scaling", None)
+    if rope_scaling is None:
+        rope_scaling = getattr(text_config, "rope_parameters", None)
+    if isinstance(rope_scaling, dict):
+        rope_scaling = dict(rope_scaling)
+        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
+        if rope_type == "default":
+            rope_type = "linear"
+        rope_scaling["rope_type"] = rope_type
+        rope_scaling["type"] = rope_type
+        if rope_type == "linear":
+            rope_scaling.setdefault("factor", 1.0)
+        text_config.rope_scaling = rope_scaling
+
+
+def _install_qwen3omni_thinker_auto_class_compat() -> None:
+    try:
+        AutoConfig.register("qwen3_omni_moe_thinker", Qwen3OmniMoeThinkerConfig, exist_ok=True)
+    except TypeError:
+        try:
+            AutoConfig.register("qwen3_omni_moe_thinker", Qwen3OmniMoeThinkerConfig)
+        except ValueError:
+            pass
+    except ValueError:
+        pass
+
+    for auto_model_cls in (AutoModel, AutoModelForCausalLM):
+        try:
+            auto_model_cls.register(Qwen3OmniMoeThinkerConfig, Qwen3OmniMoeThinkerForConditionalGeneration, exist_ok=True)
+        except TypeError:
+            try:
+                auto_model_cls.register(Qwen3OmniMoeThinkerConfig, Qwen3OmniMoeThinkerForConditionalGeneration)
+            except ValueError:
+                pass
+        except ValueError:
+            pass
+
+
 class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
     """Qwen3Omni converter (thinker text path) for XH2a HMONNX export via FX."""
 
@@ -46,8 +98,230 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         super().__init__()
         self.config = config
 
+    @staticmethod
+    def _is_gptqmodel_checkpoint(hf_model_dir: str) -> bool:
+        cfg_path = Path(hf_model_dir) / "config.json"
+        if not cfg_path.exists():
+            return False
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            quant_config = cfg.get("quantization_config", {})
+            if not isinstance(quant_config, dict):
+                return False
+            quant_method = str(quant_config.get("quant_method", "")).lower()
+            checkpoint_format = str(quant_config.get("checkpoint_format", "")).lower()
+            return quant_method == "gptq" or checkpoint_format.startswith("gptq")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_config_payload(hf_model_dir: str) -> Dict[str, Any]:
+        cfg_path = Path(hf_model_dir) / "config.json"
+        with open(cfg_path, encoding="utf-8") as f:
+            return json.load(f)
+
+    @staticmethod
+    def _load_model_from_pretrained(model_cls, hf_model_dir: str, **kwargs):
+        model_kwargs = dict(kwargs)
+        config = model_kwargs.pop("config", None)
+        if config is None:
+            config = model_cls.config_class.from_pretrained(
+                hf_model_dir,
+                trust_remote_code=model_kwargs.get("trust_remote_code", True),
+            )
+        _normalize_text_rope_scaling(config)
+        return model_cls.from_pretrained(hf_model_dir, config=config, **model_kwargs)
+
+    @staticmethod
+    def _unpack_gptq_weight(
+        qweight: torch.Tensor,
+        qzeros: torch.Tensor,
+        scales: torch.Tensor,
+        g_idx: torch.Tensor,
+        bits: int = 4,
+        raw_checkpoint_qzeros: bool = False,
+    ) -> torch.Tensor:
+        pack_factor = 32 // bits
+        maxq = (2**bits) - 1
+        wf = torch.arange(0, 32, bits, device=qweight.device, dtype=torch.int32)
+        zeros = torch.bitwise_and(
+            torch.bitwise_right_shift(qzeros.unsqueeze(2).expand(-1, -1, pack_factor), wf.view(1, 1, -1)),
+            maxq,
+        ).reshape(scales.shape)
+        if raw_checkpoint_qzeros:
+            zeros = zeros + 1
+        weight = torch.bitwise_and(
+            torch.bitwise_right_shift(qweight.unsqueeze(1).expand(-1, pack_factor, -1), wf.view(1, -1, 1)),
+            maxq,
+        )
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+        quant_weight = weight - zeros[g_idx.long()]
+        weight = scales[g_idx.long()] * quant_weight
+        return weight.t().contiguous()
+
+    @staticmethod
+    def _extract_thinker_model(native_model: nn.Module) -> nn.Module:
+        return native_model.thinker if hasattr(native_model, "thinker") else native_model
+
+    @classmethod
+    def _hydrate_packed_moe_experts_from_gptq_checkpoint(cls, native_model: nn.Module, hf_model_dir: str) -> None:
+        logger = get_root_logger()
+        index_path = Path(hf_model_dir) / "model.safetensors.index.json"
+        if not index_path.exists():
+            logger.warning(f"{index_path} not exists, skip packed MoE expert hydration")
+            return
+
+        thinker = cls._extract_thinker_model(native_model)
+        text_model = getattr(thinker, "model", None)
+        if text_model is None or not hasattr(text_model, "layers"):
+            return
+
+        first_experts = getattr(text_model.layers[0].mlp, "experts", None)
+        if not (hasattr(first_experts, "gate_up_proj") and hasattr(first_experts, "down_proj")):
+            return
+
+        with open(index_path, encoding="utf-8") as f:
+            weight_map = json.load(f).get("weight_map", {})
+
+        key_re = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.qweight$")
+        prefixes: List[Tuple[int, int, str, str]] = []
+        for key, shard_name in weight_map.items():
+            match = key_re.match(key)
+            if match is None:
+                continue
+            layer_idx = int(match.group(1))
+            expert_idx = int(match.group(2))
+            proj_name = match.group(3)
+            prefix = key[: -len(".qweight")]
+            prefixes.append((layer_idx, expert_idx, proj_name, prefix))
+
+        if not prefixes:
+            return
+
+        logger.info("Hydrating packed Qwen3-Omni thinker experts from defused GPTQ tensors")
+        suffixes = ("qweight", "qzeros", "scales", "g_idx")
+        layer_seen = set()
+        with torch.no_grad():
+            with ExitStack() as stack:
+                shard_handles = {}
+
+                def get_tensor(tensor_name: str) -> torch.Tensor:
+                    shard_name = weight_map.get(tensor_name)
+                    if shard_name is None:
+                        raise KeyError(f"{tensor_name} not found in {index_path}")
+                    if shard_name not in shard_handles:
+                        shard_handles[shard_name] = stack.enter_context(
+                            safe_open(Path(hf_model_dir) / shard_name, framework="pt", device="cpu")
+                        )
+                    return shard_handles[shard_name].get_tensor(tensor_name)
+
+                for idx, (layer_idx, expert_idx, proj_name, prefix) in enumerate(sorted(prefixes)):
+                    tensors = {suffix: get_tensor(f"{prefix}.{suffix}") for suffix in suffixes}
+                    weight = cls._unpack_gptq_weight(
+                        tensors["qweight"],
+                        tensors["qzeros"],
+                        tensors["scales"],
+                        tensors["g_idx"],
+                        raw_checkpoint_qzeros=True,
+                    )
+                    experts = text_model.layers[layer_idx].mlp.experts
+                    target_dtype = experts.gate_up_proj.dtype
+                    target_device = experts.gate_up_proj.device
+                    intermediate_dim = getattr(experts, "intermediate_dim", experts.gate_up_proj.shape[1] // 2)
+                    weight = weight.to(device=target_device, dtype=target_dtype)
+                    if proj_name == "gate_proj":
+                        experts.gate_up_proj[expert_idx, :intermediate_dim, :].copy_(weight)
+                    elif proj_name == "up_proj":
+                        experts.gate_up_proj[expert_idx, intermediate_dim:, :].copy_(weight)
+                    else:
+                        experts.down_proj[expert_idx].copy_(weight)
+                    layer_seen.add(layer_idx)
+                    if (idx + 1) % 1024 == 0:
+                        logger.info(f"Hydrated {idx + 1}/{len(prefixes)} packed Qwen3-Omni GPTQ tensors")
+        logger.info(f"Hydrated packed Qwen3-Omni experts for {len(layer_seen)} layers ({len(prefixes)} tensors)")
+
+    def dequantize_hf_model(self, native_hf_model: nn.Module) -> nn.Module:
+        hf_model = native_hf_model
+        quantization_config = getattr(hf_model.config, "quantization_config", None)
+        if quantization_config is None:
+            return hf_model
+
+        quant_method = getattr(quantization_config, "quant_method", None)
+        if quant_method is None and isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method")
+        if isinstance(quant_method, str):
+            quant_method = quant_method.lower()
+
+        if quant_method in (QuantizationMethod.AWQ, "awq"):
+            hf_model = self._dequantize_awq_hf_model(hf_model)
+        elif quant_method in (QuantizationMethod.GPTQ, "gptq"):
+            hf_model = self._dequantize_gptq_hf_model(hf_model)
+        elif quant_method in (QuantizationMethod.COMPRESSED_TENSORS, "compressed-tensors"):
+            hf_model = self._dequantize_compressed_tensors_hf_model(hf_model)
+        else:
+            raise Exception(f"Unsupported quantization method: {quant_method}")
+        return hf_model
+
     def load_hf_model(self, hf_model_dir: str, **kwargs):
-        model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(hf_model_dir, **kwargs)
+        logger = get_root_logger()
+        config_payload = self._read_config_payload(hf_model_dir)
+        is_qwen3moe_compat_view = bool(config_payload.get("xh_qwen3omni_thinker_qwen3moe_compat", False))
+        architectures = list(config_payload.get("architectures", []) or [])
+        model_cls = Qwen3OmniMoeThinkerForConditionalGeneration
+        if is_qwen3moe_compat_view:
+            model_cls = Qwen3MoeForCausalLM
+        elif "Qwen3OmniMoeThinkerForConditionalGeneration" not in architectures:
+            model_cls = Qwen3OmniMoeForConditionalGeneration
+
+        if model_cls is Qwen3OmniMoeThinkerForConditionalGeneration:
+            _install_qwen3omni_thinker_auto_class_compat()
+
+        if self._is_gptqmodel_checkpoint(hf_model_dir):
+            try:
+                from gptqmodel import BACKEND, GPTQModel  # type: ignore
+                from gptqmodel.models.base import BaseQModel  # type: ignore
+
+                logger.info(f"Detected GPTQModel checkpoint; using GPTQModel.load(): {hf_model_dir}")
+                torch_dtype = kwargs.get("torch_dtype", torch.float16)
+                native_qmodel = GPTQModel.load(
+                    hf_model_dir,
+                    device="cpu",
+                    dtype=torch_dtype,
+                    backend=BACKEND.TORCH,
+                    trust_remote_code=kwargs.get("trust_remote_code", True),
+                )
+                model = native_qmodel.model if isinstance(native_qmodel, BaseQModel) else native_qmodel
+                self._hydrate_packed_moe_experts_from_gptq_checkpoint(model, hf_model_dir)
+                model = self._dequantize_gptq_hf_model(model)
+                if hasattr(model, "config"):
+                    _normalize_text_rope_scaling(model.config)
+                    model.config.quantization_config = None
+            except ImportError:
+                logger.warning("gptqmodel not available; falling back to direct HF load")
+                if is_qwen3moe_compat_view:
+                    model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+                else:
+                    model = self._load_model_from_pretrained(model_cls, hf_model_dir, **kwargs)
+                model = self.dequantize_hf_model(model)
+            except Exception as exc:
+                logger.warning(f"GPTQModel.load failed for {hf_model_dir}, fallback to direct HF load: {exc}")
+                if is_qwen3moe_compat_view:
+                    model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+                else:
+                    model = self._load_model_from_pretrained(model_cls, hf_model_dir, **kwargs)
+                model = self.dequantize_hf_model(model)
+        else:
+            if is_qwen3moe_compat_view:
+                model = AutoModelForCausalLM.from_pretrained(hf_model_dir, **kwargs)
+            else:
+                model = self._load_model_from_pretrained(model_cls, hf_model_dir, **kwargs)
+            model = self.dequantize_hf_model(model)
+
+        assert isinstance(
+            model,
+            (Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeThinkerForConditionalGeneration, Qwen3MoeForCausalLM),
+        ), f"The model is not a supported Qwen3Omni model, but {type(model)}"
         model.eval()
         return model
 
@@ -65,7 +339,7 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         )
 
         # Extract components for later use
-        thinker = native_model.thinker
+        thinker = self._extract_thinker_model(native_model)
         audio_tower = thinker.audio_tower if hasattr(thinker, 'audio_tower') else None
         visual = thinker.visual if hasattr(thinker, 'visual') else None
         talker = native_model.talker if hasattr(native_model, 'talker') else None
@@ -102,6 +376,8 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
             quant_scheme=config.quant_scheme.to_dict(),
             quant_weight=resume_from,
         )
+        if self._is_gptqmodel_checkpoint(hf_model_path):
+            meta_info["gptq_expert_qzeros_normalized"] = True
 
         work_dir = Path(output_dir)
 
@@ -201,7 +477,9 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
             input_names.append(f"past_key_cache_{i}")
         for i in range(num_decoder_layers):
             input_names.append(f"past_value_cache_{i}")
-        output_names = ["logits"]
+        output_names = ["logits", "hidden_states"]
+        meta_info["artifact_contract_version"] = 2
+        meta_info["output_names"] = output_names
 
         prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
 
@@ -687,6 +965,6 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
     def convert(cls, hf_model_path: str, config: Qwen3OmniMoeConvertConfig, output_dir: str):
         quant_config = create_quant_config(config.quant_scheme)
         is_ssfp = is_ssfp_quant_config(quant_config)
-        if is_ssfp:
+        if is_ssfp and not cls._is_gptqmodel_checkpoint(hf_model_path):
             assert config.quant_weight is not None and Path(config.quant_weight).exists()
         cls(config)._convert(hf_model_path, output_dir)

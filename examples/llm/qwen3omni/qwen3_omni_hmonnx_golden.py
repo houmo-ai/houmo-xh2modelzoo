@@ -31,6 +31,7 @@ Supported modules (auto-detected from ``meta*.json`` under ``--work-dir``):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import time
 from dataclasses import dataclass
@@ -137,32 +138,39 @@ def _run_session_with_golden(
     feed = _build_input_feed(session, device, overrides)
     input_shapes = {k: list(v.shape) for k, v in feed.items()}
 
-    start = time.time()
-    outputs = session.run(feed)
-    elapsed = time.time() - start
+    try:
+        start = time.time()
+        outputs = session.run(feed)
+        elapsed = time.time() - start
 
-    if not isinstance(outputs, (tuple, list)):
-        outputs = (outputs,)
-    output_names = session.get_output_names()
-    output_shapes = {
-        name: list(out.shape) if hasattr(out, "shape") else None
-        for name, out in zip(output_names, outputs)
-    }
-    logger.info(
-        f"[golden] {onnx_path.name} done in {elapsed:.2f}s — golden_dir={golden_dir}"
-    )
+        if not isinstance(outputs, (tuple, list)):
+            outputs = (outputs,)
+        output_names = session.get_output_names()
+        output_shapes = {
+            name: list(out.shape) if hasattr(out, "shape") else None
+            for name, out in zip(output_names, outputs)
+        }
+        logger.info(
+            f"[golden] {onnx_path.name} done in {elapsed:.2f}s — golden_dir={golden_dir}"
+        )
 
-    del session
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return {
-        "onnx": str(onnx_path),
-        "golden_dir": str(golden_dir),
-        "elapsed_sec": round(elapsed, 3),
-        "input_shapes": input_shapes,
-        "output_shapes": output_shapes,
-    }
+        return {
+            "onnx": str(onnx_path),
+            "golden_dir": str(golden_dir),
+            "elapsed_sec": round(elapsed, 3),
+            "input_shapes": input_shapes,
+            "output_shapes": output_shapes,
+        }
+    finally:
+        if torch.cuda.is_available():
+            session.to(torch.device("cpu"))
+        del feed
+        if "outputs" in locals():
+            del outputs
+        del session
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------

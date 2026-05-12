@@ -9,7 +9,7 @@ import numpy as np
 import soundfile as sf
 import torch
 import torch.nn as nn
-from transformers import Qwen3OmniMoeForConditionalGeneration
+from transformers import AutoConfig, AutoTokenizer, Qwen3OmniMoeForConditionalGeneration
 
 from xhquant.api import CacheTensor
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
@@ -109,7 +109,11 @@ def _pick_best_validation_single_gpu(logger=None) -> Optional[str]:
     debug_entries = []
 
     for gpu_idx in range(torch.cuda.device_count()):
-        free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_idx)
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_idx)
+        except Exception as exc:
+            debug_entries.append(f"cuda:{gpu_idx}: skipped mem_get_info error={exc}")
+            continue
         min_required_bytes = max(40 * _GIB, int(total_bytes * 0.9))
         debug_entries.append(
             f"cuda:{gpu_idx}: free={_format_bytes_as_gib_str(free_bytes)}, "
@@ -156,7 +160,11 @@ def _build_safe_validation_max_memory(logger=None) -> Optional[Dict[Any, str]]:
     debug_entries = []
 
     for gpu_idx in range(torch.cuda.device_count()):
-        free_bytes, _ = torch.cuda.mem_get_info(gpu_idx)
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(gpu_idx)
+        except Exception as exc:
+            debug_entries.append(f"cuda:{gpu_idx}: skipped mem_get_info error={exc}")
+            continue
         if free_bytes < min_free_bytes:
             debug_entries.append(f"cuda:{gpu_idx}: skipped free={_format_bytes_as_gib_str(free_bytes)}")
             continue
@@ -1337,33 +1345,55 @@ def run_text_hmonnx_chain_forward(
     golden_dir: Optional[Path] = None,
 ):
     _ensure_mistral_common_reasoning_effort()
-    processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
-    if logger is not None and device_map != "cpu":
-        logger.info(f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}")
-    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        model_path,
-        torch_dtype=torch.float16,
-        device_map="cpu",
-        attn_implementation="eager",
-        trust_remote_code=True,
-    )
-    native_model.eval()
-    _force_eager_moe_implementation(native_model, logger)
+    config_for_validation = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    native_model = None
+    processor = None
+    tokenizer = None
+    if audio_meta is not None or vision_meta is not None:
+        processor = Qwen3OmniMoeProcessor.from_pretrained(model_path)
+        tokenizer = processor.tokenizer
+        if logger is not None and device_map != "cpu":
+            logger.info(f"text chain validation keeps HF model on cpu regardless of requested device_map={device_map}")
+        native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+            model_path,
+            torch_dtype=torch.float16,
+            device_map="cpu",
+            attn_implementation="eager",
+            trust_remote_code=True,
+        )
+        native_model.eval()
+        _force_eager_moe_implementation(native_model, logger)
+        config_for_validation = native_model.config
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if getattr(tokenizer, "chat_template", None) is None:
+            chat_template_path = Path(model_path) / "chat_template.json"
+            if chat_template_path.exists():
+                chat_template_payload = load_json(chat_template_path)
+                if isinstance(chat_template_payload, dict):
+                    tokenizer.chat_template = chat_template_payload.get("chat_template")
+                elif isinstance(chat_template_payload, str):
+                    tokenizer.chat_template = chat_template_payload
+        if logger is not None:
+            logger.info("text-only chain validation skips full HF omni model loading and uses tokenizer-only inputs")
 
     conversation, use_audio_in_video = build_conversation(case)
-    text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    text = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
-    inputs = processor(
-        text=text,
-        audio=audios,
-        images=images,
-        videos=videos,
-        return_tensors="pt",
-        padding=True,
-        seconds_per_chunk=2.0,
-        position_id_per_seconds=13,
-        use_audio_in_video=use_audio_in_video,
-    )
+    if processor is not None:
+        inputs = processor(
+            text=text,
+            audio=audios,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+            padding=True,
+            seconds_per_chunk=2.0,
+            position_id_per_seconds=13,
+            use_audio_in_video=use_audio_in_video,
+        )
+    else:
+        inputs = tokenizer(text=text, return_tensors="pt", padding=True)
     inputs = _ensure_hm_pixel_values(inputs)
 
     token_embedding_state_dict = torch.load(
@@ -1384,6 +1414,8 @@ def run_text_hmonnx_chain_forward(
     prefill_token_length = int(inputs_embeds.shape[1])
 
     if audio_meta is not None and "input_features" in inputs and "feature_attention_mask" in inputs:
+        if native_model is None:
+            raise RuntimeError("audio validation requires a full HF omni model")
         audio_session = _create_hmonnx_session(_resolve_meta_path(audio_meta, "audio_encoder_onnx"))
         audio_features = _run_audio_encoder_hmonnx(
             audio_session,
@@ -1391,7 +1423,7 @@ def run_text_hmonnx_chain_forward(
             inputs["input_features"].cpu(),
             inputs["feature_attention_mask"].cpu(),
         )
-        audio_mask = inputs["input_ids"].cpu() == _get_modal_token_id(native_model.config, "audio_token_id")
+        audio_mask = inputs["input_ids"].cpu() == _get_modal_token_id(config_for_validation, "audio_token_id")
         inputs_embeds[audio_mask] = audio_features.to(inputs_embeds.dtype)
 
     if vision_meta is not None and "hm_pixel_values" in inputs:
@@ -1402,7 +1434,7 @@ def run_text_hmonnx_chain_forward(
         vision_output = vision_session.forward(vision_hmonnx_input.to(torch.float16))
         vision_outputs = _extract_outputs(vision_output)
         vision_embeds = _ensure_tensor(vision_outputs[0], torch.device("cpu"), torch.float16)
-        image_mask = inputs["input_ids"].cpu() == _get_modal_token_id(native_model.config, "image_token_id")
+        image_mask = inputs["input_ids"].cpu() == _get_modal_token_id(config_for_validation, "image_token_id")
         inputs_embeds[image_mask] = vision_embeds.to(inputs_embeds.dtype)
         deepstack_tensors = _build_dense_deepstack_tensors(inputs_embeds, image_mask, vision_outputs[1:4])
     else:
@@ -1458,20 +1490,21 @@ def run_text_hmonnx_chain_forward(
     next_token = torch.argmax(prefill_logits[:, -1, :], dim=-1, keepdim=True)
 
     # Determine EOS token ids for stopping
-    eos_token_id = processor.tokenizer.eos_token_id
+    eos_token_id = tokenizer.eos_token_id
     if isinstance(eos_token_id, int):
         eos_token_ids = {eos_token_id}
     elif isinstance(eos_token_id, (list, tuple)):
         eos_token_ids = set(eos_token_id)
     else:
         eos_token_ids = set()
-    # Also add common chat stop tokens if available
-    if hasattr(native_model.config, "eos_token_id"):
-        cfg_eos = native_model.config.eos_token_id
-        if isinstance(cfg_eos, int):
-            eos_token_ids.add(cfg_eos)
-        elif isinstance(cfg_eos, (list, tuple)):
-            eos_token_ids.update(cfg_eos)
+    cfg_eos = getattr(config_for_validation, "eos_token_id", None)
+    if isinstance(cfg_eos, int):
+        eos_token_ids.add(cfg_eos)
+    elif isinstance(cfg_eos, (list, tuple)):
+        eos_token_ids.update(cfg_eos)
+    cfg_im_end = getattr(config_for_validation, "im_end_token_id", None)
+    if isinstance(cfg_im_end, int):
+        eos_token_ids.add(cfg_im_end)
 
     # --- Autoregressive decode loop ---
     generated_tokens = [next_token]  # first token from prefill
@@ -1510,7 +1543,7 @@ def run_text_hmonnx_chain_forward(
 
     # Concat all generated token ids and decode to text
     all_token_ids = torch.cat(generated_tokens, dim=-1)  # [1, num_tokens]
-    output_text = processor.tokenizer.batch_decode(
+    output_text = tokenizer.batch_decode(
         all_token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )
     logger.info(f"generated {all_token_ids.shape[-1]} tokens: {output_text}")

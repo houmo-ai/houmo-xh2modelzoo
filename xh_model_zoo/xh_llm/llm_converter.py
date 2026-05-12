@@ -19,6 +19,9 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from transformers import AutoConfig
@@ -36,10 +39,15 @@ class LLMConverter:
     def from_pretrained(
         pretrained_model_path: str, architecture: Optional[str], convert_config: BaseConvertConfig, out_dir: str
     ):
+        config: Any = None
         if architecture == "Qwen3VLForConditionalGeneration_SpiritVLA":
             pass
         else:
-            config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
+            try:
+                config = AutoConfig.from_pretrained(pretrained_model_path, trust_remote_code=True)
+            except Exception:
+                with open(Path(pretrained_model_path) / "config.json", encoding="utf-8") as f:
+                    config = SimpleNamespace(**json.load(f))
         if architecture is None:
             architectures = config.architectures
             if architectures is None:
@@ -76,6 +84,14 @@ class LLMConverter:
 
             converter_cls = Qwen3_VLConverterXH2a
         elif architecture == "Qwen3OmniMoeForConditionalGeneration":
+            from .models.qwen3_omni import Qwen3OmniMoeConverterXH2a
+
+            converter_cls = Qwen3OmniMoeConverterXH2a
+        elif architecture == "Qwen3OmniMoeThinkerForConditionalGeneration":
+            from .models.qwen3_omni import Qwen3OmniMoeConverterXH2a
+
+            converter_cls = Qwen3OmniMoeConverterXH2a
+        elif architecture == "Qwen3OmniMoeThinkerTextForCausalLM":
             from .models.qwen3_omni import Qwen3OmniMoeConverterXH2a
 
             converter_cls = Qwen3OmniMoeConverterXH2a

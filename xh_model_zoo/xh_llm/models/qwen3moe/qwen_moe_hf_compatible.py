@@ -27,7 +27,14 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, DynamicCache, GenerationMixin, Qwen3MoeForCausalLM
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_utils import no_init_weights
+try:
+    from transformers.modeling_utils import no_init_weights
+except ImportError:
+    import contextlib
+
+    @contextlib.contextmanager
+    def no_init_weights(_enable=True):
+        yield
 
 from .inference import Qwen3MoeInference
 

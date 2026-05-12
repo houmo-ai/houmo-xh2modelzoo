@@ -193,6 +193,22 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
     return native_model
 
 
+def _load_native_model_for_export(hf_model_path: str, logger):
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+
+    logger.info(f"Loading HF model from {hf_model_path} for talker export on CPU")
+    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        hf_model_path,
+        torch_dtype=torch.float16,
+        device_map="cpu",
+        attn_implementation="eager",
+        trust_remote_code=True,
+    )
+    _force_eager_moe_implementation(native_model, logger)
+    native_model.eval()
+    return native_model
+
+
 def _ensure_mistral_common_reasoning_effort():
     try:
         import mistral_common.protocol.instruct.request as request_module
@@ -614,8 +630,13 @@ def main(args):
         )
 
         talker_register_wrap_modules()
+        processor = None
+        native_model = None
+        release_export_cuda_memory(logger, "talker capture")
+        native_model = _load_native_model_for_export(hf_model_path, logger)
 
         talker = native_model.talker.to(torch.float16).cpu()
+        native_model = None
 
         batch_size = 1
         context_length = args.context_length

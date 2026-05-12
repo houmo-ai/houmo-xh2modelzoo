@@ -62,6 +62,7 @@ from ..builder import XHLLM_TRACEABLE_MODULES
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeRotaryEmbedding: "Qwen3MoeRotaryEmbedding",
         Qwen3OmniMoeThinkerTextRotaryEmbedding: "Qwen3OmniMoeThinkerTextRotaryEmbedding",
     })
 class _Qwen3MoeRotaryEmbedding(DynamicModule):
@@ -147,6 +148,7 @@ class _Qwen3MoeRotaryEmbedding(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeAttention: "Qwen3MoeAttention",
         Qwen3OmniMoeThinkerTextAttention: "Qwen3OmniMoeThinkerTextAttention",
     })
 class _Qwen3MoeAttention(DynamicModule):
@@ -309,6 +311,7 @@ class _Qwen3MoeAttention(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeDecoderLayer: "Qwen3MoeDecoderLayer",
         Qwen3OmniMoeThinkerTextDecoderLayer: "Qwen3OmniMoeThinkerTextDecoderLayer",
     })
 class _Qwen3MoeDecoderLayer(DynamicModule):
@@ -380,6 +383,7 @@ class _Qwen3MoeDecoderLayer(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeSparseMoeBlock: "Qwen3MoeSparseMoeBlock",
         Qwen3OmniMoeThinkerTextSparseMoeBlock: "Qwen3OmniMoeThinkerTextSparseMoeBlock",
     })
 class _Qwen3MoeSparseMoeBlock(DynamicModule):
@@ -460,6 +464,7 @@ class _Qwen3MoeSparseMoeBlock(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeRMSNorm: "Qwen3MoeRMSNorm",
         Qwen3OmniMoeThinkerTextRMSNorm: "Qwen3OmniMoeThinkerTextRMSNorm",
     })
 class _Qwen3MoeRMSNorm(DynamicModule):
@@ -475,6 +480,7 @@ class _Qwen3MoeRMSNorm(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeModel: "Qwen3MoeModel",
         Qwen3OmniMoeThinkerTextModel: "Qwen3OmniMoeThinkerTextModel",
     })
 class _Qwen3MoeModel(DynamicModule):
@@ -616,6 +622,7 @@ class _Qwen3MoeModel(DynamicModule):
 
 @XHLLM_TRACEABLE_MODULES.register_module(
     {
+        Qwen3MoeForCausalLM: "Qwen3MoeForCausalLM",
         Qwen3OmniMoeThinkerForConditionalGeneration: "Qwen3OmniMoeThinkerForConditionalGeneration",
     }
 )
@@ -643,7 +650,7 @@ class _Qwen3OmniMoeThinkerForConditionalGeneration(DynamicModule):
         )
         hidden_states = outputs.last_hidden_state
         logits = self.lm_head(hidden_states)
-        return logits
+        return logits, hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

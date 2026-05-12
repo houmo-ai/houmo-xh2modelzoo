@@ -109,6 +109,16 @@ def _load_export_module(
 
 def _install_pipeline_import_stubs(monkeypatch, *, model_class, processor_class):
     fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoConfig = type(
+        "DummyAutoConfig",
+        (),
+        {"from_pretrained": staticmethod(lambda *args, **kwargs: SimpleNamespace())},
+    )
+    fake_transformers.AutoTokenizer = type(
+        "DummyAutoTokenizer",
+        (),
+        {"from_pretrained": staticmethod(lambda *args, **kwargs: SimpleNamespace())},
+    )
     fake_transformers.Qwen3OmniMoeForConditionalGeneration = model_class
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
@@ -181,6 +191,80 @@ def _load_pipeline_module(monkeypatch, *, model_class, processor_class):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_pick_best_validation_single_gpu_skips_mem_info_failures(monkeypatch):
+    class DummyModel:
+        pass
+
+    class DummyProcessor:
+        pass
+
+    module = _load_pipeline_module(
+        monkeypatch,
+        model_class=DummyModel,
+        processor_class=DummyProcessor,
+    )
+    gib = 1024**3
+    logger_messages = []
+
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(module.torch.cuda, "device_count", lambda: 3)
+
+    def fake_mem_get_info(gpu_idx):
+        if gpu_idx == 0:
+            raise RuntimeError("CUDA error: out of memory")
+        if gpu_idx == 1:
+            return 90 * gib, 100 * gib
+        return 70 * gib, 100 * gib
+
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", fake_mem_get_info)
+
+    resolved = module._pick_best_validation_single_gpu(
+        SimpleNamespace(info=lambda message: logger_messages.append(message))
+    )
+
+    assert resolved == "cuda:1"
+    assert any("cuda:0" in message for message in logger_messages)
+
+
+def test_build_safe_validation_max_memory_skips_mem_info_failures(monkeypatch):
+    class DummyModel:
+        pass
+
+    class DummyProcessor:
+        pass
+
+    module = _load_pipeline_module(
+        monkeypatch,
+        model_class=DummyModel,
+        processor_class=DummyProcessor,
+    )
+    gib = 1024**3
+
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(module.torch.cuda, "device_count", lambda: 3)
+
+    def fake_mem_get_info(gpu_idx):
+        if gpu_idx == 0:
+            raise RuntimeError("CUDA error: out of memory")
+        if gpu_idx == 1:
+            return 10 * gib, 100 * gib
+        return 50 * gib, 100 * gib
+
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", fake_mem_get_info)
+    monkeypatch.setitem(
+        sys.modules,
+        "psutil",
+        SimpleNamespace(virtual_memory=lambda: SimpleNamespace(available=96 * gib)),
+    )
+
+    max_memory = module._build_safe_validation_max_memory(SimpleNamespace(info=lambda *args, **kwargs: None))
+
+    assert 0 not in max_memory
+    assert 1 not in max_memory
+    assert max_memory[2] == "42.0GiB"
+    assert "cpu" in max_memory
 
 
 def test_load_native_model_for_capture_uses_safe_single_gpu(monkeypatch):
@@ -265,6 +349,89 @@ def test_load_native_model_for_capture_passes_max_memory_when_auto_remains(monke
     assert captured["kwargs"]["device_map"] == "auto"
     assert captured["kwargs"]["max_memory"] == validation_max_memory
     assert len(patch_calls) == 2
+
+
+def test_load_native_model_for_export_uses_cpu_device_map_for_talker(monkeypatch):
+    module, patch_calls = _load_export_module(monkeypatch)
+    captured = {}
+
+    class DummySubmodule:
+        pass
+
+    class DummyModel:
+        def __init__(self):
+            self.talker = DummySubmodule()
+            self.talker.code_predictor = DummySubmodule()
+
+        def eval(self):
+            captured["eval_called"] = True
+            return self
+
+        def modules(self):
+            return [self, self.talker, self.talker.code_predictor]
+
+    class DummyModelClass:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            captured["model_path"] = model_path
+            captured["kwargs"] = kwargs
+            return DummyModel()
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.Qwen3OmniMoeForConditionalGeneration = DummyModelClass
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    model = module._load_native_model_for_export("/tmp/fake-model", logger)
+
+    assert captured["model_path"] == "/tmp/fake-model"
+    assert captured["kwargs"]["device_map"] == "cpu"
+    assert "max_memory" not in captured["kwargs"]
+    assert captured["eval_called"] is True
+    assert patch_calls == []
+    assert model is not None
+
+
+def test_load_native_model_for_export_uses_cpu_device_map_for_predictor(monkeypatch):
+    module, patch_calls = _load_export_module(
+        monkeypatch,
+        module_path=PRED_EXPORT_MODULE_PATH,
+        module_name="qwen3_omni_xh2a_export_talker_prediction_testmod_exportload",
+    )
+    captured = {}
+
+    class DummySubmodule:
+        pass
+
+    class DummyModel:
+        def __init__(self):
+            self.talker = DummySubmodule()
+            self.talker.code_predictor = DummySubmodule()
+
+        def eval(self):
+            captured["eval_called"] = True
+            return self
+
+    class DummyModelClass:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            captured["model_path"] = model_path
+            captured["kwargs"] = kwargs
+            return DummyModel()
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.Qwen3OmniMoeForConditionalGeneration = DummyModelClass
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    model = module._load_native_model_for_export("/tmp/fake-model", logger)
+
+    assert captured["model_path"] == "/tmp/fake-model"
+    assert captured["kwargs"]["device_map"] == "cpu"
+    assert "max_memory" not in captured["kwargs"]
+    assert captured["eval_called"] is True
+    assert patch_calls == []
+    assert model is not None
 
 
 def test_run_talker_dialogue_validation_passes_talker_token_limit(monkeypatch):

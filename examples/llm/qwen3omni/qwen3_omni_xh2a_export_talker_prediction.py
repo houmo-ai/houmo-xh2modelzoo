@@ -274,6 +274,21 @@ def _load_native_model_for_capture(hf_model_path: str, logger):
     return native_model
 
 
+def _load_native_model_for_export(hf_model_path: str, logger):
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+
+    logger.info(f"Loading HF model from {hf_model_path} for talker prediction export on CPU")
+    native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+        hf_model_path,
+        torch_dtype=torch.float16,
+        device_map="cpu",
+        attn_implementation="eager",
+        trust_remote_code=True,
+    )
+    native_model.eval()
+    return native_model
+
+
 def _reexec_with_phase(phase: str):
     script_path = str(Path(__file__).resolve())
     passthrough_args = []
@@ -362,23 +377,25 @@ def main(args):
         device = next(native_model.parameters()).device
         dtype = next(native_model.parameters()).dtype
 
-        # ---- 2. Package predictor-side assets into one bundle ----
-        asset_payload = _save_predictor_assets(native_model, asset_file, logger)
-
-        # ---- 3. Capture predictor inputs ----
+        # ---- 2. Capture predictor inputs ----
         captured = _capture_predictor_inputs(native_model, processor, device, dtype, work_dir, logger)
 
-        # ---- 4. Register wrap modules and wrap predictor ----
+        # ---- 3. Register wrap modules and wrap predictor ----
         from xh_model_zoo.xh_llm.models.qwen3_omni._talker_prediction import (
             register_wrap_modules as pred_register_wrap_modules,
         )
 
         pred_register_wrap_modules()
-
-        code_predictor = native_model.talker.code_predictor.to(torch.float16).cpu()
         processor = None
         native_model = None
         release_export_cuda_memory(logger, "talker prediction capture")
+        native_model = _load_native_model_for_export(hf_model_path, logger)
+
+        # ---- 4. Package predictor-side assets into one bundle ----
+        asset_payload = _save_predictor_assets(native_model, asset_file, logger)
+
+        code_predictor = native_model.talker.code_predictor.to(torch.float16).cpu()
+        native_model = None
 
         batch_size = 1
         context_length = args.context_length

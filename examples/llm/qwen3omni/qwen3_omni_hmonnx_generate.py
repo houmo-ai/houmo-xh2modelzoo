@@ -31,7 +31,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _hmonnx_pipeline import _ensure_hm_pixel_values, apply_artifact_replacements, discover_artifacts, save_json, validate_golden_outputs
+from _hmonnx_pipeline import (
+    _build_safe_validation_max_memory,
+    _ensure_hm_pixel_values,
+    _patch_inputs_embeds_generation_device,
+    _patch_runtime_device_property,
+    _resolve_validation_device_map,
+    apply_artifact_replacements,
+    discover_artifacts,
+    save_json,
+    validate_golden_outputs,
+)
 from xhquant.api import get_root_logger, set_random_seed, xhquant_init  # isort:skip
 from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference  # isort:skip
 
@@ -119,10 +129,15 @@ def main(args):
     from xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe import Qwen3OmniMoeProcessor
 
     logger.info(f"Loading HF model from {hf_model_path}")
+    resolved_device_map = _resolve_validation_device_map(args.device_map, logger)
+    max_memory = None
+    if resolved_device_map == "auto" and torch.cuda.is_available():
+        max_memory = _build_safe_validation_max_memory(logger)
     native_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         hf_model_path,
         torch_dtype=torch.float16,
-        device_map=args.device_map,
+        device_map=resolved_device_map,
+        max_memory=max_memory,
         attn_implementation="eager",
         trust_remote_code=True,
     )
@@ -141,6 +156,11 @@ def main(args):
     if args.code2wav_hmonnx:
         _replace_code2wav(native_model, args.code2wav_hmonnx, args.code2wav_static_code_len, logger)
         applied_artifacts["code2wav"] = {"path": args.code2wav_hmonnx}
+
+    _patch_inputs_embeds_generation_device(native_model.talker, "talker", logger)
+    _patch_inputs_embeds_generation_device(native_model.talker.code_predictor, "talker.code_predictor", logger)
+    if hasattr(native_model, "code2wav"):
+        _patch_runtime_device_property(native_model.code2wav, "code2wav", logger)
 
     # ---- 3. Prepare inputs ----
     cases = {
@@ -198,6 +218,8 @@ def main(args):
         )
         inputs = _ensure_hm_pixel_values(inputs)
         inputs = inputs.to(device).to(dtype)
+        inputs.pop("hm_pixel_values", None)
+        inputs.pop("hm_pixel_values_videos", None)
 
         with torch.no_grad():
             text_ids, audio = native_model.generate(
@@ -221,7 +243,11 @@ def main(args):
 
         if audio is not None:
             wav_path = golden_dir / f"golden_{case_name}.wav"
-            sf.write(str(wav_path), audio.reshape(-1).detach().cpu().numpy(), samplerate=24000)
+            sf.write(
+                str(wav_path),
+                audio.reshape(-1).to(dtype=torch.float32).detach().cpu().numpy(),
+                samplerate=24000,
+            )
             result["audio_file"] = str(wav_path.relative_to(work_dir))
             logger.info(f"[{case_name}] Audio saved to {wav_path}")
 
