@@ -76,7 +76,7 @@ def main(args):
     # model_inputs = tokenizer([text], return_tensors="pt", truncation=True)
     processor = xh_model.get_tf_processor()
     tokenizer = processor.tokenizer
-    model_inputs = processor.apply_chat_template(messages, enable_think=False)
+    model_inputs = processor.apply_chat_template(messages, enable_think=args.think)
     model_inputs = model_inputs.to(device)
     streamer = TextStreamer(tokenizer=tokenizer)
     # logger.info(f"{'-' * 20} stream output {'-' * 20}")
