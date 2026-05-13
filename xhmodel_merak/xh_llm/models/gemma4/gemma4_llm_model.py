@@ -306,7 +306,7 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
                 "Model is already quantized, quant_weight should be None or empty when loading quantized model."
             )
             native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
-            native_hf_model = cls._dequantize_hf_model(native_hf_model, quant_weight=None, **kwargs)
+            native_hf_model = cls._dequantize_gptq_hf_model(native_hf_model)
             return native_hf_model
         return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
 

@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from xhmodel_merak.xh_llm.models.qwen3_legacy import XHQwen3LegacyModel, XHQwen3LegacyModelConfig
 
 
+def _override_hf_model_dir(cfg, hf_model_dir):
+    if hf_model_dir is None or len(hf_model_dir) == 0:
+        return
+    cfg.hf_model_dir = hf_model_dir
+    cfg.model.hf_model = hf_model_dir
+
+
 def _build_cfg_from_model(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -50,9 +57,12 @@ def main(args):
     model_dir = args.model
     if config_file is not None and len(config_file) > 0 and model_dir is not None and len(model_dir) > 0:
         raise ValueError("Cannot specify both --config and --model at the same time. Please choose one.")
+    if args.config_hf_model_dir and model_dir is not None and len(model_dir) > 0:
+        raise ValueError("--config-hf-model-dir can only be used with --config, not --model.")
     if config_file is not None and len(config_file) > 0:
         cfg_name = Path(config_file).stem
         cfg = Config.fromfile(args.config)
+        _override_hf_model_dir(cfg, args.config_hf_model_dir)
     elif model_dir is not None and len(model_dir) > 0:
         cfg_name, cfg = _build_cfg_from_model(args)
     else:
@@ -131,6 +141,12 @@ if __name__ == "__main__":
         "--chip-arch", type=str, default="XH2a", help="chip architecture, default is XH2a", choices=["XH2a", "YueHui"]
     )
     parser.add_argument("--model", type=str, default="")
+    parser.add_argument(
+        "--config-hf-model-dir",
+        type=str,
+        default="",
+        help="Override hf_model_dir/hf_model in the config file.",
+    )
     parser.add_argument("--context-length", type=int, default=2048, help="max context sequence length")
     parser.add_argument("--prefill-chunk-length", type=int, default=256, help="prefill chunk length")
     parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8_sefp")

@@ -16,7 +16,7 @@ def resolve_native_glm_moe_cls() -> type[nn.Module]:
 
 # =============================================================================
 # ACTIVE PATH
-# 该函数仍然需要：GLM 通过 XHBaseModel.postprocess_gptqmodel_structure()
+# 该函数仍然需要：GLM 通过 XHBaseModel._postprocess_gptqmodel_structure()
 # 在公共 GPTQModel 反量化后调用它，完成 split-MoE 到 fused-MoE 的结构归一。
 # =============================================================================
 def convert_gptqmodel_moe_structure(

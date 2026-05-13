@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
 
 
+def _override_hf_model_dir(cfg, hf_model_dir):
+    if hf_model_dir is None or len(hf_model_dir) == 0:
+        return
+    cfg.hf_model_dir = hf_model_dir
+    cfg.model.hf_model = hf_model_dir
+
+
 def main(args):
     cfg_name = Path(args.config).stem
     eval_type = args.eval_type
@@ -37,6 +44,7 @@ def main(args):
     logger = get_xhquant_logger()
     # 使用config文件,代替命令行参数,方便调试不同的配置
     cfg = Config.fromfile(args.config)
+    _override_hf_model_dir(cfg, args.config_hf_model_dir)
     cfg.seed = seed
     logger.info(f"Config:\n{cfg.pretty_text}")
     config_file = work_dir / Path(args.config).name
@@ -124,6 +132,12 @@ if __name__ == "__main__":
         default="configs_merak/xh2a/llm_models/qwen3_legacy/1.7b/qwen3_1.7b_legacy_xh2a_2k.py",
     )
     parser.add_argument("--model", type=str)
+    parser.add_argument(
+        "--config-hf-model-dir",
+        type=str,
+        default="",
+        help="Override hf_model_dir/hf_model in the config file.",
+    )
     parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     parser.add_argument("--think", action="store_true", help="enable think mode")

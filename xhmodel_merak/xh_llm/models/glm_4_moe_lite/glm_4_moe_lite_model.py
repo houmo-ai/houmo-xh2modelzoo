@@ -40,7 +40,7 @@ class XHGlm4MoeLiteModel(TextLLMModel):
         return super().init_wrap_model(hf_model)
 
     @classmethod
-    def postprocess_gptqmodel_structure(cls, native_hf_model: Any, hf_model_dir: str, **kwargs) -> Any:
+    def _postprocess_gptqmodel_structure(cls, native_hf_model: Any, **kwargs) -> Any:
         from .gptqmodel_compat import convert_gptqmodel_moe_structure
 
         convert_gptqmodel_moe_structure(native_hf_model)

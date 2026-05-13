@@ -2,7 +2,7 @@ _base_ = [
     "./qwen3_1.7b_legacy_xh2a_2k.py",
 ]
 
-hf_model_dir = "/data02/datasets/chuyuan.wei/Qwen3-1.7B-gptqmodel-int4"
+hf_model_dir = "./data/Qwen3-1.7B-W4A16"
 
 model = dict(
     model_name="xh2_Qwen3-1.7B_w4a8_256_2k",

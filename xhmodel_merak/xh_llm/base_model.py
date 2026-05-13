@@ -1,7 +1,6 @@
 import weakref
-from functools import partial
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from types import MethodType
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -622,10 +621,15 @@ class XHBaseModel(DeviceMixin):
         assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
         converter = gptqmodel_torch_qlinear_converter
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+        
+        logger = get_xhquant_logger()
+        logger.info(f"Start Dequantizing GPTQModel")
 
         for name, module in native_hf_model.named_modules():  # type: ignore
             if isinstance(module, PackableQuantLinear):
                 converter(module)
+
+        logger.info(f"Dequantizing GPTQModel Finished")
         return native_hf_model
 
     @classmethod
@@ -696,6 +700,12 @@ class XHBaseModel(DeviceMixin):
 
     @classmethod
     def _dequantize_gptq_hf_model(cls, native_hf_model: nn.Module):
+        """
+        Abandon this method in future. Should unify 'gptqmodel' quant model 
+        load and dequantization logic. Currently, Gemma4 is not registered 
+        in our custom gptqmodel yet, so we need to load it via hf transformers
+        and dequantize it via this method.
+        """
         hf_model = native_hf_model
         assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
         hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
@@ -776,6 +786,7 @@ class XHBaseModel(DeviceMixin):
 
     @classmethod
     def _dequantize_gptqmodel(cls, native_hf_model: nn.Module) -> nn.Module:
+        raise ValueError("The _dequantize_gptqmodel method is deprecated, please use _dequantize_gptqmodel_hf_model instead.")
         """
         Dequantize a GPTQ model loaded via GPTQModel library.
         This handles models loaded through `_load_gptqmodel` which contain QuantLinear layers.
@@ -817,79 +828,195 @@ class XHBaseModel(DeviceMixin):
 
         return hf_model
 
+    @staticmethod
+    def _get_quantization_method(quantization_config: Any) -> str | None:
+        # AutoConfig 已经读取了 config.json；这里直接使用其中的 quantization_config.quant_method。
+        if quantization_config is None:
+            return None
+        if isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method")
+        else:
+            quant_method = getattr(quantization_config, "quant_method", None)
+        quant_method = getattr(quant_method, "value", quant_method)
+        return str(quant_method).lower() if quant_method is not None else None
+
+    @staticmethod
+    def _compressed_tensors_value(value: Any) -> Any:
+        return getattr(value, "value", value)
+
+    
+
+    @classmethod
+    def _convert_compressed_tensors_linear(
+        cls,
+        module_name: str,
+        module: nn.Linear,
+    ) -> nn.Linear:
+
+        def _expand_compressed_tensors_group_param(
+            module_name: str,
+            value: Tensor,
+            weight_shape: torch.Size,
+            group_size: int,
+            param_name: str,
+        ) -> Tensor:
+            if value.shape[-1] * group_size < weight_shape[-1]:
+                raise RuntimeError(
+                    f"compressed-tensors {param_name} shape mismatch for {module_name}: "
+                    f"{tuple(value.shape)} cannot cover weight shape {tuple(weight_shape)} with group_size={group_size}."
+                )
+            return value.repeat_interleave(group_size, dim=-1)[..., : weight_shape[-1]]
+
+        min_compressed_tensors_version = Version("0.15.0")
+        try:
+            compressed_tensors_version = Version(version("compressed-tensors"))
+        except PackageNotFoundError as e:
+            raise ImportError("未安装 compressed-tensors 库，请先安装: pip install compressed-tensors>=0.15.0") from e
+        
+        """
+        compressed-tensors 0.15.0后对量化线性层实现做了调整。这里的实现不保证兼容0.15.0以下版本。
+        """
+        if compressed_tensors_version < min_compressed_tensors_version:
+            raise RuntimeError(
+                f"当前 compressed-tensors 版本 {compressed_tensors_version} 低于要求的最低版本 "
+                f"{min_compressed_tensors_version}。请升级 compressed-tensors 库: "
+                "pip install --upgrade 'compressed-tensors>=0.15.0'"
+            )
+        
+        from compressed_tensors.compressors.pack_quantized.helpers import unpack_from_int32
+        from compressed_tensors.quantization.lifecycle.forward import dequantize
+
+        scheme = getattr(module, "quantization_scheme", None)
+        weights = getattr(scheme, "weights", None)
+        if scheme is None or weights is None:
+            raise NotImplementedError(
+                f"Cannot find compressed-tensors quantization_scheme.weights for {module_name}."
+            )
+
+        format_str = str(cls._compressed_tensors_value(getattr(scheme, "format", None))).lower()
+        if format_str != "pack-quantized":
+            raise NotImplementedError(
+                f"compressed-tensors format {format_str!r} is not supported for {module_name}; "
+                "only 'pack-quantized' is supported."
+            )
+
+        num_bits = int(getattr(weights, "num_bits"))
+        if num_bits not in (4, 8):
+            raise NotImplementedError(
+                f"compressed-tensors num_bits={num_bits} is not supported for {module_name}; "
+                "only int4/int8 pack-quantized weights are supported."
+            )
+
+        strategy = str(cls._compressed_tensors_value(getattr(weights, "strategy", None))).lower()
+        if strategy not in {"group", "tensor_group"}:
+            raise NotImplementedError(
+                f"compressed-tensors strategy {strategy!r} is not supported for {module_name}; "
+                "only group/tensor_group pack-quantized weights are supported."
+            )
+
+        g_idx = getattr(module, "weight_g_idx", None)
+        if g_idx is not None and g_idx.device.type != "meta" and not torch.any(g_idx == -1):
+            raise NotImplementedError(
+                f"compressed-tensors actorder with weight_g_idx is not supported for {module_name}."
+            )
+
+        packed = module.weight_packed.detach()
+        scale = module.weight_scale.detach()
+        weight_shape = torch.Size(int(dim) for dim in module.weight_shape.detach().cpu().tolist())
+        group_size = int(getattr(weights, "group_size"))
+
+        # transformers 加载 compressed-tensors 后，量化 Linear 仍是 nn.Linear，
+        # 但 dense weight 尚未 materialize，压缩权重保存在 weight_packed/weight_scale 成员中。
+        unpacked = unpack_from_int32(packed, num_bits, weight_shape).contiguous()
+        zero_point = getattr(module, "weight_zero_point", None)
+        zero_point = zero_point.detach() if zero_point is not None else None
+        if zero_point is not None and zero_point.dtype == torch.int32:
+            original_zp_shape = torch.Size((*weight_shape[:-1], scale.shape[-1]))
+            zero_point = unpack_from_int32(zero_point, num_bits, original_zp_shape, packed_dim=0).contiguous()
+
+        expanded_scale = _expand_compressed_tensors_group_param(
+            module_name, scale, weight_shape, group_size, "weight_scale"
+        )
+        expanded_zero_point = None
+        if zero_point is not None:
+            expanded_zero_point = _expand_compressed_tensors_group_param(
+                module_name, zero_point, weight_shape, group_size, "weight_zero_point"
+            )
+
+        # zero point 先作用到整数域：dense_weight == (unpacked - zero_point) * scale。
+        quant_weight_int = unpacked.to(torch.int16)
+        if expanded_zero_point is not None:
+            quant_weight_int = quant_weight_int - expanded_zero_point.to(torch.int16)
+        if quant_weight_int.min() < -128 or quant_weight_int.max() > 127:
+            raise RuntimeError(
+                f"compressed-tensors quant_weight for {module_name} exceeds int8 range after zero point subtraction."
+            )
+        quant_weight = quant_weight_int.to(torch.int8).contiguous()
+        dense_weight = (quant_weight.to(expanded_scale.dtype) * expanded_scale).contiguous()
+
+        reference_weight = dequantize(
+            x_q=unpacked,
+            scale=scale,
+            zero_point=zero_point,
+            args=weights,
+            g_idx=g_idx,
+            dtype=dense_weight.dtype,
+        ).contiguous()
+        if not torch.allclose(dense_weight.float(), reference_weight.float(), rtol=1e-2, atol=1e-2):
+            max_diff = torch.max(torch.abs(dense_weight.float() - reference_weight.float())).item()
+            raise RuntimeError(
+                f"compressed-tensors dequantization check failed for {module_name}: max_abs_diff={max_diff}"
+            )
+
+        if tuple(dense_weight.shape) != (module.out_features, module.in_features):
+            raise RuntimeError(
+                f"compressed-tensors dense weight shape mismatch for {module_name}: "
+                f"weight={tuple(dense_weight.shape)}, expected={(module.out_features, module.in_features)}"
+            )
+
+        # 用父节点 setattr 替换模块，得到后续 wrap/export 预期的普通 nn.Linear，
+        # 同时保留未缩放整数权重 quant_weight 作为 buffer。
+        new_linear = nn.Linear(
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device=dense_weight.device,
+            dtype=dense_weight.dtype,
+        )
+        new_linear.weight = nn.Parameter(dense_weight, requires_grad=False)
+        if module.bias is not None:
+            new_linear.bias = nn.Parameter(
+                module.bias.detach().to(device=dense_weight.device, dtype=dense_weight.dtype).contiguous(),
+                requires_grad=False,
+            )
+        new_linear.register_buffer("quant_weight", quant_weight)
+        return new_linear
+
     @classmethod
     def _dequantize_compressed_tensors_hf_model(cls, native_hf_model: nn.Module) -> nn.Module:
-        import compressed_tensors.quantization.lifecycle.forward
-        from compressed_tensors.linear.compressed_linear import CompressedLinear
-        from compressed_tensors.quantization.quant_args import QuantizationArgs, QuantizationStrategy
-
         hf_model = native_hf_model
-        for _, module in hf_model.named_modules():  # type: ignore
-            if isinstance(module, CompressedLinear):
-                _process_quantization_orig = compressed_tensors.quantization.lifecycle.forward._process_quantization
-                _dequantize_orig = compressed_tensors.quantization.lifecycle.forward._dequantize
+        compressed_linears = [
+            (name, module)
+            for name, module in hf_model.named_modules()
+            if isinstance(module, nn.Linear) and hasattr(module, "weight_packed") and hasattr(module, "weight_scale")
+        ]
+        if not compressed_linears:
+            raise NotImplementedError(
+                "No compressed-tensors pack-quantized nn.Linear modules with weight_packed/weight_scale were found."
+            )
 
-                def _module_process_quantization(
-                    self: nn.Module,
-                    x: torch.Tensor,
-                    scale: torch.Tensor,
-                    zero_point: torch.Tensor,
-                    args: QuantizationArgs,
-                    g_idx: torch.Tensor | None = None,
-                    dtype: torch.dtype | None = None,
-                    do_quantize: bool = True,
-                    do_dequantize: bool = True,
-                    global_scale: torch.Tensor | None = None,
-                    _process_quantization_orig=_process_quantization_orig,
-                ):
-                    self._args = args
-                    self._original_shape = x.shape
-                    # nonlocal _process_quantization_orig
-                    return _process_quantization_orig(
-                        x, scale, zero_point, args, g_idx, dtype, do_quantize, do_dequantize, global_scale
-                    )
+        for module_name, module in tqdm(compressed_linears, desc="Dequantizing compressed-tensors Linear modules"):
+            new_linear = cls._convert_compressed_tensors_linear(module_name, module)
+            if "." in module_name:
+                parent_name, child_name = module_name.rsplit(".", 1)
+                parent = hf_model.get_submodule(parent_name)
+            else:
+                parent = hf_model
+                child_name = module_name
+            setattr(parent, child_name, new_linear)
 
-                def _module_dequantize(
-                    self: nn.Module,
-                    x_q: torch.Tensor,
-                    scale: torch.Tensor,
-                    zero_point: torch.Tensor | None = None,
-                    dtype: torch.dtype | None = None,
-                    global_scale: torch.Tensor | None = None,
-                    _dequantize_orig=_dequantize_orig,
-                ):
-                    quanted_strategy = self._args.strategy
-
-                    quant_weight = x_q
-                    if zero_point is not None:
-                        quant_weight = x_q - zero_point
-                    if quanted_strategy in (
-                        QuantizationStrategy.GROUP,
-                        QuantizationStrategy.TENSOR_GROUP,
-                    ):
-                        quant_weight = quant_weight.flatten(start_dim=-2)
-                    elif quanted_strategy == QuantizationStrategy.BLOCK:
-                        original_shape = self._original_shape
-                        quant_weight = quant_weight.transpose(1, 2).reshape(original_shape)
-
-                    self.register_buffer("quant_weight", quant_weight)
-                    # nonlocal _dequantize_orig
-                    return _dequantize_orig(x_q, scale, zero_point, dtype, global_scale)
-
-                compressed_tensors.quantization.lifecycle.forward._dequantize = partial(_module_dequantize, module)
-                compressed_tensors.quantization.lifecycle.forward._process_quantization = partial(
-                    _module_process_quantization, module
-                )
-
-                weight_data = module.compressor.decompress_module(module)
-                compressed_tensors.quantization.lifecycle.forward._dequantize = _dequantize_orig
-                compressed_tensors.quantization.lifecycle.forward._process_quantization = _process_quantization_orig
-                param = nn.Parameter(weight_data, requires_grad=False)
-
-                module.register_parameter("weight", param)
-                module.__class__ = nn.Linear
-                module.forward = MethodType(nn.Linear.forward, module)
-
+        logger = get_xhquant_logger()
+        logger.info(f"Converted {len(compressed_linears)} compressed-tensors Linear modules to nn.Linear.")
         return hf_model
 
     @classmethod
@@ -954,11 +1081,31 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
-    def _dequantize_hf_model(cls, native_hf_model: nn.Module, quant_weight=None, **kwargs):
-        if (
-            not hasattr(native_hf_model.config, "quantization_config")
-            or native_hf_model.config.quantization_config is None
-        ):
+    def _dequantize_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs):
+        # abandoned function
+        raise ValueError(
+            """
+            The _dequantize_hf_model method is deprecated.If model structure is not modified after quantization, 
+            get_hf_model() will automatically dequantize the model. If model structure adjustment is needed after 
+            loading gptqmodel, please implement your own _postprocess_gptqmodel_structure method. 
+            ref: xhmodel_merak/xh_llm/models/glm_4_moe_lite/glm_4_moe_lite_model.py
+            """
+        )
+        return None
+        
+
+    @classmethod
+    def _postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, **kwargs) -> nn.Module:
+        return native_hf_model
+
+    @classmethod
+    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        quantization_config = config.get("quantization_config", None) if isinstance(config, dict) else getattr(config, "quantization_config", None)
+        quant_method = cls._get_quantization_method(quantization_config)
+        
+        if quantization_config is None:
+            native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
             if quant_weight is not None and len(quant_weight) > 0:
                 cls._load_quant_weight(quant_weight, native_hf_model)
             return native_hf_model
@@ -968,58 +1115,32 @@ class XHBaseModel(DeviceMixin):
                 "Model is already quantized, quant_weight should be None or empty when loading quantized model."
             )
 
-        hf_model = native_hf_model
-        quant_method = hf_model.config.quantization_config.quant_method
-        quant_method_str = str(quant_method).lower()
-        if quant_method == QuantizationMethod.AWQ or "awq" in quant_method_str:
+        if quant_method == "awq":
+            hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
             hf_model = cls._dequantize_awq_hf_model(hf_model)
-        elif quant_method == QuantizationMethod.GPTQ or "gptq" in quant_method_str:
-            hf_model = cls._dequantize_gptq_hf_model(hf_model)
-        elif quant_method == QuantizationMethod.COMPRESSED_TENSORS or "compressed-tensors" in quant_method_str:
-            hf_model = cls._dequantize_compressed_tensors_hf_model(hf_model)
-        elif quant_method == QuantizationMethod.AUTOROUND or "auto-round" in quant_method_str:
-            hf_model = cls._dequantize_autoround_hf_model(hf_model)
-        else:
-            raise NotImplementedError(
-                f"Dequantize not implemented for quantization method: {hf_model.config.quantization_config.quant_method}"
-            )
-        return hf_model
-
-    @classmethod
-    def postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, hf_model_dir: str, **kwargs) -> nn.Module:
-        return native_hf_model
-
-    @classmethod
-    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        quantization_config = getattr(config, "quantization_config", None)
-        quant_method = getattr(quantization_config, "quant_method", None)
-        if isinstance(quantization_config, dict):
-            quant_method = quantization_config.get("quant_method", quant_method)
-
-        if str(quant_method).lower() == "gptq":
-            assert quant_weight is None or len(quant_weight) == 0, (
-                "Model is already quantized, quant_weight should be None or empty when loading quantized model."
-            )
-            native_hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
-            cls._dequantize_gptqmodel_hf_model(native_hf_model)
+        elif quant_method == "gptq":
             """
             GPTQModel在量化某些模型时，会调整模型结构，这导致gptqmodel量化模型和原始hf模型结构不一致，
-            无法进行后续Wrap和Fronted等转换，postprocess_gptqmodel_structure函数的作用是对伪量化后
+            无法进行后续Wrap和Fronted等转换，_postprocess_gptqmodel_structure函数的作用是对伪量化后
             的gptqmodel模型结构进行调整，使其与原始hf模型结构一致。如果适配的新模型也存在类似问题，需要
-            实现自己的postprocess_gptqmodel_structure函数，覆盖基类行为
+            实现自己的_postprocess_gptqmodel_structure函数，覆盖基类行为
             """
-            native_hf_model = cls.postprocess_gptqmodel_structure(native_hf_model, hf_model_dir, **kwargs)
-            return native_hf_model
-
-        if quant_weight is not None and len(quant_weight) > 0:
-            raise RuntimeError(
-                "Model is already quantized, quant_weight should be None or empty when loading quantized model."
-            )
+            hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
+            hf_model = cls._dequantize_gptqmodel_hf_model(hf_model)
+            hf_model = cls._postprocess_gptqmodel_structure(hf_model, **kwargs)
+        elif quant_method == "compressed-tensors":
+            """
+            适配comrpessed-tensors量化模型
+            """
+            # TODO: 量化时改变结构的MoE compressed-tensors量化模型加载权重missing/unexpected问题
+            hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
+            hf_model = cls._dequantize_compressed_tensors_hf_model(hf_model)
+        elif quant_method in {"auto-round", "auto_round", "autoround"}:
+            hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
+            hf_model = cls._dequantize_autoround_hf_model(hf_model)
         else:
-            native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
-            native_hf_model = cls._dequantize_hf_model(native_hf_model, quant_weight=quant_weight, **kwargs)
-        return native_hf_model
+            raise NotImplementedError(f"Dequantize not implemented for quantization method: {quant_method}")
+        return hf_model
 
     def get_native_model(self):
         resume_from = self.config.quant_weight
