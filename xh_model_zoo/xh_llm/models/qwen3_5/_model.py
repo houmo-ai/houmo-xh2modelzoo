@@ -189,6 +189,15 @@ def _manual_depthwise_conv1d_tail(
     return output
 
 
+def _split_linear_qkv_tensor(
+    tensor: Tensor,
+    key_dim: int,
+    value_dim: int,
+    dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.split(tensor, [key_dim, key_dim, value_dim], dim=dim)
+
+
 def _get_safe_autocast_device_type(device: torch.device) -> str:
     device_type = device.type if isinstance(device.type, str) else "cpu"
     return device_type if device_type != "mps" else "cpu"
@@ -502,7 +511,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        conv_cache: Optional[Tensor] = None,
+        conv_cache: Optional[Union[Tensor, Tuple[Tensor, Tensor, Tensor]]] = None,
         recurrent_state: Optional[Tensor] = None,
         linear_attn_mask: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
@@ -512,14 +521,18 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
 
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Separate projections (Qwen3.5 style)
-        mixed_qkv = self.in_proj_qkv(hidden_states)  # [bs, seq, key_dim*2+value_dim]
+        # Split QKV projection and depthwise conv into explicit branches.
+        query_states = self.in_proj_q(hidden_states)
+        key_states = self.in_proj_k(hidden_states)
+        value_states = self.in_proj_v(hidden_states)
         z = self.in_proj_z(hidden_states)  # [bs, seq, value_dim]
         z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
         b = self.in_proj_b(hidden_states)  # [bs, seq, num_v_heads]
         a = self.in_proj_a(hidden_states)  # [bs, seq, num_v_heads]
 
-        mixed_qkv = mixed_qkv.transpose(1, 2)  # [bs, conv_dim, seq]
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
 
         use_recurrent = self.linear_attention_mode == "recurrent"
         if self.linear_attention_mode == "auto" and current_input_length is not None:
@@ -528,18 +541,39 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
             use_recurrent = (resolved_len == 1) if resolved_len is not None else False
 
         # Conv1d with cache
-        conv_cache, recurrent_state = _align_linear_cache_args(
-            conv_cache,
-            recurrent_state,
-            self.conv_dim,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
+        if isinstance(conv_cache, (list, tuple)):
+            if len(conv_cache) != 3:
+                raise RuntimeError(
+                    f"Expected 3 conv caches for linear attention, got {len(conv_cache)}"
+                )
+            conv_cache_q = _normalize_linear_conv_cache_rank(conv_cache[0])
+            conv_cache_k = _normalize_linear_conv_cache_rank(conv_cache[1])
+            conv_cache_v = _normalize_linear_conv_cache_rank(conv_cache[2])
+        else:
+            conv_cache, recurrent_state = _align_linear_cache_args(
+                conv_cache,
+                recurrent_state,
+                self.conv_dim,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+            assert conv_cache is not None, "conv_cache is required"
+            conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
+            conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
+                conv_cache,
+                self.key_dim,
+                self.value_dim,
+                dim=1,
+            )
+        query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
+            self.conv1d_q.weight.dtype
         )
-        assert conv_cache is not None, "conv_cache is required"
-        conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
-        hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(
-            self.conv1d.weight.dtype
+        key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
+            self.conv1d_k.weight.dtype
+        )
+        value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
+            self.conv1d_v.weight.dtype
         )
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
         if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
@@ -550,30 +584,56 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
             # to ``conv_cache_out_{layer}_{t}`` ONNX outputs.
             _kernel = int(self.conv_kernel_size)
             conv_cache_out = tuple(
-                hidden_states_new[..., 1 + t : 1 + t + _kernel]
+                query_states_new[..., 1 + t : 1 + t + _kernel]
+                for t in range(self.input_sequence_length)
+            ) + tuple(
+                key_states_new[..., 1 + t : 1 + t + _kernel]
+                for t in range(self.input_sequence_length)
+            ) + tuple(
+                value_states_new[..., 1 + t : 1 + t + _kernel]
                 for t in range(self.input_sequence_length)
             )
         else:
-            conv_cache_out = self.conv_cache_slice(
-                hidden_states_new, current_input_length
+            conv_cache_out = (
+                self.conv_cache_slice(query_states_new, current_input_length),
+                self.conv_cache_slice(key_states_new, current_input_length),
+                self.conv_cache_slice(value_states_new, current_input_length),
             )
-        conv_out = _manual_depthwise_conv1d_tail(
-            hidden_states_new,
-            self.conv1d_manual_weight,
-            getattr(self, "conv1d_manual_bias", None),
+        query_states = _manual_depthwise_conv1d_tail(
+            query_states_new,
+            self.conv1d_q_manual_weight,
+            getattr(self, "conv1d_q_manual_bias", None),
             self.input_sequence_length,
         )
-        mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
-        mask_qkv = linear_attn_mask.unsqueeze(1)
-        mixed_qkv = mixed_qkv * mask_qkv
-
-        mixed_qkv = mixed_qkv.transpose(1, 2)
-        query, key, value = torch.split(
-            mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+        key_states = _manual_depthwise_conv1d_tail(
+            key_states_new,
+            self.conv1d_k_manual_weight,
+            getattr(self, "conv1d_k_manual_bias", None),
+            self.input_sequence_length,
         )
-        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        value_states = _manual_depthwise_conv1d_tail(
+            value_states_new,
+            self.conv1d_v_manual_weight,
+            getattr(self, "conv1d_v_manual_bias", None),
+            self.input_sequence_length,
+        )
+        query_states = F.silu(query_states).to(query_states.dtype)
+        key_states = F.silu(key_states).to(key_states.dtype)
+        value_states = F.silu(value_states).to(value_states.dtype)
+        mask_qkv = linear_attn_mask.unsqueeze(1)
+        query_states = query_states * mask_qkv
+        key_states = key_states * mask_qkv
+        value_states = value_states * mask_qkv
+
+        query = query_states.transpose(1, 2).reshape(
+            batch_size, seq_len, -1, self.head_k_dim
+        )
+        key = key_states.transpose(1, 2).reshape(
+            batch_size, seq_len, -1, self.head_k_dim
+        )
+        value = value_states.transpose(1, 2).reshape(
+            batch_size, seq_len, -1, self.head_v_dim
+        )
 
         beta = b.sigmoid()
         g = self.A_log_exp * F.softplus(a + self.dt_bias)
@@ -697,6 +757,107 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
 
+        if not hasattr(self, "in_proj_q"):
+            proj_has_bias = self.in_proj_qkv.bias is not None
+            proj_device = self.in_proj_qkv.weight.device
+            proj_dtype = self.in_proj_qkv.weight.dtype
+            q_weight, k_weight, v_weight = _split_linear_qkv_tensor(
+                self.in_proj_qkv.weight.detach().clone(),
+                self.key_dim,
+                self.value_dim,
+                dim=0,
+            )
+            self.in_proj_q = nn.Linear(
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
+            )
+            self.in_proj_k = nn.Linear(
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
+            )
+            self.in_proj_v = nn.Linear(
+                self.hidden_size,
+                self.value_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
+            )
+            self.in_proj_q.weight.data.copy_(q_weight)
+            self.in_proj_k.weight.data.copy_(k_weight)
+            self.in_proj_v.weight.data.copy_(v_weight)
+            if proj_has_bias:
+                q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
+                    self.in_proj_qkv.bias.detach().clone(),
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
+                )
+                self.in_proj_q.bias.data.copy_(q_bias)
+                self.in_proj_k.bias.data.copy_(k_bias)
+                self.in_proj_v.bias.data.copy_(v_bias)
+            del self.in_proj_qkv
+
+        if not hasattr(self, "conv1d_q"):
+            conv_has_bias = self.conv1d.bias is not None
+            conv_device = self.conv1d.weight.device
+            conv_dtype = self.conv1d.weight.dtype
+            q_weight, k_weight, v_weight = _split_linear_qkv_tensor(
+                self.conv1d.weight.detach().clone(),
+                self.key_dim,
+                self.value_dim,
+                dim=0,
+            )
+            self.conv1d_q = nn.Conv1d(
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device,
+                dtype=conv_dtype,
+            )
+            self.conv1d_k = nn.Conv1d(
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device,
+                dtype=conv_dtype,
+            )
+            self.conv1d_v = nn.Conv1d(
+                self.value_dim,
+                self.value_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.value_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device,
+                dtype=conv_dtype,
+            )
+            self.conv1d_q.weight.data.copy_(q_weight)
+            self.conv1d_k.weight.data.copy_(k_weight)
+            self.conv1d_v.weight.data.copy_(v_weight)
+            if conv_has_bias:
+                q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
+                    self.conv1d.bias.detach().clone(),
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
+                )
+                self.conv1d_q.bias.data.copy_(q_bias)
+                self.conv1d_k.bias.data.copy_(k_bias)
+                self.conv1d_v.bias.data.copy_(v_bias)
+            del self.conv1d
+
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
             _dt_bias_data = self.dt_bias.data.clone()
@@ -711,7 +872,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         self.chunk_num_heads = self.num_v_heads
         self.chunk_k_head_dim = self.head_k_dim
         self.chunk_v_head_dim = self.head_v_dim
-        target_dtype = self.in_proj_qkv.weight.dtype
+        target_dtype = self.in_proj_q.weight.dtype
         self.register_buffer(
             "chunk_scale",
             torch.tensor(
@@ -728,14 +889,34 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         self.register_buffer("A_log_exp", a_log_exp, persistent=False)
 
         self.register_buffer(
-            "conv1d_manual_weight",
-            self.conv1d.weight.detach().clone().squeeze(1),
+            "conv1d_q_manual_weight",
+            self.conv1d_q.weight.detach().clone().squeeze(1),
             persistent=False,
         )
-        if self.conv1d.bias is not None:
+        self.register_buffer(
+            "conv1d_k_manual_weight",
+            self.conv1d_k.weight.detach().clone().squeeze(1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "conv1d_v_manual_weight",
+            self.conv1d_v.weight.detach().clone().squeeze(1),
+            persistent=False,
+        )
+        if self.conv1d_q.bias is not None:
             self.register_buffer(
-                "conv1d_manual_bias",
-                self.conv1d.bias.detach().clone(),
+                "conv1d_q_manual_bias",
+                self.conv1d_q.bias.detach().clone(),
+                persistent=False,
+            )
+            self.register_buffer(
+                "conv1d_k_manual_bias",
+                self.conv1d_k.bias.detach().clone(),
+                persistent=False,
+            )
+            self.register_buffer(
+                "conv1d_v_manual_bias",
+                self.conv1d_v.bias.detach().clone(),
                 persistent=False,
             )
 
@@ -815,7 +996,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         target_dtype = (
             self.chunk_scale.dtype
             if hasattr(self, "chunk_scale")
-            else self.in_proj_qkv.weight.dtype
+            else self.in_proj_q.weight.dtype
         )
         eye_matrix = (
             torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
@@ -1151,6 +1332,7 @@ class _Qwen3_5TextModel(DynamicModule):
         recurrent_state_out_list = []
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
+        linear_conv_cache_idx = 0
 
         # Collect intermediate hidden states for speculative decode (DFlash)
         if self.output_hidden_state_indices is not None:
@@ -1178,7 +1360,10 @@ class _Qwen3_5TextModel(DynamicModule):
                     _past_k_cache = None
                     _past_v_cache = None
                     _past_conv_cache = (
-                        past_conv_cache[linear_attn_cache_idx]
+                        tuple(
+                            past_conv_cache[linear_conv_cache_idx + offset]
+                            for offset in range(3)
+                        )
                         if past_conv_cache is not None
                         else None
                     )
@@ -1187,6 +1372,7 @@ class _Qwen3_5TextModel(DynamicModule):
                         if past_recurrent_state is not None
                         else None
                     )
+                    linear_conv_cache_idx += 3
                     linear_attn_cache_idx += 1
             else:
                 # Full-attention KV cache is disabled, but linear attention still
@@ -1195,7 +1381,10 @@ class _Qwen3_5TextModel(DynamicModule):
                 _past_v_cache = None
                 if layer_type == "linear_attention":
                     _past_conv_cache = (
-                        past_conv_cache[linear_attn_cache_idx]
+                        tuple(
+                            past_conv_cache[linear_conv_cache_idx + offset]
+                            for offset in range(3)
+                        )
                         if past_conv_cache is not None
                         else None
                     )
@@ -1204,6 +1393,7 @@ class _Qwen3_5TextModel(DynamicModule):
                         if past_recurrent_state is not None
                         else None
                     )
+                    linear_conv_cache_idx += 3
                     linear_attn_cache_idx += 1
                 else:
                     _past_conv_cache = None

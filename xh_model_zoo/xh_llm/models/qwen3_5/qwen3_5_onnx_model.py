@@ -128,6 +128,14 @@ def _clone_cache_value(value: torch.Tensor) -> torch.Tensor:
     return cloned
 
 
+def _parse_conv_cache_name(name: str) -> tuple[Optional[str], str]:
+    suffix = name[len("past_conv_cache_") :]
+    prefix, idx = suffix.rsplit("_", 1)
+    if prefix in {"q", "k", "v"}:
+        return prefix, idx
+    return None, idx
+
+
 def _ensure_logits_shape(logits: torch.Tensor) -> torch.Tensor:
     if logits.dim() == 3:
         return logits
@@ -562,16 +570,20 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
                 cache_state[name] = _as_cache_value(cache_state[name], output_map[name])
                 continue
             if name.startswith("past_conv_cache_"):
-                idx = name.rsplit("_", 1)[-1]
+                branch, idx = _parse_conv_cache_name(name)
                 # Per-step verify export emits conv_cache_out_{idx}_{t};
                 # baseline path consumes only one valid token, so pick t=0.
-                per_step = f"conv_cache_out_{idx}_0"
+                if branch is None:
+                    per_step = f"conv_cache_out_{idx}_0"
+                    out_name = f"conv_cache_out_{idx}"
+                else:
+                    per_step = f"conv_cache_out_{branch}_{idx}_0"
+                    out_name = f"conv_cache_out_{branch}_{idx}"
                 if per_step in output_map:
                     cache_state[name] = _as_cache_value(
                         cache_state[name], output_map[per_step]
                     )
                     continue
-                out_name = f"conv_cache_out_{idx}"
                 if out_name in output_map:
                     conv_out = output_map[out_name]
                     if (

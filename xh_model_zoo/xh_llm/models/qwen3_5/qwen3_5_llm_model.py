@@ -260,9 +260,17 @@ class XHQwen3_5Model(LLMBaseModel):
             layer = text_model.layers[layer_idx]
             assert layer.layer_type == "linear_attention", f"Layer {layer_idx} should be linear_attention"
             linear_attn = layer.linear_attn
-            conv_cache_shape = [
+            conv_cache_shapes = [
                 self.wrap_cfg.batch_size,
-                linear_attn.conv_dim,
+                linear_attn.key_dim,
+                linear_attn.conv_kernel_size,
+            ], [
+                self.wrap_cfg.batch_size,
+                linear_attn.key_dim,
+                linear_attn.conv_kernel_size,
+            ], [
+                self.wrap_cfg.batch_size,
+                linear_attn.value_dim,
                 linear_attn.conv_kernel_size,
             ]
             recurrent_cache_shape = [
@@ -271,13 +279,23 @@ class XHQwen3_5Model(LLMBaseModel):
                 linear_attn.head_k_dim,
                 linear_attn.head_v_dim,
             ]
-            cache_dtype = linear_attn.conv1d.weight.dtype
-            self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
+            cache_dtype = (
+                linear_attn.conv1d_q.weight.dtype
+                if hasattr(linear_attn, "conv1d_q")
+                else linear_attn.conv1d.weight.dtype
+            )
+            for conv_cache_shape in conv_cache_shapes:
+                self.past_conv_caches.append(
+                    CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype))
+                )
             self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
 
         if self.export_cfg is not None:
-            for cache_idx in range(num_linear_attention_layers):
-                self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}")
+            for layer_idx in range(num_linear_attention_layers):
+                for branch in ("q", "k", "v"):
+                    self.export_cfg.input_names.append(
+                        f"past_conv_cache_{branch}_{layer_idx}"
+                    )
             for cache_idx in range(num_linear_attention_layers):
                 self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
@@ -293,19 +311,23 @@ class XHQwen3_5Model(LLMBaseModel):
                 ):
                     verify_steps = int(self.wrap_cfg.input_sequence_length)
                 if verify_steps > 1:
-                    for cache_idx in range(num_linear_attention_layers):
-                        for step_idx in range(verify_steps):
-                            output_names.append(
-                                f"conv_cache_out_{cache_idx}_{step_idx}"
-                            )
+                    for layer_idx in range(num_linear_attention_layers):
+                        for branch in ("q", "k", "v"):
+                            for step_idx in range(verify_steps):
+                                output_names.append(
+                                    f"conv_cache_out_{branch}_{layer_idx}_{step_idx}"
+                                )
                     for cache_idx in range(num_linear_attention_layers):
                         for step_idx in range(verify_steps):
                             output_names.append(
                                 f"recurrent_state_out_{cache_idx}_{step_idx}"
                             )
                 else:
-                    for cache_idx in range(num_linear_attention_layers):
-                        output_names.append(f"conv_cache_out_{cache_idx}")
+                    for layer_idx in range(num_linear_attention_layers):
+                        for branch in ("q", "k", "v"):
+                            output_names.append(
+                                f"conv_cache_out_{branch}_{layer_idx}"
+                            )
                     for cache_idx in range(num_linear_attention_layers):
                         output_names.append(f"recurrent_state_out_{cache_idx}")
                 # Add spec_decode_hidden output if configured

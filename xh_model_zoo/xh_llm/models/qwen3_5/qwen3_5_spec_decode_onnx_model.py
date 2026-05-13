@@ -32,6 +32,7 @@ from .qwen3_5_onnx_model import (
     _clone_cache_value,
     _ensure_logits_shape,
     _is_kv_cache_name,
+    _parse_conv_cache_name,
     _sample_next_token,
     _select_last_valid_logits,
     _apply_repetition_penalty,
@@ -243,18 +244,22 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
     ) -> None:
         for name, cache_tensor in list(cache_state.items()):
             if name.startswith("past_conv_cache_"):
-                idx = name.rsplit("_", 1)[-1]
+                branch, idx = _parse_conv_cache_name(name)
                 # New per-step naming: conv_cache_out_{layer}_{t}. Pick the
                 # (accepted_steps-1)-th snapshot by name (NPU-friendly, no slice).
                 step = max(accepted_steps - 1, 0)
-                per_step_name = f"conv_cache_out_{idx}_{step}"
+                if branch is None:
+                    per_step_name = f"conv_cache_out_{idx}_{step}"
+                    out_name = f"conv_cache_out_{idx}"
+                else:
+                    per_step_name = f"conv_cache_out_{branch}_{idx}_{step}"
+                    out_name = f"conv_cache_out_{branch}_{idx}"
                 if per_step_name in output_map:
                     cache_state[name] = _as_cache_value(
                         cache_tensor, output_map[per_step_name]
                     )
                     continue
                 # Fallback to legacy continuous-window output that needs slicing.
-                out_name = f"conv_cache_out_{idx}"
                 if out_name not in output_map:
                     continue
                 conv_out = output_map[out_name]

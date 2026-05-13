@@ -274,6 +274,15 @@ def _manual_depthwise_conv1d_tail(
     return output
 
 
+def _split_linear_qkv_tensor(
+    tensor: Tensor,
+    key_dim: int,
+    value_dim: int,
+    dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.split(tensor, [key_dim, key_dim, value_dim], dim=dim)
+
+
 def _get_safe_autocast_device_type(device: torch.device) -> str:
     device_type = device.type if isinstance(device.type, str) else "cpu"
     return device_type if device_type != "mps" else "cpu"
