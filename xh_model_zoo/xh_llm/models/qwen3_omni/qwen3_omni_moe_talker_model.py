@@ -12,6 +12,34 @@ from .modeling_qwen3_omni_moe import Qwen3OmniMoeTalkerForConditionalGeneration
 
 @MODELS.register_module()
 class XHQwen3OmniMoeTalkerModel(LLMBaseModel):
+    """LLMBaseModel adapter for the fused-projection Qwen3-Omni talker.
+
+    The wrap forward (``_Qwen3OmniMoeTalkerForConditionalGeneration`` in
+    ``_talker_model.py``) folds ``hidden_projection`` and ``text_projection``
+    into the talker graph and selects between them with arithmetic masks
+    instead of HF's host-side control flow. This adapter feeds that
+    signature.
+
+    Expected ``data`` keys for ``prepare_inputs``:
+
+    - ``hidden_state`` (or ``source``): per-batch list of
+      ``[seq, thinker_hidden]`` fp16 tensors. mm positions hold
+      ``thinker_hidden``, text positions hold ``thinker_embed``, codec /
+      decode positions can be zeros.
+    - ``role_mask``: per-batch list of ``[seq, 1]`` fp16. ``1.0`` =
+      ``text_projection`` path, ``0.0`` = ``hidden_projection`` path.
+    - ``bypass_embeds``: per-batch list of ``[seq, talker_hidden]`` fp16.
+      Pre-mixed embeddings for positions where projection is bypassed
+      (assistant tts/codec specials, decode codec embeds).
+    - ``bypass_mask``: per-batch list of ``[seq, 1]`` fp16. ``1.0`` = use
+      ``bypass_embeds``, ``0.0`` = use the projected result.
+    - ``past_seq_length``: per-batch list of ``int``.
+
+    Construction of these four tensors must follow HF semantics; see
+    ``Qwen3OmniMoeForConditionalGeneration._get_talker_user_parts`` and
+    ``_get_talker_assistant_parts`` in ``modeling_qwen3_omni_moe.py``.
+    """
+
     def __init__(
         self,
         hf_model: str,
@@ -45,6 +73,8 @@ class XHQwen3OmniMoeTalkerModel(LLMBaseModel):
         super().init_wrap_model(hf_model)
         hf_model = cast(Qwen3OmniMoeTalkerForConditionalGeneration, self.wrap_model)
 
+        # Codec embedding kept here so callers can build ``bypass_embeds`` for
+        # decode via ``self.get_input_embeddings()(codec_token_id)``.
         self.token_embedding = deepcopy(hf_model.model.get_input_embeddings())
         self.generation_config = hf_model.generation_config
         self.config = hf_model.config
@@ -65,147 +95,116 @@ class XHQwen3OmniMoeTalkerModel(LLMBaseModel):
 
         hf_model = None
 
+    def _pad_to_seq_len(self, tensor, fill_value: float = 0.0) -> Tensor:
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.tensor(tensor, dtype=torch.float16)
+        seq_length = tensor.shape[0]
+        assert seq_length <= self.input_sequence_length, (
+            f"Input sequence length is too long. max input sequence length is "
+            f"{self.input_sequence_length} but got {seq_length}"
+        )
+        if self.input_sequence_length > seq_length:
+            pad_shape = (self.input_sequence_length - seq_length, *tensor.shape[1:])
+            pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype, device=tensor.device)
+            tensor = torch.cat([tensor, pad], dim=0)
+        return tensor.unsqueeze(0)
+
     def prepare_inputs(self, data: Union[dict, tuple, list]):
         device = self.execution_device
-        
-        # 支持直接输入 embeddings 或 input_ids
-        if "inputs_embeds" in data:
-            # 直接使用输入的 embeddings
-            raw_inputs_embeds = data["inputs_embeds"]
-            embeddings_list = []
-            current_input_length = []
-            position_ids = []
-            
-            for batch_idx, input_embed in enumerate(raw_inputs_embeds):
-                if isinstance(input_embed, list):
-                    input_embed = torch.tensor(input_embed, dtype=torch.float32)
-                elif not isinstance(input_embed, torch.Tensor):
-                    input_embed = torch.tensor(input_embed, dtype=torch.float32)
-                
-                # input_embed shape: [seq_length, hidden_size]
-                seq_length = input_embed.shape[0]
-                past_seq_length = data["past_seq_length"][batch_idx]
-                position_id = torch.arange(
-                    past_seq_length, past_seq_length + seq_length, dtype=torch.long, device=input_embed.device
-                )
-                current_input_length.append(seq_length)
-                
-                assert (
-                    seq_length <= self.input_sequence_length
-                ), f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
-                
-                if self.input_sequence_length > seq_length:
-                    # 对 embeddings 进行 padding
-                    hidden_size = input_embed.shape[-1]
-                    padding_embeds = torch.zeros(
-                        (self.input_sequence_length - seq_length, hidden_size),
-                        dtype=input_embed.dtype,
-                        device=input_embed.device
-                    )
-                    input_embed = torch.cat([input_embed, padding_embeds], dim=0)
-                    
-                    padding_position_id = torch.ones(
-                        (self.input_sequence_length - seq_length), dtype=torch.long, device=input_embed.device
-                    )
-                    position_id = torch.cat([position_id, padding_position_id], dim=-1)
-                
-                input_embed = input_embed.unsqueeze(0)
-                position_id = position_id.unsqueeze(0)
-                position_ids.append(position_id)
-                embeddings_list.append(input_embed)
-            
-            inputs_embeds = torch.cat(embeddings_list, dim=0).to(device)
-            position_ids = torch.cat(position_ids, dim=0).to(device)
-            current_input_length = torch.tensor(current_input_length, dtype=torch.int32).to(device)
-            
-        else:
-            # 原有的 input_ids 逻辑
-            raw_input_ids: List[List[int]] = data["input_ids"]
-            assert self.token_embedding is not None, "Token embedding is not available."
-            
-            input_ids = []
-            current_input_length = []
-            position_ids = []
-            for batch_idx, input_id in enumerate(raw_input_ids):
-                input_id = torch.tensor(input_id, dtype=torch.long)
-                seq_length = input_id.shape[0]
-                past_seq_length = data["past_seq_length"][batch_idx]
-                position_id = torch.arange(
-                    past_seq_length, past_seq_length + seq_length, dtype=torch.long, device=input_id.device
-                )
-                current_input_length.append(seq_length)
-                assert (
-                    seq_length <= self.input_sequence_length
-                ), f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
-                if self.input_sequence_length > seq_length:
-                    padding_input_ids = torch.zeros(
-                        (self.input_sequence_length - seq_length), dtype=torch.long, device=input_id.device
-                    )
-                    padding_input_ids.fill_(self.pad_token_id)
-                    input_id = torch.cat([input_id, padding_input_ids], dim=-1)
 
-                    padding_position_id = torch.ones(
-                        (self.input_sequence_length - seq_length), dtype=torch.long, device=input_id.device
-                    )
-                    position_id = torch.cat([position_id, padding_position_id], dim=-1)
+        raw_source = data.get("hidden_state", data.get("source"))
+        assert raw_source is not None, (
+            "XHQwen3OmniMoeTalkerModel requires `hidden_state` (or `source`) in data; "
+            "the legacy `inputs_embeds` / `input_ids` path is no longer supported "
+            "because the fused projection lives inside the wrapped graph."
+        )
+        raw_role_mask = data["role_mask"]
+        raw_bypass_embeds = data["bypass_embeds"]
+        raw_bypass_mask = data["bypass_mask"]
+        raw_past_seq_length = data["past_seq_length"]
 
-                input_id = input_id.unsqueeze(0)
-                position_id = position_id.unsqueeze(0)
-                position_ids.append(position_id)
-                input_ids.append(input_id)
+        batch_size = len(raw_source)
+        assert (
+            len(raw_role_mask) == batch_size
+            and len(raw_bypass_embeds) == batch_size
+            and len(raw_bypass_mask) == batch_size
+            and len(raw_past_seq_length) == batch_size
+        ), "All per-batch lists in `data` must share the same length."
 
-            input_ids = torch.cat(input_ids, dim=0).to(device)
-            position_ids = torch.cat(position_ids, dim=0).to(device)
-            current_input_length = torch.tensor(current_input_length, dtype=torch.int32).to(device)
-            
-            self.token_embedding.to(device)
-            inputs_embeds = self.token_embedding(input_ids)
-        
-        past_seq_length = data["past_seq_length"]
-        past_seq_length = torch.tensor(past_seq_length, dtype=torch.int32).to(device)
+        sources: List[Tensor] = []
+        role_masks: List[Tensor] = []
+        bypass_embeds_list: List[Tensor] = []
+        bypass_masks: List[Tensor] = []
+        current_input_length: List[int] = []
+
+        for batch_idx in range(batch_size):
+            src = raw_source[batch_idx]
+            if not isinstance(src, torch.Tensor):
+                src = torch.tensor(src, dtype=torch.float16)
+            seq_length = src.shape[0]
+            current_input_length.append(seq_length)
+            sources.append(self._pad_to_seq_len(src))
+            role_masks.append(self._pad_to_seq_len(raw_role_mask[batch_idx]))
+            bypass_embeds_list.append(self._pad_to_seq_len(raw_bypass_embeds[batch_idx]))
+            bypass_masks.append(self._pad_to_seq_len(raw_bypass_mask[batch_idx]))
+
+        source = torch.cat(sources, dim=0).to(device)
+        role_mask = torch.cat(role_masks, dim=0).to(device)
+        bypass_embeds = torch.cat(bypass_embeds_list, dim=0).to(device)
+        bypass_mask = torch.cat(bypass_masks, dim=0).to(device)
+        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32).to(device)
+
+        past_seq_length = torch.tensor(raw_past_seq_length, dtype=torch.int32).to(device)
         assert torch.all(past_seq_length >= 0)
+
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
 
         return (
-            inputs_embeds.to(device),
-            past_seq_length.to(device),
-            current_input_length,
-            # position_ids.to(device),
+            source,
+            role_mask,
+            bypass_embeds,
+            bypass_mask,
+            past_seq_length,
+            current_input_length_t,
             past_key_caches,
             past_value_caches,
         )
 
     def prepare_inputs_for_graph(self, data: Union[dict, tuple, list]):
-        inputs_embeds, past_seq_length, seg_length, past_key_caches, past_value_caches = (
-            self.prepare_inputs(data)
-        )
-        return (
-            inputs_embeds,
-            past_seq_length,
-            seg_length,
-            # position_ids,
-            past_key_caches,
-            past_value_caches,
-        )
+        # Override LLMBaseModel.prepare_inputs_for_graph, which assumes a
+        # 5-tuple (inputs_embeds, past_seq_length, seg_length, past_key_caches,
+        # past_value_caches). The fused-projection talker emits an 8-tuple, so
+        # we just forward whatever prepare_inputs produced.
+        return self.prepare_inputs(data)
 
     def _forward(
         self,
-        inputs_embeds: Tensor,
+        source: Tensor,
+        role_mask: Tensor,
+        bypass_embeds: Tensor,
+        bypass_mask: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
-        position_ids: Optional[Tensor],
         past_key_caches: List[Tensor],
         past_value_caches: List[Tensor],
     ):
-        logits = self(
-            inputs_embeds,
+        out = self(
+            source,
+            role_mask,
+            bypass_embeds,
+            bypass_mask,
             past_seq_length,
             current_input_length,
-            position_ids,
             past_key_caches,
             past_value_caches,
         )
-        return CausalLMOutputWithPast(
-            logits=logits,
-        )
+        # Wrap forward returns ``(logits, hidden_states)``; exported HMONNX
+        # mirrors the same output schema. Frontend / quant graphs preserve
+        # the tuple. Only ``logits`` is needed for the CausalLMOutputWithPast
+        # return contract used by `LLMBaseModel.test_step`.
+        if isinstance(out, (tuple, list)):
+            logits = out[0]
+        else:
+            logits = out
+        return CausalLMOutputWithPast(logits=logits)

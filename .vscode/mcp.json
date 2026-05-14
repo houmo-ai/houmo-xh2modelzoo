@@ -8,12 +8,5 @@
         "serve"
       ]
     },
-    "jira-assistant": {
-      "type": "stdio",
-      "command": "/data01/home/huxing/jira_agents/scripts/start-mcp.sh",
-      "args": [],
-      "cwd": "/data01/home/huxing/jira_agents",
-      "env": {}
-    }
   }
 }
