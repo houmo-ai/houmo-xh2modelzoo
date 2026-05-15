@@ -160,6 +160,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         self._llm_prefill = True
         """更新预填充阶段使用的 HMONNX 模型路径，并重新加载模型。"""
         self.prefill_model.to(device=self.device)
+        self.set_input_sequence_length(self.meta_info.model_config.prefill_chunk_length)
         # if self.fast_mode:
         #     self.prefill_model.to_fast()
 
@@ -168,6 +169,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         """更新解码阶段使用的 HMONNX 模型路径，并重新加载模型。"""
         self.prefill_model.to(device="cpu")
         self.decode_model.to(device=self.device)
+        self.set_input_sequence_length(self.get_input_sequence_length())
         # if self.fast_mode:
         #     self.decode_model.to_fast()
 
