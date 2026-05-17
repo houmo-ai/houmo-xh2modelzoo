@@ -194,7 +194,12 @@ def main(args):
     # ============================================================ 音频文本预处理与特征融合 ============================================================ # 
     max_audio_length = args.max_audio_length
     embed_lengths = _get_feat_extract_output_lengths(max_audio_length)
-    text_embed_lengths = embed_lengths + 21
+    prefix_token_budget = int(args.prefix_token_budget)
+    text_embed_lengths = embed_lengths + 21 + prefix_token_budget
+    meta_info.max_audio_length = max_audio_length
+    meta_info.audio_embed_lengths = embed_lengths
+    meta_info.prefix_token_budget = prefix_token_budget
+    meta_info.prefill_input_sequence_length = text_embed_lengths
     
     tokenizer = processor.tokenizer
         
@@ -390,6 +395,12 @@ if __name__ == "__main__":
         type=int,
         default=1500,
         help="手动固定 Encoder 输入的时间维度 T，并通过 _get_feat_extract_output_lengths 计算出嵌入后维度"
+    )
+    parser.add_argument(
+        "--prefix_token_budget",
+        type=int,
+        default=512,
+        help="为 streaming 文本 prefix 额外预留的 prefill token 长度"
     )
     args = parser.parse_args()
     main(args)
