@@ -35,3 +35,9 @@ vision+llm回答
 ```
 CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_with_mask_xh_vlm_generate.py --llm-config work_dirs/gemma4_moe_with_mask_26b_a4b_it_xh2a_w4a8_256_2k/hmquant_xh2_gemma4_moe_with_mask_26b_a4b_it_w4a8_256_2k_20260508/golden_meta_info.json --vision-config work_dirs/gemma4_moe_26b_a4b_it_vision_xh2a_no_upsample_token_448x448/export_meta_info.json --image data/images/qwen2_vl_demo.jpeg --prompt "描述这张图片" --streaming-out
 ```
+
+### 带mtp模块的export
+
+```
+
+```

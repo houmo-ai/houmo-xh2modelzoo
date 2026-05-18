@@ -163,6 +163,61 @@ def _get_visual_export_mode(llm_model: Any) -> str:
     return "full"
 
 
+def _run_visual_model(
+    visual_model: Any,
+    pixel_values: torch.Tensor,
+    image_position_ids: Optional[torch.Tensor],
+    *,
+    export_mode: str,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    pixel_values = pixel_values.to(visual_model.device, visual_model.dtype)
+    image_count = pixel_values.shape[0] if pixel_values.ndim >= 3 else 1
+
+    def _forward_one(image_index: int | None = None):
+        if image_index is None:
+            visual_pixel_values = pixel_values
+            visual_position_ids = image_position_ids
+        else:
+            visual_pixel_values = pixel_values[image_index : image_index + 1].contiguous()
+            visual_position_ids = (
+                image_position_ids[image_index : image_index + 1].contiguous()
+                if image_position_ids is not None and image_position_ids.ndim >= 3
+                else image_position_ids
+            )
+
+        visual_inputs = [visual_pixel_values]
+        if export_mode != "compact":
+            visual_inputs.append(
+                visual_position_ids.to(visual_model.device) if visual_position_ids is not None else None
+            )
+        return visual_model.forward(*visual_inputs)
+
+    if image_count <= 1:
+        return _forward_one()
+
+    image_embeds_list: list[torch.Tensor] = []
+    image_embed_mask_list: list[torch.Tensor] = []
+    has_embed_mask = False
+    for image_index in range(image_count):
+        image_outputs = _forward_one(image_index)
+        image_embed_mask = None
+        if isinstance(image_outputs, (tuple, list)) and len(image_outputs) == 2:
+            image_embeds, image_embed_mask = image_outputs
+            has_embed_mask = True
+        else:
+            image_embeds = image_outputs
+        image_embeds_list.append(image_embeds)
+        if image_embed_mask is not None:
+            image_embed_mask_list.append(image_embed_mask)
+
+    image_embeds = torch.cat(image_embeds_list, dim=0)
+    if has_embed_mask:
+        if len(image_embed_mask_list) != image_count:
+            raise ValueError("Gemma4 visual runtime returned masks for only part of the image batch.")
+        return image_embeds, torch.cat(image_embed_mask_list, dim=0)
+    return image_embeds
+
+
 class _Gemma4HFCompatible(TextLLMHFCompatible):
     def _setup(self: Gemma4ForConditionalGeneration, text_llm_model: "XHGemma4Model"):
         model = super()._setup(text_llm_model)
@@ -260,12 +315,12 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         image_embeds = None
         if pixel_values is not None and getattr(self._llm_model, "visual", None) is not None:
             visual_model = self._llm_model.visual
-            visual_inputs = [
-                pixel_values.to(visual_model.device, visual_model.dtype),
-            ]
-            if _get_visual_export_mode(self._llm_model) != "compact":
-                visual_inputs.append(image_position_ids.to(visual_model.device) if image_position_ids is not None else None)
-            image_outputs = visual_model.forward(*visual_inputs)
+            image_outputs = _run_visual_model(
+                visual_model,
+                pixel_values,
+                image_position_ids,
+                export_mode=_get_visual_export_mode(self._llm_model),
+            )
             image_embed_mask = None
             if isinstance(image_outputs, (tuple, list)) and len(image_outputs) == 2:
                 image_embeds, image_embed_mask = image_outputs

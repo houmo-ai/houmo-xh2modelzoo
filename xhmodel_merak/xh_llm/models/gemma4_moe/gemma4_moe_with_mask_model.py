@@ -256,6 +256,7 @@ class XHGemma4MoeWithMaskModel(VisionLLMModel):
                     continue
 
             missing_keys.append(key)
+
         return missing_keys
 
     def _load_missing_tensors_from_fallback(
@@ -709,6 +710,8 @@ class XHGemma4MoeWithMaskModel(VisionLLMModel):
             insert_at += 1
         if self.sliding_window_cfg.get("has_global_attention", False):
             export_cfg["input_names"].insert(insert_at, "global_attention_mask")
+        if bool(self.wrap_cfg.get("output_hidden_states_for_export", False)):
+            export_cfg["output_names"].append("last_hidden_state")
         return export_cfg
 
     def _extra_export_metadata(self, output_dir: str, meta_info):

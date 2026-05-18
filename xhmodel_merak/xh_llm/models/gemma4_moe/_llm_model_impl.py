@@ -29,7 +29,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 
 from xhquant.api import ConfigDict
-from xhquant.nn import LLMCache, MaskedAdd, RMSNorm, Rope, SoftmaxPlus
+from xhquant.nn import LLMCacheV2, MaskedAdd, RMSNorm, Rope, SoftmaxPlus
 from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils.registry import DynamicModule
 
@@ -175,8 +175,8 @@ class _Gemma4TextAttention(DynamicModule):
 
         if use_cache:
             cache_axis = cfg.kv_cache.cache_axis
-            self.k_cache = LLMCache(axis=cache_axis, attention_max_length=attention_max_length)
-            self.v_cache = LLMCache(axis=cache_axis, attention_max_length=attention_max_length)
+            self.k_cache = LLMCacheV2(axis=cache_axis, attention_max_length=attention_max_length)
+            self.v_cache = LLMCacheV2(axis=cache_axis, attention_max_length=attention_max_length)
 
         self.kv_scale = 1.0
 
@@ -247,7 +247,6 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         **kwargs,
     ) -> Tuple[Tensor]:
         clip_value = torch.finfo(torch.float16).max - 1000
-
         layer_scalar = self.layer_scalar
         if isinstance(layer_scalar, Tensor):
             layer_scalar = layer_scalar.to(hidden_states)
@@ -349,6 +348,8 @@ class _Gemma4TextModel(DynamicModule):
 
         self.num_logits_to_keep = cfg.num_logits_to_keep
         assert self.num_logits_to_keep in [0, 1]
+        self.output_hidden_states_for_export = bool(cfg.get("output_hidden_states_for_export", False))
+        self.output_hidden_sequence = bool(cfg.get("output_hidden_sequence", False))
 
         self.use_cache = cfg.use_cache
         input_seq_len = cfg.input_sequence_length
@@ -415,10 +416,19 @@ class _Gemma4TextModel(DynamicModule):
             if self.only_first_block:
                 break
 
+        normalized_sequence = None
+        if self.num_logits_to_keep == 0 or self.output_hidden_sequence:
+            normalized_sequence = self.norm(hidden_states)
+
         if self.num_logits_to_keep != 0:
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
+            hidden_states = self.norm(hidden_states)
+        else:
+            hidden_states = normalized_sequence
 
-        hidden_states = self.norm(hidden_states)
+        if self.output_hidden_states_for_export:
+            hidden_output = normalized_sequence if self.output_hidden_sequence else hidden_states
+            return hidden_states, hidden_output
 
         return BaseModelOutputWithPast(last_hidden_state=hidden_states)
 
@@ -448,13 +458,20 @@ class _Gemma4ForCausalLM(DynamicModule):
             past_value_cache=past_value_cache,
         )
 
-        hidden_states = outputs[0]
+        extra_outputs = []
+        if isinstance(outputs, (tuple, list)):
+            hidden_states = outputs[0]
+            extra_outputs = list(outputs[1:])
+        else:
+            hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         if self.config.final_logit_softcapping is not None:
             logits = logits / self.config.final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * self.config.final_logit_softcapping
 
+        if extra_outputs:
+            return (logits, *extra_outputs)
         return logits
 
 
