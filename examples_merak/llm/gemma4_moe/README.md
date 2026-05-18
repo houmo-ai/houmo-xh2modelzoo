@@ -1,10 +1,12 @@
+# gemma4_26b_a4b的导出与demo
+
 ## 环境基础
 
 transformers==5.5.0
 
-## usage
+## Usage
 
-### export
+### Export
 
 以w4a8为例
 
@@ -21,7 +23,7 @@ CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_with_mask
 
 在config中填写正确的模型路径和量化配置，注意w4a8的配置中依然要填写官方浮点的路径
 
-### demo/generate
+### Demo/Generate
 
 llm回答
 ```
