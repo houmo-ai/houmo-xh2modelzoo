@@ -221,6 +221,7 @@ class KVCacheWithLinearConfig(KVCacheConfig):
         batch_size: int = 1,
         cache_dtype: str = "float16",
         linear_kv_cache_config: dict = None,
+        use_cache: bool = True,
     ):
         super().__init__(
             num_layers=num_layers,
@@ -228,6 +229,7 @@ class KVCacheWithLinearConfig(KVCacheConfig):
             cache_axis=cache_axis,
             batch_size=batch_size,
             cache_dtype=cache_dtype,
+            use_cache=use_cache,
         )
         self.linear_kv_cache_config: LinearKVCacheConfig = (
             LinearKVCacheConfig(**linear_kv_cache_config)
