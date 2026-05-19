@@ -39,5 +39,11 @@ CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_with_mask
 ### 带mtp模块的export
 
 ```
+CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_with_mask_mtp_xh_export_hmonnx.py --config configs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_with_mask_mtp_26b_a4b_it_xh2a_w4a8_256_2k.py 
+```
 
+### 带mtp模块的demo
+
+```
+CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_with_mask_mtp_xh_generate.py --meta work_dirs/gemma4_moe_with_mask_mtp_26b_a4b_it_xh2a_w4a8_256_2k/hmquant_xh2_gemma4_moe_with_mask_26b_a4b_it_mtp_w4a8_256_2k_20260518/golden_meta_info_mtp.json --prompt "你是谁" --max-new-tokens 512
 ```

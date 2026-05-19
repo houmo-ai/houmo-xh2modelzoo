@@ -19,7 +19,7 @@ from ...vision_llm_model import VisionLLMModel
 from .data_preprocess import Gemma4DataPreprocess, Gemma4InputProcessorConfig, Gemma4PerLayerInputBuilder
 from .gemma4_audio_model import XHGemma4AudioModel
 from .gemma4_hmonnx_inference import XHGemma4_HMONNXModel
-from .gemma4_processor import XHGemma4Processor
+from .gemma4_processor import XHGemma4Processor, configure_gemma4_visual_processor
 from .gemma4_vision_model import XHGemma4VisionModel
 from .xh_gemma4_config import Gemma4ModelMeta, XHGemma4ModelConfig
 
@@ -173,6 +173,23 @@ def _run_visual_model(
     pixel_values = pixel_values.to(visual_model.device, visual_model.dtype)
     image_count = pixel_values.shape[0] if pixel_values.ndim >= 3 else 1
 
+    def _trim_visual_patch_padding(
+        visual_pixel_values: torch.Tensor,
+        visual_position_ids: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if export_mode == "compact" or visual_position_ids is None or visual_pixel_values.ndim < 3:
+            return visual_pixel_values, visual_position_ids
+        if visual_position_ids.ndim == 2:
+            visual_position_ids = visual_position_ids.unsqueeze(0)
+        valid_positions = ~(visual_position_ids == -1).all(dim=-1)
+        real_patch_count = int(valid_positions[0].sum().item())
+        if real_patch_count <= 0 or visual_pixel_values.shape[1] == real_patch_count:
+            return visual_pixel_values, visual_position_ids
+        return (
+            visual_pixel_values[:, :real_patch_count, :].contiguous(),
+            visual_position_ids[:, :real_patch_count, :].contiguous(),
+        )
+
     def _forward_one(image_index: int | None = None):
         if image_index is None:
             visual_pixel_values = pixel_values
@@ -184,6 +201,11 @@ def _run_visual_model(
                 if image_position_ids is not None and image_position_ids.ndim >= 3
                 else image_position_ids
             )
+
+        visual_pixel_values, visual_position_ids = _trim_visual_patch_padding(
+            visual_pixel_values,
+            visual_position_ids,
+        )
 
         visual_inputs = [visual_pixel_values]
         if export_mode != "compact":
@@ -500,10 +522,14 @@ class XHGemma4Model(VisionLLMModel):
     def get_tf_processor(self):
         processor = XHGemma4Processor.from_pretrained(self.hf_model_dir)
         if self.visual is not None:
-            processor.config.max_size_h = self.visual.config.max_size_h
-            processor.config.max_size_w = self.visual.config.max_size_w
-            processor.config.patch_size = self.visual.config.patch_size
-            processor.config.export_mode = self.visual.config.export_mode
+            processor = configure_gemma4_visual_processor(
+                processor,
+                export_mode=self.visual.config.export_mode,
+                max_size_w=self.visual.config.max_size_w,
+                max_size_h=self.visual.config.max_size_h,
+                patch_size=self.visual.config.patch_size,
+                image_seq_length=self.visual.config.image_seq_length,
+            )
         if self.audio is not None:
             processor.config.sampling_rate = self.audio.config.sampling_rate
         return processor

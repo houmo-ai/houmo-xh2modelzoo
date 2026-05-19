@@ -80,13 +80,53 @@ def test_gemma4_processor_full_mode_keeps_rectangular_image_tokens():
     assert image_token_count == 280
 
 
-def test_gemma4_processor_compact_mode_forces_square_image_contract():
+def test_gemma4_processor_full_export_mode_forces_fixed_square_contract():
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import configure_gemma4_visual_processor
 
     processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
-    processor.config.export_mode = "compact"
-    processor.config.max_size_h = 224
-    processor.config.max_size_w = 224
+    configure_gemma4_visual_processor(
+        processor,
+        export_mode="full",
+        max_size_h=448,
+        max_size_w=448,
+        patch_size=16,
+        image_seq_length=280,
+    )
+    model_inputs = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": Image.new("RGB", (320, 224), color="white")},
+                    {"type": "text", "text": "Describe the image briefly."},
+                ],
+            }
+        ]
+    )
+
+    image_token_count = int((model_inputs["input_ids"] == processor.tokenizer.image_token_id).sum().item())
+    real_patch_count = int((~(model_inputs["image_position_ids"] == -1).all(dim=-1)).sum().item())
+
+    assert image_token_count == 280
+    assert model_inputs["pixel_values"].shape[1] == 2520
+    assert model_inputs["image_position_ids"].shape[1] == 2520
+    assert real_patch_count == 2304
+
+
+def test_gemma4_processor_compact_mode_forces_square_image_contract():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import XHGemma4Processor
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_processor import configure_gemma4_visual_processor
+
+    processor = XHGemma4Processor.from_pretrained(str(MODEL_DIR))
+    configure_gemma4_visual_processor(
+        processor,
+        export_mode="compact",
+        max_size_h=448,
+        max_size_w=448,
+        patch_size=16,
+        image_seq_length=256,
+    )
     model_inputs = processor.apply_chat_template(
         [
             {
@@ -103,9 +143,9 @@ def test_gemma4_processor_compact_mode_forces_square_image_contract():
     real_patch_count = int((~(model_inputs["image_position_ids"] == -1).all(dim=-1)).sum().item())
 
     assert image_token_count == 256
-    assert model_inputs["pixel_values"].shape[1] == 2304
-    assert model_inputs["image_position_ids"].shape[1] == 2304
-    assert real_patch_count == 2304
+    assert model_inputs["pixel_values"].shape[1] == 256
+    assert model_inputs["image_position_ids"].shape[1] == 256
+    assert real_patch_count == 256
 
 
 def test_gemma4_processor_uses_official_turn_tokens_without_double_bos():

@@ -973,10 +973,10 @@ def test_gemma4_hf_compatible_compact_visual_omits_position_ids():
 
     outputs = compatible_model.forward(
         input_ids=torch.tensor([[10, 10, 1, 10]], dtype=torch.long),
-        pixel_values=torch.zeros((1, 2304, 8), dtype=torch.float32),
-        image_position_ids=torch.zeros((1, 2304, 2), dtype=torch.long),
+        pixel_values=torch.zeros((1, 256, 8), dtype=torch.float32),
+        image_position_ids=torch.zeros((1, 256, 2), dtype=torch.long),
     )
 
     assert outputs.logits.shape == (1, 4, 16)
-    assert recorded["pixel_values_shape"] == (1, 2304, 8)
+    assert recorded["pixel_values_shape"] == (1, 256, 8)
     assert recorded["image_embeds_shape"] == (256, 8)

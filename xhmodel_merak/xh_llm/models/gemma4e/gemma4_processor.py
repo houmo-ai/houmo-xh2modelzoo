@@ -8,6 +8,11 @@ from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
 from xhmodel_merak.configuration_utils import BaseConfig
 
 
+DEFAULT_VISUAL_MAX_SOFT_TOKENS = 280
+FULL_VISUAL_POOLING_KERNEL_SIZE = 3
+COMPACT_VISUAL_POOLING_KERNEL_SIZE = 1
+
+
 class Gemma4ProcessorConfig(BaseConfig):
     def __init__(self):
         super().__init__()
@@ -17,6 +22,7 @@ class Gemma4ProcessorConfig(BaseConfig):
         self.sampling_rate: int = 16000
         self.audio_feature_length: int | None = None
         self.export_mode: str = "full"
+        self.enforce_fixed_image_size: bool = False
 
 
 class XHGemma4Processor(Gemma4Processor):
@@ -50,8 +56,8 @@ class XHGemma4Processor(Gemma4Processor):
             audio_ms_per_token=getattr(processor, "audio_ms_per_token", 40),
         )
 
-    def _resize_image_for_compact_export(self, image: Any) -> Any:
-        if self.config.export_mode != "compact" or not isinstance(image, Image.Image):
+    def _resize_image_for_export_contract(self, image: Any) -> Any:
+        if not self.config.enforce_fixed_image_size or not isinstance(image, Image.Image):
             return image
         target_size = (self.config.max_size_w, self.config.max_size_h)
         if image.size == target_size:
@@ -65,9 +71,9 @@ class XHGemma4Processor(Gemma4Processor):
         prepared = dict(kwargs)
         images = prepared["images"]
         if isinstance(images, (list, tuple)):
-            prepared["images"] = [self._resize_image_for_compact_export(image) for image in images]
+            prepared["images"] = [self._resize_image_for_export_contract(image) for image in images]
         else:
-            prepared["images"] = self._resize_image_for_compact_export(images)
+            prepared["images"] = self._resize_image_for_export_contract(images)
         return prepared
 
     def __call__(self, *args, **kwargs):
@@ -282,3 +288,25 @@ class XHGemma4Processor(Gemma4Processor):
             processor_kwargs["audio"] = audios[0] if len(audios) == 1 else audios
             processor_kwargs["sampling_rate"] = sampling_rate
         return self(**processor_kwargs)
+
+
+def configure_gemma4_visual_processor(
+    processor: XHGemma4Processor,
+    *,
+    export_mode: str,
+    max_size_w: int,
+    max_size_h: int,
+    patch_size: int,
+    image_seq_length: int,
+) -> XHGemma4Processor:
+    processor.config.max_size_h = max_size_h
+    processor.config.max_size_w = max_size_w
+    processor.config.patch_size = patch_size
+    processor.config.export_mode = export_mode
+    processor.config.enforce_fixed_image_size = True
+    processor.image_processor.max_soft_tokens = DEFAULT_VISUAL_MAX_SOFT_TOKENS
+    processor.image_processor.pooling_kernel_size = (
+        COMPACT_VISUAL_POOLING_KERNEL_SIZE if export_mode == "compact" else FULL_VISUAL_POOLING_KERNEL_SIZE
+    )
+    processor.image_seq_length = image_seq_length
+    return processor

@@ -16,7 +16,7 @@ from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...kv_cache_mixin import KVCacheMixin
 from ...types import KVCacheConfig, LLMModelMeta
 from .data_preprocess import Gemma4DataPreprocess, Gemma4InputProcessorConfig, Gemma4PerLayerInputBuilder
-from .gemma4_processor import XHGemma4Processor
+from .gemma4_processor import XHGemma4Processor, configure_gemma4_visual_processor
 
 
 def _cast_hmonnx_int_args(args):
@@ -363,10 +363,14 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
         processor = XHGemma4Processor.from_pretrained(self.hf_model_dir)
         model_config = self.meta_info.model_config
         if getattr(model_config, "visual_config", None) is not None:
-            processor.config.max_size_h = model_config.visual_config.max_size_h
-            processor.config.max_size_w = model_config.visual_config.max_size_w
-            processor.config.patch_size = model_config.visual_config.patch_size
-            processor.config.export_mode = getattr(model_config.visual_config, "export_mode", "full")
+            processor = configure_gemma4_visual_processor(
+                processor,
+                export_mode=getattr(model_config.visual_config, "export_mode", "full"),
+                max_size_w=model_config.visual_config.max_size_w,
+                max_size_h=model_config.visual_config.max_size_h,
+                patch_size=model_config.visual_config.patch_size,
+                image_seq_length=model_config.visual_config.image_seq_length,
+            )
         if getattr(model_config, "audio_config", None) is not None:
             processor.config.sampling_rate = model_config.audio_config.sampling_rate
             processor.config.audio_feature_length = getattr(model_config.audio_config, "input_feature_length", None)

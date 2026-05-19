@@ -98,9 +98,10 @@ class XHGemma4VisualConfig(HFModelConfig):
         export_mode = _normalize_visual_export_mode(export_mode)
         defaults = _get_visual_defaults(kwargs.get("hf_model"))
         if export_mode == "compact":
-            defaults["max_size_w"] = 224
-            defaults["max_size_h"] = 224
+            defaults["max_size_w"] = 448
+            defaults["max_size_h"] = 448
             defaults["image_seq_length"] = 256
+            defaults["pooling_kernel_size"] = 1
         super().__init__(**kwargs)
         self.export_mode = export_mode
         self.max_size_w = defaults["max_size_w"] if max_size_w is None else max_size_w

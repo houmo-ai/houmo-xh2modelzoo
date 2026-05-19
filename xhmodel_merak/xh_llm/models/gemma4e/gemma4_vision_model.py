@@ -19,7 +19,7 @@ from ...types import VisualModelMeta
 from ..gemma4.gemma4_visual_model import Gemma4VisualAdapter as _CompactGemma4VisualAdapter
 from ..gemma4.gemma4_visual_model import _replace_rmsnorm
 from ..gemma4.gemma4_visual_model import _wrap_vision_modules as _wrap_compact_vision_modules
-from .gemma4_processor import XHGemma4Processor
+from .gemma4_processor import XHGemma4Processor, configure_gemma4_visual_processor
 from .xh_gemma4_config import XHGemma4VisualConfig
 
 
@@ -82,7 +82,7 @@ class XHGemma4VisionModel(BaseVisionModel):
     def _use_compact_export(self) -> bool:
         return self.export_mode == "compact"
 
-    def _get_compact_export_inputs(self) -> dict[str, torch.Tensor]:
+    def _get_export_inputs(self) -> dict[str, torch.Tensor]:
         messages = [
             {
                 "role": "user",
@@ -105,6 +105,9 @@ class XHGemma4VisionModel(BaseVisionModel):
             "image_position_ids": image_position_ids[:, :real_patch_count, :],
         }
 
+    def _get_compact_export_inputs(self) -> dict[str, torch.Tensor]:
+        return self._get_export_inputs()
+
     def _init_compact_wrap_model(self, hf_model: Gemma4ForConditionalGeneration | None) -> Any:
         if hf_model is None:
             hf_model = self.get_native_model()
@@ -116,12 +119,9 @@ class XHGemma4VisionModel(BaseVisionModel):
             vision_config = gemma4_config.vision_config
             if isinstance(vision_config, dict):
                 patch_size = vision_config.get("patch_size")
-                pooling_kernel_size = vision_config.get("pooling_kernel_size")
             else:
                 patch_size = vision_config.patch_size
-                pooling_kernel_size = vision_config.pooling_kernel_size
             assert patch_size == self.config.patch_size
-            assert pooling_kernel_size == self.config.pooling_kernel_size
 
         dummy_inputs = self._get_compact_export_inputs()
         image_position_ids = dummy_inputs["image_position_ids"]
@@ -192,11 +192,14 @@ class XHGemma4VisionModel(BaseVisionModel):
 
     def get_tf_processor(self):
         processor = XHGemma4Processor.from_pretrained(self.hf_model_dir)
-        processor.config.max_size_h = self.config.max_size_h
-        processor.config.max_size_w = self.config.max_size_w
-        processor.config.patch_size = self.config.patch_size
-        processor.config.export_mode = self.config.export_mode
-        return processor
+        return configure_gemma4_visual_processor(
+            processor,
+            export_mode=self.config.export_mode,
+            max_size_w=self.config.max_size_w,
+            max_size_h=self.config.max_size_h,
+            patch_size=self.config.patch_size,
+            image_seq_length=self.config.image_seq_length,
+        )
 
     def _get_data_preprocessor(self) -> BaseVisualProcessor:
         if self._use_compact_export():
@@ -207,21 +210,14 @@ class XHGemma4VisionModel(BaseVisionModel):
         if self._use_compact_export():
             compact_inputs = self._get_compact_export_inputs()
             return {"image": compact_inputs["pixel_values"]}
-        processor = self.get_tf_processor()
-        model_inputs = processor(
-            text="<|image|>Describe the image briefly.",
-            images=Image.new("RGB", (self.config.max_size_w, self.config.max_size_h), color="white"),
-            return_tensors="pt",
-        )
-        return {
-            "pixel_values": model_inputs["pixel_values"],
-            "image_position_ids": model_inputs["image_position_ids"],
-        }
+        return self._get_export_inputs()
 
     def _to_fronted(self, wrap_model):
         if self._use_compact_export():
             dummy_inputs = self.get_dummy_inputs()
             pixel_values = dummy_inputs["image"].float().cpu()
+            if self.work_dir:
+                self._export_plain_onnx_sidecar(self.work_dir)
             return to_frontend_graph(wrap_model.float().cpu(), "TorchFX", [pixel_values])
 
         logger = get_xhquant_logger()

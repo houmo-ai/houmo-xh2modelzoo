@@ -58,9 +58,10 @@ def test_gemma4_model_config_supports_compact_visual_export_via_auto_llm_config(
 
     assert isinstance(config, XHGemma4ModelConfig)
     assert config.visual_config.export_mode == "compact"
-    assert config.visual_config.max_size_w == 224
-    assert config.visual_config.max_size_h == 224
+    assert config.visual_config.max_size_w == 448
+    assert config.visual_config.max_size_h == 448
     assert config.visual_config.image_seq_length == 256
+    assert config.visual_config.pooling_kernel_size == 1
 
 
 def test_gemma4_vision_submodel_contracts():
@@ -73,6 +74,8 @@ def test_gemma4_vision_submodel_contracts():
     dummy_inputs = model.get_dummy_inputs()
     assert set(dummy_inputs) == {"pixel_values", "image_position_ids"}
     assert dummy_inputs["pixel_values"].ndim == 3
+    assert dummy_inputs["pixel_values"].shape[1] == 2304
+    assert dummy_inputs["image_position_ids"].shape[1] == 2304
     assert dummy_inputs["image_position_ids"].shape[-1] == 2
     processed_inputs = model.get_data_preprocessor()(dummy_inputs)
     assert len(processed_inputs) == 2
@@ -101,7 +104,7 @@ def test_gemma4_compact_vision_submodel_contracts():
 
     dummy_inputs = model.get_dummy_inputs()
     assert set(dummy_inputs) == {"image"}
-    assert dummy_inputs["image"].shape[1] == 2304
+    assert dummy_inputs["image"].shape[1] == 256
     processed_inputs = model.get_data_preprocessor()(dummy_inputs)
     assert len(processed_inputs) == 1
     assert processed_inputs[0].shape == dummy_inputs["image"].shape
@@ -111,8 +114,8 @@ def test_gemma4_compact_vision_submodel_contracts():
     assert export_cfg["output_names"] == ["image_embeds"]
 
     meta = model.create_export_metadata("work_dirs/gemma4_visual_meta")
-    assert meta.image_size_h == 224
-    assert meta.image_size_w == 224
+    assert meta.image_size_h == 448
+    assert meta.image_size_w == 448
     assert meta.patch_size == config.patch_size
     assert meta.image_seq_length == 256
     assert meta.export_mode == "compact"
@@ -468,8 +471,8 @@ def test_gemma4_visual_hmonnx_compact_mode_ignores_position_ids():
 
     VisualHMONNXModel.forward(
         model,
-        torch.randn(1, 2304, 768),
-        torch.zeros((1, 2304, 2), dtype=torch.int64),
+        torch.randn(1, 256, 768),
+        torch.zeros((1, 256, 2), dtype=torch.int64),
     )
 
     assert len(captured["args"]) == 1
