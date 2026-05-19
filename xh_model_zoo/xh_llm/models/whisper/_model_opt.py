@@ -129,6 +129,8 @@ def whisper_encoder_forward_v2(
     output_kv_output = []
     # print(hidden_states.sum())
     bsz, tgt_len = hidden_states.shape[:-1]
+    k_states = []
+    v_states = []
     for layer in self.decoder_m.layers:
         # k_state = layer.encoder_attn.k_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
         # v_state = layer.encoder_attn.v_proj(hidden_states).view(1, -1, 16, 64).transpose(1, 2).contiguous()
@@ -144,7 +146,10 @@ def whisper_encoder_forward_v2(
             .transpose(1, 2)
             .contiguous()
         )
-        output_kv_output.append((k_state, v_state))
+        k_states.append(k_state)
+        v_states.append(v_state)
+    # 分组返回：[k0, k1, ..., kN, v0, v1, ..., vN]
+    output_kv_output = k_states + v_states
 
     return output_kv_output
 

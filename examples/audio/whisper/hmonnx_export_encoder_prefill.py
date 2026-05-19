@@ -147,6 +147,11 @@ def main(args):
     ).input_features
     # 通过 替换onnx 先导出onnx 再转hmonnx 将decoder部分的qk linear转移到了encoder中，避免重复多次操作
     # 1. 导出onnx
+    encoder_output_names = []
+    for i in range(num_decode_layers):
+        encoder_output_names.append(f"key_state_{i}")
+    for i in range(num_decode_layers):
+        encoder_output_names.append(f"value_state_{i}")
     if not Path(onnx_file).exists():
         with tempfile.TemporaryDirectory() as tmp_dir:
             with RewriterContext(None, backend="onnxruntime"):
@@ -156,9 +161,7 @@ def main(args):
                     input_features,  # inputs[0], #
                     temp_onnx_file,
                     input_names=["input_features"],
-                    output_names=[
-                        "hidden_state",
-                    ],
+                    output_names=encoder_output_names,
                     # dynamo=True,
                 )
                 onnx_model = onnx.load(temp_onnx_file)
@@ -200,7 +203,7 @@ def main(args):
     output_names = []
     for i in range(num_decode_layers):
         output_names.append(f"key_state_{i}")
-    # for i in range(num_decode_layers):
+    for i in range(num_decode_layers):
         output_names.append(f"value_state_{i}")
     # 3. 转换
     if not Path(hmonnx_file).exists():
