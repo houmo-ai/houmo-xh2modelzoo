@@ -33,11 +33,13 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeForConditionalGeneration,
 )
+
 from xhquant.api import CacheTensor
 
 from ..base_converter import BaseConverter, HFTransfromersConverter
 from ..builder import wrap_llm_model
 from .qwen3_5_moe_convert_config import Qwen3_5MoeConvertConfig
+
 
 from xhquant.api import (  # type: ignore # isort:skip
     Config,
@@ -103,9 +105,7 @@ def _load_dflash_target_layer_ids(dflash_model_dir: str) -> List[int]:
         dflash_config = json.load(f)
     target_layer_ids = dflash_config.get("dflash_config", {}).get("target_layer_ids")
     if not target_layer_ids:
-        raise ValueError(
-            f"Failed to read dflash_config.target_layer_ids from {config_path}"
-        )
+        raise ValueError(f"Failed to read dflash_config.target_layer_ids from {config_path}")
     return list(target_layer_ids)
 
 
@@ -146,9 +146,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             try:
                 from gptqmodel import BACKEND, GPTQModel  # type: ignore
 
-                logger.info(
-                    f"Detected gptqmodel checkpoint; using GPTQModel.load() for dequantization: {hf_model_dir}"
-                )
+                logger.info(f"Detected gptqmodel checkpoint; using GPTQModel.load() for dequantization: {hf_model_dir}")
                 torch_dtype = kwargs.get("torch_dtype", torch.float16)
                 # BACKEND.TORCH ensures all packed linears become TorchQuantLinear, which
                 # the base ``_dequantize_gptq_hf_model`` already knows how to dequantize.
@@ -288,9 +286,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         if spec_decode_mode == "dflash":
             dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
             if not dflash_model_dir:
-                raise ValueError(
-                    "dflash_model_dir is required when spec_decode_mode='dflash'"
-                )
+                raise ValueError("dflash_model_dir is required when spec_decode_mode='dflash'")
             output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
         wrap_cfg = Config(
             dict(
@@ -339,12 +335,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             head_dim,
         ]
         past_key_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            for _ in full_attention_layer_indices
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
         ]
         past_value_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            for _ in full_attention_layer_indices
+            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
         ]
 
         past_conv_caches = []
@@ -516,8 +510,8 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         )
 
         # M-RoPE position IDs: for text-only, all three are sequential
-        position_ids = torch.arange(input_sequence_length, dtype=torch.long).unsqueeze(0).expand(
-            self.config.batch_size, -1
+        position_ids = (
+            torch.arange(input_sequence_length, dtype=torch.long).unsqueeze(0).expand(self.config.batch_size, -1)
         )
         time_position_ids = position_ids
         hight_position_ids = position_ids
@@ -570,9 +564,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         if spec_decode_mode == "dflash":
             dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
             if not dflash_model_dir:
-                raise ValueError(
-                    "dflash_model_dir is required when spec_decode_mode='dflash'"
-                )
+                raise ValueError("dflash_model_dir is required when spec_decode_mode='dflash'")
             output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
         output_post_norm_hidden = spec_decode_mode == "mtp"
         extra_hidden_output_name = None
@@ -589,14 +581,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             decode_output_names = ["logits"]
             for layer_idx in range(len(linear_attention_layer_indices)):
                 for step_idx in range(verify_length):
-                    decode_output_names.append(
-                        f"conv_cache_out_{layer_idx}_{step_idx}"
-                    )
+                    decode_output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
             for layer_idx in range(len(linear_attention_layer_indices)):
                 for step_idx in range(verify_length):
-                    decode_output_names.append(
-                        f"recurrent_state_out_{layer_idx}_{step_idx}"
-                    )
+                    decode_output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
         else:
             decode_output_names = list(output_names_base)
         if extra_hidden_output_name is not None:
@@ -712,9 +700,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             for key, value in draft_onnx_files.items():
                 meta_info[f"{key}_file"] = str(Path(value).relative_to(work_dir))
             if "draft_decode_onnx" in draft_onnx_files:
-                meta_info["draft_onnx_file"] = str(
-                    Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir)
-                )
+                meta_info["draft_onnx_file"] = str(Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir))
             meta_info["spec_decode_mode"] = spec_decode_mode
             meta_info["spec_decode_block_size"] = num_draft_tokens
             meta_info["spec_decode_hidden_output_name"] = "post_norm_hidden"
@@ -732,9 +718,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             for key, value in draft_onnx_files.items():
                 meta_info[f"{key}_file"] = str(Path(value).relative_to(work_dir))
             if "draft_decode_onnx" in draft_onnx_files:
-                meta_info["draft_onnx_file"] = str(
-                    Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir)
-                )
+                meta_info["draft_onnx_file"] = str(Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir))
             meta_info["spec_decode_mode"] = spec_decode_mode
             meta_info["spec_decode_block_size"] = num_draft_tokens
             meta_info["spec_decode_hidden_output_name"] = "target_hidden"
@@ -761,13 +745,13 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         Returns:
             dict mapping {"draft_prefill_onnx": path, "draft_decode_onnx": path}
         """
+        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: F401
+        from xh_model_zoo.xh_llm.models.builder import MODELS
         from xhquant.api import (  # type: ignore
             ConfigDict,
             PrecisionMode,
             ptq_quantize,
         )
-        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: F401 – register XHMTPDraftModel
-        from xh_model_zoo.xh_llm.models.builder import MODELS
 
         logger = get_root_logger()
         draft_onnx_dir = work_dir / "draft_onnx"
@@ -805,9 +789,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 [torch.device("cpu")],
             )
             draft_model.convert_to_export_graph(dummy_data)
-            onnx_file = draft_model.to_export_onnx(
-                dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}"
-            )[0]
+            onnx_file = draft_model.to_export_onnx(dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}")[0]
             draft_model.release_exported_model()
             draft_model.release_quanted_model()
             draft_model.release_frontend_model()
@@ -833,18 +815,32 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         verify_length: int,
         target_device: str,
     ) -> dict:
+        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: F401
+        from xh_model_zoo.xh_llm.models.builder import MODELS
         from xhquant.api import (  # type: ignore
             ConfigDict,
             PrecisionMode,
             ptq_quantize,
         )
-        import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: F401
-        from xh_model_zoo.xh_llm.models.builder import MODELS
 
         logger = get_root_logger()
         draft_onnx_dir = work_dir / "draft_onnx"
         draft_onnx_dir.mkdir(exist_ok=True, parents=True)
         max_pe_length = 262144
+        draft_decode_seq_len = int(verify_length)
+        with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
+            dflash_cfg = json.load(f)
+        model_block_size = int(dflash_cfg.get("block_size", draft_decode_seq_len))
+        if draft_decode_seq_len > model_block_size:
+            raise ValueError(
+                f"DFlash draft decode input length ({draft_decode_seq_len} = num_draft_tokens + 1) exceeds "
+                f"model block_size ({model_block_size}) from {Path(dflash_model_dir) / 'config.json'}"
+            )
+        if draft_decode_seq_len < model_block_size:
+            logger.info(
+                "DFlash draft decode input_sequence_length reduced from model "
+                f"block_size={model_block_size} to verify_length={draft_decode_seq_len}"
+            )
 
         def _export_one(mode: str, input_sequence_length: int, name_suffix: str) -> str:
             model_cfg = dict(
@@ -879,9 +875,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 [torch.device("cpu")],
             )
             draft_model.convert_to_export_graph(dummy_data)
-            onnx_file = draft_model.to_export_onnx(
-                dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}"
-            )[0]
+            onnx_file = draft_model.to_export_onnx(dummy_data, str(draft_onnx_dir), f"{prefix}_{name_suffix}")[0]
             draft_model.release_exported_model()
             draft_model.release_quanted_model()
             draft_model.release_frontend_model()
@@ -890,15 +884,125 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             return onnx_file
 
         return {
-            "draft_context_onnx": _export_one(
-                "context", self.config.input_sequence_length, "dflash_context"
-            ),
+            "draft_context_onnx": _export_one("context", self.config.input_sequence_length, "dflash_context"),
+            "draft_context_decode_onnx": _export_one("context", draft_decode_seq_len, "dflash_context_decode"),
             "draft_decode_onnx": _export_one(
                 "decode",
-                int(json.load(open(Path(dflash_model_dir) / "config.json", encoding="utf-8")).get("block_size", verify_length)),
+                draft_decode_seq_len,
                 "dflash_decode",
             ),
         }
+
+    @staticmethod
+    def _resolve_existing_meta_path(existing_work_dir: Path, meta_info: Dict[str, Any], *keys: str) -> Path:
+        for key in keys:
+            path_value = meta_info.get(key)
+            if path_value:
+                path = Path(str(path_value))
+                if not path.is_absolute():
+                    path = (existing_work_dir / path).resolve()
+                if not path.exists():
+                    raise FileNotFoundError(f"Resolved {key} does not exist: {path}")
+                return path
+        raise FileNotFoundError(f"None of {keys} found in {existing_work_dir / 'meta.json'}")
+
+    def export_draft_only(self, hf_model_path: str, existing_work_dir: str, output_dir: str):
+        logger = get_root_logger()
+        existing_work_dir_path = Path(existing_work_dir).resolve()
+        work_dir = Path(output_dir).resolve()
+        meta_path = existing_work_dir_path / "meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"meta.json not found in existing work_dir: {meta_path}")
+
+        with meta_path.open("r", encoding="utf-8") as file:
+            existing_meta = json.load(file)
+
+        spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
+        if spec_decode_mode not in {"mtp", "dflash"}:
+            raise ValueError("draft-only MoE export requires spec_decode_mode to be one of {'mtp', 'dflash'}")
+        if spec_decode_mode == "dflash" and not getattr(self.config, "dflash_model_dir", None):
+            raise ValueError("dflash_model_dir is required when spec_decode_mode='dflash'")
+
+        work_dir.mkdir(exist_ok=True, parents=True)
+        hf_model_path = str(existing_meta.get("hf_model_path") or hf_model_path)
+        context_length = int(existing_meta.get("max_context_tokens", self.config.context_length))
+        wrap_cfg = existing_meta.get("wrap_cfg", {})
+        if isinstance(wrap_cfg, dict) and wrap_cfg.get("input_sequence_length") is not None:
+            self.config.input_sequence_length = int(wrap_cfg["input_sequence_length"])
+        self.config.context_length = context_length
+
+        quant_scheme = existing_meta.get("quant_scheme", {})
+        quant_type = (
+            quant_scheme.get("quant_type", self.config.quant_scheme.quant_type)
+            if isinstance(quant_scheme, dict)
+            else self.config.quant_scheme.quant_type
+        )
+        target_device = self.config.quant_scheme.target_device
+        model_name = str(existing_meta.get("model_name") or Path(hf_model_path).name)
+        prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
+        verify_length = int(getattr(self.config, "num_draft_tokens", 4)) + 1
+
+        logger.info(f"Draft-only MoE export: reusing target work_dir={existing_work_dir_path}")
+        prefill_onnx = self._resolve_existing_meta_path(
+            existing_work_dir_path, existing_meta, "prefill_onnx", "prefill_onnx_file"
+        )
+        decode_onnx = self._resolve_existing_meta_path(
+            existing_work_dir_path, existing_meta, "decode_onnx", "decode_onnx_file"
+        )
+        hf_config = self._resolve_existing_meta_path(existing_work_dir_path, existing_meta, "hf_config")
+        token_embedding = self._resolve_existing_meta_path(
+            existing_work_dir_path, existing_meta, "token_embedding_file"
+        )
+        logger.info(f"Reused target prefill ONNX: {prefill_onnx}")
+        logger.info(f"Reused target decode ONNX: {decode_onnx}")
+
+        if spec_decode_mode == "mtp":
+            draft_onnx_files = self._export_mtp_draft_model(
+                hf_model_path=hf_model_path,
+                work_dir=work_dir,
+                prefix=prefix,
+                context_length=context_length,
+                verify_length=verify_length,
+                target_device=target_device,
+            )
+            hidden_output_name = "post_norm_hidden"
+        else:
+            draft_onnx_files = self._export_dflash_draft_model(
+                hf_model_path=hf_model_path,
+                dflash_model_dir=self.config.dflash_model_dir,
+                work_dir=work_dir,
+                prefix=prefix,
+                context_length=context_length,
+                verify_length=verify_length,
+                target_device=target_device,
+            )
+            hidden_output_name = "target_hidden"
+
+        new_meta = copy.deepcopy(existing_meta)
+        new_meta.update(
+            dict(
+                create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                hf_model_path=hf_model_path,
+                prefill_onnx=str(prefill_onnx),
+                decode_onnx=str(decode_onnx),
+                hf_config=str(hf_config),
+                token_embedding_file=str(token_embedding),
+                spec_decode_mode=spec_decode_mode,
+                spec_decode_block_size=int(getattr(self.config, "num_draft_tokens", 4)),
+                spec_decode_hidden_output_name=hidden_output_name,
+                spec_decode_verify_length=verify_length,
+            )
+        )
+        for key, value in draft_onnx_files.items():
+            new_meta[f"{key}_file"] = str(Path(value).relative_to(work_dir))
+        if "draft_decode_onnx" in draft_onnx_files:
+            new_meta["draft_onnx_file"] = str(Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir))
+
+        with (work_dir / "meta.json").open("w", encoding="utf-8") as fout:
+            json.dump(new_meta, fout, ensure_ascii=False, indent=4)
+        with (work_dir / "export_meta_info.json").open("w", encoding="utf-8") as fout:
+            json.dump(new_meta, fout, ensure_ascii=False, indent=4)
+        logger.info(f"Draft-only MoE export done. New artifacts in: {work_dir}")
 
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen3_5MoeConvertConfig, output_dir: str):

@@ -1227,9 +1227,14 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         combined_cos = time_cos + hight_cos + width_cos
         combined_sin = time_sin + hight_sin + width_sin
 
-        rotary_dim = combined_cos.shape[-1]
-        combined_cos = combined_cos.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
-        combined_sin = combined_sin.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
+        # combined_cos / combined_sin shape after M-RoPE combine:
+        # [batch, seq, mrope_slot=1, head_dim] (the mid dim comes from
+        # ``cos_cached`` of shape [max_seq, 1, head_dim]).  We need shape
+        # [batch, 1, seq, head_dim] so it broadcasts against attention
+        # tensors of shape [batch, num_heads, seq, head_dim] for both
+        # batch_size == 1 and batch_size > 1.
+        combined_cos = combined_cos.squeeze(-2).unsqueeze(1)
+        combined_sin = combined_sin.squeeze(-2).unsqueeze(1)
         position_embeddings = (combined_cos, combined_sin)
 
         hidden_states = input_embeds

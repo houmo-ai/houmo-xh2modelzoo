@@ -1,5 +1,7 @@
 # Qwen3.5 XH2a 导出与推理
 
+## MTP Head Pruning → see [MTP_HEAD_PRUNING.md](./MTP_HEAD_PRUNING.md)
+
 Qwen3.5 目录当前已经支持两条链路：
 
 1. 纯 LLM 的 XH2a 量化导出、Golden 生成与 HMONNX 推理
@@ -69,6 +71,349 @@ python \
 
 1. 这个参数需要在导出阶段开启，生成的产物才会支持超过 `64K` 的上下文。
 2. 开启后会带来一定性能下降，通常大约增加 `10ms` 左右的耗时。
+
+
+## 六模型 8k Spec Decode 导出（命令版，不再使用 batch_export_8k.sh）
+
+下面命令覆盖六个模型的 W4A8 GPTQ/quant-weight 8k context 导出，每个模型都有 MTP 和 DFlash 两种 spec mode。目录名包含模型、8k、W4A8、GPTQ、spec mode、draft tokens、DFlash input length、draft head weight bits 和时间戳，避免产物混淆。
+
+推荐流程是 **target once, draft many**：
+
+1. 每个模型、每种 spec mode 先导一次默认 W4 head 完整产物，得到 target prefill/decode、W4 draft 和 `meta.json`。
+2. 如果要对比 W8 head，不再重导 target，直接用 `--draft_only/--draft-only` 复用第 1 步的 `--existing_work_dir/--existing-work-dir`，只导 W8 draft 并生成新的 `meta.json`。
+3. 如果 W4/W8 效果差异可接受，后续正式产物使用默认 W4 head。
+
+通用约定：
+
+- 在仓库根目录运行：`export PYTHONPATH=./`，并用 `CUDA_VISIBLE_DEVICES=<gpu>` 绑定单张卡。
+- MTP 默认 `--num_draft_tokens 4`；DFlash 默认 `--num_draft_tokens 9`，对应 draft decode input length 为 `10`。
+- Dense 模型使用 `examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py`，GPTQ/quant weight 目录通过 `--hf_model_dir` 指定。
+- 文中的 `weights/...` 和 `/data01/home/yujy/work/auto-round/output/...` 是当前批处理脚本使用的约定路径；本机目录不同则按实际位置替换。
+- MoE 模型使用 `examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py`，FP base 通过 `--model` 指定，GPTQ/quant weight 通过 `--quant-weight` 指定，输出目录通过 `--work-dir` 指定。
+
+### Dense 模型命令
+
+先按下表选择模型变量：
+
+| 模型 | `MODEL_KEY` | `CONFIG` | `HF_MODEL_DIR` | `DFLASH_MODEL_DIR` |
+| --- | --- | --- | --- | --- |
+| Qwen3.5 4B | `qwen3_5_4b` | `configs/qwen3_5/qwen3_5_4b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only` | `weights/Qwen3.5-4B-DFlash` |
+| Qwen3.5 9B | `qwen3_5_9b` | `configs/qwen3_5/qwen3_5_9b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only` | `weights/Qwen3.5-9B-DFlash` |
+| Qwen3.5 27B | `qwen3_5_27b` | `configs/qwen3_5/qwen3_5_27b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/sym-mode1` | `weights/Qwen3.5-27B-DFlash` |
+| Qwen3.6 27B | `qwen3_6_27b` | `configs/qwen3_5/qwen3_6_27b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only` | `weights/Qwen3.6-27B-DFlash` |
+
+MTP：先导 W4 head 完整产物。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_27b
+CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR"
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=weights/Qwen3.5-9B
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR"
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=5
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=6
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_6_27b
+CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=7
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=4
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_6_27b
+CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit
+```
+
+MTP：复用上面的 target，只重导 W8 draft 生成对比 `meta.json`。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_27b
+CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
+EXISTING_WORK_DIR=work_dirs/qwen3_5_27b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_<timestamp>
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw8_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --draft_only \
+  --existing_work_dir "$EXISTING_WORK_DIR" \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --work_dir "$WORK_DIR"
+```
+
+DFlash：先导 W4 head 完整产物。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_27b
+CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
+DFLASH_MODEL_DIR=weights/Qwen3.5-27B-DFlash
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode dflash \
+  --num_draft_tokens 9 \
+  --dflash_model_dir "$DFLASH_MODEL_DIR" \
+  --work_dir "$WORK_DIR"
+```
+
+DFlash：复用上面的 target，只重导 W8 draft 生成对比 `meta.json`。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_27b
+CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
+DFLASH_MODEL_DIR=weights/Qwen3.5-27B-DFlash
+EXISTING_WORK_DIR=work_dirs/qwen3_5_27b_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw4_<timestamp>
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw8_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --draft_only \
+  --existing_work_dir "$EXISTING_WORK_DIR" \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode dflash \
+  --num_draft_tokens 9 \
+  --dflash_model_dir "$DFLASH_MODEL_DIR" \
+  --work_dir "$WORK_DIR"
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=5
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only
+DFLASH_MODEL_DIR=weights/Qwen3.5-9B-DFlash
+EXISTING_WORK_DIR=work_dirs/qwen3_5_9b_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw4_<timestamp>
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw4_fix_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --draft_only \
+  --existing_work_dir "$EXISTING_WORK_DIR" \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --spec_decode_mode dflash \
+  --num_draft_tokens 9 \
+  --dflash_model_dir "$DFLASH_MODEL_DIR" \
+  --work_dir "$WORK_DIR"
+```
+
+### MoE 模型命令
+
+先按下表选择模型变量：
+
+| 模型 | `MODEL_KEY` | `MODEL_DIR` | `QUANT_WEIGHT` | `DFLASH_MODEL_DIR` |
+| --- | --- | --- | --- | --- |
+| Qwen3.5 35B-A3B | `qwen3_5_35b_a3b` | `weights/Qwen3.5-35B-A3B` | `/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only` | `weights/Qwen3.5-35B-A3B-DFlash` |
+| Qwen3.6 35B-A3B | `qwen3_6_35b_a3b` | `weights/Qwen3.6-35B-A3B` | `/data01/home/yujy/work/auto-round/output/Qwen3.6-35B-A3B-mode1-llm-only` | `weights/Qwen3.6-35B-A3B-DFlash` |
+
+MTP：先导 W4 head 完整产物。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_35b_a3b
+MODEL_DIR=weights/Qwen3.5-35B-A3B
+QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 8192 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h1_ssfp \
+  --spec-decode-mode mtp \
+  --num-draft-tokens 4 \
+  --quant-weight "$QUANT_WEIGHT" \
+  --work-dir "$WORK_DIR"
+```
+
+MTP：复用上面的 target，只重导 W8 draft 生成对比 `meta.json`。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_35b_a3b
+MODEL_DIR=weights/Qwen3.5-35B-A3B
+QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
+EXISTING_WORK_DIR=work_dirs/qwen3_5_35b_a3b_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_headw4_<timestamp>
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_headw8_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --draft-only \
+  --existing-work-dir "$EXISTING_WORK_DIR" \
+  --model "$MODEL_DIR" \
+  --context-length 8192 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h1_ssfp \
+  --spec-decode-mode mtp \
+  --num-draft-tokens 4 \
+  --quant-weight "$QUANT_WEIGHT" \
+  --work-dir "$WORK_DIR"
+```
+
+DFlash：先导 W4 head 完整产物。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_35b_a3b
+MODEL_DIR=weights/Qwen3.5-35B-A3B
+QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
+DFLASH_MODEL_DIR=weights/Qwen3.5-35B-A3B-DFlash
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_dflash_draft9_input10_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 8192 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h1_ssfp \
+  --spec-decode-mode dflash \
+  --num-draft-tokens 9 \
+  --quant-weight "$QUANT_WEIGHT" \
+  --dflash-model-dir "$DFLASH_MODEL_DIR" \
+  --work-dir "$WORK_DIR"
+```
+
+DFlash：复用上面的 target，只重导 W8 draft 生成对比 `meta.json`。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_5_35b_a3b
+MODEL_DIR=weights/Qwen3.5-35B-A3B
+QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
+DFLASH_MODEL_DIR=weights/Qwen3.5-35B-A3B-DFlash
+EXISTING_WORK_DIR=work_dirs/qwen3_5_35b_a3b_xh2a_8k_w4a8h1_ssfp_gptq_spec_dflash_draft9_input10_headw4_<timestamp>
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_dflash_draft9_input10_headw8_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --draft-only \
+  --existing-work-dir "$EXISTING_WORK_DIR" \
+  --model "$MODEL_DIR" \
+  --context-length 8192 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h1_ssfp \
+  --spec-decode-mode dflash \
+  --num-draft-tokens 9 \
+  --quant-weight "$QUANT_WEIGHT" \
+  --dflash-model-dir "$DFLASH_MODEL_DIR" \
+  --work-dir "$WORK_DIR"
+```
 
 ## Vision 导出
 
@@ -293,80 +638,167 @@ python examples/quantization/examples/example_qwen35dense.py \
 3. 在使用 GPTQModel 前，建议先确认仓库代码已经包含 `aeb3864e` 之后的修复，否则 Qwen3.5 相关旋转与量化功能可能不完整。
 
 
-## Spec Decode 评测
+## 六模型 8k Spec Decode Benchmark（命令版，不再使用 batch_bench_8k.sh）
 
-`qwen3_5_xh2a_spec_decode_bench.py` 用于评测已导出的 spec-decode HMONNX 产物。当前评测脚本不再维护一套私有 spec-decode 循环，而是直接调用 `Qwen3_5SpecDecodeONNXModel.generate(..., return_stats=True)`：
+`batch_bench_8k.sh` 的核心行为等价于下面的单任务命令：从导出目录选择 `meta.json`，把 Markdown/JSON/log 写入 `output/qwen35_bench`，按 `think-mode`、`max-new-tokens`、`limit` 和 `shards` 控制评测范围。多任务并行时，一个 benchmark 进程绑定一张卡：`CUDA_VISIBLE_DEVICES=0` 后，进程内部仍使用 `cuda:0` / `exec-device cuda:0`。
 
-- bench 只统计真实 `generate` 链路的 spec 指标：target prefill/decode、MTP/DFlash draft 调用次数、每轮接受 token 数、接受率、延迟和 tokens/s；
-- 不再在 bench 中额外跑 baseline。若要单独做 baseline/spec 消融或定位文本差异，请使用 `qwen3_5_xh2a_spec_decode_test.py`；
-- 默认 `--dtype fp16`、`--repetition-penalty 1.0`，与 `generate` 默认行为保持一致。
-
-### 数据集
-
-默认评测集为：
+默认数据集：
 
 ```bash
 examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl
 ```
 
-每行是一个 JSON case，至少包含 `prompt` 和 `category`。如需快速 smoke test，可加 `--limit 1 --max-new-tokens 32 --think-mode off`；完整评测建议去掉 `--limit`，并按显存/时间选择是否分片：
+参数对齐：
 
-```bash
---shard-index 0 --num-shards 4
-```
+- `--think-mode on|off|both`：默认建议 `both`；快速 smoke test 可用 `off`。
+- `--max-new-tokens`：批处理脚本默认 `8192`；快速验证可降到 `32` 或 `128`。
+- `--limit 0` 表示全量；`--limit 1`/`10` 适合 smoke test。
+- `--shard-index N --num-shards M` 把数据集切成 M 份，N 从 0 开始；输出文件名建议带 `.shardNofM`。
+- 批处理脚本默认开启 CUDA Graph：手写命令中显式加 `--enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6`。
+- Dense 额外可加 `--auto-offload-max-memory`、`--prefill-auto-offload-max-memory`、`--decode-auto-offload-max-memory`；MoE 可用 `--enable-auto-offload` / `--disable-auto-offload`。
 
-### 9B MTP 评测命令
+### 单任务模板
 
-```bash
-export PYTHONPATH=./
-export CUDA_VISIBLE_DEVICES=0
-
-python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
-  --meta work_dirs/qwen3_5_9b_mtp_k4_w4a8_8k/meta.json \
-  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
-  --output-md output/spec_decode_metrics/qwen3_5_9b_mtp_generate_bench.md \
-  --output-json output/spec_decode_metrics/qwen3_5_9b_mtp_generate_bench.json \
-  --think-mode both \
-  --max-new-tokens 128 \
-  --dtype fp16 \
-  --device cuda:0 \
-  --exec-device cuda:0
-```
-
-### 27B MTP 评测命令
+Dense 模型（Qwen3.5 4B / 9B / 27B，Qwen3.6 27B）：
 
 ```bash
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-
+mkdir -p output/qwen35_bench
 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
-  --meta work_dirs/qwen3_5_27b_mtp_k4_w4a8_8k/meta.json \
+  --meta work_dirs/<dense-export-dir>/meta.json \
   --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
-  --output-md output/spec_decode_metrics/qwen3_5_27b_mtp_generate_bench.md \
-  --output-json output/spec_decode_metrics/qwen3_5_27b_mtp_generate_bench.json \
+  --output-md output/qwen35_bench/<tag>.md \
+  --output-json output/qwen35_bench/<tag>.json \
   --think-mode both \
-  --max-new-tokens 128 \
+  --max-new-tokens 8192 \
   --dtype fp16 \
   --device cuda:0 \
-  --exec-device cuda:0
+  --exec-device cuda:0 \
+  --enable-cuda-graph \
+  --cuda-graph-warmup-runs 3 \
+  --cuda-graph-graph-warmup-runs 6 \
+  --limit 0 \
+  2>&1 | tee output/qwen35_bench/<tag>.log
 ```
 
-### 快速验证结果（2026-04-24）
+MoE 模型（35B-A3B）：
 
-以下结果来自同一条 smoke case（`case_0021`，`think-mode=off`，`max-new-tokens=32`，`dtype=fp16`），用于证明 bench 已经通过真实 `generate` 链路在 9B/27B 产物上跑通；完整性能结论应以去掉 `--limit` 的全量报告为准。
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+mkdir -p output/qwen35_bench
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_bench.py \
+  --meta work_dirs/<moe-export-dir>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/<tag>.md \
+  --output-json output/qwen35_bench/<tag>.json \
+  --think-mode both \
+  --max-new-tokens 8192 \
+  --dtype fp16 \
+  --device cuda:0 \
+  --exec-device cuda:0 \
+  --enable-cuda-graph \
+  --cuda-graph-warmup-runs 3 \
+  --cuda-graph-graph-warmup-runs 6 \
+  --limit 0 \
+  2>&1 | tee output/qwen35_bench/<tag>.log
+```
 
-| 模型 | meta | spec target decode | MTP decode | 接受率 | 平均每轮接受 | spec latency | spec tokens/s |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.5 9B MTP k4 | `work_dirs/qwen3_5_9b_mtp_k4_w4a8_8k/meta.json` | 9 | 36 | 0.6389 | 2.5556 | 7.5709s | 4.2267 |
-| Qwen3.5 27B MTP k4 | `work_dirs/qwen3_5_27b_mtp_k4_w4a8_8k/meta.json` | 8 | 32 | 0.7188 | 2.8750 | 13.5037s | 2.3697 |
+分片示例（第 1/4 片，文件名同步带 shard 后缀）：
 
-结果分析：
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+mkdir -p output/qwen35_bench
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/<dense-export-dir>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/<tag>.shard0of4.md \
+  --output-json output/qwen35_bench/<tag>.shard0of4.json \
+  --think-mode both \
+  --max-new-tokens 8192 \
+  --dtype fp16 \
+  --device cuda:0 \
+  --exec-device cuda:0 \
+  --enable-cuda-graph \
+  --cuda-graph-warmup-runs 3 \
+  --cuda-graph-graph-warmup-runs 6 \
+  --shard-index 0 \
+  --num-shards 4 \
+  2>&1 | tee output/qwen35_bench/<tag>.shard0of4.log
+```
 
-1. 两个模型都直接走真实 `generate` 链路，说明 bench 评测口径已经收敛到 spec runtime 本身，不再混入额外 baseline 逻辑。
-2. 9B 的 target decode 为 9 次，27B 为 8 次；spec decode 的收益主要来自把多个 draft token 合并进一次 target verify。
-3. 27B smoke case 的接受率更高（0.7188 vs 0.6389），平均每轮接受 token 更多，因此 target decode 次数更少；但模型更大，单次 target/draft 图耗时更高，tokens/s 低于 9B。
-4. smoke 结果只覆盖 1 条样本和 32 token，上表适合做回归验证，不适合当最终吞吐结论。正式报告应使用 `--think-mode both --max-new-tokens 128` 或业务指定长度，并汇总 Markdown/JSON 输出。
+### 六模型并行示例（MTP，每个任务一张卡）
 
+把 `<TS_...>` 替换为上面导出目录中的实际时间戳。DFlash 评测同理，把 meta 目录和输出 tag 中的 `spec_mtp_draft4` 换成 `spec_dflash_draft9_input10`；如果同时测 MTP + DFlash，请把 12 个 meta 当作 12 个独立任务，或在同一张卡上串行执行。
+
+```bash
+export PYTHONPATH=./
+mkdir -p output/qwen35_bench
+
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_4b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_<TS_Q35_4B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_5_4b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_5_4b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_5_4b_mtp_8k.log &
+
+CUDA_VISIBLE_DEVICES=1 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_9b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_<TS_Q35_9B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_5_9b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_5_9b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_5_9b_mtp_8k.log &
+
+CUDA_VISIBLE_DEVICES=2 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_27b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_<TS_Q35_27B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_5_27b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_5_27b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_5_27b_mtp_8k.log &
+
+CUDA_VISIBLE_DEVICES=3 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_6_27b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_<TS_Q36_27B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_6_27b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_6_27b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_6_27b_mtp_8k.log &
+
+CUDA_VISIBLE_DEVICES=4 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_5_35b_a3b_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_headw4_<TS_Q35_35B_A3B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_5_35b_a3b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_5_35b_a3b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_5_35b_a3b_mtp_8k.log &
+
+CUDA_VISIBLE_DEVICES=5 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_bench.py \
+  --meta work_dirs/qwen3_6_35b_a3b_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_headw4_<TS_Q36_35B_A3B>/meta.json \
+  --dataset examples/llm/qwen3_5/spec_decode_eval_prompts.jsonl \
+  --output-md output/qwen35_bench/qwen3_6_35b_a3b_mtp_8k.md \
+  --output-json output/qwen35_bench/qwen3_6_35b_a3b_mtp_8k.json \
+  --think-mode both --max-new-tokens 8192 --dtype fp16 --device cuda:0 --exec-device cuda:0 \
+  --enable-cuda-graph --cuda-graph-warmup-runs 3 --cuda-graph-graph-warmup-runs 6 \
+  2>&1 | tee output/qwen35_bench/qwen3_6_35b_a3b_mtp_8k.log &
+
+wait
+```
+
+快速 smoke test 时，把每条命令里的 `--think-mode` / `--max-new-tokens` 改成下面的取值；已有 `--limit 0` 的模板将其改为 `--limit 1`，没有 `--limit` 的并行示例则追加 `--limit 1`：
+
+```bash
+--think-mode off --max-new-tokens 32 --limit 1
+```
 
 ## 注意事项
 
@@ -376,3 +808,19 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py \
 4. 运行 Vision 导出或 VL demo 时，建议始终显式设置 `PYTHONPATH=./`；如果缺少 hmquant 动态库路径，`xhquant` GPU 扩展可能加载失败。
 5. Vision 导出当前默认使用 `448 x 448` 输入分辨率、`patch_size=16`、`temporal_patch_size=2`，如果修改这些参数，Vision 产物与 VL demo 的输入配置也要保持一致。
 6. LLM 的 Prefill 和 Decode 是两张独立图，Vision HMONNX 只负责生成图像特征，最终由 VL demo 将图像特征散射回文本 token embedding 后再调用 LLM HMONNX。
+
+
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_mtp_demo_benchmark.py \
+      --config work_dirs/qwen3_5_9b_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw4_20260519_004608/meta.json \
+      --per-category 100 \
+      --out-dir tmp/mtp_demo_xh2a_benchmark \
+      --enable_cuda_graph \
+      --cuda_graph_modules prefill,decode,draft_prefill,draft_context,draft_context_decode,draft_decode
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_mtp_demo_benchmark.py \
+      --config work_dirs/qwen3_5_9b_xh2a_8k_w4a8_gptq_spec_mtp_k81920_draft4_headw4_20260519_004651/meta.json \
+      --per-category 100 \
+      --out-dir tmp/mtp_demo_xh2a_benchmark1 \
+      --enable_cuda_graph \
+      --cuda_graph_modules prefill,decode,draft_prefill,draft_context,draft_context_decode,draft_decode

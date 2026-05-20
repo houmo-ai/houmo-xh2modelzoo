@@ -79,15 +79,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         hidden_output_name: str = "post_norm_hidden",
         max_context_tokens: Optional[int] = None,
         auto_offload: bool = True,
-        auto_offload_max_memory: Optional[
-            Dict[Union[int, str], Union[int, str]]
-        ] = None,
-        prefill_auto_offload_max_memory: Optional[
-            Dict[Union[int, str], Union[int, str]]
-        ] = None,
-        decode_auto_offload_max_memory: Optional[
-            Dict[Union[int, str], Union[int, str]]
-        ] = None,
+        auto_offload_max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
+        prefill_auto_offload_max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
+        decode_auto_offload_max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
         resource_tight_mode: bool = False,
         pad_token_id: int = 0,
         enable_cuda_graph: bool = False,
@@ -115,16 +109,19 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         if isinstance(draft, dict):
             self.draft_prefill_config = draft.get("prefill")
             self.draft_context_config = draft.get("context")
+            self.draft_context_decode_config = draft.get("context_decode") or self.draft_context_config
             self.draft_decode_config = draft.get("decode")
         else:
             self.draft_prefill_config = None
             self.draft_context_config = None
+            self.draft_context_decode_config = None
             self.draft_decode_config = draft
         self.spec_decode_mode = spec_decode_mode
         self.block_size = block_size
         self.hidden_output_name = hidden_output_name
         self.draft_prefill_session: Optional[HMONNXSession] = None
         self.draft_context_session: Optional[HMONNXSession] = None
+        self.draft_context_decode_session: Optional[HMONNXSession] = None
         self.draft_decode_session: Optional[HMONNXSession] = None
         self._create_draft_sessions()
         self._mtp_cache_state: Optional[Dict[str, torch.Tensor]] = None
@@ -136,6 +133,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for session in (
             self.draft_prefill_session,
             self.draft_context_session,
+            self.draft_context_decode_session,
             self.draft_decode_session,
         ):
             if session is not None:
@@ -147,6 +145,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             for session in (
                 self.draft_prefill_session,
                 self.draft_context_session,
+                self.draft_context_decode_session,
                 self.draft_decode_session,
             ):
                 if session is not None:
@@ -162,15 +161,15 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         return session
 
     def _create_draft_sessions(self):
-        self.draft_prefill_session = self._create_single_draft_session(
-            self.draft_prefill_config, "draft_prefill"
-        )
-        self.draft_context_session = self._create_single_draft_session(
-            self.draft_context_config, "draft_context"
-        )
-        self.draft_decode_session = self._create_single_draft_session(
-            self.draft_decode_config, "draft_decode"
-        )
+        self.draft_prefill_session = self._create_single_draft_session(self.draft_prefill_config, "draft_prefill")
+        self.draft_context_session = self._create_single_draft_session(self.draft_context_config, "draft_context")
+        if self.draft_context_decode_config is self.draft_context_config:
+            self.draft_context_decode_session = self.draft_context_session
+        else:
+            self.draft_context_decode_session = self._create_single_draft_session(
+                self.draft_context_decode_config, "draft_context_decode"
+            )
+        self.draft_decode_session = self._create_single_draft_session(self.draft_decode_config, "draft_decode")
 
     def _init_mtp_rope(self, rope_theta: float, rotary_dim: int, partial_rotary_factor: float):
         """Initialize MTP RoPE inverse frequencies for cos/sin computation."""
@@ -180,7 +179,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
 
     def _compute_mtp_rope(self, position: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute RoPE cos/sin for a single position."""
-        if not hasattr(self, '_mtp_inv_freq'):
+        if not hasattr(self, "_mtp_inv_freq"):
             # Auto-init from draft session input shapes
             if self.draft_decode_session is None:
                 raise RuntimeError("MTP draft decode session is not available.")
@@ -190,9 +189,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
 
         inv_freq = self._mtp_inv_freq.to(device=self.device)
         pos = torch.tensor([position], dtype=torch.float32, device=self.device).unsqueeze(1)  # [1, 1]
-        freqs = pos * inv_freq.unsqueeze(0)         # [1, rotary_dim//2]
-        emb = torch.cat([freqs, freqs], dim=-1)     # [1, rotary_dim]
-        cos = emb.cos().unsqueeze(0).unsqueeze(0)   # [1, 1, 1, rotary_dim]
+        freqs = pos * inv_freq.unsqueeze(0)  # [1, rotary_dim//2]
+        emb = torch.cat([freqs, freqs], dim=-1)  # [1, rotary_dim]
+        cos = emb.cos().unsqueeze(0).unsqueeze(0)  # [1, 1, 1, rotary_dim]
         sin = emb.sin().unsqueeze(0).unsqueeze(0)
         return cos.to(dtype=self._dtype, device=self.device), sin.to(dtype=self._dtype, device=self.device)
 
@@ -203,7 +202,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
 
     def _compute_dflash_rope(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute RoPE cos/sin for DFlash from position_ids [1, 2*block_size]."""
-        if not hasattr(self, '_dflash_inv_freq'):
+        if not hasattr(self, "_dflash_inv_freq"):
             if self.draft_decode_session is None:
                 raise RuntimeError("DFlash draft decode session is not available.")
             info = self.draft_decode_session.get_input("rope_cos")
@@ -211,25 +210,21 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             self._init_dflash_rope(10_000_000.0, head_dim)
 
         inv_freq = self._dflash_inv_freq.to(device=position_ids.device)
-        pos = position_ids.reshape(-1, 1).float()         # [2*BS, 1]
-        freqs = pos * inv_freq.unsqueeze(0)                # [2*BS, head_dim//2]
-        emb = torch.cat([freqs, freqs], dim=-1)            # [2*BS, head_dim]
-        cos = emb.cos().unsqueeze(0).unsqueeze(0)          # [1, 1, 2*BS, head_dim]
+        pos = position_ids.reshape(-1, 1).float()  # [2*BS, 1]
+        freqs = pos * inv_freq.unsqueeze(0)  # [2*BS, head_dim//2]
+        emb = torch.cat([freqs, freqs], dim=-1)  # [2*BS, head_dim]
+        cos = emb.cos().unsqueeze(0).unsqueeze(0)  # [1, 1, 2*BS, head_dim]
         sin = emb.sin().unsqueeze(0).unsqueeze(0)
         return cos.to(dtype=self._dtype, device=self.device), sin.to(dtype=self._dtype, device=self.device)
 
-    def _extract_hidden(
-        self, output_map: Dict[str, torch.Tensor]
-    ) -> Optional[torch.Tensor]:
+    def _extract_hidden(self, output_map: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
         """Extract spec_decode hidden state from target model output."""
         if self.hidden_output_name in output_map:
             return output_map[self.hidden_output_name]
         return None
 
     @staticmethod
-    def _select_hidden_step(
-        hidden_states: Optional[torch.Tensor], step_idx: int
-    ) -> Optional[torch.Tensor]:
+    def _select_hidden_step(hidden_states: Optional[torch.Tensor], step_idx: int) -> Optional[torch.Tensor]:
         if hidden_states is None:
             return None
         if hidden_states.dim() < 3 or hidden_states.shape[1] == 1:
@@ -255,9 +250,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                     per_step_name = f"conv_cache_out_{branch}_{idx}_{step}"
                     out_name = f"conv_cache_out_{branch}_{idx}"
                 if per_step_name in output_map:
-                    cache_state[name] = _as_cache_value(
-                        cache_tensor, output_map[per_step_name]
-                    )
+                    cache_state[name] = _as_cache_value(cache_tensor, output_map[per_step_name])
                     continue
                 # Fallback to legacy continuous-window output that needs slicing.
                 if out_name not in output_map:
@@ -275,9 +268,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 step = max(accepted_steps - 1, 0)
                 per_step_name = f"recurrent_state_out_{idx}_{step}"
                 if per_step_name in output_map:
-                    cache_state[name] = _as_cache_value(
-                        cache_tensor, output_map[per_step_name]
-                    )
+                    cache_state[name] = _as_cache_value(cache_tensor, output_map[per_step_name])
                     continue
                 # Fallback to legacy stacked/flat output for backward compat with
                 # older ONNX exports that still emit a single recurrent_state_out_{idx}.
@@ -317,15 +308,10 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         status = super().get_cuda_graph_status()
         status.update(
             {
-                "draft_prefill": self._get_session_cuda_graph_status(
-                    self.draft_prefill_session
-                ),
-                "draft_context": self._get_session_cuda_graph_status(
-                    self.draft_context_session
-                ),
-                "draft_decode": self._get_session_cuda_graph_status(
-                    self.draft_decode_session
-                ),
+                "draft_prefill": self._get_session_cuda_graph_status(self.draft_prefill_session),
+                "draft_context": self._get_session_cuda_graph_status(self.draft_context_session),
+                "draft_context_decode": self._get_session_cuda_graph_status(self.draft_context_decode_session),
+                "draft_decode": self._get_session_cuda_graph_status(self.draft_decode_session),
             }
         )
         return status
@@ -349,15 +335,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         if self.draft_prefill_session is None:
             raise RuntimeError("MTP prefill session is not available.")
         actual_input_length = int(hidden_states.shape[1])
-        prefill_seq_len = int(
-            self.draft_prefill_session.get_input("post_norm_hidden").shape[1]
-        )
-        next_token_embedding = _pad_hidden_tensor(
-            self._embed_token_ids(next_token_ids), prefill_seq_len
-        )
-        hidden_states = _pad_hidden_tensor(
-            hidden_states.to(device=self.device, dtype=self._dtype), prefill_seq_len
-        )
+        prefill_seq_len = int(self.draft_prefill_session.get_input("post_norm_hidden").shape[1])
+        next_token_embedding = _pad_hidden_tensor(self._embed_token_ids(next_token_ids), prefill_seq_len)
+        hidden_states = _pad_hidden_tensor(hidden_states.to(device=self.device, dtype=self._dtype), prefill_seq_len)
         batch_size = hidden_states.shape[0]
         current_input_length = torch.full(
             (batch_size,),
@@ -385,9 +365,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 feed[name] = cache_state[name]
             else:
                 info = self.draft_prefill_session.get_input(name)
-                feed[name] = torch.zeros(
-                    info.shape, dtype=info.dtype, device=self.device
-                )
+                feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=self.device)
         return feed
 
     def _build_mtp_decode_feed(
@@ -403,9 +381,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             raise RuntimeError("MTP decode session is not available.")
         next_token_embedding = self._embed_token_ids(next_token_id)
         batch_size = hidden_state.shape[0]
-        current_input_length = torch.ones(
-            batch_size, dtype=torch.int32, device=self.device
-        )
+        current_input_length = torch.ones(batch_size, dtype=torch.int32, device=self.device)
         past_seq_length = torch.full(
             (batch_size,),
             int(past_seq_len),
@@ -426,9 +402,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 feed[name] = cache_state[name]
             else:
                 info = self.draft_decode_session.get_input(name)
-                feed[name] = torch.zeros(
-                    info.shape, dtype=info.dtype, device=self.device
-                )
+                feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=self.device)
         return feed
 
     def _prefill_mtp_chunk(
@@ -442,28 +416,29 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         cache_state = self._ensure_mtp_cache_state()
         self._run_draft_session(
             self.draft_prefill_session,
-            self._build_mtp_prefill_feed(
-                hidden_states, next_token_ids, past_seq_len, cache_state
-            ),
+            self._build_mtp_prefill_feed(hidden_states, next_token_ids, past_seq_len, cache_state),
         )
 
     def _append_dflash_context(
         self,
         target_hidden: torch.Tensor,
         past_seq_len: int,
+        *,
+        decode_step: bool = False,
     ) -> None:
         if target_hidden is None or target_hidden.shape[1] == 0:
             return
-        if self.draft_context_session is None:
+        session = (
+            self.draft_context_decode_session
+            if decode_step and self.draft_context_decode_session is not None
+            else self.draft_context_session
+        )
+        if session is None:
             raise RuntimeError("DFlash context session is not available.")
         cache_state = self._ensure_dflash_cache_state()
         actual_input_length = int(target_hidden.shape[1])
-        context_seq_len = int(
-            self.draft_context_session.get_input("target_hidden").shape[1]
-        )
-        target_hidden = _pad_hidden_tensor(
-            target_hidden.to(device=self.device, dtype=self._dtype), context_seq_len
-        )
+        context_seq_len = int(session.get_input("target_hidden").shape[1])
+        target_hidden = _pad_hidden_tensor(target_hidden.to(device=self.device, dtype=self._dtype), context_seq_len)
         batch_size = target_hidden.shape[0]
         current_input_length = torch.full(
             (batch_size,),
@@ -478,7 +453,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             device=self.device,
         )
         feed: Dict[str, torch.Tensor] = {}
-        for name in self.draft_context_session.get_input_names():
+        for name in session.get_input_names():
             if name == "target_hidden":
                 feed[name] = target_hidden
             elif name in ("past_seq_length", "valid_length"):
@@ -489,7 +464,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 feed[name] = cache_state[name]
             else:
                 raise RuntimeError(f"Unexpected input '{name}' in DFlash draft context session.")
-        self._run_draft_session(self.draft_context_session, feed)
+        self._run_draft_session(session, feed)
 
     def _build_dflash_decode_feed(
         self,
@@ -521,9 +496,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             dtype=self._dtype,
             device=self.device,
         )
-        draft_visible_length = min(
-            attn_mask.shape[1], int(past_seq_len) + int(noise_embedding.shape[1])
-        )
+        draft_visible_length = min(attn_mask.shape[1], int(past_seq_len) + int(noise_embedding.shape[1]))
         attn_mask[:, :draft_visible_length] = 0
         feed: Dict[str, torch.Tensor] = {}
         for name in self.draft_decode_session.get_input_names():
@@ -592,16 +565,12 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for j in range(num_drafts):
             draft_output_map = self._run_draft_session(
                 self.draft_decode_session,
-                self._build_mtp_decode_feed(
-                    next_tok, current_hidden, past_seq_len + j, cache_state
-                ),
+                self._build_mtp_decode_feed(next_tok, current_hidden, past_seq_len + j, cache_state),
             )
             logits = draft_output_map["logits"]  # [1, 1, V]
             post_norm_out = draft_output_map.get("post_norm_out")  # [1, 1, H]
             if post_norm_out is None:
-                raise RuntimeError(
-                    "MTP draft graph must export post_norm_out for autoregressive chaining."
-                )
+                raise RuntimeError("MTP draft graph must export post_norm_out for autoregressive chaining.")
 
             tok = torch.argmax(logits[:, -1:, :], dim=-1)  # [1, 1]
             drafts.append(tok)
@@ -633,18 +602,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         if max_new_tokens <= 0:
             return ""
         if input_ids.dim() != 2 or input_ids.shape[0] != 1:
-            raise ValueError(
-                f"input_ids must be [1, seq], got {tuple(input_ids.shape)}"
-            )
+            raise ValueError(f"input_ids must be [1, seq], got {tuple(input_ids.shape)}")
         if self.token_embedding is None:
-            raise ValueError(
-                "token_embedding is not set, call set_input_embeddings first."
-            )
+            raise ValueError("token_embedding is not set, call set_input_embeddings first.")
 
-        if (
-            self.max_context_tokens is not None
-            and input_ids.shape[1] > self.max_context_tokens
-        ):
+        if self.max_context_tokens is not None and input_ids.shape[1] > self.max_context_tokens:
             input_ids = input_ids[:, -self.max_context_tokens :]
 
         total_prompt_len = int(input_ids.shape[1])
@@ -666,20 +628,14 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             chunk_ids = input_ids[:, start:end]
             valid_len = int(chunk_ids.shape[1])
 
-            prefill_feed = self._build_prefill_feed(
-                chunk_ids, valid_len, past_seq_len, prefill_cache_state
-            )
-            _, prefill_output_map = self._run_hmonnx(
-                self.prefill_session, prefill_feed
-            )
+            prefill_feed = self._build_prefill_feed(chunk_ids, valid_len, past_seq_len, prefill_cache_state)
+            _, prefill_output_map = self._run_hmonnx(self.prefill_session, prefill_feed)
             prefill_logits = self._extract_logits(prefill_output_map)
             last_prefill_logits = _select_last_valid_logits(prefill_logits, valid_len)
             prefill_hidden_all = self._extract_hidden(prefill_output_map)
             if prefill_hidden_all is not None:
                 prefill_hidden_all = prefill_hidden_all[:, :valid_len, :]
-                last_hidden = self._select_hidden_step(
-                    prefill_hidden_all, valid_len - 1
-                )
+                last_hidden = self._select_hidden_step(prefill_hidden_all, valid_len - 1)
                 if self.spec_decode_mode == "dflash":
                     self._append_dflash_context(prefill_hidden_all, past_seq_len)
                 elif self.spec_decode_mode == "mtp":
@@ -694,9 +650,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                     if hidden_parts:
                         mtp_hidden = torch.cat(hidden_parts, dim=1)
                         mtp_tokens = torch.cat(token_parts, dim=1)
-                        self._prefill_mtp_chunk(
-                            mtp_hidden, mtp_tokens, mtp_prefill_seq_len
-                        )
+                        self._prefill_mtp_chunk(mtp_hidden, mtp_tokens, mtp_prefill_seq_len)
                         mtp_prefill_seq_len += int(mtp_hidden.shape[1])
                     mtp_pending_hidden = prefill_hidden_all[:, valid_len - 1 : valid_len, :]
 
@@ -708,12 +662,8 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
 
         # Sample first token from prefill
         history_token_ids = input_ids[0].tolist()
-        first_logits = _apply_repetition_penalty(
-            last_prefill_logits, history_token_ids, repetition_penalty
-        )
-        first_logits = _apply_presence_penalty(
-            first_logits, history_token_ids, presence_penalty
-        )
+        first_logits = _apply_repetition_penalty(last_prefill_logits, history_token_ids, repetition_penalty)
+        first_logits = _apply_presence_penalty(first_logits, history_token_ids, presence_penalty)
         next_token_id = _sample_next_token(
             first_logits,
             do_sample=do_sample,
@@ -730,17 +680,14 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         decode_cache_state = _alloc_cache_inputs(self.decode_session, self.device)
         for name in decode_cache_state:
             if name in prefill_cache_state and (
-                _is_kv_cache_name(name)
-                or name.startswith(("past_conv_cache_", "past_recurrent_state_"))
+                _is_kv_cache_name(name) or name.startswith(("past_conv_cache_", "past_recurrent_state_"))
             ):
                 decode_cache_state[name] = prefill_cache_state[name]
 
         eos_token_id = tokenizer.eos_token_id
         streamer: Optional[TextStreamer] = None
         if stream_output:
-            streamer = TextStreamer(
-                tokenizer, skip_prompt=False, skip_special_tokens=True
-            )
+            streamer = TextStreamer(tokenizer, skip_prompt=False, skip_special_tokens=True)
 
         token_val = int(next_token_id[0][0].item())
         if eos_token_id is not None and token_val == eos_token_id:
@@ -748,11 +695,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 streamer.end()
             return ""
         mtp_past_seq_len = mtp_prefill_seq_len
-        num_drafts = (
-            self.block_size - 1
-            if self.spec_decode_mode == "dflash"
-            else self.block_size
-        )
+        num_drafts = self.block_size - 1 if self.spec_decode_mode == "dflash" else self.block_size
 
         def _on_token(token_id: int) -> None:
             history_token_ids.append(token_id)
@@ -766,14 +709,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             round_mtp_past_seq_len: int,
             round_num_drafts: int,
         ) -> List[int]:
-            current_token = torch.tensor(
-                [[current_token_id]], dtype=torch.long, device=self.device
-            )
+            current_token = torch.tensor([[current_token_id]], dtype=torch.long, device=self.device)
             if self.spec_decode_mode == "dflash":
-                return [
-                    int(tok[0, 0].item())
-                    for tok in self._run_draft_dflash(current_token, round_past_seq_len)
-                ]
+                return [int(tok[0, 0].item()) for tok in self._run_draft_dflash(current_token, round_past_seq_len)]
             if round_last_hidden is None:
                 return []
             return [
@@ -792,9 +730,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             round_past_seq_len: int,
         ) -> SpecDecodeVerifyResult:
             verify_ids = [current_token_id] + draft_token_ids
-            verify_input_ids = torch.tensor(
-                [verify_ids], dtype=torch.long, device=self.device
-            )
+            verify_input_ids = torch.tensor([verify_ids], dtype=torch.long, device=self.device)
             decode_feed = self._build_decode_feed(
                 verify_input_ids,
                 round_past_seq_len,
@@ -805,8 +741,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             verify_logits = _ensure_logits_shape(self._extract_logits(decode_output_map))
             verify_hidden_all = self._extract_hidden(decode_output_map)
             predicted_token_ids = [
-                int(torch.argmax(verify_logits[:, j : j + 1, :], dim=-1)[0, 0].item())
-                for j in range(len(verify_ids))
+                int(torch.argmax(verify_logits[:, j : j + 1, :], dim=-1)[0, 0].item()) for j in range(len(verify_ids))
             ]
             return SpecDecodeVerifyResult(
                 initial_seq_len=round_past_seq_len,
@@ -833,21 +768,13 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             _next_token_id: int,
             round_mtp_past_seq_len: int,
         ) -> Tuple[Optional[torch.Tensor], int]:
-            next_hidden = self._select_hidden_step(
-                verify_result.verify_hidden, accepted_count
-            )
+            next_hidden = self._select_hidden_step(verify_result.verify_hidden, accepted_count)
             accepted_hidden = (
-                verify_result.verify_hidden[:, :accepted_steps, :]
-                if verify_result.verify_hidden is not None
-                else None
+                verify_result.verify_hidden[:, :accepted_steps, :] if verify_result.verify_hidden is not None else None
             )
             if self.spec_decode_mode == "dflash":
-                assert (
-                    accepted_hidden is not None
-                ), "DFlash mode requires hidden states from the verify step."
-                self._append_dflash_context(
-                    accepted_hidden, verify_result.initial_seq_len
-                )
+                assert accepted_hidden is not None, "DFlash mode requires hidden states from the verify step."
+                self._append_dflash_context(accepted_hidden, verify_result.initial_seq_len, decode_step=True)
                 return next_hidden, round_mtp_past_seq_len
             return next_hidden, round_mtp_past_seq_len + accepted_steps
 
@@ -901,9 +828,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         """
         snapshot = {}
         for name, tensor in cache_state.items():
-            if name.startswith("past_conv_cache_") or name.startswith(
-                "past_recurrent_state_"
-            ):
+            if name.startswith("past_conv_cache_") or name.startswith("past_recurrent_state_"):
                 snapshot[name] = _clone_cache_value(tensor)
         return snapshot
 

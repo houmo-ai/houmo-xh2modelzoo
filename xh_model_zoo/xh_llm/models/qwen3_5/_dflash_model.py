@@ -11,7 +11,7 @@ from torch import Tensor
 
 from xhquant import nn as xhnn
 from xhquant.core import CacheTensor
-from xhquant.nn import LLMCacheV2, RMSNorm
+from xhquant.nn import LLMCacheV2, RMSNorm, MaskedAdd
 
 
 def _build_rope_cache(
@@ -70,6 +70,7 @@ class DFlashCrossAttention(nn.Module):
         self.sin_slice = xhnn.DynamicSlice([input_sequence_length], [2], [1])
         self.k_cache = LLMCacheV2(axis=2) if use_cache else None
         self.v_cache = LLMCacheV2(axis=2) if use_cache else None
+        self.masked_add = MaskedAdd() 
 
         cos_cached, sin_cached = _build_rope_cache(
             head_dim=head_dim,
@@ -157,7 +158,7 @@ class DFlashCrossAttention(nn.Module):
             combined_value_states, self.num_kv_groups, dim=1
         )
         attn_weights = torch.matmul(query_states, key_states)
-        attn_weights = attn_weights + attn_mask.unsqueeze(1).unsqueeze(1)
+        attn_weights = self.masked_add(attn_weights, attn_mask.unsqueeze(1).unsqueeze(1))
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
             query_states.dtype
         )

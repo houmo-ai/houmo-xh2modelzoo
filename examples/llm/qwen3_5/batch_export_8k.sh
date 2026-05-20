@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Batch export Qwen3.5 family for xh2a with kv=8192, MTP k=4, DFlash block=16.
+# Batch export Qwen3.5 family for xh2a with kv=8192, MTP k=4, DFlash input=9 (draft=8).
 #
 # Covers 5 base models × {w8a8, w4a8} × {MTP, DFlash} = 20 exports.
 # w4a8 uses the auto-round GPTQ-packed output dirs.
@@ -18,7 +18,8 @@ conda activate xhquant
 OUT_ROOT="${OUT_ROOT:-work_dirs}"
 SEQ=8192
 MTP_K=4
-DFLASH_BS=9
+DFLASH_DRAFT_TOKENS=9
+DFLASH_INPUT_SIZE=$((DFLASH_DRAFT_TOKENS + 1))
 LOG_DIR="${LOG_DIR:-output/qwen35_exports}"
 ONLY_TAG_REGEX="${ONLY_TAG_REGEX:-}"
 FORCE_REEXPORT="${FORCE_REEXPORT:-0}"
@@ -144,14 +145,14 @@ for row in "${ROWS[@]}"; do
     # run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_mtp" \
     #   "$FLOAT_DIR" "w8a8h0_sefp" "mtp" "$MTP_K"
 
-    # run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_dflash" \
-    #   "$FLOAT_DIR" "w8a8h0_sefp" "dflash" "$DFLASH_BS" "" "$DFLASH_DIR"
+    # run_one_moe "${local_model_name}-XH2a-8k-w8a8h0_sefp-spec_dflash_input${DFLASH_INPUT_SIZE}" \
+    #   "$FLOAT_DIR" "w8a8h0_sefp" "dflash" "$DFLASH_DRAFT_TOKENS" "" "$DFLASH_DIR"
 
     run_one_moe "${local_model_name}-XH2a-8k-w4a8h1_ssfp-gptq-spec_mtp" \
       "$FLOAT_DIR" "w4a8h1_ssfp" "mtp" "$MTP_K" "$AR_DIR"
 
-    run_one_moe "${local_model_name}-XH2a-8k-w4a8h1_ssfp-gptq-spec_dflash" \
-      "$FLOAT_DIR" "w4a8h1_ssfp" "dflash" "$DFLASH_BS" "$AR_DIR" "$DFLASH_DIR"
+    run_one_moe "${local_model_name}-XH2a-8k-w4a8h1_ssfp-gptq-spec_dflash_input${DFLASH_INPUT_SIZE}" \
+      "$FLOAT_DIR" "w4a8h1_ssfp" "dflash" "$DFLASH_DRAFT_TOKENS" "$AR_DIR" "$DFLASH_DIR"
     continue
   fi
 
@@ -161,9 +162,9 @@ for row in "${ROWS[@]}"; do
   #     --spec_decode_mode mtp --num_draft_tokens "$MTP_K"
 
   # # w8a8 + DFlash
-  # run_one "${MID}_dflash_bs${DFLASH_BS}_w8a8_8k" \
+  # run_one "${MID}_dflash_input${DFLASH_INPUT_SIZE}_w8a8_8k" \
   #     --config "$CFG" --hf_model_dir "$FLOAT_DIR" \
-  #     --spec_decode_mode dflash --num_draft_tokens "$DFLASH_BS" \
+  #     --spec_decode_mode dflash --num_draft_tokens "$DFLASH_DRAFT_TOKENS" \
   #     --dflash_model_dir "$DFLASH_DIR"
 
   # w4a8 + MTP
@@ -172,9 +173,9 @@ for row in "${ROWS[@]}"; do
       --spec_decode_mode mtp --num_draft_tokens "$MTP_K"
 
   # w4a8 + DFlash
-  run_one "${MID}_dflash_bs${DFLASH_BS}_w4a8_8k" \
+  run_one "${MID}_dflash_input${DFLASH_INPUT_SIZE}_w4a8_8k" \
       --config "$CFG" --hf_model_dir "$AR_DIR" \
-      --spec_decode_mode dflash --num_draft_tokens "$DFLASH_BS" \
+      --spec_decode_mode dflash --num_draft_tokens "$DFLASH_DRAFT_TOKENS" \
       --dflash_model_dir "$DFLASH_DIR"
 done
 

@@ -204,7 +204,11 @@ def build_dense_spec_generate_metrics(
     accepted_drafts_per_round = (
         [int(v) for v in raw_accepts]
         if isinstance(raw_accepts, list)
-        else ([int(round(total_accepted / num_rounds))] * num_rounds if num_rounds > 0 and total_accepted > 0 else [0] * num_rounds)
+        else (
+            [int(round(total_accepted / num_rounds))] * num_rounds
+            if num_rounds > 0 and total_accepted > 0
+            else [0] * num_rounds
+        )
     )
     extra_counts = (
         {
@@ -222,15 +226,9 @@ def build_dense_spec_generate_metrics(
         draft_mode=draft_mode,
         model_name=model_name,
         baseline_text=baseline.get("text", "") if baseline is not None else None,
-        baseline_decoder_calls=(
-            int(baseline.get("target_decoder_calls", 0)) if baseline is not None else None
-        ),
-        baseline_prefill_calls=(
-            int(baseline.get("target_prefill_calls", 0)) if baseline is not None else None
-        ),
-        baseline_output_tokens=(
-            int(baseline.get("output_tokens", 0)) if baseline is not None else None
-        ),
+        baseline_decoder_calls=(int(baseline.get("target_decoder_calls", 0)) if baseline is not None else None),
+        baseline_prefill_calls=(int(baseline.get("target_prefill_calls", 0)) if baseline is not None else None),
+        baseline_output_tokens=(int(baseline.get("output_tokens", 0)) if baseline is not None else None),
         spec_text=spec.get("text", ""),
         spec_output_tokens=int(spec.get("output_tokens", 0)),
         target_prefill_calls=int(spec.get("target_prefill_calls", 0)),
@@ -536,6 +534,7 @@ def load_dense_runtime_from_meta(
     if spec_decode and spec_decode.get("mode") in ("mtp", "dflash"):
         draft_prefill = spec_decode.get("draft_prefill_onnx")
         draft_context = spec_decode.get("draft_context_onnx")
+        draft_context_decode = spec_decode.get("draft_context_decode_onnx")
         draft_decode = spec_decode.get("draft_decode_onnx") or spec_decode.get("draft_onnx")
         if draft_decode is None:
             raise ValueError(f"{meta_path} missing draft decode path.")
@@ -545,6 +544,9 @@ def load_dense_runtime_from_meta(
             draft={
                 "prefill": {"onnx": str(resolve_path(model_dir, draft_prefill))} if draft_prefill else None,
                 "context": {"onnx": str(resolve_path(model_dir, draft_context))} if draft_context else None,
+                "context_decode": (
+                    {"onnx": str(resolve_path(model_dir, draft_context_decode))} if draft_context_decode else None
+                ),
                 "decode": {"onnx": str(resolve_path(model_dir, draft_decode))},
             },
             spec_decode_mode=spec_decode["mode"],
@@ -625,11 +627,7 @@ def finalise_spec_metrics(
             "avg_accepted_per_round": round((total_accepted / total_rounds) if total_rounds else 0.0, 4),
         },
     }
-    if (
-        baseline_text is not None
-        and baseline_decoder_calls is not None
-        and baseline_prefill_calls is not None
-    ):
+    if baseline_text is not None and baseline_decoder_calls is not None and baseline_prefill_calls is not None:
         result["baseline"] = {
             "text": baseline_text,
             "output_tokens": (
@@ -720,12 +718,8 @@ class CompatibleMTPHead:
             post_norm_hidden=main_hidden.to(self._mtp_device),
             past_seq_length=torch.tensor([position], dtype=torch.int32, device=self._mtp_device),
             current_input_length=torch.tensor([1], dtype=torch.int32, device=self._mtp_device),
-            past_key_cache=self._wrap_cache(
-                kv_cache.get("key"), device=self._mtp_device, dtype=main_hidden.dtype
-            ),
-            past_value_cache=self._wrap_cache(
-                kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype
-            ),
+            past_key_cache=self._wrap_cache(kv_cache.get("key"), device=self._mtp_device, dtype=main_hidden.dtype),
+            past_value_cache=self._wrap_cache(kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype),
         )
         if return_hidden:
             return logits, hidden
@@ -746,12 +740,8 @@ class CompatibleMTPHead:
             post_norm_hidden=main_hidden.to(self._mtp_device),
             past_seq_length=torch.tensor([int(positions[0].item())], dtype=torch.int32, device=self._mtp_device),
             current_input_length=torch.tensor([seq_len], dtype=torch.int32, device=self._mtp_device),
-            past_key_cache=self._wrap_cache(
-                kv_cache.get("key"), device=self._mtp_device, dtype=main_hidden.dtype
-            ),
-            past_value_cache=self._wrap_cache(
-                kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype
-            ),
+            past_key_cache=self._wrap_cache(kv_cache.get("key"), device=self._mtp_device, dtype=main_hidden.dtype),
+            past_value_cache=self._wrap_cache(kv_cache.get("value"), device=self._mtp_device, dtype=main_hidden.dtype),
         )
         return logits, hidden
 
@@ -1309,7 +1299,9 @@ def run_dense_target_baseline_from_spec(
 
     for _ in range(max_new_tokens - 1):
         decoder_calls += 1
-        decode_feed = runtime._build_decode_feed(current_token, past_seq_len, decode_cache_state, current_input_length=1)
+        decode_feed = runtime._build_decode_feed(
+            current_token, past_seq_len, decode_cache_state, current_input_length=1
+        )
         _, decode_output_map = runtime._run_hmonnx(runtime.decode_session, decode_feed)
         decode_logits = runtime._extract_logits(decode_output_map)
         decode_logits = _select_last_valid_logits(decode_logits, 1)
@@ -1641,7 +1633,11 @@ def run_moe_spec_metrics(
 
     try:
         verify_len = runtime.spec_decode_verify_length
-        num_drafts = runtime.spec_decode_block_size - 1 if runtime.spec_decode_mode == "dflash" else runtime.spec_decode_block_size
+        num_drafts = (
+            runtime.spec_decode_block_size - 1
+            if runtime.spec_decode_mode == "dflash"
+            else runtime.spec_decode_block_size
+        )
 
         texts = runtime.tokenizer.apply_chat_template(
             make_messages(prompt),
@@ -1823,9 +1819,7 @@ def run_moe_spec_metrics(
                         mtp_initial_seq_len = mtp_past_seq_len
                         for step_idx in range(accepted_steps):
                             next_token_for_cache = (
-                                verify_ids[step_idx + 1]
-                                if step_idx < accepted_steps - 1
-                                else new_tok
+                                verify_ids[step_idx + 1] if step_idx < accepted_steps - 1 else new_tok
                             )
                             tok_emb = runtime._embed_token_ids(
                                 torch.tensor([[next_token_for_cache]], dtype=torch.long, device=dev)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import time
 from pathlib import Path
 
@@ -1863,6 +1864,10 @@ def parse_args():
     p.add_argument("--timing-steps", type=int, default=50)
     p.add_argument("--dtype", type=str, default="bf16", choices=sorted(DTYPE_MAP.keys()))
     p.add_argument("--system-prompt", type=str, default="")
+    p.add_argument(
+        "--save-json", type=str, default=None,
+        help="If set, save acceptance-rate results as JSON to this path.",
+    )
     thinking_group = p.add_mutually_exclusive_group()
     thinking_group.add_argument("--enable-thinking", action="store_true", help="Enable thinking mode in chat template.")
     thinking_group.add_argument("--disable-thinking", action="store_true", help="Disable thinking mode in chat template.")
@@ -1931,6 +1936,19 @@ def main():
 
     if len(all_results) > 1:
         print_summary(all_results)
+
+    # ── save JSON results ───────────────────────────────────────
+    if args.save_json:
+        out_path = Path(args.save_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        json_data = {
+            "model": args.model,
+            "dtype": dtype,
+            "max_new_tokens": args.max_new_tokens,
+            "results": all_results,
+        }
+        out_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2))
+        print(f"\n  Saved acceptance results → {out_path}")
 
     # ── speculative decode (sequential) ───────────────────────────
     if args.spec_decode:

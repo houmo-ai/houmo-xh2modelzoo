@@ -8,14 +8,16 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+
 project_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 import torch.nn as nn
-import xhquant.utils.suppress_printing
 from transformers import AutoConfig
+
+import xhquant.utils.suppress_printing
 from xhquant.api import (
     CacheTensor,
     Config,
@@ -27,18 +29,19 @@ from xhquant.api import (
 )
 from xhquant.xhonnxruntime import AutoOffloadGraphModel, HMONNXGraphGoldenInference
 
+
 try:
-    from ._export_validation import collect_hf_references, cleanup_memory, run_conversion_validation
+    from ._export_validation import cleanup_memory, collect_hf_references, run_conversion_validation
     from .common import decode_next_token, get_root_logger, xhquant_llm_init
 except ImportError:
-    from _export_validation import collect_hf_references, cleanup_memory, run_conversion_validation
+    from _export_validation import cleanup_memory, collect_hf_references, run_conversion_validation
     from common import decode_next_token, get_root_logger, xhquant_llm_init
 
+import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: F401
+import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: F401
 from xh_model_zoo.xh_llm.models.builder import MODELS
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.models.qwen3_5 import XHQwen3_5Model
-import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_dflash_model  # noqa: register
-import xh_model_zoo.xh_llm.models.qwen3_5.qwen3_5_mtp_model  # noqa: register
 
 
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
@@ -175,8 +178,7 @@ def _log_module_dtype(tag: str, module: Optional[torch.nn.Module], expected_dtyp
     )
     if observed_dtype is not None and observed_dtype != expected_dtype:
         logger.warning(
-            f"{tag} dtype mismatch: observed={_format_dtype(observed_dtype)}, "
-            f"target={_format_dtype(expected_dtype)}"
+            f"{tag} dtype mismatch: observed={_format_dtype(observed_dtype)}, target={_format_dtype(expected_dtype)}"
         )
 
 
@@ -244,10 +246,10 @@ def _is_cache_input_name(name: str) -> bool:
     return (
         name.startswith(
             (
-                "past_key_cache_",
-                "past_value_cache_",
-                "past_conv_cache_",
-                "past_recurrent_state_",
+                "past_key_cache",
+                "past_value_cache",
+                "past_conv_cache",
+                "past_recurrent_state",
             )
         )
         or "kcache_input" in name
@@ -333,6 +335,19 @@ def _build_default_work_dir(config_path: str, hf_model_dir: str) -> Path:
     model_family = re.sub(r"_xh2a$", "", cfg_name)
     hf_model_name = _sanitize_path_component(Path(hf_model_dir).name)
     return Path("./work_dirs") / model_family / f"{cfg_name}_{hf_model_name}"
+
+
+def _build_draft_only_default_work_dir(
+    existing_work_dir: Path, spec_decode_mode: str
+) -> Path:
+    existing_work_dir = existing_work_dir.resolve()
+    suffix = f"draft_{spec_decode_mode}"
+    base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}")
+    if base.resolve() == existing_work_dir:
+        base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}-{int(time.time())}")
+    if not base.exists():
+        return base
+    return existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}-{time.strftime('%Y%m%d%H%M%S')}")
 
 
 def _with_model_size_in_name(modelscope_name: str, model_size: str) -> str:
@@ -468,7 +483,8 @@ def _generate_draft_golden_for_onnx(
 
     # Detect the primary sequence-length from the 3-D float input (embeddings / hidden states)
     float3d_names = [
-        n for n in session.get_input_names()
+        n
+        for n in session.get_input_names()
         if session.get_input(n).dtype in (torch.float16, torch.float32, torch.bfloat16)
         and len(session.get_input(n).shape) == 3
         and n not in cache_inputs
@@ -509,7 +525,9 @@ def _generate_draft_golden_for_onnx(
             else:
                 pad_ids = torch.full(
                     (input_ids_full.shape[0], seq_len - input_ids_full.shape[1]),
-                    pad_token_id, dtype=info.dtype, device=device,
+                    pad_token_id,
+                    dtype=info.dtype,
+                    device=device,
                 )
                 ids = torch.cat([input_ids_full.to(device=device, dtype=info.dtype), pad_ids], dim=1)
             input_feed[name] = ids
@@ -563,10 +581,7 @@ def _create_golden_session(
         session.golden_dir = golden_dir
         session.initialize()
         graph_module = session._session.graph_module
-        logger.info(
-            f"Applying AutoOffloadGraphModel to HMONNX graph '{Path(onnx_file).name}', "
-            f"max_memory={max_memory}"
-        )
+        logger.info(f"Applying AutoOffloadGraphModel to HMONNX graph '{Path(onnx_file).name}', max_memory={max_memory}")
         AutoOffloadGraphModel.from_graph_model(graph_module, max_memory=max_memory)
         session._device = torch.device("cpu")
         session._exec_device = torch.device("cpu")
@@ -700,7 +715,8 @@ def _generate_golden(
             key: value.cpu() if isinstance(value, torch.Tensor) else value for key, value in prefill_output_map.items()
         }
         prefill_cache_inputs = {
-            key: value.cpu() if isinstance(value, torch.Tensor) else value for key, value in prefill_cache_inputs.items()
+            key: value.cpu() if isinstance(value, torch.Tensor) else value
+            for key, value in prefill_cache_inputs.items()
         }
 
     del prefill_session
@@ -744,9 +760,7 @@ def _generate_golden(
     decode_linear_attn_mask = _build_linear_attn_mask(1, decode_mask_info, device)
     decode_batch = decode_inputs_info.shape[0]
     decode_past_seq_length = torch.tensor([valid_len] * decode_batch, dtype=decode_past_seq_info.dtype, device=device)
-    decode_current_input_length = torch.tensor(
-        [1] * decode_batch, dtype=decode_current_seq_info.dtype, device=device
-    )
+    decode_current_input_length = torch.tensor([1] * decode_batch, dtype=decode_current_seq_info.dtype, device=device)
 
     decode_input_feed: Dict[str, torch.Tensor] = {}
     for name in decode_session.get_input_names():
@@ -818,6 +832,7 @@ def _generate_golden(
         else:  # dflash
             draft_items = [
                 ("draft_context_onnx", "draft_context", False),
+                ("draft_context_decode_onnx", "draft_context_decode", False),
                 ("draft_decode_onnx", "draft_decode", True),
             ]
 
@@ -873,9 +888,7 @@ def _generate_golden(
     for dir_name, dir_path in draft_golden_paths.items():
         golden_meta[f"{dir_name}_golden_dir"] = dir_name
         named_onnx = dir_path / f"{release_prefix}_{dir_name}_with_act.onnx"
-        golden_meta[f"{dir_name}_onnx"] = (
-            str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
-        )
+        golden_meta[f"{dir_name}_onnx"] = str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
     with (release_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
         json.dump(golden_meta, fout, ensure_ascii=False, indent=2)
 
@@ -1101,19 +1114,37 @@ def _export_draft_model(
     """
     cfg_name = cfg.cfg_name
     target_device = cfg.get("target_device", "XH2a")
-    dtype = torch.float16  # draft models always exported as fp16
-    verify_length = max(1, int(getattr(args, "num_draft_tokens", 4)) + 1)
     max_sequence_length = int(getattr(args, "max_sequence_length", cfg.model.wrap_cfg.max_sequence_length))
     max_pe_length = int(getattr(cfg.model.wrap_cfg, "max_pe_length", cfg.model.wrap_cfg.get("max_pe_length", 262144)))
 
     logger.info(f"{'=' * 20} Exporting {mode.upper()} draft model {'=' * 20}")
 
+    def _resolve_dflash_decode_seq_len(dflash_model_dir: str) -> int:
+        num_draft_tokens = int(getattr(args, "num_draft_tokens", 4))
+        if num_draft_tokens <= 0:
+            raise ValueError(f"--num_draft_tokens must be positive for dflash, got {num_draft_tokens}")
+        decode_seq_len = num_draft_tokens + 1
+        with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
+            dflash_cfg = json.load(f)
+        model_block_size = int(dflash_cfg.get("block_size", decode_seq_len))
+        if decode_seq_len > model_block_size:
+            raise ValueError(
+                f"DFlash draft decode input length ({decode_seq_len} = --num_draft_tokens + 1) exceeds "
+                f"model block_size ({model_block_size}) from {Path(dflash_model_dir) / 'config.json'}"
+            )
+        if decode_seq_len < model_block_size:
+            logger.info(
+                "DFlash draft decode input_sequence_length reduced from model "
+                f"block_size={model_block_size} to verify_length={decode_seq_len} "
+                f"(num_draft_tokens={num_draft_tokens})"
+            )
+        return decode_seq_len
+
     def _export_named_draft_model(model_cfg: dict, prefix: str) -> str:
         draft_model = MODELS.build(model_cfg)
         draft_model.init_wrap_model()
         logger.info(
-            f"[{prefix}] Draft model params: "
-            f"{sum(p.numel() for p in draft_model._wrap_model.parameters()) / 1e6:.1f}M"
+            f"[{prefix}] Draft model params: {sum(p.numel() for p in draft_model._wrap_model.parameters()) / 1e6:.1f}M"
         )
 
         dummy_data = draft_model.prepare_inputs(None)
@@ -1126,9 +1157,7 @@ def _export_draft_model(
             [torch.device("cpu")],
         )
         draft_model.convert_to_export_graph(dummy_data)
-        onnx_file = draft_model.to_export_onnx(
-            dummy_data, str(onnx_output_dir), prefix
-        )[0]
+        onnx_file = draft_model.to_export_onnx(dummy_data, str(onnx_output_dir), prefix)[0]
         draft_model.release_exported_model()
         draft_model.release_quanted_model()
         draft_model.release_frontend_model()
@@ -1141,10 +1170,8 @@ def _export_draft_model(
         dflash_model_dir = getattr(args, "dflash_model_dir", None)
         if dflash_model_dir is None:
             raise ValueError("--dflash_model_dir is required for dflash spec_decode_mode")
-        with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
-            dflash_cfg = json.load(f)
-        draft_decode_seq_len = int(dflash_cfg.get("block_size", verify_length))
-        context_cfg = dict(
+        draft_decode_seq_len = _resolve_dflash_decode_seq_len(dflash_model_dir)
+        context_prefill_cfg = dict(
             type="XHDFlashDraftModel",
             hf_model=None,
             wrap_cfg=ConfigDict(
@@ -1160,6 +1187,10 @@ def _export_draft_model(
             dflash_model_dir=dflash_model_dir,
             target_model_dir=args.hf_model_dir,
         )
+        context_decode_cfg = deepcopy(context_prefill_cfg)
+        context_decode_wrap_cfg = dict(context_prefill_cfg["wrap_cfg"])
+        context_decode_wrap_cfg["input_sequence_length"] = draft_decode_seq_len
+        context_decode_cfg["wrap_cfg"] = ConfigDict(**context_decode_wrap_cfg)
         decode_cfg = dict(
             type="XHDFlashDraftModel",
             hf_model=None,
@@ -1177,12 +1208,11 @@ def _export_draft_model(
             target_model_dir=args.hf_model_dir,
         )
         return {
-            "draft_context_onnx": _export_named_draft_model(
-                context_cfg, f"{cfg_name}_dflash_context"
+            "draft_context_onnx": _export_named_draft_model(context_prefill_cfg, f"{cfg_name}_dflash_context"),
+            "draft_context_decode_onnx": _export_named_draft_model(
+                context_decode_cfg, f"{cfg_name}_dflash_context_decode"
             ),
-            "draft_decode_onnx": _export_named_draft_model(
-                decode_cfg, f"{cfg_name}_dflash_decode"
-            ),
+            "draft_decode_onnx": _export_named_draft_model(decode_cfg, f"{cfg_name}_dflash_decode"),
         }
 
     if mode == "mtp":
@@ -1215,12 +1245,8 @@ def _export_draft_model(
             target_model_dir=args.hf_model_dir,
         )
         return {
-            "draft_prefill_onnx": _export_named_draft_model(
-                prefill_cfg, f"{cfg_name}_mtp_prefill"
-            ),
-            "draft_decode_onnx": _export_named_draft_model(
-                decode_cfg, f"{cfg_name}_mtp_decode"
-            ),
+            "draft_prefill_onnx": _export_named_draft_model(prefill_cfg, f"{cfg_name}_mtp_prefill"),
+            "draft_decode_onnx": _export_named_draft_model(decode_cfg, f"{cfg_name}_mtp_decode"),
         }
 
     raise ValueError(f"Unknown spec_decode_mode: {mode}")
@@ -1252,7 +1278,7 @@ def _copy_hf_configs(hf_model_dir: str, work_dir: str, logger) -> Path:
 
 
 def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
-    quant_type = _detect_export_quant_type(args.hf_model_dir)
+    quant_type = meta_info.get("quant_type", None) or _detect_export_quant_type(args.hf_model_dir)
     return dict(
         create_time=meta_info.create_time,
         device=str(cfg.target_device),
@@ -1286,11 +1312,14 @@ def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
             draft_onnx=meta_info.get("draft_onnx_file", None),
             draft_prefill_onnx=meta_info.get("draft_prefill_onnx_file", None),
             draft_context_onnx=meta_info.get("draft_context_onnx_file", None),
+            draft_context_decode_onnx=meta_info.get("draft_context_decode_onnx_file", None),
             draft_decode_onnx=meta_info.get("draft_decode_onnx_file", None),
             block_size=meta_info.get("spec_decode_block_size", None),
             hidden_output_name=meta_info.get("spec_decode_hidden_output_name", None),
             verify_length=meta_info.get("spec_decode_verify_length", None),
-        ) if meta_info.get("spec_decode_mode") else None,
+        )
+        if meta_info.get("spec_decode_mode")
+        else None,
     )
 
 
@@ -1313,7 +1342,9 @@ def _prepare_export_context(cfg, args, logger):
         cfg.model.quant_config.w_schema.bits = 4
         if "fallback_w_schema" not in cfg.model.quant_config:
             cfg.model.quant_config["fallback_w_schema"] = dict(
-                fp_mode="ssfp", hidden_bit=False, bits=8,
+                fp_mode="ssfp",
+                hidden_bit=False,
+                bits=8,
             )
 
     qwen3_5_model: XHQwen3_5Model = MODELS.build(cfg.model)
@@ -1470,9 +1501,101 @@ def _resolve_existing_onnx_file(
     if len(candidates) == 0:
         raise FileNotFoundError(f"No ONNX file found in {onnx_dir}")
     raise RuntimeError(
-        f"Found multiple ONNX files in {onnx_dir}: {candidates}. "
-        f"Please specify --{meta_key} explicitly."
+        f"Found multiple ONNX files in {onnx_dir}: {candidates}. Please specify --{meta_key} explicitly."
     )
+
+
+def _load_json_file(json_file: Path) -> Dict[str, Any]:
+    if not json_file.exists():
+        return {}
+    with json_file.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _resolve_meta_path(base_dir: Path, path_value: str) -> Path:
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
+
+
+def _first_meta_value(export_meta_info: Dict[str, Any], normalized_meta: Dict[str, Any], *keys: str):
+    for key in keys:
+        if key in export_meta_info and export_meta_info[key] is not None:
+            return export_meta_info[key]
+        if key in normalized_meta and normalized_meta[key] is not None:
+            return normalized_meta[key]
+    return None
+
+
+def _require_existing_meta_path(
+    existing_work_dir: Path,
+    export_meta_info: Dict[str, Any],
+    normalized_meta: Dict[str, Any],
+    artifact_name: str,
+    *keys: str,
+) -> Path:
+    path_value = _first_meta_value(export_meta_info, normalized_meta, *keys)
+    if not path_value:
+        raise FileNotFoundError(
+            f"Cannot resolve {artifact_name}: none of {keys} found in "
+            f"{existing_work_dir / 'export_meta_info.json'} or {existing_work_dir / 'meta.json'}"
+        )
+    path = _resolve_meta_path(existing_work_dir, str(path_value))
+    if not path.exists():
+        raise FileNotFoundError(f"Resolved {artifact_name} does not exist: {path}")
+    return path
+
+
+def _infer_context_length_from_meta(
+    export_meta_info: Dict[str, Any], normalized_meta: Dict[str, Any], default: int
+) -> int:
+    max_context_tokens = normalized_meta.get("max_context_tokens", None)
+    if max_context_tokens is not None:
+        return int(max_context_tokens)
+    kv_cache = normalized_meta.get("kv_cache", {})
+    kv_shape = kv_cache.get("shape") if isinstance(kv_cache, dict) else None
+    if isinstance(kv_shape, list) and len(kv_shape) >= 3:
+        return int(kv_shape[2])
+    kv_shape = export_meta_info.get("kv_cache_shape", None)
+    if isinstance(kv_shape, list) and len(kv_shape) >= 3:
+        return int(kv_shape[2])
+    return int(default)
+
+
+def _copy_existing_cache_meta(
+    meta_info: ConfigDict,
+    export_meta_info: Dict[str, Any],
+    normalized_meta: Dict[str, Any],
+) -> None:
+    kv_cache = normalized_meta.get("kv_cache", {})
+    linear_cache = normalized_meta.get("linear_cache", {})
+
+    kv_shape = export_meta_info.get("kv_cache_shape", None)
+    if kv_shape is None and isinstance(kv_cache, dict):
+        kv_shape = kv_cache.get("shape")
+    if kv_shape is not None:
+        meta_info.kv_cache_shape = kv_shape
+
+    num_full = export_meta_info.get("num_full_attention_layers", None)
+    if num_full is None and isinstance(kv_cache, dict):
+        num_full = kv_cache.get("num_decoder_layers")
+    if num_full is not None:
+        meta_info.num_full_attention_layers = num_full
+
+    conv_shape = export_meta_info.get("conv_cache_shape", None)
+    recurrent_shape = export_meta_info.get("recurrent_state_shape", None)
+    num_linear = export_meta_info.get("num_linear_attention_layers", None)
+    if isinstance(linear_cache, dict):
+        conv_shape = conv_shape if conv_shape is not None else linear_cache.get("conv_shape")
+        recurrent_shape = recurrent_shape if recurrent_shape is not None else linear_cache.get("recurrent_shape")
+        num_linear = num_linear if num_linear is not None else linear_cache.get("num_decoder_layers")
+    if conv_shape is not None:
+        meta_info.conv_cache_shape = conv_shape
+    if recurrent_shape is not None:
+        meta_info.recurrent_state_shape = recurrent_shape
+    if num_linear is not None:
+        meta_info.num_linear_attention_layers = num_linear
 
 
 def _prepare_golden_only_context(cfg, args, logger):
@@ -1521,7 +1644,13 @@ def _run_golden_generation(
     logger.info("Generating HMONNX golden (prefill + decode)")
     logger.info("=" * 60)
     release_dir = _generate_golden(
-        cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger,
+        cfg,
+        args,
+        input_ids,
+        tokenizer,
+        prefill_onnx_file,
+        decode_onnx_file,
+        logger,
         draft_onnx_files=draft_onnx_files,
         spec_decode_mode=spec_decode_mode,
     )
@@ -1573,6 +1702,7 @@ def _golden_only_impl(cfg, args):
         else:  # dflash
             draft_meta_keys = [
                 ("draft_context_onnx_file", "draft_context_onnx"),
+                ("draft_context_decode_onnx_file", "draft_context_decode_onnx"),
                 ("draft_decode_onnx_file", "draft_decode_onnx"),
             ]
         draft_onnx_files = {}
@@ -1593,10 +1723,133 @@ def _golden_only_impl(cfg, args):
 
     tokenizer, input_ids = _prepare_golden_only_context(cfg, args, logger)
     _run_golden_generation(
-        cfg, args, input_ids, tokenizer, str(prefill_onnx_file), str(decode_onnx_file), logger,
+        cfg,
+        args,
+        input_ids,
+        tokenizer,
+        str(prefill_onnx_file),
+        str(decode_onnx_file),
+        logger,
         draft_onnx_files=draft_onnx_files,
         spec_decode_mode=spec_decode_mode,
     )
+
+
+def _draft_only_impl(cfg, args):
+    logger = get_root_logger()
+    work_dir = Path(cfg.work_dir)
+    existing_work_dir = Path(args.existing_work_dir).resolve()
+    if not existing_work_dir.exists():
+        raise FileNotFoundError(f"--existing_work_dir does not exist: {existing_work_dir}")
+
+    spec_decode_mode = getattr(args, "spec_decode_mode", None)
+    if spec_decode_mode in (None, "none"):
+        raise ValueError("--draft_only requires --spec_decode_mode to be one of {'mtp', 'dflash'}")
+    if spec_decode_mode == "dflash" and not getattr(args, "dflash_model_dir", None):
+        raise ValueError("--dflash_model_dir is required for --draft_only --spec_decode_mode=dflash")
+
+    existing_export_meta = _load_json_file(existing_work_dir / "export_meta_info.json")
+    existing_meta = _load_json_file(existing_work_dir / "meta.json")
+    if not existing_export_meta and not existing_meta:
+        raise FileNotFoundError(
+            f"No export_meta_info.json or meta.json found under --existing_work_dir: {existing_work_dir}"
+        )
+
+    prefill_onnx = _require_existing_meta_path(
+        existing_work_dir,
+        existing_export_meta,
+        existing_meta,
+        "target prefill ONNX",
+        "prefill_onnx_file",
+        "prefill_onnx",
+    )
+    decode_onnx = _require_existing_meta_path(
+        existing_work_dir,
+        existing_export_meta,
+        existing_meta,
+        "target decode ONNX",
+        "decode_onnx_file",
+        "decode_onnx",
+    )
+    hf_config = _require_existing_meta_path(
+        existing_work_dir,
+        existing_export_meta,
+        existing_meta,
+        "HF config directory",
+        "hf_config",
+    )
+    token_embedding_file = _require_existing_meta_path(
+        existing_work_dir,
+        existing_export_meta,
+        existing_meta,
+        "token embedding",
+        "token_embedding_file",
+    )
+
+    hf_model_dir = (
+        _first_meta_value(existing_export_meta, existing_meta, "hf_model", "hf_model_path") or args.hf_model_dir
+    )
+    args.hf_model_dir = str(hf_model_dir)
+    cfg.hf_model_dir = args.hf_model_dir
+    cfg.model.hf_model = args.hf_model_dir
+    cfg.model.wrap_cfg.max_sequence_length = _infer_context_length_from_meta(
+        existing_export_meta,
+        existing_meta,
+        cfg.model.wrap_cfg.max_sequence_length,
+    )
+    args.max_sequence_length = cfg.model.wrap_cfg.max_sequence_length
+    cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
+    cfg.model.wrap_cfg.support_long_context_over_fp16_limit = getattr(
+        args, "support_long_context_over_fp16_limit", False
+    )
+
+    logger.info(f"Draft-only export: reusing target work_dir={existing_work_dir}")
+    logger.info(f"Reused target prefill ONNX: {prefill_onnx}")
+    logger.info(f"Reused target decode ONNX: {decode_onnx}")
+    logger.info(f"Reused HF config: {hf_config}")
+    logger.info(f"Reused token embedding: {token_embedding_file}")
+
+    draft_onnx_dir = work_dir / "draft_onnx"
+    draft_onnx_dir.mkdir(exist_ok=True, parents=True)
+    draft_onnx_files = _export_draft_model(cfg, args, spec_decode_mode, draft_onnx_dir, logger)
+
+    meta_info = ConfigDict(
+        dict(
+            create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            config=str(Path(cfg.config_file).relative_to(work_dir)),
+            hf_model=args.hf_model_dir,
+            source_quant_method=_first_meta_value(existing_export_meta, existing_meta, "source_quant_method"),
+            quant_type=_first_meta_value(existing_export_meta, existing_meta, "quant_type"),
+            dtype=_first_meta_value(existing_export_meta, existing_meta, "dtype") or cfg.dtype,
+            pad_token_id=_first_meta_value(existing_export_meta, existing_meta, "pad_token_id"),
+            hf_config=str(hf_config),
+            token_embedding_file=str(token_embedding_file),
+            prefill_onnx_file=str(prefill_onnx),
+            decode_onnx_file=str(decode_onnx),
+        )
+    )
+    _copy_existing_cache_meta(meta_info, existing_export_meta, existing_meta)
+
+    for key, value in draft_onnx_files.items():
+        meta_info[f"{key}_file"] = str(Path(value).relative_to(work_dir))
+    if "draft_decode_onnx" in draft_onnx_files:
+        meta_info.draft_onnx_file = str(Path(draft_onnx_files["draft_decode_onnx"]).relative_to(work_dir))
+    meta_info.spec_decode_mode = spec_decode_mode
+    meta_info.spec_decode_block_size = int(getattr(args, "num_draft_tokens", 4))
+    if spec_decode_mode == "dflash":
+        meta_info.spec_decode_block_size += 1
+    meta_info.spec_decode_hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+    meta_info.spec_decode_verify_length = max(1, int(getattr(args, "num_draft_tokens", 4)) + 1)
+
+    export_meta_path = work_dir / "export_meta_info.json"
+    with export_meta_path.open("w", encoding="utf-8") as file:
+        json.dump(meta_info, file, ensure_ascii=False, indent=4)
+
+    normalized_meta = _build_normalized_meta(meta_info, cfg, args)
+    with (work_dir / "meta.json").open("w", encoding="utf-8") as file:
+        json.dump(normalized_meta, file, ensure_ascii=False, indent=4)
+
+    logger.info(f"Draft-only export done. New artifacts in: {work_dir}")
 
 
 def _export_impl(cfg, args):
@@ -1623,6 +1876,7 @@ def _export_impl(cfg, args):
         if dflash_model_dir is None:
             raise ValueError("--dflash_model_dir is required for dflash spec_decode_mode")
         import json as _json
+
         dflash_config = _json.load(open(Path(dflash_model_dir) / "config.json"))
         num_target_layers = dflash_config["num_target_layers"]
         num_draft_layers = dflash_config["num_hidden_layers"]
@@ -1632,7 +1886,9 @@ def _export_impl(cfg, args):
         else:
             start, end = 1, num_target_layers - 3
             span = end - start
-            target_layer_ids = [int(round(start + (i * span) / (num_draft_layers - 1))) for i in range(num_draft_layers)]
+            target_layer_ids = [
+                int(round(start + (i * span) / (num_draft_layers - 1))) for i in range(num_draft_layers)
+            ]
         spec_decode_prefill_cfg = {
             "output_hidden_state_indices": target_layer_ids,
             "num_logits_to_keep": 0,
@@ -1658,7 +1914,13 @@ def _export_impl(cfg, args):
             "decode_current_input_length": spec_verify_length,
         }
     prefill_onnx_file = _export_single_graph(
-        cfg, args, "prefill", input_ids, tokenizer, prefill_onnx_dir, logger,
+        cfg,
+        args,
+        "prefill",
+        input_ids,
+        tokenizer,
+        prefill_onnx_dir,
+        logger,
         spec_decode_cfg=spec_decode_prefill_cfg,
     )
     meta_info.prefill_onnx_file = str(Path(prefill_onnx_file).relative_to(cfg.work_dir))
@@ -1667,7 +1929,13 @@ def _export_impl(cfg, args):
     logger.info("Exporting DECODE graph (recurrent mode)")
     logger.info("=" * 60)
     decode_onnx_file = _export_single_graph(
-        cfg, args, "decode", input_ids, tokenizer, decode_onnx_dir, logger,
+        cfg,
+        args,
+        "decode",
+        input_ids,
+        tokenizer,
+        decode_onnx_dir,
+        logger,
         spec_decode_cfg=spec_decode_decode_cfg,
     )
     meta_info.decode_onnx_file = str(Path(decode_onnx_file).relative_to(cfg.work_dir))
@@ -1678,16 +1946,12 @@ def _export_impl(cfg, args):
     if spec_decode_mode and spec_decode_mode != "none":
         draft_onnx_dir = Path(cfg.work_dir) / "draft_onnx"
         draft_onnx_dir.mkdir(exist_ok=True, parents=True)
-        draft_onnx_files = _export_draft_model(
-            cfg, args, spec_decode_mode, draft_onnx_dir, logger
-        )
+        draft_onnx_files = _export_draft_model(cfg, args, spec_decode_mode, draft_onnx_dir, logger)
         draft_onnx_files_for_golden = dict(draft_onnx_files)
         for key, value in draft_onnx_files.items():
             meta_info[f"{key}_file"] = str(Path(value).relative_to(cfg.work_dir))
         if "draft_decode_onnx" in draft_onnx_files:
-            meta_info.draft_onnx_file = str(
-                Path(draft_onnx_files["draft_decode_onnx"]).relative_to(cfg.work_dir)
-            )
+            meta_info.draft_onnx_file = str(Path(draft_onnx_files["draft_decode_onnx"]).relative_to(cfg.work_dir))
         meta_info.spec_decode_mode = spec_decode_mode
         if spec_decode_mode == "dflash":
             meta_info.spec_decode_block_size = getattr(args, "num_draft_tokens", 4)
@@ -1698,7 +1962,13 @@ def _export_impl(cfg, args):
         meta_info.spec_decode_verify_length = spec_verify_length
 
     release_dir = _run_golden_generation(
-        cfg, args, input_ids, tokenizer, prefill_onnx_file, decode_onnx_file, logger,
+        cfg,
+        args,
+        input_ids,
+        tokenizer,
+        prefill_onnx_file,
+        decode_onnx_file,
+        logger,
         draft_onnx_files=draft_onnx_files_for_golden,
         spec_decode_mode=spec_decode_mode if spec_decode_mode and spec_decode_mode != "none" else None,
     )
@@ -1715,9 +1985,40 @@ def _export_impl(cfg, args):
 
 
 def main(args):
-    cfg = Config.fromfile(args.config)
-    cfg_name = Path(args.config).stem
-    if getattr(args, "golden_only", False) and getattr(args, "existing_work_dir", None):
+    if getattr(args, "spec_decode_mode", None) == "none":
+        args.spec_decode_mode = None
+
+    config_path = Path(args.config)
+    if getattr(args, "draft_only", False):
+        if not getattr(args, "existing_work_dir", None):
+            raise ValueError("--draft_only requires --existing_work_dir")
+        if args.spec_decode_mode not in {"mtp", "dflash"}:
+            raise ValueError("--draft_only requires --spec_decode_mode to be one of {'mtp', 'dflash'}")
+        existing_work_dir = Path(args.existing_work_dir).resolve()
+        existing_export_meta = _load_json_file(existing_work_dir / "export_meta_info.json")
+        existing_config = existing_export_meta.get("config")
+        if existing_config:
+            existing_config_path = _resolve_meta_path(existing_work_dir, str(existing_config))
+            if existing_config_path.exists():
+                config_path = existing_config_path
+                args.config = str(existing_config_path)
+
+    cfg = Config.fromfile(str(config_path))
+    cfg_name = config_path.stem
+    if getattr(args, "draft_only", False):
+        existing_work_dir = Path(args.existing_work_dir).resolve()
+        if args.work_dir is not None:
+            cfg.work_dir = str(Path(args.work_dir))
+        else:
+            cfg.work_dir = str(
+                _build_draft_only_default_work_dir(
+                    existing_work_dir,
+                    args.spec_decode_mode,
+                )
+            )
+        if Path(cfg.work_dir).resolve() == existing_work_dir:
+            raise ValueError("--draft_only --work_dir must not overwrite --existing_work_dir")
+    elif getattr(args, "golden_only", False) and getattr(args, "existing_work_dir", None):
         cfg.work_dir = str(Path(args.existing_work_dir))
     elif args.work_dir is not None:
         cfg.work_dir = str(Path(args.work_dir))
@@ -1738,7 +2039,10 @@ def main(args):
     if not hasattr(cfg, "release") or cfg.release is None:
         cfg.release = {}
     if cfg.release.get("wmix_amix", None) is None:
-        cfg.release["wmix_amix"] = _detect_release_wmix_amix(args.hf_model_dir)
+        if getattr(args, "draft_only", False):
+            cfg.release["wmix_amix"] = "w8_a8"
+        else:
+            cfg.release["wmix_amix"] = _detect_release_wmix_amix(args.hf_model_dir)
     for key in ("xh_version", "modelscope_name", "wmix_amix", "date"):
         cli_val = getattr(args, f"release_{key}", None)
         if cli_val is not None:
@@ -1761,7 +2065,9 @@ def main(args):
 
     xhquant.utils.suppress_printing.disable_printing = True
     start_time = time.time()
-    if getattr(args, "golden_only", False):
+    if getattr(args, "draft_only", False):
+        _draft_only_impl(cfg, args)
+    elif getattr(args, "golden_only", False):
         _golden_only_impl(cfg, args)
     else:
         _export_impl(cfg, args)
@@ -1803,7 +2109,9 @@ def parse_arguments():
     parser.add_argument("--valid", default=True, help="run precision checks (HF/wrap/frontend/quant)")
     parser.add_argument("--valid_exported", action="store_true", help="validate exported graph before ONNX save")
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
-    parser.add_argument("--valid_compare_full_output", dest="valid_compare_full_output", action="store_true", default=True)
+    parser.add_argument(
+        "--valid_compare_full_output", dest="valid_compare_full_output", action="store_true", default=True
+    )
     parser.add_argument("--no-valid_compare_full_output", dest="valid_compare_full_output", action="store_false")
     parser.add_argument("--valid_compare_max_new_tokens", type=int, default=64)
     parser.add_argument("--golden", action="store_true", help="generate HMONNX golden after export")
@@ -1813,10 +2121,21 @@ def parse_arguments():
         help="skip HF load/quant/export and only generate golden from existing work_dir ONNX files",
     )
     parser.add_argument(
+        "--draft_only",
+        action="store_true",
+        help=(
+            "reuse target prefill/decode/token_embedding/hf_config/cache metadata from --existing_work_dir "
+            "and export only MTP/DFlash draft ONNX files into a new --work_dir"
+        ),
+    )
+    parser.add_argument(
         "--existing_work_dir",
         type=str,
         default=None,
-        help="existing export work_dir containing token_embedding.pt and prefill_onnx/decode_onnx for --golden_only",
+        help=(
+            "existing export work_dir containing token_embedding.pt and prefill_onnx/decode_onnx "
+            "for --golden_only or --draft_only"
+        ),
     )
     parser.add_argument("--prefill_onnx_file", type=str, default=None)
     parser.add_argument("--decode_onnx_file", type=str, default=None)
@@ -1831,7 +2150,9 @@ def parse_arguments():
         default=None,
         help='Per-device memory limits for multi-GPU golden (JSON string). Example: \'{"0":"70GiB","1":"70GiB","cpu":"160GiB"}\'.',
     )
-    parser.add_argument("--package_release", action="store_true", help="zip the release directory after golden generation")
+    parser.add_argument(
+        "--package_release", action="store_true", help="zip the release directory after golden generation"
+    )
     parser.add_argument("--release_xh_version", type=str, default=None)
     parser.add_argument("--release_modelscope_name", type=str, default=None)
     parser.add_argument("--release_wmix_amix", type=str, default=None)
@@ -1854,7 +2175,10 @@ def parse_arguments():
         "--num_draft_tokens",
         type=int,
         default=4,
-        help="Number of draft tokens to generate and verify per round.",
+        help=(
+            "Number of draft tokens to generate and verify per round. "
+            "For DFlash the draft decode input length is num_draft_tokens + 1."
+        ),
     )
     return parser
 
