@@ -47,6 +47,20 @@ def is_qwen3_omni_gptq_checkpoint(model_dir: str) -> bool:
     )
 
 
+def is_qwen3_omni_checkpoint(model_dir: str) -> bool:
+    config_path = Path(model_dir) / "config.json"
+    if not config_path.exists():
+        return False
+
+    try:
+        config_payload = json.loads(config_path.read_text())
+    except Exception:
+        return False
+
+    architectures = config_payload.get("architectures", [])
+    return isinstance(architectures, list) and "Qwen3OmniMoeForConditionalGeneration" in architectures
+
+
 def _write_json(file_path: Path, payload: Dict[str, Any]) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as file_obj:
@@ -98,12 +112,17 @@ def _build_qwen3omni_thinker_config_payload(root_dir: Path) -> Dict[str, Any]:
     root_config = AutoConfig.from_pretrained(str(root_dir), trust_remote_code=True)
     text_config = root_config.thinker_config.text_config.to_dict()
     quantization_config = dict(getattr(root_config, "quantization_config", {}) or {})
-    quantization_config["block_name_to_quantize"] = "model.layers"
+    talker_config = getattr(root_config, "talker_config", None)
 
     text_config["architectures"] = ["Qwen3MoeForCausalLM"]
     text_config["model_type"] = "qwen3_moe"
     text_config["tie_word_embeddings"] = False
-    text_config["quantization_config"] = quantization_config
+    if quantization_config:
+        quantization_config["block_name_to_quantize"] = "model.layers"
+        text_config["quantization_config"] = quantization_config
+    accept_hidden_layer = getattr(talker_config, "accept_hidden_layer", None)
+    if accept_hidden_layer is not None:
+        text_config["accept_hidden_layer"] = int(accept_hidden_layer)
     text_config.update(_resolve_special_token_ids(root_dir, root_config))
     text_config["xh_qwen3omni_thinker_qwen3moe_compat"] = True
     return text_config
@@ -113,10 +132,28 @@ def _is_text_thinker_weight(weight_name: str) -> bool:
     return any(weight_name.startswith(prefix) for prefix in _TEXT_WEIGHT_PREFIXES)
 
 
-def prepare_qwen3_omni_thinker_gptq_view(model_dir: str, view_dir: Path) -> Path:
+def _is_existing_view_complete(view_dir: Path) -> bool:
+    index_path = view_dir / "model.safetensors.index.json"
+    config_path = view_dir / "config.json"
+    if not index_path.exists() or not config_path.exists():
+        return False
+    try:
+        index_payload = json.loads(index_path.read_text())
+    except Exception:
+        return False
+    weight_map = index_payload.get("weight_map", {})
+    if not isinstance(weight_map, dict) or not weight_map:
+        return False
+    return all((view_dir / shard_name).exists() for shard_name in set(weight_map.values()))
+
+
+def prepare_qwen3_omni_thinker_text_view(model_dir: str, view_dir: Path) -> Path:
     root_dir = Path(model_dir)
-    if not is_qwen3_omni_gptq_checkpoint(str(root_dir)):
-        raise ValueError(f"{root_dir} is not a Qwen3-Omni GPTQ checkpoint")
+    if not is_qwen3_omni_checkpoint(str(root_dir)):
+        raise ValueError(f"{root_dir} is not a Qwen3-Omni checkpoint")
+
+    if _is_existing_view_complete(view_dir):
+        return view_dir
 
     view_dir.mkdir(parents=True, exist_ok=True)
     _write_json(view_dir / "config.json", _build_qwen3omni_thinker_config_payload(root_dir))
@@ -173,3 +210,10 @@ def prepare_qwen3_omni_thinker_gptq_view(model_dir: str, view_dir: Path) -> Path
             _ensure_link_or_copy(src, view_dir / file_name)
 
     return view_dir
+
+
+def prepare_qwen3_omni_thinker_gptq_view(model_dir: str, view_dir: Path) -> Path:
+    root_dir = Path(model_dir)
+    if not is_qwen3_omni_gptq_checkpoint(str(root_dir)):
+        raise ValueError(f"{root_dir} is not a Qwen3-Omni GPTQ checkpoint")
+    return prepare_qwen3_omni_thinker_text_view(model_dir, view_dir)

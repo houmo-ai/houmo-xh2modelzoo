@@ -30,6 +30,7 @@ import types
 from pathlib import Path
 from typing import Iterable, Optional
 
+import soundfile as sf
 import torch
 import torch.nn as nn
 
@@ -176,14 +177,24 @@ def _write_markdown_report(report_path: Path, report: dict) -> None:
 
     audio_check = report.get("audio_output_replacement_validation")
     if audio_check is not None:
+        case_name = audio_check.get("case", "text")
+        audio_lines = [
+            "",
+            f"## Audio Output Replacement Validation: {case_name}",
+            "",
+            f"- supported: {audio_check['supported']}",
+            f"- error_type: {audio_check['error_type']}",
+            f"- error_message: {audio_check['error_message']}",
+        ]
+        if audio_check.get("output_text") is not None:
+            audio_lines.append(f"- output_text: {audio_check['output_text']}")
+        if audio_check.get("audio_file") is not None:
+            audio_lines.append(f"- audio_file: {audio_check['audio_file']}")
+        if audio_check.get("output_ids_file") is not None:
+            audio_lines.append(f"- output_ids_file: {audio_check['output_ids_file']}")
         lines.extend(
-            [
-                "",
-                "## Audio Output Replacement Validation",
-                "",
-                f"- supported: {audio_check['supported']}",
-                f"- error_type: {audio_check['error_type']}",
-                f"- error_message: {audio_check['error_message']}",
+            audio_lines
+            + [
                 "",
                 "### Rendered Text",
                 "",
@@ -252,6 +263,36 @@ def _collect_text_mismatches(results: list[dict]) -> list[dict]:
     return mismatches
 
 
+def _get_known_case_limitations(case: str, text_meta: dict) -> list[str]:
+    if case == "text":
+        return []
+
+    limitations = []
+    if not text_meta.get("supports_multimodal_position_ids", False):
+        limitations.append(
+            "current text HMONNX artifact does not expose multimodal position_ids/get_rope_index support; "
+            "non-text cases cannot be validated with strict token-level equality"
+        )
+
+    if text_meta.get("prefill_hidden_states_contract") != "accept_hidden_layer_full_prompt_pre_norm":
+        limitations.append(
+            "current text HMONNX artifact only exports last-token hidden states; multimodal talker audio validation "
+            "needs full prompt accept_hidden_layer states"
+        )
+
+    return limitations
+
+
+def _build_unsupported_audio_validation(case: str, rendered_text: str, reasons: list[str]) -> dict:
+    return {
+        "case": case,
+        "rendered_text": rendered_text,
+        "supported": False,
+        "error_type": "UnsupportedConfiguration",
+        "error_message": "; ".join(reasons),
+    }
+
+
 def _resolve_eos_token_ids(eos_token_id, thinker_config) -> set[int]:
     eos_token_ids: set[int] = set()
     if isinstance(eos_token_id, int):
@@ -294,9 +335,15 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
 
     prefill_session = _create_hmonnx_session(_resolve_meta_path(text_meta, "prefill_onnx"))
     decode_session = _create_hmonnx_session(_resolve_meta_path(text_meta, "decode_onnx"))
-    text_supports_deepstack = len(prefill_session.inputs) == 3 + 3 + (2 * num_layers)
+    text_supports_position_ids = bool(text_meta.get("supports_multimodal_position_ids", False))
+    prefill_tensor_input_count = len(prefill_session.inputs) - (2 * num_layers)
+    expected_base_inputs = 6 if text_supports_position_ids else 3
+    text_supports_deepstack = prefill_tensor_input_count == expected_base_inputs + 3
     output_names = text_meta.get("output_names")
     text_supports_hidden_states = output_names == ["logits", "hidden_states"]
+    text_supports_full_prefill_hidden = (
+        text_meta.get("prefill_hidden_states_contract") == "accept_hidden_layer_full_prompt_pre_norm"
+    )
     if not text_supports_hidden_states:
         prefill_output_names = getattr(prefill_session, "get_output_names", lambda: [])()
         decode_output_names = getattr(decode_session, "get_output_names", lambda: [])()
@@ -304,7 +351,9 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
     if accept_hidden_layer is None:
         accept_hidden_layer = getattr(getattr(thinker, "config", None), "accept_hidden_layer", None)
     if accept_hidden_layer is None:
-        accept_hidden_layer = 1
+        accept_hidden_layer = text_meta.get("accept_hidden_layer")
+    if accept_hidden_layer is None:
+        raise ValueError("Qwen3-Omni text HMONNX replacement requires accept_hidden_layer")
     accept_hidden_layer = max(int(accept_hidden_layer), 0)
 
     def _extract_logits_and_hidden_states(output, actual_seq_len: int):
@@ -335,6 +384,66 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
             [CacheTensor(torch.zeros(kv_shape, dtype=torch.float16)) for _ in range(num_layers)],
         )
 
+    def _pad_position_ids(position_ids: torch.Tensor, actual_seq_len: int, target_seq_len: int) -> torch.Tensor:
+        position_ids = position_ids.detach().cpu().to(torch.int32)
+        position_ids = position_ids[:actual_seq_len]
+        if actual_seq_len >= target_seq_len:
+            return position_ids
+        return torch.cat(
+            [
+                position_ids,
+                torch.zeros(target_seq_len - actual_seq_len, dtype=torch.int32),
+            ],
+            dim=0,
+        )
+
+    def _build_prefill_position_ids(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        image_grid_thw,
+        video_grid_thw,
+        feature_attention_mask,
+        use_audio_in_video,
+        video_second_per_grid,
+        target_seq_len: int,
+    ):
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        audio_feature_lengths = None
+        if feature_attention_mask is not None:
+            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+        position_ids, rope_deltas = self.get_rope_index(
+            input_ids,
+            image_grid_thw,
+            video_grid_thw,
+            attention_mask,
+            use_audio_in_video,
+            audio_feature_lengths,
+            video_second_per_grid,
+        )
+        delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
+        rope_deltas = rope_deltas - delta0
+        actual_seq_len = int(input_ids.shape[1])
+        return (
+            _pad_position_ids(position_ids[0, 0], actual_seq_len, target_seq_len),
+            _pad_position_ids(position_ids[1, 0], actual_seq_len, target_seq_len),
+            _pad_position_ids(position_ids[2, 0], actual_seq_len, target_seq_len),
+            rope_deltas.detach().cpu().to(torch.long),
+        )
+
+    def _build_decode_position_ids(decode_past_seq_length: torch.Tensor, rope_deltas: Optional[torch.Tensor]):
+        if rope_deltas is None:
+            position_ids = torch.full(
+                (3, 1),
+                int(decode_past_seq_length.item()),
+                dtype=torch.int32,
+            )
+        else:
+            delta = int(decode_past_seq_length.item()) + int(rope_deltas.reshape(-1)[0].item())
+            position_ids = torch.full((3, 1), delta, dtype=torch.int32)
+        return position_ids[0], position_ids[1], position_ids[2]
+
     def hmonnx_generate(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -343,7 +452,6 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
         eos_token_id=None,
         **kwargs,
     ):
-        del attention_mask
         if input_ids is None:
             raise ValueError("text HMONNX thinker replacement requires input_ids")
 
@@ -363,8 +471,8 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
         image_grid_thw = kwargs.pop("image_grid_thw", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
         kwargs.pop("audio_feature_lengths", None)
-        kwargs.pop("use_audio_in_video", None)
-        kwargs.pop("video_second_per_grid", None)
+        use_audio_in_video = kwargs.pop("use_audio_in_video", None)
+        video_second_per_grid = kwargs.pop("video_second_per_grid", None)
         kwargs.pop("use_cache", None)
         kwargs.pop("cache_position", None)
         kwargs.pop("position_ids", None)
@@ -443,6 +551,19 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
             torch.zeros((1, 1, inputs_embeds.shape[2]), dtype=torch.float16) for _ in range(3)
         ]
         prefill_step_embeds = inputs_embeds[:, :prefill_token_length, :].detach().cpu()
+        rope_deltas = None
+        if text_supports_position_ids:
+            time_position_ids, height_position_ids, width_position_ids, rope_deltas = _build_prefill_position_ids(
+                self,
+                input_ids,
+                attention_mask,
+                image_grid_thw,
+                video_grid_thw,
+                feature_attention_mask,
+                bool(use_audio_in_video),
+                video_second_per_grid,
+                input_sequence_length,
+            )
 
         past_key_caches, past_value_caches = _empty_caches()
         current_input_length = torch.tensor([prefill_token_length], dtype=torch.int32)
@@ -450,9 +571,13 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
 
         prefill_inputs = [
             inputs_embeds.to(torch.float16),
+        ]
+        if text_supports_position_ids:
+            prefill_inputs.extend([time_position_ids, height_position_ids, width_position_ids])
+        prefill_inputs.extend([
             past_seq_length,
             current_input_length,
-        ]
+        ])
         if text_supports_deepstack:
             prefill_inputs.extend(deepstack_tensors)
 
@@ -465,6 +590,11 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
         next_token = torch.argmax(prefill_logits[:, -1, :], dim=-1, keepdim=True)
         generated_hidden_states = []
         if need_hidden_states:
+            if not text_supports_full_prefill_hidden and prefill_hidden_states is not None and prefill_token_length > 1:
+                raise NotImplementedError(
+                    "Current text HMONNX artifact does not provide full prefill hidden states. Re-export text HMONNX "
+                    "with prefill_full_accept_hidden=True before validating Qwen3-Omni talker audio generation."
+                )
             generated_hidden_states.append(_build_step_hidden_states(prefill_step_embeds, prefill_hidden_states))
 
         eos_token_ids = _resolve_eos_token_ids(eos_token_id, self.config)
@@ -484,9 +614,13 @@ def _build_text_hmonnx_generate_patch(thinker, text_meta: dict, logger, accept_h
 
             decode_inputs = [
                 token_embedding(next_token.cpu()).to(torch.float16),
+            ]
+            if text_supports_position_ids:
+                decode_inputs.extend(_build_decode_position_ids(decode_past_seq_length, rope_deltas))
+            decode_inputs.extend([
                 decode_past_seq_length,
                 one_length,
-            ]
+            ])
             if text_supports_deepstack:
                 decode_inputs.extend(zero_decode_deepstack)
 
@@ -542,12 +676,12 @@ def _ensure_chat_template(tokenizer, model_dir: Path) -> None:
     tokenizer.chat_template = chat_template
 
 
-def _prepare_text_inputs(tokenizer, prompt: str, device: torch.device):
-    conversation = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+def _prepare_text_inputs(tokenizer, device: torch.device, text_prompt: Optional[str] = None):
+    conversation, _ = build_conversation("text", text_prompt=text_prompt)
     text = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     inputs = tokenizer(text=text, return_tensors="pt", padding=True)
     inputs = inputs.to(device)
-    return text, inputs
+    return text, inputs, False
 
 
 def _prepare_case_inputs(processor, case: str, device: torch.device, dtype: torch.dtype, text_prompt: Optional[str] = None):
@@ -571,23 +705,36 @@ def _prepare_case_inputs(processor, case: str, device: torch.device, dtype: torc
     return rendered_text, inputs, use_audio_in_video
 
 
+def _prepare_inputs_for_case(
+    tokenizer,
+    device: torch.device,
+    dtype: torch.dtype,
+    case: str,
+    processor=None,
+):
+    if case == "text":
+        return _prepare_text_inputs(tokenizer, device)
+    if processor is None:
+        raise RuntimeError(f"processor is required for multimodal case={case}")
+    return _prepare_case_inputs(processor, case, device, dtype)
+
+
 def _run_dialogue_case(
     native_model,
     tokenizer,
-    prompt: Optional[str],
+    case: str,
     max_new_tokens: int,
     processor=None,
-    case: Optional[str] = None,
 ):
     device = next(native_model.parameters()).device
     dtype = next(native_model.parameters()).dtype
-    if case is None:
-        rendered_text, inputs = _prepare_text_inputs(tokenizer, prompt, device)
-        use_audio_in_video = False
-    else:
-        if processor is None:
-            raise RuntimeError(f"processor is required for multimodal case={case}")
-        rendered_text, inputs, use_audio_in_video = _prepare_case_inputs(processor, case, device, dtype, prompt)
+    rendered_text, inputs, use_audio_in_video = _prepare_inputs_for_case(
+        tokenizer,
+        device,
+        dtype,
+        case,
+        processor=processor,
+    )
 
     with torch.no_grad():
         output = native_model.generate(
@@ -619,14 +766,25 @@ def _attempt_audio_output(
     processor,
     max_new_tokens: int,
     talker_max_new_tokens: int,
+    output_dir: Optional[Path] = None,
+    case: str = "text",
 ):
     device = next(native_model.parameters()).device
     dtype = next(native_model.parameters()).dtype
-    rendered_text, inputs, use_audio_in_video = _prepare_case_inputs(processor, "text", device, dtype)
+    rendered_text, inputs, use_audio_in_video = _prepare_inputs_for_case(
+        tokenizer,
+        device,
+        dtype,
+        case,
+        processor=processor,
+    )
+    audio_file = None
+    output_ids_file = None
+    output_text = None
 
     try:
         with torch.no_grad():
-            native_model.generate(
+            generated = native_model.generate(
                 **inputs,
                 return_audio=True,
                 speaker="Ethan",
@@ -635,8 +793,53 @@ def _attempt_audio_output(
                 thinker_max_new_tokens=max_new_tokens,
                 talker_max_new_tokens=talker_max_new_tokens,
             )
+
+        sequences = _extract_sequence_tensor(generated)
+        new_tokens = sequences[:, inputs["input_ids"].shape[1] :]
+        output_text = tokenizer.batch_decode(
+            new_tokens,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+
+        audio = generated[1] if isinstance(generated, tuple) and len(generated) > 1 else None
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            case_slug = case.replace("/", "_").replace(" ", "_")
+            output_ids_name = (
+                "text_hmonnx_talker_output_ids.pt"
+                if case_slug == "text"
+                else f"text_hmonnx_talker_{case_slug}_output_ids.pt"
+            )
+            output_ids_path = output_dir / output_ids_name
+            torch.save(
+                {
+                    "case": case,
+                    "input_ids": inputs["input_ids"].detach().cpu(),
+                    "output_ids": sequences.detach().cpu(),
+                    "new_tokens": new_tokens.detach().cpu(),
+                    "output_text": output_text,
+                },
+                output_ids_path,
+            )
+            output_ids_file = str(output_ids_path)
+
+        if audio is not None and output_dir is not None:
+            audio_name = (
+                "text_hmonnx_talker_output.wav"
+                if case_slug == "text"
+                else f"text_hmonnx_talker_{case_slug}_output.wav"
+            )
+            audio_path = output_dir / audio_name
+            sf.write(
+                str(audio_path),
+                audio.reshape(-1).to(dtype=torch.float32).detach().cpu().numpy(),
+                samplerate=24000,
+            )
+            audio_file = str(audio_path)
     except Exception as exc:
         return {
+            "case": case,
             "rendered_text": rendered_text,
             "supported": False,
             "error_type": type(exc).__name__,
@@ -644,8 +847,12 @@ def _attempt_audio_output(
         }
 
     return {
+        "case": case,
         "rendered_text": rendered_text,
         "supported": True,
+        "output_text": output_text,
+        "audio_file": audio_file,
+        "output_ids_file": output_ids_file,
         "error_type": None,
         "error_message": None,
     }
@@ -687,24 +894,23 @@ def main(args):
     tokenizer.padding_side = "left"
     _ensure_chat_template(tokenizer, Path(hf_model_path))
 
+    validation_case = args.case
+
     processor = None
-    if args.case:
+    if validation_case != "text":
         from xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe import Qwen3OmniMoeProcessor
 
         processor = Qwen3OmniMoeProcessor.from_pretrained(hf_model_path)
-
-    prompts = args.prompt if args.prompt else _default_prompts()
-    validation_items = []
-    if args.case:
-        validation_items.extend({"case": case, "prompt": None} for case in args.case)
-    else:
-        validation_items.extend({"case": None, "prompt": prompt} for prompt in prompts)
+    validation_item = {"case": validation_case, "prompt": None}
 
     report = {
         "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "hf_model_path": hf_model_path,
         "work_dir": str(work_dir),
         "text_meta": str(Path(text_meta["_meta_path"]).resolve()) if "_meta_path" in text_meta else None,
+        "case": validation_case,
+        "known_case_limitations": [],
+        "strict_text_match_enabled": True,
         "max_new_tokens": args.max_new_tokens,
         "talker_max_new_tokens": args.talker_max_new_tokens,
         "device_map": resolved_device_map,
@@ -713,17 +919,20 @@ def main(args):
     }
 
     logger.info("Running native HF baseline dialogue")
-    baseline_results = [
-        _run_dialogue_case(
-            native_model,
-            tokenizer,
-            item["prompt"],
-            args.max_new_tokens,
-            processor=processor,
-            case=item["case"],
-        )
-        for item in validation_items
-    ]
+    baseline_result = _run_dialogue_case(
+        native_model,
+        tokenizer,
+        validation_case,
+        args.max_new_tokens,
+        processor=processor,
+    )
+
+    known_case_limitations = _get_known_case_limitations(validation_case, text_meta)
+    strict_text_match_enabled = not known_case_limitations
+    report["known_case_limitations"] = known_case_limitations
+    report["strict_text_match_enabled"] = strict_text_match_enabled
+    for limitation in known_case_limitations:
+        logger.warning(f"known validation limitation for case={validation_case}: {limitation}")
 
     logger.info("Replacing HF thinker.generate with text HMONNX")
     original_generate = native_model.thinker.generate
@@ -736,30 +945,33 @@ def main(args):
     )
 
     try:
-        replacement_results = [
-            _run_dialogue_case(
-                native_model,
-                tokenizer,
-                item["prompt"],
-                args.max_new_tokens,
-                processor=processor,
-                case=item["case"],
+        replacement_result = _run_dialogue_case(
+            native_model,
+            tokenizer,
+            validation_case,
+            args.max_new_tokens,
+            processor=processor,
+        )
+        if known_case_limitations:
+            report["audio_output_replacement_validation"] = _build_unsupported_audio_validation(
+                validation_case,
+                baseline_result["rendered_text"],
+                known_case_limitations,
             )
-            for item in validation_items
-        ]
-        if processor is not None:
+        else:
             report["audio_output_replacement_validation"] = _attempt_audio_output(
                 native_model,
                 tokenizer,
                 processor,
                 args.max_new_tokens,
                 args.talker_max_new_tokens,
+                output_dir=work_dir / "text_hmonnx_talker_output",
+                case=validation_case,
             )
     finally:
         native_model.thinker.generate = original_generate
 
-    for item, baseline, replacement in zip(validation_items, baseline_results, replacement_results):
-        report["results"].append(_build_report_item(item, baseline, replacement))
+    report["results"].append(_build_report_item(validation_item, baseline_result, replacement_result))
 
     report_path = work_dir / "text_hmonnx_llm_replacement_report.json"
     save_json(report_path, report)
@@ -778,17 +990,18 @@ def main(args):
             item["normalized_exact_match"],
         )
 
-    if report["audio_output_replacement_validation"] is not None:
-        audio_check = report["audio_output_replacement_validation"]
+    audio_check = report["audio_output_replacement_validation"]
+    if audio_check is not None:
         logger.info(
-            "audio_output_replacement_supported=%s | error_type=%s | error_message=%s",
+            "audio_output_replacement case=%s | supported=%s | error_type=%s | error_message=%s",
+            audio_check.get("case", validation_case),
             audio_check["supported"],
             audio_check["error_type"],
             audio_check["error_message"],
         )
 
     mismatch_items = _collect_text_mismatches(report["results"])
-    if mismatch_items and not getattr(args, "allow_mismatch_report_only", False):
+    if mismatch_items and not getattr(args, "allow_mismatch_report_only", False) and strict_text_match_enabled:
         mismatch_summaries = [
             f"case={item['case']} prompt={item['prompt']} prefix_tokens={item['common_prefix_token_count']}"
             for item in mismatch_items
@@ -803,14 +1016,13 @@ if __name__ == "__main__":
         description="Validate text HMONNX as a thinker replacement inside HF Qwen3-Omni"
     )
     parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-Omni-30B-A3B-Instruct/")
-    parser.add_argument("--work-dir", type=str, required=True, help="work_dir that contains qwen3omni text HMONNX meta")
-    parser.add_argument("--prompt", action="append", default=None, help="text prompt to validate; repeatable")
+    parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni/Qwen3-Omni-30B-A3B-Instruct-XH2a-text-2k-w4a8_ssfp-ahl24-mmpos-fullhidden", help="work_dir that contains qwen3omni text HMONNX meta")
     parser.add_argument(
         "--case",
-        action="append",
-        default=None,
+        type=str,
+        default="multimodal",
         choices=["text", "vision", "audio", "multimodal"],
-        help="built-in validation case; repeatable",
+        help="single built-in validation case; supports pure text or multimodal input and will validate both text and audio output",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--talker-max-new-tokens", type=int, default=64)

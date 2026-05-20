@@ -30,7 +30,10 @@ def _load_module(monkeypatch, *, resolved_device_map="cuda:5", validation_max_me
 
     fake_api = types.ModuleType("xhquant.api")
     fake_api.CacheTensor = lambda value: value
-    fake_api.get_root_logger = lambda: SimpleNamespace(info=lambda *args, **kwargs: None)
+    fake_api.get_root_logger = lambda: SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+    )
     fake_api.set_random_seed = lambda *args, **kwargs: None
     fake_api.xhquant_init = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "xhquant.api", fake_api)
@@ -86,13 +89,17 @@ def test_main_uses_safe_model_loading_for_auto_device_map(monkeypatch, tmp_path)
 
     monkeypatch.setattr(module, "_run_dialogue_case", lambda *args, **kwargs: {"rendered_text": "", "output_ids": [[]], "output_text": [""]})
     monkeypatch.setattr(module, "_build_text_hmonnx_generate_patch", lambda *args, **kwargs: (lambda *a, **k: None))
+    monkeypatch.setattr(
+        module,
+        "_attempt_audio_output",
+        lambda *args, **kwargs: {"case": "text", "supported": True, "error_type": None, "error_message": None},
+    )
     monkeypatch.setattr(module, "_write_markdown_report", lambda *args, **kwargs: None)
 
     args = SimpleNamespace(
         model="/tmp/fake-model",
         work_dir=str(tmp_path),
-        prompt=["hello"],
-        case=None,
+        case="text",
         max_new_tokens=8,
         talker_max_new_tokens=16,
         device_map="auto",
@@ -147,13 +154,17 @@ def test_main_raises_when_replacement_text_mismatches(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(module, "_run_dialogue_case", lambda *args, **kwargs: next(call_results))
     monkeypatch.setattr(module, "_build_text_hmonnx_generate_patch", lambda *args, **kwargs: (lambda *a, **k: None))
+    monkeypatch.setattr(
+        module,
+        "_attempt_audio_output",
+        lambda *args, **kwargs: {"case": "text", "supported": True, "error_type": None, "error_message": None},
+    )
     monkeypatch.setattr(module, "_write_markdown_report", lambda *args, **kwargs: None)
 
     args = SimpleNamespace(
         model="/tmp/fake-model",
         work_dir=str(tmp_path),
-        prompt=["hello"],
-        case=None,
+        case="text",
         max_new_tokens=8,
         talker_max_new_tokens=16,
         device_map="cuda:0",
@@ -164,3 +175,100 @@ def test_main_raises_when_replacement_text_mismatches(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="Text HMONNX replacement mismatch detected"):
         module.main(args)
+
+
+def test_main_reports_known_multimodal_limitations_without_raising(monkeypatch, tmp_path):
+    module = _load_module(monkeypatch)
+
+    class DummyModel:
+        def __init__(self):
+            self.thinker = SimpleNamespace(generate=lambda *args, **kwargs: None)
+            self.config = SimpleNamespace(talker_config=SimpleNamespace(accept_hidden_layer=24))
+
+        def eval(self):
+            return self
+
+    class DummyModelClass:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            return DummyModel()
+
+    class DummyTokenizer:
+        pad_token_id = 0
+        eos_token = "</s>"
+        padding_side = "left"
+        chat_template = "dummy"
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return DummyTokenizer()
+
+    class DummyProcessor:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return DummyProcessor()
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = DummyTokenizer
+    fake_transformers.Qwen3OmniMoeForConditionalGeneration = DummyModelClass
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    fake_processor_module = types.ModuleType("xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe")
+    fake_processor_module.Qwen3OmniMoeProcessor = DummyProcessor
+    monkeypatch.setitem(
+        sys.modules,
+        "xh_model_zoo.xh_llm.models.qwen3_omni.processing_qwen3_omni_moe",
+        fake_processor_module,
+    )
+
+    monkeypatch.setattr(
+        module,
+        "discover_artifacts",
+        lambda work_dir: {
+            "text": {
+                "_meta_path": "meta.json",
+                "wrap_cfg": {"num_logits_to_keep": 1},
+            }
+        },
+    )
+
+    call_results = iter(
+        [
+            {"rendered_text": "mm prompt", "output_ids": [[1, 2]], "output_text": ["baseline"]},
+            {"rendered_text": "mm prompt", "output_ids": [[3, 4]], "output_text": ["replacement"]},
+        ]
+    )
+    monkeypatch.setattr(module, "_run_dialogue_case", lambda *args, **kwargs: next(call_results))
+    monkeypatch.setattr(module, "_build_text_hmonnx_generate_patch", lambda *args, **kwargs: (lambda *a, **k: None))
+    monkeypatch.setattr(
+        module,
+        "_attempt_audio_output",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("audio validation should be skipped")),
+    )
+    monkeypatch.setattr(module, "_write_markdown_report", lambda *args, **kwargs: None)
+
+    args = SimpleNamespace(
+        model="/tmp/fake-model",
+        work_dir=str(tmp_path),
+        case="multimodal",
+        max_new_tokens=8,
+        talker_max_new_tokens=16,
+        device_map="cuda:0",
+        allow_mismatch_report_only=False,
+        seed=1234,
+        debug=False,
+    )
+
+    module.main(args)
+
+
+def test_upgraded_text_meta_has_no_multimodal_limitations(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    assert module._get_known_case_limitations(
+        "multimodal",
+        {
+            "supports_multimodal_position_ids": True,
+            "prefill_hidden_states_contract": "accept_hidden_layer_full_prompt_pre_norm",
+        },
+    ) == []

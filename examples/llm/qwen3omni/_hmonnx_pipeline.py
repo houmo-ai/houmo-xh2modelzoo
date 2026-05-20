@@ -1465,16 +1465,71 @@ def run_text_hmonnx_chain_forward(
             for tensor in deepstack_tensors
         ]
 
+    def _pad_position_ids(position_ids: torch.Tensor, actual_seq_len: int, target_seq_len: int) -> torch.Tensor:
+        position_ids = position_ids.detach().cpu().to(torch.int32)[:actual_seq_len]
+        if actual_seq_len >= target_seq_len:
+            return position_ids
+        return torch.cat([position_ids, torch.zeros(target_seq_len - actual_seq_len, dtype=torch.int32)], dim=0)
+
+    def _build_prefill_position_ids():
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(inputs["input_ids"])
+        attention_mask = attention_mask.cpu()
+        audio_feature_lengths = None
+        if "feature_attention_mask" in inputs:
+            audio_feature_lengths = torch.sum(inputs["feature_attention_mask"].cpu(), dim=1)
+        if native_model is not None:
+            position_ids, rope_deltas = native_model.thinker.get_rope_index(
+                inputs["input_ids"].cpu(),
+                inputs.get("image_grid_thw"),
+                inputs.get("video_grid_thw"),
+                attention_mask,
+                use_audio_in_video,
+                audio_feature_lengths,
+                inputs.get("video_second_per_grid"),
+            )
+            delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
+            rope_deltas = rope_deltas - delta0
+        else:
+            position_ids = attention_mask.to(torch.float32).cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+            max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
+            rope_deltas = max_position_ids + 1 - torch.sum(attention_mask, dim=-1, keepdim=True)
+        return (
+            _pad_position_ids(position_ids[0, 0], prefill_token_length, input_sequence_length),
+            _pad_position_ids(position_ids[1, 0], prefill_token_length, input_sequence_length),
+            _pad_position_ids(position_ids[2, 0], prefill_token_length, input_sequence_length),
+            rope_deltas.detach().cpu().to(torch.long),
+        )
+
+    def _build_decode_position_ids(decode_past_seq_length: torch.Tensor, rope_deltas: torch.Tensor):
+        delta = int(decode_past_seq_length.item()) + int(rope_deltas.reshape(-1)[0].item())
+        position_ids = torch.full((3, 1), delta, dtype=torch.int32)
+        return position_ids[0], position_ids[1], position_ids[2]
+
+    text_supports_position_ids = bool(text_meta.get("supports_multimodal_position_ids", False))
+    rope_deltas = None
+    if text_supports_position_ids:
+        time_position_ids, height_position_ids, width_position_ids, rope_deltas = _build_prefill_position_ids()
+
     current_input_length = torch.tensor([prefill_token_length], dtype=torch.int32)
     past_seq_length = torch.tensor([0], dtype=torch.int32)
     zero_decode_deepstack = [torch.zeros((1, 1, inputs_embeds.shape[2]), dtype=torch.float16) for _ in range(3)]
 
     prefill_inputs = [
         inputs_embeds.to(torch.float16),
+    ]
+    if text_supports_position_ids:
+        prefill_inputs.extend([time_position_ids, height_position_ids, width_position_ids])
+    prefill_inputs.extend([
         past_seq_length,
         current_input_length,
-    ]
-    text_supports_deepstack = len(prefill_session.inputs) == 3 + 3 + (2 * num_layers)
+    ])
+    prefill_tensor_input_count = len(prefill_session.inputs) - (2 * num_layers)
+    expected_base_inputs = 6 if text_supports_position_ids else 3
+    text_supports_deepstack = prefill_tensor_input_count == expected_base_inputs + 3
     if text_supports_deepstack:
         prefill_inputs.extend(deepstack_tensors)
 
@@ -1524,9 +1579,13 @@ def run_text_hmonnx_chain_forward(
 
         decode_inputs = [
             token_embedding(next_token).to(torch.float16),
+        ]
+        if text_supports_position_ids:
+            decode_inputs.extend(_build_decode_position_ids(decode_past_seq_length, rope_deltas))
+        decode_inputs.extend([
             decode_past_seq_length,
             one_length,
-        ]
+        ])
         if text_supports_deepstack:
             decode_inputs.extend(zero_decode_deepstack)
         decode_logits = decode_session.forward(

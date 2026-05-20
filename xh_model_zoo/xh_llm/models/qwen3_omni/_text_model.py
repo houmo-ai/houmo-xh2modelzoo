@@ -487,6 +487,9 @@ class _Qwen3MoeModel(DynamicModule):
     def forward(
         self,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        time_position_ids: Optional[Tensor] = None,
+        height_position_ids: Optional[Tensor] = None,
+        width_position_ids: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         deepstack_visual_embed_0: Optional[Tensor] = None,
@@ -501,9 +504,24 @@ class _Qwen3MoeModel(DynamicModule):
 
         causal_mask = None  # 在Qwen2Attention中处理
         hidden_states = inputs_embeds
+        accept_hidden_states = inputs_embeds if self.accept_hidden_layer == 0 else None
 
-        cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
-        sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
+        if self.use_multimodal_position_ids:
+            cos_cache = self.rotary_emb.cos_cached[0, 0]
+            sin_cache = self.rotary_emb.sin_cached[0, 0]
+
+            time_cos = cos_cache[time_position_ids] * self.time_mask
+            time_sin = sin_cache[time_position_ids] * self.time_mask
+            height_cos = cos_cache[height_position_ids] * self.height_mask
+            height_sin = sin_cache[height_position_ids] * self.height_mask
+            width_cos = cos_cache[width_position_ids] * self.width_mask
+            width_sin = sin_cache[width_position_ids] * self.width_mask
+
+            cos = (time_cos + height_cos + width_cos).unsqueeze(0).unsqueeze(0)
+            sin = (time_sin + height_sin + width_sin).unsqueeze(0).unsqueeze(0)
+        else:
+            cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
+            sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
 
         # cos = self.cos_embeding(position_ids)
         # sin = self.sin_embeding(position_ids)
@@ -539,9 +557,14 @@ class _Qwen3MoeModel(DynamicModule):
                 hidden_states = hidden_states + deepstack_visual_embed_1
             if deepstack_visual_embed_2 is not None and idx == self.deepstack_inject_layers[2]:
                 hidden_states = hidden_states + deepstack_visual_embed_2
+            if self.accept_hidden_capture_layer_idx is not None and idx == self.accept_hidden_capture_layer_idx:
+                accept_hidden_states = hidden_states
             # break
             if self.only_first_block:
                 break
+
+        if accept_hidden_states is None:
+            raise RuntimeError(f"accept_hidden_layer={self.accept_hidden_layer} was not captured")
 
         # hidden_states = hidden_states[
         #     :,
@@ -557,11 +580,14 @@ class _Qwen3MoeModel(DynamicModule):
             pass
         else:
             # 取最后一个token的输出
+            if accept_hidden_states is not None and not self.prefill_full_accept_hidden:
+                accept_hidden_states = self.llm_gather(accept_hidden_states, current_input_length - 1)
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
         hidden_states = self.norm(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
+            hidden_states=(accept_hidden_states,),
         )
 
     def _setup_cos_sin_embeding(self):
@@ -571,7 +597,19 @@ class _Qwen3MoeModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
-        self.deepstack_inject_layers = [8, 16, 24]
+        # Keep this aligned with Qwen3OmniMoeThinkerTextModel.forward, which adds
+        # the three deepstack feature tensors after the first three decoder layers.
+        self.deepstack_inject_layers = [0, 1, 2]
+        self.use_multimodal_position_ids = bool(cfg.get("use_multimodal_position_ids", False))
+        self.prefill_full_accept_hidden = bool(cfg.get("prefill_full_accept_hidden", False))
+        accept_hidden_layer = cfg.get("accept_hidden_layer", None)
+        if accept_hidden_layer is None:
+            raise ValueError("Qwen3-Omni text wrapper requires cfg.accept_hidden_layer")
+        self.accept_hidden_layer = max(int(accept_hidden_layer), 0)
+        if self.accept_hidden_layer == 0:
+            self.accept_hidden_capture_layer_idx = None
+        else:
+            self.accept_hidden_capture_layer_idx = self.accept_hidden_layer - 1
         # max_seq_len = cfg.max_sequence_length
         # self.rotary_matrix_cache = RotaryMatrixCache(self.rotary_emb, max_seq_len)
 
@@ -617,6 +655,53 @@ class _Qwen3MoeModel(DynamicModule):
         else:
             self._setup_cos_sin_embeding()
 
+        rope_scaling = None
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        if mrope_section is None:
+            rope_scaling = getattr(getattr(self, "config", None), "rope_scaling", None)
+            if rope_scaling is None:
+                rope_scaling = getattr(getattr(self, "config", None), "rope_parameters", None)
+            if isinstance(rope_scaling, dict):
+                mrope_section = rope_scaling.get("mrope_section")
+        if mrope_section is None:
+            mrope_section = [24, 20, 20]
+        if rope_scaling is None:
+            rope_scaling = getattr(getattr(self, "config", None), "rope_scaling", None)
+            if rope_scaling is None:
+                rope_scaling = getattr(getattr(self, "config", None), "rope_parameters", None)
+        mrope_interleaved = True
+        if isinstance(rope_scaling, dict):
+            mrope_interleaved = bool(rope_scaling.get("mrope_interleaved", rope_scaling.get("interleaved", True)))
+
+        section_sizes = [int(value) for value in mrope_section]
+        rotary_half_dim = sum(section_sizes)
+        time_mask = torch.ones(rotary_half_dim, dtype=torch.float16)
+        height_mask = torch.zeros(rotary_half_dim, dtype=torch.float16)
+        width_mask = torch.zeros(rotary_half_dim, dtype=torch.float16)
+        if mrope_interleaved:
+            def _interleaved_ids(offset: int, section_size: int) -> torch.Tensor:
+                end = min(section_size * 3, rotary_half_dim)
+                if end <= offset:
+                    return torch.empty(0, dtype=torch.long)
+                return torch.arange(offset, end, 3)
+
+            height_ids = _interleaved_ids(1, section_sizes[1])
+            width_ids = _interleaved_ids(2, section_sizes[2])
+            height_mask[height_ids] = 1
+            width_mask[width_ids] = 1
+            time_mask[height_ids] = 0
+            time_mask[width_ids] = 0
+        else:
+            time_mask.zero_()
+            time_mask[: section_sizes[0]] = 1
+            height_start = section_sizes[0]
+            height_end = height_start + section_sizes[1]
+            height_mask[height_start:height_end] = 1
+            width_mask[height_end:] = 1
+        self.register_buffer("time_mask", torch.cat([time_mask, time_mask], dim=0), persistent=False)
+        self.register_buffer("height_mask", torch.cat([height_mask, height_mask], dim=0), persistent=False)
+        self.register_buffer("width_mask", torch.cat([width_mask, width_mask], dim=0), persistent=False)
+
         return self
 
 
@@ -630,6 +715,9 @@ class _Qwen3OmniMoeThinkerForConditionalGeneration(DynamicModule):
     def forward(
         self,
         inputs_embeds: Optional[Tensor] = None,
+        time_position_ids: Optional[Tensor] = None,
+        height_position_ids: Optional[Tensor] = None,
+        width_position_ids: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         deepstack_visual_embed_0: Optional[Tensor] = None,
@@ -640,6 +728,9 @@ class _Qwen3OmniMoeThinkerForConditionalGeneration(DynamicModule):
     ):
         outputs = self.model(
             inputs_embeds=inputs_embeds,
+            time_position_ids=time_position_ids,
+            height_position_ids=height_position_ids,
+            width_position_ids=width_position_ids,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             deepstack_visual_embed_0=deepstack_visual_embed_0,
@@ -649,8 +740,9 @@ class _Qwen3OmniMoeThinkerForConditionalGeneration(DynamicModule):
             past_value_cache=past_value_cache,
         )
         hidden_states = outputs.last_hidden_state
+        accept_hidden_states = outputs.hidden_states[0]
         logits = self.lm_head(hidden_states)
-        return logits, hidden_states
+        return logits, accept_hidden_states
 
     def _setup(self, cfg: Optional[Dict] = None):
         return self

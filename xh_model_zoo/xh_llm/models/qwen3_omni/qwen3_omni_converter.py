@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from safetensors import safe_open
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 from transformers import Qwen3MoeForCausalLM
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeThinkerConfig
 from transformers.utils.quantization_config import QuantizationMethod
@@ -44,26 +44,92 @@ def _release_cuda_memory(logger=None, label: Optional[str] = None):
         logger.info(f"released converter resources and cleared CUDA cache{suffix}")
 
 
-def _normalize_text_rope_scaling(config) -> None:
-    text_config = getattr(config, "text_config", None)
-    if text_config is None and hasattr(config, "thinker_config"):
-        text_config = getattr(config.thinker_config, "text_config", None)
-    if text_config is None:
-        return
+def _iter_qwen3omni_nested_configs(config):
+    seen = set()
+    stack = [config]
+    while stack:
+        nested_config = stack.pop()
+        if nested_config is None or not hasattr(nested_config, "__dict__"):
+            continue
+        nested_id = id(nested_config)
+        if nested_id in seen:
+            continue
+        seen.add(nested_id)
+        yield nested_config
+        for attr_name, child_config in vars(nested_config).items():
+            if attr_name.endswith("_config") and hasattr(child_config, "__dict__"):
+                stack.append(child_config)
 
-    rope_scaling = getattr(text_config, "rope_scaling", None)
-    if rope_scaling is None:
-        rope_scaling = getattr(text_config, "rope_parameters", None)
-    if isinstance(rope_scaling, dict):
-        rope_scaling = dict(rope_scaling)
-        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
-        if rope_type == "default":
-            rope_type = "linear"
-        rope_scaling["rope_type"] = rope_type
-        rope_scaling["type"] = rope_type
-        if rope_type == "linear":
-            rope_scaling.setdefault("factor", 1.0)
-        text_config.rope_scaling = rope_scaling
+
+def _normalize_text_rope_scaling(config) -> None:
+    for nested_config in _iter_qwen3omni_nested_configs(config):
+        rope_scaling = getattr(nested_config, "rope_scaling", None)
+        if rope_scaling is None:
+            rope_scaling = getattr(nested_config, "rope_parameters", None)
+        if isinstance(rope_scaling, dict):
+            rope_scaling = dict(rope_scaling)
+            rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
+            if rope_type == "default":
+                rope_type = "linear"
+            rope_scaling["rope_type"] = rope_type
+            rope_scaling["type"] = rope_type
+            if rope_type == "linear":
+                rope_scaling.setdefault("factor", 1.0)
+            nested_config.rope_scaling = rope_scaling
+
+
+def _set_missing_config_value(config, name: str, value: Optional[int]) -> None:
+    if config is None or value is None:
+        return
+    if getattr(config, name, None) is None:
+        setattr(config, name, int(value))
+
+
+def _ensure_qwen3omni_special_token_ids(config, model_dir: str) -> None:
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    except Exception:
+        tokenizer = None
+
+    bos_token_id = getattr(tokenizer, "bos_token_id", None) if tokenizer is not None else None
+    eos_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer is not None else None
+    pad_token_id = getattr(tokenizer, "pad_token_id", None) if tokenizer is not None else None
+
+    if bos_token_id is None:
+        bos_token_id = getattr(config, "bos_token_id", None)
+    if bos_token_id is None:
+        bos_token_id = getattr(config, "im_start_token_id", None)
+    if eos_token_id is None:
+        eos_token_id = getattr(config, "eos_token_id", None)
+    if eos_token_id is None:
+        eos_token_id = getattr(config, "im_end_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = getattr(config, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
+
+    for nested_config in _iter_qwen3omni_nested_configs(config):
+        _set_missing_config_value(nested_config, "bos_token_id", bos_token_id)
+        _set_missing_config_value(nested_config, "eos_token_id", eos_token_id)
+        _set_missing_config_value(nested_config, "pad_token_id", pad_token_id)
+
+
+def _resolve_accept_hidden_layer(config: Qwen3OmniMoeConvertConfig, thinker) -> Optional[int]:
+    accept_hidden_layer = getattr(config, "accept_hidden_layer", None)
+    if accept_hidden_layer is not None:
+        return int(accept_hidden_layer)
+
+    thinker_config = getattr(thinker, "config", None)
+    accept_hidden_layer = getattr(thinker_config, "accept_hidden_layer", None)
+    if accept_hidden_layer is not None:
+        return int(accept_hidden_layer)
+
+    talker_config = getattr(thinker_config, "talker_config", None)
+    accept_hidden_layer = getattr(talker_config, "accept_hidden_layer", None)
+    if accept_hidden_layer is not None:
+        return int(accept_hidden_layer)
+
+    return None
 
 
 def _install_qwen3omni_thinker_auto_class_compat() -> None:
@@ -130,6 +196,7 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
                 hf_model_dir,
                 trust_remote_code=model_kwargs.get("trust_remote_code", True),
             )
+        _ensure_qwen3omni_special_token_ids(config, hf_model_dir)
         _normalize_text_rope_scaling(config)
         return model_cls.from_pretrained(hf_model_dir, config=config, **model_kwargs)
 
@@ -409,16 +476,31 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         text_register_wrap_modules()
 
         # ---- 4. Wrap model for FX tracing ----
-        wrap_cfg = Config(
-            dict(
-                batch_size=batch_size,
-                max_sequence_length=context_length,
-                input_sequence_length=input_sequence_length,
-                use_cache=True,
-                num_logits_to_keep=config.num_logits_to_keep,
-                kv_cache=dict(cache_axis=2),
-            )
+        accept_hidden_layer = _resolve_accept_hidden_layer(config, thinker)
+        if accept_hidden_layer is None:
+            raise ValueError("Qwen3-Omni text export requires accept_hidden_layer")
+        wrap_cfg_dict = dict(
+            batch_size=batch_size,
+            max_sequence_length=context_length,
+            input_sequence_length=input_sequence_length,
+            use_cache=True,
+            num_logits_to_keep=config.num_logits_to_keep,
+            kv_cache=dict(cache_axis=2),
+            accept_hidden_layer=accept_hidden_layer,
+            use_multimodal_position_ids=config.use_multimodal_position_ids,
+            prefill_full_accept_hidden=config.prefill_full_accept_hidden,
         )
+        meta_info["accept_hidden_layer"] = accept_hidden_layer
+        meta_info["hidden_states_output_contract"] = "accept_hidden_layer_pre_norm"
+        meta_info["supports_multimodal_position_ids"] = bool(config.use_multimodal_position_ids)
+        meta_info["position_ids_contract"] = "qwen3_omni_get_rope_index_t_h_w"
+        meta_info["prefill_hidden_states_contract"] = (
+            "accept_hidden_layer_full_prompt_pre_norm"
+            if config.prefill_full_accept_hidden
+            else "accept_hidden_layer_last_token_pre_norm"
+        )
+        meta_info["decode_hidden_states_contract"] = "accept_hidden_layer_single_token_pre_norm"
+        wrap_cfg = Config(wrap_cfg_dict)
         meta_info["wrap_cfg"] = wrap_cfg.to_dict()
 
         wrapped_model = wrap_llm_model(thinker, wrap_cfg)
@@ -447,6 +529,10 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         # ---- 6. Prepare prefill inputs ----
         input_ids_t = torch.randint(0, 1000, (1, input_sequence_length), dtype=torch.long)
         inputs_embeds = token_embedding(input_ids_t)
+        position_ids_t = torch.arange(input_sequence_length, dtype=torch.long)
+        time_position_ids_t = position_ids_t.clone()
+        height_position_ids_t = position_ids_t.clone()
+        width_position_ids_t = position_ids_t.clone()
         deepstack_visual_embed_0 = torch.zeros_like(inputs_embeds)
         deepstack_visual_embed_1 = torch.zeros_like(inputs_embeds)
         deepstack_visual_embed_2 = torch.zeros_like(inputs_embeds)
@@ -456,6 +542,9 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
 
         inputs = (
             inputs_embeds,
+            time_position_ids_t,
+            height_position_ids_t,
+            width_position_ids_t,
             past_seq_length_t,
             current_input_length_t,
             deepstack_visual_embed_0,
@@ -467,6 +556,9 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
 
         input_names = [
             "inputs_embeds",
+            "time_position_ids",
+            "height_position_ids",
+            "width_position_ids",
             "past_seq_length",
             "current_input_length",
             "deepstack_visual_embed_0",
@@ -478,7 +570,7 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         for i in range(num_decoder_layers):
             input_names.append(f"past_value_cache_{i}")
         output_names = ["logits", "hidden_states"]
-        meta_info["artifact_contract_version"] = 2
+        meta_info["artifact_contract_version"] = 3
         meta_info["output_names"] = output_names
 
         prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
@@ -505,6 +597,9 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
         # ---- 8. Export decode HMONNX ----
         decode_inputs = (
             inputs_embeds[:, :1, :],
+            time_position_ids_t[:1],
+            height_position_ids_t[:1],
+            width_position_ids_t[:1],
             past_seq_length_t,
             torch.ones_like(current_input_length_t),
             deepstack_visual_embed_0[:, :1, :],
@@ -963,8 +1058,4 @@ class Qwen3OmniMoeConverterXH2a(HFTransfromersConverter):
 
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen3OmniMoeConvertConfig, output_dir: str):
-        quant_config = create_quant_config(config.quant_scheme)
-        is_ssfp = is_ssfp_quant_config(quant_config)
-        if is_ssfp and not cls._is_gptqmodel_checkpoint(hf_model_path):
-            assert config.quant_weight is not None and Path(config.quant_weight).exists()
         cls(config)._convert(hf_model_path, output_dir)
