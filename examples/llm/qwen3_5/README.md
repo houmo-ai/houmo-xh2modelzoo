@@ -86,6 +86,7 @@ python \
 通用约定：
 
 - 在仓库根目录运行：`export PYTHONPATH=./`，并用 `CUDA_VISIBLE_DEVICES=<gpu>` 绑定单张卡。
+- `HEAD_W_BITS=${HEAD_W_BITS:-4}`：draft lm_head 默认 W4；需要保持 W8 时执行前设置 `HEAD_W_BITS=8`。
 - MTP 默认 `--num_draft_tokens 4`；DFlash 默认 `--num_draft_tokens 9`，对应 draft decode input length 为 `10`。
 - Dense 模型使用 `examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py`，GPTQ/quant weight 目录通过 `--hf_model_dir` 指定。
 - 文中的 `weights/...` 和 `/data01/home/yujy/work/auto-round/output/...` 是当前批处理脚本使用的约定路径；本机目录不同则按实际位置替换。
@@ -107,11 +108,11 @@ MTP：先导 W4 head 完整产物。
 ```bash
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_27b
 CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -119,16 +120,16 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR"
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=weights/Qwen3.5-9B
-MTPK=81920
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -136,15 +137,16 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR"
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=5
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -152,6 +154,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
@@ -160,11 +163,11 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=6
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_6_27b
 CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -172,6 +175,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
@@ -180,12 +184,11 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=7
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
-MTPK=81920
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -193,6 +196,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
@@ -201,12 +205,11 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=4
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_6_27b
 CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
-MTPK=81920
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -214,6 +217,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
@@ -241,6 +245,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
+  --spec-draft-head-weight-bits 8 \
   --work_dir "$WORK_DIR"
 ```
 
@@ -249,12 +254,12 @@ DFlash：先导 W4 head 完整产物。
 ```bash
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_27b
 CONFIG=configs/qwen3_5/qwen3_5_27b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/sym-mode1
 DFLASH_MODEL_DIR=weights/Qwen3.5-27B-DFlash
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -262,6 +267,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode dflash \
   --num_draft_tokens 9 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --dflash_model_dir "$DFLASH_MODEL_DIR" \
   --work_dir "$WORK_DIR"
 ```
@@ -287,6 +293,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode dflash \
   --num_draft_tokens 9 \
+  --spec-draft-head-weight-bits 8 \
   --dflash_model_dir "$DFLASH_MODEL_DIR" \
   --work_dir "$WORK_DIR"
 
@@ -308,6 +315,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --max_sequence_length 8192 \
   --spec_decode_mode dflash \
   --num_draft_tokens 9 \
+  --spec-draft-head-weight-bits 4 \
   --dflash_model_dir "$DFLASH_MODEL_DIR" \
   --work_dir "$WORK_DIR"
 ```
@@ -326,11 +334,11 @@ MTP：先导 W4 head 完整产物。
 ```bash
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_35b_a3b
 MODEL_DIR=weights/Qwen3.5-35B-A3B
 QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --model "$MODEL_DIR" \
   --context-length 8192 \
@@ -338,6 +346,7 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --quant-type w4a8h1_ssfp \
   --spec-decode-mode mtp \
   --num-draft-tokens 4 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --quant-weight "$QUANT_WEIGHT" \
   --work-dir "$WORK_DIR"
 ```
@@ -362,6 +371,7 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --quant-type w4a8h1_ssfp \
   --spec-decode-mode mtp \
   --num-draft-tokens 4 \
+  --spec-draft-head-weight-bits 8 \
   --quant-weight "$QUANT_WEIGHT" \
   --work-dir "$WORK_DIR"
 ```
@@ -371,12 +381,12 @@ DFlash：先导 W4 head 完整产物。
 ```bash
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-TS=$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_35b_a3b
 MODEL_DIR=weights/Qwen3.5-35B-A3B
 QUANT_WEIGHT=/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only
 DFLASH_MODEL_DIR=weights/Qwen3.5-35B-A3B-DFlash
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_dflash_draft9_input10_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h1_ssfp_gptq_spec_dflash_draft9_input10_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --model "$MODEL_DIR" \
   --context-length 8192 \
@@ -384,6 +394,7 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --quant-type w4a8h1_ssfp \
   --spec-decode-mode dflash \
   --num-draft-tokens 9 \
+  --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --quant-weight "$QUANT_WEIGHT" \
   --dflash-model-dir "$DFLASH_MODEL_DIR" \
   --work-dir "$WORK_DIR"
@@ -410,6 +421,7 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --quant-type w4a8h1_ssfp \
   --spec-decode-mode dflash \
   --num-draft-tokens 9 \
+  --spec-draft-head-weight-bits 8 \
   --quant-weight "$QUANT_WEIGHT" \
   --dflash-model-dir "$DFLASH_MODEL_DIR" \
   --work-dir "$WORK_DIR"

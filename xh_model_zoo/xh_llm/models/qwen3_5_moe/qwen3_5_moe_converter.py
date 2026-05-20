@@ -109,6 +109,28 @@ def _load_dflash_target_layer_ids(dflash_model_dir: str) -> List[int]:
     return list(target_layer_ids)
 
 
+DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
+
+
+def _build_spec_draft_quant_config(head_weight_bits: int) -> ConfigDict:
+    if head_weight_bits == 8:
+        return ConfigDict(quant_type=DRAFT_BASE_QUANT_TYPE)
+    if head_weight_bits != 4:
+        raise ValueError(f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8.")
+    return ConfigDict(
+        quant_type=DRAFT_BASE_QUANT_TYPE,
+        nodes_cfg=dict(
+            lm_head=dict(
+                w_schema=dict(
+                    bits=4,
+                    fp_mode="ssfp",
+                    hidden_bit=False,
+                )
+            )
+        ),
+    )
+
+
 class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
@@ -705,6 +727,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             meta_info["spec_decode_block_size"] = num_draft_tokens
             meta_info["spec_decode_hidden_output_name"] = "post_norm_hidden"
             meta_info["spec_decode_verify_length"] = verify_length
+            meta_info["spec_decode_draft_head_weight_bits"] = self.config.spec_draft_head_weight_bits
         elif spec_decode_mode == "dflash":
             draft_onnx_files = self._export_dflash_draft_model(
                 hf_model_path=hf_model_path,
@@ -723,6 +746,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             meta_info["spec_decode_block_size"] = num_draft_tokens
             meta_info["spec_decode_hidden_output_name"] = "target_hidden"
             meta_info["spec_decode_verify_length"] = verify_length
+            meta_info["spec_decode_draft_head_weight_bits"] = self.config.spec_draft_head_weight_bits
 
         with open(work_dir / "meta.json", "w", encoding="utf-8") as fout:
             json.dump(meta_info, fout, ensure_ascii=False, indent=4)
@@ -757,6 +781,8 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         draft_onnx_dir = work_dir / "draft_onnx"
         draft_onnx_dir.mkdir(exist_ok=True, parents=True)
         max_pe_length = 262144
+        draft_head_weight_bits = int(getattr(self.config, "spec_draft_head_weight_bits", 4))
+        logger.info(f"MTP draft quant config: base={DRAFT_BASE_QUANT_TYPE}, lm_head_w_bits={draft_head_weight_bits}")
 
         def _export_one(wrap_cfg_extra: dict, name_suffix: str) -> str:
             model_cfg = dict(
@@ -769,7 +795,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                     batch_size=1,
                     **wrap_cfg_extra,
                 ),
-                quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+                quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
                 export_cfg=ConfigDict(),
                 target_model_dir=hf_model_path,
             )
@@ -828,6 +854,8 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         draft_onnx_dir.mkdir(exist_ok=True, parents=True)
         max_pe_length = 262144
         draft_decode_seq_len = int(verify_length)
+        draft_head_weight_bits = int(getattr(self.config, "spec_draft_head_weight_bits", 4))
+        logger.info(f"DFlash draft quant config: base={DRAFT_BASE_QUANT_TYPE}, lm_head_w_bits={draft_head_weight_bits}")
         with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
             dflash_cfg = json.load(f)
         model_block_size = int(dflash_cfg.get("block_size", draft_decode_seq_len))
@@ -854,7 +882,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                     dtype="float16",
                     batch_size=1,
                 ),
-                quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+                quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
                 export_cfg=ConfigDict(),
                 dflash_model_dir=dflash_model_dir,
                 target_model_dir=hf_model_path,
@@ -991,6 +1019,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 spec_decode_block_size=int(getattr(self.config, "num_draft_tokens", 4)),
                 spec_decode_hidden_output_name=hidden_output_name,
                 spec_decode_verify_length=verify_length,
+                spec_decode_draft_head_weight_bits=int(getattr(self.config, "spec_draft_head_weight_bits", 4)),
             )
         )
         for key, value in draft_onnx_files.items():

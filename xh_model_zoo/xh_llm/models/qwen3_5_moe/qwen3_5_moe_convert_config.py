@@ -38,3 +38,4 @@ class Qwen3_5MoeConvertConfig(LLMConvertConfig):
     spec_decode_mode: Optional[str] = None  # "mtp", "dflash", or None
     num_draft_tokens: int = 4
     dflash_model_dir: Optional[str] = None
+    spec_draft_head_weight_bits: int = 4

@@ -64,6 +64,27 @@ DTYPE_NAME_MAP = {
     "bfp16": "bfloat16",
 }
 
+DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
+
+
+def _build_spec_draft_quant_config(head_weight_bits: int) -> ConfigDict:
+    if head_weight_bits == 8:
+        return ConfigDict(quant_type=DRAFT_BASE_QUANT_TYPE)
+    if head_weight_bits != 4:
+        raise ValueError(f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8.")
+    return ConfigDict(
+        quant_type=DRAFT_BASE_QUANT_TYPE,
+        nodes_cfg=dict(
+            lm_head=dict(
+                w_schema=dict(
+                    bits=4,
+                    fp_mode="ssfp",
+                    hidden_bit=False,
+                )
+            )
+        ),
+    )
+
 
 def _flatten_inputs(inputs):
     flat = []
@@ -338,10 +359,10 @@ def _build_default_work_dir(config_path: str, hf_model_dir: str) -> Path:
 
 
 def _build_draft_only_default_work_dir(
-    existing_work_dir: Path, spec_decode_mode: str
+    existing_work_dir: Path, spec_decode_mode: str, draft_head_weight_bits: int
 ) -> Path:
     existing_work_dir = existing_work_dir.resolve()
-    suffix = f"draft_{spec_decode_mode}"
+    suffix = f"draft_{spec_decode_mode}_w{draft_head_weight_bits}"
     base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}")
     if base.resolve() == existing_work_dir:
         base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}-{int(time.time())}")
@@ -1116,8 +1137,12 @@ def _export_draft_model(
     target_device = cfg.get("target_device", "XH2a")
     max_sequence_length = int(getattr(args, "max_sequence_length", cfg.model.wrap_cfg.max_sequence_length))
     max_pe_length = int(getattr(cfg.model.wrap_cfg, "max_pe_length", cfg.model.wrap_cfg.get("max_pe_length", 262144)))
+    draft_head_weight_bits = int(getattr(args, "spec_draft_head_weight_bits", 4))
 
     logger.info(f"{'=' * 20} Exporting {mode.upper()} draft model {'=' * 20}")
+    logger.info(
+        f"{mode.upper()} draft quant config: base={DRAFT_BASE_QUANT_TYPE}, lm_head_w_bits={draft_head_weight_bits}"
+    )
 
     def _resolve_dflash_decode_seq_len(dflash_model_dir: str) -> int:
         num_draft_tokens = int(getattr(args, "num_draft_tokens", 4))
@@ -1182,7 +1207,7 @@ def _export_draft_model(
                 dtype="float16",
                 batch_size=1,
             ),
-            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
             export_cfg=ConfigDict(),
             dflash_model_dir=dflash_model_dir,
             target_model_dir=args.hf_model_dir,
@@ -1202,7 +1227,7 @@ def _export_draft_model(
                 dtype="float16",
                 batch_size=1,
             ),
-            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
             export_cfg=ConfigDict(),
             dflash_model_dir=dflash_model_dir,
             target_model_dir=args.hf_model_dir,
@@ -1226,7 +1251,7 @@ def _export_draft_model(
                 dtype="float16",
                 batch_size=1,
             ),
-            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
             export_cfg=ConfigDict(),
             target_model_dir=args.hf_model_dir,
         )
@@ -1240,7 +1265,7 @@ def _export_draft_model(
                 dtype="float16",
                 batch_size=1,
             ),
-            quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+            quant_config=_build_spec_draft_quant_config(draft_head_weight_bits),
             export_cfg=ConfigDict(),
             target_model_dir=args.hf_model_dir,
         )
@@ -1317,6 +1342,7 @@ def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
             block_size=meta_info.get("spec_decode_block_size", None),
             hidden_output_name=meta_info.get("spec_decode_hidden_output_name", None),
             verify_length=meta_info.get("spec_decode_verify_length", None),
+            draft_head_weight_bits=meta_info.get("spec_decode_draft_head_weight_bits", None),
         )
         if meta_info.get("spec_decode_mode")
         else None,
@@ -1840,6 +1866,7 @@ def _draft_only_impl(cfg, args):
         meta_info.spec_decode_block_size += 1
     meta_info.spec_decode_hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
     meta_info.spec_decode_verify_length = max(1, int(getattr(args, "num_draft_tokens", 4)) + 1)
+    meta_info.spec_decode_draft_head_weight_bits = int(getattr(args, "spec_draft_head_weight_bits", 4))
 
     export_meta_path = work_dir / "export_meta_info.json"
     with export_meta_path.open("w", encoding="utf-8") as file:
@@ -1960,6 +1987,7 @@ def _export_impl(cfg, args):
             meta_info.spec_decode_block_size = getattr(args, "num_draft_tokens", 4)
             meta_info.spec_decode_hidden_output_name = "post_norm_hidden"
         meta_info.spec_decode_verify_length = spec_verify_length
+        meta_info.spec_decode_draft_head_weight_bits = int(getattr(args, "spec_draft_head_weight_bits", 4))
 
     release_dir = _run_golden_generation(
         cfg,
@@ -2014,6 +2042,7 @@ def main(args):
                 _build_draft_only_default_work_dir(
                     existing_work_dir,
                     args.spec_decode_mode,
+                    int(getattr(args, "spec_draft_head_weight_bits", 4)),
                 )
             )
         if Path(cfg.work_dir).resolve() == existing_work_dir:
@@ -2179,6 +2208,15 @@ def parse_arguments():
             "Number of draft tokens to generate and verify per round. "
             "For DFlash the draft decode input length is num_draft_tokens + 1."
         ),
+    )
+    parser.add_argument(
+        "--spec-draft-head-weight-bits",
+        "--spec_draft_head_weight_bits",
+        dest="spec_draft_head_weight_bits",
+        type=int,
+        default=4,
+        choices=[4, 8],
+        help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
     )
     return parser
 

@@ -47,10 +47,10 @@ from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
 
 
 def _build_draft_only_default_work_dir(
-    existing_work_dir: Path, spec_decode_mode: str
+    existing_work_dir: Path, spec_decode_mode: str, draft_head_weight_bits: int
 ) -> Path:
     existing_work_dir = existing_work_dir.resolve()
-    suffix = f"draft_{spec_decode_mode}"
+    suffix = f"draft_{spec_decode_mode}_w{draft_head_weight_bits}"
     base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}")
     if not base.exists() and base.resolve() != existing_work_dir:
         return base
@@ -82,6 +82,7 @@ def main(args):
         spec_decode_mode=spec_decode_mode,
         num_draft_tokens=num_draft_tokens,
         dflash_model_dir=args.dflash_model_dir,
+        spec_draft_head_weight_bits=args.spec_draft_head_weight_bits,
     )
 
     if args.draft_only:
@@ -95,6 +96,7 @@ def main(args):
             work_dir = _build_draft_only_default_work_dir(
                 Path(args.existing_work_dir),
                 spec_decode_mode,
+                int(args.spec_draft_head_weight_bits),
             )
         if work_dir.resolve() == Path(args.existing_work_dir).resolve():
             raise ValueError("--draft-only --work-dir must not overwrite --existing-work-dir")
@@ -114,6 +116,7 @@ def main(args):
     logger.info(f"model: {hf_model_path}")
     logger.info(f"quant_weight: {args.quant_weight}")
     logger.info(f"spec_decode_mode: {spec_decode_mode}")
+    logger.info(f"spec_draft_head_weight_bits: {args.spec_draft_head_weight_bits}")
     logger.info(f"output: {work_dir}")
 
     if args.draft_only:
@@ -219,6 +222,15 @@ if __name__ == "__main__":
             "Number of draft tokens per spec-decode round (verify_length = N + 1). "
             "For DFlash the draft decode input length is also verify_length."
         ),
+    )
+    parser.add_argument(
+        "--spec-draft-head-weight-bits",
+        "--spec_draft_head_weight_bits",
+        dest="spec_draft_head_weight_bits",
+        type=int,
+        default=4,
+        choices=[4, 8],
+        help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
     )
     args = parser.parse_args()
     if args.spec_decode_mode == "none":
