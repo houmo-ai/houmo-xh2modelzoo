@@ -339,3 +339,70 @@ CUDA_VISIBLE_DEVICES=1 python examples/llm/qwen3_5/qwen3_5_mtp_benchmark.py \
 ### 8.3 VS Code launch.json
 
 见项目 `.vscode/launch.json` 中的 debug 配置，以 9B 模型为例提供了多种调试场景。
+
+---
+
+## 9. MTP Head Trimming Workflow
+
+本节介绍将 MTP Head 裁剪到 K 个热门 token 后的完整工作流：**Rerank → Benchmark → Export NPU**。
+
+### 9.1 三步流程
+
+```
+Step 1  Rerank — 构建 K-trimmed 仓库
+Step 2  Benchmark — 测量裁剪后接收率损失
+Step 3  Export — 导出 NPU 可用的 HMONNX
+```
+
+### 9.2 Step 1：Rerank（生成 reranked 仓库）
+
+```bash
+cd analysis/mtp_head_longtail/v2_reranked
+MODEL=/path/to/weights/Qwen3.5-4B K=82000 python pipeline/04_merge_select.py
+MODEL=/path/to/weights/Qwen3.5-4B K_LIST=82000 python pipeline/05_export_reranked.py
+MODEL=/path/to/weights/Qwen3.5-4B K=82000 \
+  DST=/path/to/weights/Qwen3.5-4B-reranked-K82000 python pipeline/09_rerank_full_model.py
+```
+
+产物：`weights/Qwen3.5-4B-reranked-K82000/`，含 `mtp_lm_head.pt` shape `[82000, 2560]`。
+
+### 9.3 Step 2：Benchmark（测量接收率）
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3_5/qwen3_5_mtp_benchmark.py \
+    --model weights/Qwen3.5-4B-reranked-K82000 \
+    --mtp-head-pt weights/Qwen3.5-4B-reranked-K82000/mtp_lm_head.pt \
+    --forced-decode --num-draft-tokens 4 --max-new-tokens 128 \
+    --save-json results/k82000_acceptance.json
+```
+
+**实测结果（K=82000，Qwen3.5-4B，Sprint 2）**：接收率 delta = **−1.73 pt**（原始 vs K=82000）。
+可接受范围参考：delta < 3 pt 视为合格。如需更低损失可尝试更大 K（如 100000）。
+
+### 9.4 Step 3：Export NPU HMONNX（`--mtp-head-k`）
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+    --hf_model_dir weights/Qwen3.5-4B \
+    --config configs/qwen3_5/qwen3_5_4b_xh2a.py \
+    --mtp-head-k 82000 \
+    --spec_decode_mode mtp \
+    --work_dir work_dirs/qwen3_5_4b_mtpk82000 \
+    --max_sequence_length 4096
+```
+
+若 `weights/Qwen3.5-4B-reranked-K82000/mtp_lm_head.pt` 已存在，则跳过生成直接导出。
+强制重新生成：加 `--force-rerank`。自定义输出路径：加 `--reranked-repo-dir <path>`。
+
+### 9.5 调整 K 的指引
+
+| K | 显存节省（lm_head） | 接收率 delta | 推荐场景 |
+|---|---------|---------|---------|
+| 32000 | ~58% | TBD | 极限省显存 |
+| 48000 | ~68% | TBD | 平衡 |
+| 82000 | ~46% | −1.73 pt | 当前推荐 |
+| 100000 | ~34% | TBD | 最小损失 |
+
+工具链不绑死 K，任意值均可一键导出。
+
+对裁剪后模型的 benchmark 用法 → 参见 [MTP_HEAD_PRUNING.md §5](./MTP_HEAD_PRUNING.md#5-benchmark接收率)

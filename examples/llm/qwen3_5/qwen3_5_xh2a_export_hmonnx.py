@@ -358,6 +358,34 @@ def _build_default_work_dir(config_path: str, hf_model_dir: str) -> Path:
     return Path("./work_dirs") / model_family / f"{cfg_name}_{hf_model_name}"
 
 
+def prepare_reranked_repo(
+    original_model_dir: str,
+    K: int,
+    reranked_repo_dir: str,
+    force_rerank: bool = False,
+) -> str:
+    """Prepare a K-trimmed reranked model repo.
+
+    Args:
+        original_model_dir: Path to the original (read-only) HF model directory.
+            Works with both FP16 HF checkpoints and GPTQ/autoround quantised models.
+        K: Number of hot tokens to keep in the MTP lm_head.
+        reranked_repo_dir: Destination directory for the reranked repo.
+        force_rerank: When True, regenerate even if the repo already exists.
+
+    Returns:
+        The absolute path to the ready reranked repo directory.
+    """
+    from utils.model_utils import rerank_model_for_mtp
+
+    return rerank_model_for_mtp(
+        original_model_dir=original_model_dir,
+        K=K,
+        dst_dir=reranked_repo_dir,
+        force=force_rerank,
+    )
+
+
 def _build_draft_only_default_work_dir(
     existing_work_dir: Path, spec_decode_mode: str, draft_head_weight_bits: int
 ) -> Path:
@@ -2016,6 +2044,24 @@ def main(args):
     if getattr(args, "spec_decode_mode", None) == "none":
         args.spec_decode_mode = None
 
+    # ── MTP head K-trimming: redirect hf_model_dir to reranked repo ──────────
+    mtp_head_k = getattr(args, "mtp_head_k", None)
+    if mtp_head_k is not None:
+        reranked_repo_dir = getattr(args, "reranked_repo_dir", None)
+        if reranked_repo_dir is None:
+            hf_model_path = Path(args.hf_model_dir)
+            reranked_repo_dir = str(
+                hf_model_path.parent / f"{hf_model_path.name}-reranked-K{mtp_head_k}"
+            )
+        args.hf_model_dir = prepare_reranked_repo(
+            original_model_dir=args.hf_model_dir,
+            K=mtp_head_k,
+            reranked_repo_dir=reranked_repo_dir,
+            force_rerank=getattr(args, "force_rerank", False),
+        )
+        print(f"[mtp-head-k] Using reranked hf_model_dir: {args.hf_model_dir}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     config_path = Path(args.config)
     if getattr(args, "draft_only", False):
         if not getattr(args, "existing_work_dir", None):
@@ -2217,6 +2263,42 @@ def parse_arguments():
         default=4,
         choices=[4, 8],
         help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
+    )
+    # MTP head K-trimming (reranked vocab)
+    parser.add_argument(
+        "--mtp-head-k",
+        "--mtp_head_k",
+        dest="mtp_head_k",
+        type=int,
+        default=None,
+        help=(
+            "Trim MTP draft lm_head output dimension to K tokens (hot vocab). "
+            "When set, the script auto-generates a reranked model repo under "
+            "--reranked-repo-dir (default: weights/Qwen3.5-4B-reranked-K<K>) "
+            "by invoking the Sprint 1 pipeline scripts, then redirects "
+            "--hf_model_dir to that repo. The MTP draft ONNX is exported with "
+            "shape [K, H] instead of [V, H], reducing NPU memory and compute. "
+            "Typical K values: 32000, 48000, 82000, 100000."
+        ),
+    )
+    parser.add_argument(
+        "--reranked-repo-dir",
+        "--reranked_repo_dir",
+        dest="reranked_repo_dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory for the K-reranked model repo (used with --mtp-head-k). "
+            "Defaults to weights/Qwen3.5-4B-reranked-K<K>. "
+            "If the directory already contains mtp_lm_head.pt, generation is skipped."
+        ),
+    )
+    parser.add_argument(
+        "--force-rerank",
+        "--force_rerank",
+        dest="force_rerank",
+        action="store_true",
+        help="Force regeneration of the reranked repo even if it already exists (use with --mtp-head-k).",
     )
     return parser
 

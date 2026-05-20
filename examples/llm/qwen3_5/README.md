@@ -129,7 +129,8 @@ TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=weights/Qwen3.5-9B
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -138,7 +139,8 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --spec_decode_mode mtp \
   --num_draft_tokens 4 \
   --spec-draft-head-weight-bits "$HEAD_W_BITS" \
-  --work_dir "$WORK_DIR"
+  --work_dir "$WORK_DIR" \
+  --mtp-head-k "$MTPK"
 
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=5
@@ -188,7 +190,8 @@ TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -198,6 +201,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --num_draft_tokens 4 \
   --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
+  --mtp-head-k "$MTPK" \
   --golden \
   --package_release \
   --release_xh_version xh2a \
@@ -209,7 +213,8 @@ TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_6_27b
 CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
+MTPK=81920
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
@@ -219,6 +224,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --num_draft_tokens 4 \
   --spec-draft-head-weight-bits "$HEAD_W_BITS" \
   --work_dir "$WORK_DIR" \
+  --mtp-head-k "$MTPK" \
   --golden \
   --package_release \
   --release_xh_version xh2a \

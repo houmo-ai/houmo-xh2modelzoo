@@ -534,7 +534,7 @@ def load_mtp_weights(model_path: str | Path) -> tuple[
     return state, dedicated_lm_head, llm_norm_scale, mtp_norm_scale, llm_norm_rotated_matrix, mtp_norm_rotated_matrix
 
 
-def build_mtp_head(model, model_path: str, dtype: str) -> Qwen3_5MTPHead:
+def build_mtp_head(model, model_path: str, dtype: str, mtp_head_pt: str | None = None) -> Qwen3_5MTPHead:
     cfg = _get_text_config(model)
     hs = cfg.hidden_size
     nh = cfg.num_attention_heads
@@ -567,6 +567,15 @@ def build_mtp_head(model, model_path: str, dtype: str) -> Qwen3_5MTPHead:
         mtp_norm_rotated_matrix,
     ) = load_mtp_weights(model_path)
     head.load_state_dict(sd, strict=True)
+
+    # Load external cropped MTP lm_head (reranked model: shape [K, H] instead of [V, H]).
+    # Priority: explicit --mtp-head-pt > auto-detect {model_path}/mtp_lm_head.pt > None
+    if dedicated_lm_head_weight is None:
+        pt_path = Path(mtp_head_pt) if mtp_head_pt else Path(model_path) / "mtp_lm_head.pt"
+        if pt_path.exists():
+            dedicated_lm_head_weight = torch.load(str(pt_path), map_location="cpu", weights_only=True)
+            K = dedicated_lm_head_weight.shape[0]
+            print(f"  Loaded cropped MTP lm_head from {pt_path} — K={K} (vocab_size={model.lm_head.weight.shape[0]})")
 
     tm = _get_text_model(model)
     lm_head = model.lm_head
@@ -1865,6 +1874,11 @@ def parse_args():
     p.add_argument("--dtype", type=str, default="bf16", choices=sorted(DTYPE_MAP.keys()))
     p.add_argument("--system-prompt", type=str, default="")
     p.add_argument(
+        "--mtp-head-pt", type=str, default=None,
+        help="Path to external mtp_lm_head.pt for reranked/cropped model. "
+             "Auto-detected from {model}/mtp_lm_head.pt when present.",
+    )
+    p.add_argument(
         "--save-json", type=str, default=None,
         help="If set, save acceptance-rate results as JSON to this path.",
     )
@@ -1898,7 +1912,7 @@ def main():
 
     # ── build MTP head ──────────────────────────────────────────
     print("\nBuilding MTP head …")
-    mtp_head = build_mtp_head(model, args.model, dtype)
+    mtp_head = build_mtp_head(model, args.model, dtype, mtp_head_pt=args.mtp_head_pt)
 
     # ── determine prompts ───────────────────────────────────────
     if args.prompt:
@@ -1945,6 +1959,7 @@ def main():
             "model": args.model,
             "dtype": dtype,
             "max_new_tokens": args.max_new_tokens,
+            "mtp_head_pt": args.mtp_head_pt,
             "results": all_results,
         }
         out_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2))

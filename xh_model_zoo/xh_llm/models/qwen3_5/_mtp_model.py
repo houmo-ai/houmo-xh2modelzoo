@@ -404,6 +404,40 @@ class MTPModelXH2a(nn.Module):
             if isinstance(module, RMSNorm) and name
         }
 
+        # Auto-detect K-trimmed lm_head from mtp_lm_head.pt (Sprint 3 reranked repo support).
+        # If present, its shape[0] overrides vocab_size for the MTP lm_head.
+        mtp_lm_head_path = Path(target_model_dir) / "mtp_lm_head.pt"
+        if mtp_lm_head_path.exists():
+            _probe = torch.load(str(mtp_lm_head_path), map_location="cpu")
+            mtp_vocab_size_override = int(_probe.shape[0])
+            del _probe
+            if mtp_vocab_size_override != _cfg_value("vocab_size"):
+                # Recreate model with trimmed vocab (K < V)
+                model = MTPModelXH2a(
+                    hidden_size=_cfg_value("hidden_size"),
+                    num_attention_heads=_cfg_value("num_attention_heads"),
+                    num_key_value_heads=_cfg_value("num_key_value_heads"),
+                    head_dim=_cfg_value("head_dim"),
+                    intermediate_size=intermediate_size,
+                    rms_norm_eps=text_cfg.get("rms_norm_eps", cfg.get("rms_norm_eps", 1e-6)),
+                    vocab_size=mtp_vocab_size_override,
+                    input_sequence_length=input_sequence_length,
+                    rope_theta=rope_params.get("rope_theta", 10_000_000.0),
+                    partial_rotary_factor=rope_params.get("partial_rotary_factor", 0.25),
+                    max_pe_length=max_pe_length,
+                    use_cache=use_cache,
+                )
+                if is_moe:
+                    model.layer.mlp = MTPSparseMoEBlock(
+                        hidden_size=_cfg_value("hidden_size"),
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        expert_intermediate_size=expert_intermediate_size,
+                        shared_expert_intermediate_size=shared_expert_intermediate_size,
+                    ).to(dtype=dtype)
+        else:
+            mtp_vocab_size_override = None
+
         mtp_sd = {}
         lm_head_weight = None
         embed_weight = None
@@ -481,7 +515,12 @@ class MTPModelXH2a(nn.Module):
         if missing:
             raise RuntimeError(f"Missing MTP keys: {missing}")
 
-        if lm_head_weight is not None:
+        # mtp_lm_head.pt takes highest priority (K-trimmed head from reranked repo).
+        if mtp_vocab_size_override is not None:
+            mtp_lm_head_tensor = torch.load(str(mtp_lm_head_path), map_location="cpu").to(dtype)
+            model.lm_head.weight.data.copy_(mtp_lm_head_tensor)
+            del mtp_lm_head_tensor
+        elif lm_head_weight is not None:
             model.lm_head.weight.data.copy_(lm_head_weight)
         elif embed_weight is not None:
             model.lm_head.weight.data.copy_(embed_weight)

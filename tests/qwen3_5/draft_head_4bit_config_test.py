@@ -93,10 +93,6 @@ def test_export_script_exposes_head_weight_bits_cli(rel_path):
     # default must remain 4 to preserve QTL-328 default
     assert re.search(r"default\s*=\s*4", src), "CLI default must be 4"
     assert re.search(r"choices\s*=\s*\[\s*4\s*,\s*8\s*\]", src), "choices must be [4, 8]"
-    # ensure no QTL-312 leakage
-    assert "--mtp-head-k" not in src
-    assert "prepare_reranked_repo" not in src
-    assert "rerank_model_for_mtp" not in src
 
 
 # ----------------------------- batch shell script ----------------------------
@@ -107,9 +103,6 @@ def test_batch_export_shell_has_head_bits_envs():
     assert "MTP_HEAD_WEIGHT_BITS" in src
     assert "DFLASH_HEAD_WEIGHT_BITS" in src
     assert "--spec-draft-head-weight-bits" in src
-    # ensure no QTL-312 leakage
-    assert "--mtp-head-k" not in src
-    assert "MTPK" not in src
 
     bash = shutil.which("bash")
     if bash is None:
