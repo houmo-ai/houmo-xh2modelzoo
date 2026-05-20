@@ -13,12 +13,6 @@ from tqdm import tqdm
 from transformers import AutoConfig, GenerationConfig
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
-
-from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
-from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
-from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
-from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
-from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
 from xhquant.api import (
     FXInterpreter,
     PrecisionMode,
@@ -37,12 +31,17 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import DynamicModule
 from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
+from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
+from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
+from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
+from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
+
 from ._dequant_converter import autoround_torch_qlinear_converter, restore_autoround_qwen3_5_moe_sparse_block
 from .device_mixin import DeviceMixin
 from .types import LLMModelMeta, LLMModelState, ModelMeta, ModelSwitcher
 from .utils import hf_auto_offload, unfold_args
 from .wrap_model import wrap_llm_model
-
 
 if TYPE_CHECKING:
     from .hmonnx import BaseLLMHMONNXModel
@@ -446,9 +445,9 @@ class XHBaseModel(DeviceMixin):
         return cls(config)
 
     @classmethod
-    def from_hmonnx_meta(cls, meta: LLMModelMeta) -> "XHBaseModel":
+    def from_hmonnx_meta(cls, meta: LLMModelMeta, **kwargs) -> "XHBaseModel":
         infer_cls = cls.get_hmonnx_inference_cls()
-        return infer_cls(meta)
+        return infer_cls(meta, **kwargs)
 
     @classmethod
     def get_hf_auto_model_cls(cls):
@@ -621,7 +620,7 @@ class XHBaseModel(DeviceMixin):
         assert is_gptqmodel_available(), "We need gptqmodel to dequantize auto-gptq model"
         converter = gptqmodel_torch_qlinear_converter
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-        
+
         logger = get_xhquant_logger()
         logger.info(f"Start Dequantizing GPTQModel")
 
@@ -701,8 +700,8 @@ class XHBaseModel(DeviceMixin):
     @classmethod
     def _dequantize_gptq_hf_model(cls, native_hf_model: nn.Module):
         """
-        Abandon this method in future. Should unify 'gptqmodel' quant model 
-        load and dequantization logic. Currently, Gemma4 is not registered 
+        Abandon this method in future. Should unify 'gptqmodel' quant model
+        load and dequantization logic. Currently, Gemma4 is not registered
         in our custom gptqmodel yet, so we need to load it via hf transformers
         and dequantize it via this method.
         """
@@ -786,13 +785,14 @@ class XHBaseModel(DeviceMixin):
 
     @classmethod
     def _dequantize_gptqmodel(cls, native_hf_model: nn.Module) -> nn.Module:
-        raise ValueError("The _dequantize_gptqmodel method is deprecated, please use _dequantize_gptqmodel_hf_model instead.")
+        raise ValueError(
+            "The _dequantize_gptqmodel method is deprecated, please use _dequantize_gptqmodel_hf_model instead."
+        )
         """
         Dequantize a GPTQ model loaded via GPTQModel library.
         This handles models loaded through `_load_gptqmodel` which contain QuantLinear layers.
         """
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-
         from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
 
         hf_model = native_hf_model
@@ -844,8 +844,6 @@ class XHBaseModel(DeviceMixin):
     def _compressed_tensors_value(value: Any) -> Any:
         return getattr(value, "value", value)
 
-    
-
     @classmethod
     def _convert_compressed_tensors_linear(
         cls,
@@ -872,7 +870,7 @@ class XHBaseModel(DeviceMixin):
             compressed_tensors_version = Version(version("compressed-tensors"))
         except PackageNotFoundError as e:
             raise ImportError("未安装 compressed-tensors 库，请先安装: pip install compressed-tensors>=0.15.0") from e
-        
+
         """
         compressed-tensors 0.15.0后对量化线性层实现做了调整。这里的实现不保证兼容0.15.0以下版本。
         """
@@ -882,16 +880,14 @@ class XHBaseModel(DeviceMixin):
                 f"{min_compressed_tensors_version}。请升级 compressed-tensors 库: "
                 "pip install --upgrade 'compressed-tensors>=0.15.0'"
             )
-        
+
         from compressed_tensors.compressors.pack_quantized.helpers import unpack_from_int32
         from compressed_tensors.quantization.lifecycle.forward import dequantize
 
         scheme = getattr(module, "quantization_scheme", None)
         weights = getattr(scheme, "weights", None)
         if scheme is None or weights is None:
-            raise NotImplementedError(
-                f"Cannot find compressed-tensors quantization_scheme.weights for {module_name}."
-            )
+            raise NotImplementedError(f"Cannot find compressed-tensors quantization_scheme.weights for {module_name}.")
 
         format_str = str(cls._compressed_tensors_value(getattr(scheme, "format", None))).lower()
         if format_str != "pack-quantized":
@@ -1092,7 +1088,6 @@ class XHBaseModel(DeviceMixin):
             """
         )
         return None
-        
 
     @classmethod
     def _postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, **kwargs) -> nn.Module:
@@ -1101,9 +1096,13 @@ class XHBaseModel(DeviceMixin):
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
-        quantization_config = config.get("quantization_config", None) if isinstance(config, dict) else getattr(config, "quantization_config", None)
+        quantization_config = (
+            config.get("quantization_config", None)
+            if isinstance(config, dict)
+            else getattr(config, "quantization_config", None)
+        )
         quant_method = cls._get_quantization_method(quantization_config)
-        
+
         if quantization_config is None:
             native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
             if quant_weight is not None and len(quant_weight) > 0:

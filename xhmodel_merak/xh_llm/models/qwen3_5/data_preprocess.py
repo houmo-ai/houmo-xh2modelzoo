@@ -72,6 +72,7 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
     def get_rope_index(
         self,
         input_ids: torch.LongTensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -205,38 +206,75 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
                 max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
                 mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
             else:
-                position_ids = (
-                    torch.arange(input_ids.shape[1], device=input_ids.device)
-                    .view(1, 1, -1)
-                    .expand(3, input_ids.shape[0], -1)
-                )
+                B, S = inputs_embeds.shape[:2]
+                position_ids = torch.arange(S, device=inputs_embeds.device).view(1, 1, -1).expand(3, B, -1)
                 mrope_position_deltas = torch.zeros(
-                    [input_ids.shape[0], 1],
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
+                    [B, 1],
+                    device=inputs_embeds.device,
+                    dtype=torch.long,
                 )
 
             return position_ids, mrope_position_deltas
 
     def forward(self, data: Union[dict, tuple, list]):
+        assert isinstance(data, dict)
+        input_ids = data.get("input_ids", None)
+        inputs_embeds = data.get("inputs_embeds", None)
+        assert (input_ids is not None) or (inputs_embeds is not None), (
+            "Either input_ids or inputs_embeds should be provided, but not both."
+        )
+
         device = self._device
 
-        input_ids = data["input_ids"].to(device)
+        if input_ids is not None:
+            assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
+            seq_length = input_ids.shape[1]
+            assert seq_length <= self.input_sequence_length, (
+                f"Input sequence length is too long. "
+                f"max input sequence length is {self.input_sequence_length} but got {seq_length}"
+            )
+            if self.input_sequence_length > seq_length:
+                padding_input_ids = torch.zeros(
+                    (1, self.input_sequence_length - seq_length),
+                    dtype=torch.long,
+                    device=input_ids.device,
+                )
+                padding_input_ids.fill_(self.pad_token_id)
+                input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
+            inputs_embeds = self.embed_tokens(input_ids)
+        elif inputs_embeds is not None:
+            assert inputs_embeds.shape[0] == 1, "Batch size should be 1 in inference mode."
+            seq_length = inputs_embeds.shape[1]
+            inputs_embeds = inputs_embeds
+            assert seq_length <= self.input_sequence_length, (
+                "Input sequence length should be larger than input_sequence_length."
+            )
+            if self.input_sequence_length > seq_length:
+                padding_token_id = self.pad_token_id
+                padding_input_ids = torch.ones(
+                    (1, self.input_sequence_length - seq_length),
+                    dtype=torch.long,
+                    device=inputs_embeds.device,
+                )
+                padding_input_ids = padding_input_ids * padding_token_id
+                padding_embedding = self.embed_tokens(padding_input_ids)
+                inputs_embeds = torch.cat([inputs_embeds, padding_embedding], dim=1)
 
         attention_mask = None
 
-        seq_length = input_ids.shape[1]
+        # input_ids = data["input_ids"].to(device)
+        # seq_length = input_ids.shape[1]
 
-        assert self.token_embedding is not None, "Token embedding is not available."
-        assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
+        # assert self.token_embedding is not None, "Token embedding is not available."
+        # assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
 
-        assert seq_length <= self.input_sequence_length, (
-            f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
-        )
-        if self.input_sequence_length > seq_length:
-            padding_input_ids = torch.zeros((1, self.input_sequence_length - seq_length), dtype=torch.long).to(device)
-            padding_input_ids.fill_(self.pad_token_id)
-            input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
+        # assert seq_length <= self.input_sequence_length, (
+        #     f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
+        # )
+        # if self.input_sequence_length > seq_length:
+        #     padding_input_ids = torch.zeros((1, self.input_sequence_length - seq_length), dtype=torch.long).to(device)
+        #     padding_input_ids.fill_(self.pad_token_id)
+        #     input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
 
         # Build linear attention mask
         linear_attn_mask = []
@@ -254,10 +292,9 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         linear_attn_mask.append(mask.unsqueeze(0))
         linear_attn_mask = torch.cat(linear_attn_mask, dim=0).to(device=device, dtype=torch.float16)
 
-        inputs_embeds = self.token_embedding.to(device)(input_ids.to(device))
-
-        n_image_tokens = (input_ids == self.image_token_id).sum().item()
-        if n_image_tokens > 0:
+        image_embeds = data.get("image_embeds", None)
+        if image_embeds is not None:
+            n_image_tokens = (input_ids == self.image_token_id).sum().item()
             image_embeds = data["image_embeds"]
             n_image_features = image_embeds.shape[0]
             if n_image_tokens != n_image_features:
@@ -277,7 +314,9 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
             # prefill
             image_grid_thw = data.get("image_grid_thw", None)
             video_grid_thw = data.get("video_grid_thw", None)
-            position_ids, rope_deltas = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)
+            position_ids, rope_deltas = self.get_rope_index(
+                input_ids, inputs_embeds, image_grid_thw, video_grid_thw, attention_mask
+            )
             self.rope_deltas = rope_deltas
         else:
             assert self.rope_deltas is not None, f"rope_deltas is None, but past_seq_length is {past_seq_length}"

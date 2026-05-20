@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -18,8 +17,8 @@ from .hmonnx_model import HMONNXBaseModel, HMONNXModel
 class BaseLLMHMONNXModel(HMONNXBaseModel):
     LLM_MODEL_CLS: type[BaseLLMModel] = BaseLLMModel
 
-    def __init__(self, meta: LLMModelMeta):
-        super().__init__()
+    def __init__(self, meta: LLMModelMeta, enable_cuda_graph=False, **kwargs):
+        super().__init__(**kwargs)
         self.meta_info = meta
         self.hf_model_dir = meta.hf_config
         self.hf_compatible_model = None
@@ -30,8 +29,13 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             meta.kv_cache if isinstance(meta.kv_cache, KVCacheConfig) else KVCacheConfig(**meta.kv_cache)
         )
         self.use_cache = self.kvcache_config.num_layers > 0
-        self.prefill_model = HMONNXModel(meta.prefill_hmonnx)
-        self.decode_model = HMONNXModel(meta.decode_hmonnx)
+        self.prefill_model = HMONNXModel(meta.prefill_hmonnx, enable_cuda_graph)
+        self.prefill_model.to("cuda:0")
+        self.decode_model = HMONNXModel(meta.decode_hmonnx, enable_cuda_graph)
+        decode_device = "cuda:0"
+        if torch.cuda.device_count() > 1:
+            decode_device = "cuda:1"
+        self.decode_model.to(decode_device)
 
         self._data_processor = None
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)

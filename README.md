@@ -11,7 +11,7 @@
 ## 安装
 
 ```bash
-c
+pip install -v -e . --no-index --no-build-isolation
 或者 uv pip install -e . --link-mode=copy
 ```
 

@@ -14,11 +14,11 @@ class AutoLLMConfig:
     def from_pretrained(cls, config: BaseLLMModelConfig | dict) -> BaseLLMModelConfig:
         logger = get_xhquant_logger()
         if isinstance(config, dict):
-            config_dict = copy.deepcopy(config)
             base_config = BaseLLMModelConfig.from_dict(config)
         else:
+            assert isinstance(config, BaseLLMModelConfig)
             base_config = config
-            config_dict = base_config.to_dict()
+
         model_type = base_config.model_type
         pretrained_model_path = base_config.hf_model
         if pretrained_model_path is None:
@@ -32,10 +32,10 @@ class AutoLLMConfig:
             if architectures is None:
                 raise ValueError("architectures is None")
             model_type = architectures[0]
-            config_dict["model_type"] = model_type
+            base_config.model_type = model_type
             logger.info(f"model_type is not specified, inferred from config: {model_type}")
-        if config_dict.get("model_type") is None:
+        if model_type is None:
             raise ValueError("model_type must be specified in convert_config")
         cls = get_config_class(base_config)
-        model_config = cls.from_dict(config_dict)
+        model_config = cls.from_dict(base_config.to_dict())
         return model_config

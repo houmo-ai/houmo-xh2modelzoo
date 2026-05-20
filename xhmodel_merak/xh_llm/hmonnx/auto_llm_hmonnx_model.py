@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 class AutoLLMHONNXModel:
     @classmethod
-    def from_pretrained(cls, meta_or_path: dict | str) -> "BaseLLMHMONNXModel":
+    def from_pretrained(cls, meta_or_path: dict | str, **kwargs) -> "BaseLLMHMONNXModel":
         logger = get_xhquant_logger()
         if isinstance(meta_or_path, str):
             meta_dict = json.load(open(meta_or_path, "r"))
@@ -48,5 +48,5 @@ class AutoLLMHONNXModel:
         else:
             meta_info = meta_dict
         model_type = meta_info.model_config.model_type
-        hmonnx_model = model_cls.from_hmonnx_meta(meta_info)
+        hmonnx_model = model_cls.from_hmonnx_meta(meta_info, **kwargs)
         return hmonnx_model
