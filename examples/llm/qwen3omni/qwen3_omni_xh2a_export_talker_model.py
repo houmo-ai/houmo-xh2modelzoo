@@ -562,7 +562,16 @@ def main(args):
     model_name = Path(hf_model_path).name
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
-    quant_scheme = QuantScheme(target_device=target_device, quant_type=quant_type)
+    projection_quant_type = args.projection_quant_type
+    # Build QuantScheme with per-node precision override for projection layers
+    quant_scheme = QuantScheme(
+        target_device=target_device,
+        quant_type=quant_type,
+        nodes={
+            "hidden_projection": projection_quant_type,
+            "text_projection": projection_quant_type,
+        },
+    )
     quant_config = ConfigDict(create_quant_config(quant_scheme))
 
     prefix = f"{model_name}-{target_device}-talker-{quant_type}"
@@ -909,7 +918,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Qwen3-Omni talker LM to HMONNX")
     parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3-Omni-30B-A3B-Instruct/")
     parser.add_argument("--work-dir", type=str, default="work_dirs/qwen3omni")
-    parser.add_argument("--quant-type", default="w8a8h0_sefp")
+    parser.add_argument("--quant-type", default="w8a8h1_sefp")
+    parser.add_argument(
+        "--projection-quant-type",
+        type=str,
+        default="w16a16h0_sefp",
+        help="quantization type for hidden_projection and text_projection layers; "
+        "use w16a16_sefp or w16a16h0_sefp for higher precision",
+    )
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--valid", action="store_true", default=True, help="validate exported HMONNX")
     parser.add_argument("--no-valid", action="store_false", dest="valid", help="skip validation")

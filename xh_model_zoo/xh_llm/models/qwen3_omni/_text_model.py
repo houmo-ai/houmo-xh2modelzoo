@@ -602,9 +602,7 @@ class _Qwen3MoeModel(DynamicModule):
         self.deepstack_inject_layers = [0, 1, 2]
         self.use_multimodal_position_ids = bool(cfg.get("use_multimodal_position_ids", False))
         self.prefill_full_accept_hidden = bool(cfg.get("prefill_full_accept_hidden", False))
-        accept_hidden_layer = cfg.get("accept_hidden_layer", None)
-        if accept_hidden_layer is None:
-            raise ValueError("Qwen3-Omni text wrapper requires cfg.accept_hidden_layer")
+        accept_hidden_layer = cfg.get("accept_hidden_layer", 0)
         self.accept_hidden_layer = max(int(accept_hidden_layer), 0)
         if self.accept_hidden_layer == 0:
             self.accept_hidden_capture_layer_idx = None

@@ -953,18 +953,61 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
         raise RuntimeError(
             "talker meta missing thinker hidden size (talker_thinker_hidden_size / talker_projection_in_features)"
         )
+    capture_path = Path(talker_meta["_root_dir"]) / "talker_model_inputs.pth"
+    captured_prefill_entry = None
+    if capture_path.exists():
+        try:
+            captured = torch.load(capture_path, map_location="cpu", weights_only=False)
+            if captured:
+                candidate = captured[0]
+                if all(
+                    isinstance(candidate.get(key), torch.Tensor)
+                    for key in ("inputs_embeds", "hidden_state", "role_mask", "bypass_embeds", "bypass_mask")
+                ):
+                    captured_prefill_entry = candidate
+                    if logger is not None:
+                        logger.info("talker takeover will use captured hidden_state/bypass guidance for prefill")
+        except Exception as exc:
+            if logger is not None:
+                logger.warning(f"failed to load talker captured guidance from {capture_path}: {exc}")
+
+    def _pad_prefill_tensor(tensor: torch.Tensor, target_seq_len: int, fill_value: float = 0.0) -> torch.Tensor:
+        tensor = tensor.detach().cpu().to(torch.float16)
+        current_seq_len = int(tensor.shape[1])
+        if current_seq_len >= target_seq_len:
+            return tensor[:, :target_seq_len, ...]
+        pad_shape = (tensor.shape[0], target_seq_len - current_seq_len, *tensor.shape[2:])
+        pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype)
+        return torch.cat([tensor, pad], dim=1)
+
+    def _build_captured_prefill_guidance(shadow_inputs_embeds: torch.Tensor, shadow_seq_len: int):
+        if captured_prefill_entry is None:
+            return None
+        captured_inputs_embeds = captured_prefill_entry["inputs_embeds"]
+        if int(captured_inputs_embeds.shape[1]) != int(shadow_inputs_embeds.shape[1]):
+            return None
+        hidden_state = _pad_prefill_tensor(captured_prefill_entry["hidden_state"], shadow_seq_len)
+        role_mask = _pad_prefill_tensor(captured_prefill_entry["role_mask"], shadow_seq_len)
+        bypass_embeds = _pad_prefill_tensor(captured_prefill_entry["bypass_embeds"], shadow_seq_len)
+        bypass_mask = _pad_prefill_tensor(captured_prefill_entry["bypass_mask"], shadow_seq_len)
+        return hidden_state, role_mask, bypass_embeds, bypass_mask
 
     def _call_fused(session, shadow_inputs_embeds, shadow_seq_len):
         batch = int(shadow_inputs_embeds.shape[0])
-        # Shadow always exercises the bypass path: feed the pre-projected
-        # embeds the HF side produced via its python projection code.
-        source = torch.zeros(batch, shadow_seq_len, thinker_hs, dtype=torch.float16)
-        role_mask = torch.zeros(batch, shadow_seq_len, 1, dtype=torch.float16)
-        bypass_mask = torch.ones(batch, shadow_seq_len, 1, dtype=torch.float16)
+        guidance = _build_captured_prefill_guidance(shadow_inputs_embeds, shadow_seq_len)
+        if guidance is not None:
+            source, role_mask, bypass_embeds, bypass_mask = guidance
+        else:
+            # Decode or unmatched prefill falls back to bypass path: feed the
+            # pre-projected embeds the HF side produced via python projection.
+            source = torch.zeros(batch, shadow_seq_len, thinker_hs, dtype=torch.float16)
+            role_mask = torch.zeros(batch, shadow_seq_len, 1, dtype=torch.float16)
+            bypass_embeds = shadow_inputs_embeds
+            bypass_mask = torch.ones(batch, shadow_seq_len, 1, dtype=torch.float16)
         return session.forward(
             source,
             role_mask,
-            shadow_inputs_embeds,
+            bypass_embeds,
             bypass_mask,
             torch.tensor([state["past_seq_length"]], dtype=torch.int32),
             torch.tensor([shadow_seq_len], dtype=torch.int32),
@@ -1378,7 +1421,10 @@ def run_text_hmonnx_chain_forward(
             logger.info("text-only chain validation skips full HF omni model loading and uses tokenizer-only inputs")
 
     conversation, use_audio_in_video = build_conversation(case)
-    text = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    if processor is not None:
+        text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+    else:
+        text = tokenizer.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
     if processor is not None:
         inputs = processor(

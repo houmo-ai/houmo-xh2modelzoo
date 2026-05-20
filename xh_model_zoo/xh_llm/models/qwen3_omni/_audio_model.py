@@ -19,7 +19,6 @@ from xhquant.nn import (
     RMSNorm,
     Rope,
     MoeBlock,
-    MoeBlockOss,
 )
 from xhquant.utils.registry import DynamicModule
 

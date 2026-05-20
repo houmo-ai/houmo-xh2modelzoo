@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+import soundfile as sf
 import torch
 
 
@@ -22,6 +23,7 @@ from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
 
 def _build_prefill_fused_inputs(meta, captured_entry, inputs_embeds: torch.Tensor):
     seq_len = int(inputs_embeds.shape[1])
+    target_seq_len = int(meta.get("talker_input_sequence_length", seq_len))
     batch = int(inputs_embeds.shape[0])
     hidden_state_size = int(
         meta.get(
@@ -36,17 +38,54 @@ def _build_prefill_fused_inputs(meta, captured_entry, inputs_embeds: torch.Tenso
         bypass_mask = captured_entry.get("bypass_mask")
         if all(isinstance(item, torch.Tensor) for item in (hidden_state, role_mask, bypass_embeds, bypass_mask)):
             if int(hidden_state.shape[1]) >= seq_len and int(bypass_embeds.shape[1]) >= seq_len:
+                hidden_state = hidden_state[:, :seq_len, :].to(torch.float16).cpu()
+                role_mask = role_mask[:, :seq_len, :].to(torch.float16).cpu()
+                bypass_embeds = bypass_embeds[:, :seq_len, :].to(torch.float16).cpu()
+                bypass_mask = bypass_mask[:, :seq_len, :].to(torch.float16).cpu()
+                if seq_len < target_seq_len:
+                    hidden_state = torch.cat(
+                        [hidden_state, torch.zeros(batch, target_seq_len - seq_len, hidden_state_size, dtype=torch.float16)],
+                        dim=1,
+                    )
+                    role_mask = torch.cat(
+                        [role_mask, torch.zeros(batch, target_seq_len - seq_len, 1, dtype=torch.float16)],
+                        dim=1,
+                    )
+                    bypass_embeds = torch.cat(
+                        [bypass_embeds, torch.zeros(batch, target_seq_len - seq_len, bypass_embeds.shape[-1], dtype=torch.float16)],
+                        dim=1,
+                    )
+                    bypass_mask = torch.cat(
+                        [bypass_mask, torch.zeros(batch, target_seq_len - seq_len, 1, dtype=torch.float16)],
+                        dim=1,
+                    )
                 return (
-                    hidden_state[:, :seq_len, :].to(torch.float16).cpu(),
-                    role_mask[:, :seq_len, :].to(torch.float16).cpu(),
-                    bypass_embeds[:, :seq_len, :].to(torch.float16).cpu(),
-                    bypass_mask[:, :seq_len, :].to(torch.float16).cpu(),
+                    hidden_state,
+                    role_mask,
+                    bypass_embeds,
+                    bypass_mask,
                 )
     return (
-        torch.zeros(batch, seq_len, hidden_state_size, dtype=torch.float16),
-        torch.zeros(batch, seq_len, 1, dtype=torch.float16),
-        inputs_embeds,
-        torch.ones(batch, seq_len, 1, dtype=torch.float16),
+        torch.zeros(batch, target_seq_len, hidden_state_size, dtype=torch.float16),
+        torch.zeros(batch, target_seq_len, 1, dtype=torch.float16),
+        torch.cat(
+            [
+                inputs_embeds,
+                torch.zeros(batch, target_seq_len - seq_len, inputs_embeds.shape[-1], dtype=torch.float16),
+            ],
+            dim=1,
+        )
+        if seq_len < target_seq_len
+        else inputs_embeds,
+        torch.cat(
+            [
+                torch.ones(batch, seq_len, 1, dtype=torch.float16),
+                torch.zeros(batch, target_seq_len - seq_len, 1, dtype=torch.float16),
+            ],
+            dim=1,
+        )
+        if seq_len < target_seq_len
+        else torch.ones(batch, seq_len, 1, dtype=torch.float16),
     )
 
 
@@ -74,7 +113,7 @@ def _run_talker_forward(meta, report):
     decode = HMONNXInference(str(Path(meta["_root_dir"]) / meta["talker_decode_onnx"]))
 
     batch = int(inputs_embeds.shape[0])
-    prefill_seq = int(inputs_embeds.shape[1])
+    prefill_seq = int(meta.get("talker_input_sequence_length", inputs_embeds.shape[1]))
     prefill_hidden_state, prefill_role_mask, prefill_bypass_embeds, prefill_bypass_mask = _build_prefill_fused_inputs(
         meta, captured_entry, inputs_embeds
     )
@@ -163,15 +202,19 @@ def _run_talker_prediction_forward(meta, report):
     }
 
 
-def _run_code2wav_forward(meta, report):
+def _run_code2wav_forward(meta, report, work_dir: Path):
     session = HMONNXInference(str(Path(meta["_root_dir"]) / meta["code2wav_hmonnx"]))
     static_code_len = int(meta["static_code_len"])
     codes = torch.randint(0, 100, (1, 16, static_code_len), dtype=torch.int32)
     output = session.forward(codes)
     tensor = output[0] if isinstance(output, (list, tuple)) else output
+    wav_path = work_dir / "hmonnx_forward_code2wav.wav"
+    waveform = tensor.reshape(-1).detach().cpu().to(torch.float32).numpy()
+    sf.write(str(wav_path), waveform, samplerate=24000)
     report["code2wav"] = {
         "status": "ok",
         "output_shape": list(tensor.shape),
+        "audio_file": str(wav_path.relative_to(work_dir)),
     }
 
 
@@ -220,7 +263,7 @@ def main(args):
         if "talker_prediction" in artifacts:
             _run_talker_prediction_forward(artifacts["talker_prediction"], report)
         if "code2wav" in artifacts:
-            _run_code2wav_forward(artifacts["code2wav"], report)
+            _run_code2wav_forward(artifacts["code2wav"], report, work_dir)
 
     report_path = work_dir / "hmonnx_forward_report.json"
     save_json(report_path, report)
