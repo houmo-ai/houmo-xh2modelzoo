@@ -638,3 +638,79 @@ CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3vl/qwen3_vl_wrapped_model_consis
 
 - wrapped export 前主链已经能在真实输入上给出与 transformers 原生一致的下一 token 决策
 - 但若要求中间张量和 logits 数值级严格对齐，当前仍有进一步排查空间
+
+
+
+
+## 多图推理（HMONNX 图运行时 Demo）
+
+`examples/llm/qwen3vl/qwen3_vl_xh2a_multi_image_demo.py` 是一个通用 CLI 多图推理脚本，基于 `HMONNXGraphInference` + 可选 cuda_graph，支持流式输出。**该脚本不含任何特定业务场景的硬编码**，所有图片路径、提示词通过命令行参数传入。
+
+### 输入方式（三选一，必须且只能选一种）
+
+| 输入模式 | 参数 | 说明 |
+|---------|------|------|
+| 直接列举 | `--image-paths a.jpg,b.jpg,c.jpg` | 逗号分隔的图像路径，按出现顺序作为多图序列 |
+| 目录扫描 | `--image-dir ./images [--image-glob '*.jpg']` | 扫描目录，默认按文件名排序；可选 glob 过滤 |
+| 任务 JSON | `--task-json tasks.json --task-id <id>` | 兼容旧任务描述格式，从 JSON 记录中解析 basename 列表，对应文件应位于 `--image-dir`（缺省取 JSON 同级目录） |
+
+### 提示词（二选一）
+
+| 参数 | 说明 |
+|------|------|
+| `--prompt "Describe these images."` | 直接传入提示词字符串 |
+| `--prompt-file ./prompts/desc.txt` | 从 UTF-8 文本文件读入提示词（自动 strip） |
+
+### 通用参数
+
+| 类别 | 参数 | 默认 / 说明 |
+|------|------|-----------|
+| 模型 | `--model-config export_meta_info.json` | 推荐方式，单一入口指向导出元数据 |
+| 模型（兼容） | `--model-dir`, `--visual-onnx`, `--prefill-onnx`, `--decode-onnx`, `--hf-model-dir` | 旧式分参指定 |
+| 批处理 | `--images-per-batch 20`, `--max-batches`, `--max-images` | 控制分批与上限 |
+| 分辨率 | `--image-size-w 448`, `--image-size-h 448`, `--max-size-t`, `--patch-size`, `--temporal-patch-size` | 视觉编码器输入参数 |
+| 生成 | `--max-new-tokens 256`, `--max-context-tokens 32768`, `--temperature`, `--top-p`, `--top-k`, `--repetition-penalty`, `--do-sample/--no-sample` | 标准生成超参 |
+| 运行时 | `--dtype bf16`, `--device cuda:0`, `--enable-cuda-graph`, `--cuda-graph-modules prefill decode vision`, `--disable-auto-offload`, `--stream-output/--no-stream-output` | 设备与图运行时控制 |
+| 其他 | `--scene-name street_scene`, `--prepare-only`, `--debug` | scene-name 仅用于日志/work_dir 命名 |
+
+### 示例 1：街景多图描述
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3vl/qwen3_vl_xh2a_multi_image_demo.py \
+    --model-config ./weights/qwen3vl/Qwen3-VL-2B-Instruct-XH2a/export_meta_info.json \
+    --image-dir ./data/street_scene \
+    --image-glob '*.jpg' \
+    --prompt "请按拍摄顺序描述这几张街景图，并指出各张图之间的差异。" \
+    --scene-name street_scene \
+    --images-per-batch 8 \
+    --image-size-w 448 --image-size-h 448 \
+    --max-new-tokens 512 \
+    --enable-cuda-graph --cuda-graph-modules prefill decode vision \
+    --disable-auto-offload
+```
+
+### 示例 2：商品对比
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3vl/qwen3_vl_xh2a_multi_image_demo.py \
+    --model-config ./weights/qwen3vl/Qwen3-VL-2B-Instruct-XH2a/export_meta_info.json \
+    --image-paths ./data/products/sku_a_front.jpg,./data/products/sku_a_side.jpg,./data/products/sku_b_front.jpg,./data/products/sku_b_side.jpg \
+    --prompt-file ./prompts/product_compare.txt \
+    --scene-name product_compare \
+    --images-per-batch 4 \
+    --max-new-tokens 384 \
+    --enable-cuda-graph
+```
+
+### 示例 3：兼容旧 task-json 输入
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3vl/qwen3_vl_xh2a_multi_image_demo.py \
+    --model-config ./weights/qwen3vl/Qwen3-VL-2B-Instruct-XH2a/export_meta_info.json \
+    --task-json ./data/tasks.json --task-id demo_task_001 \
+    --image-dir ./data/task_images \
+    --prompt "请整理这组图片的关键信息。" \
+    --scene-name task_demo
+```
+
+输出工作目录约定为 `./work_dirs/qwen3_vl_multi_image_demo_<scene-name>/`，其中 `<scene-name>` 经过基础合法化处理（仅保留字母数字与 `-_`）。
