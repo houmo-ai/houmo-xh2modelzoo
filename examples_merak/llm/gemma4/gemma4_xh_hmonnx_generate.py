@@ -14,12 +14,21 @@ if TYPE_CHECKING:
     from xhmodel_merak.xh_llm.models.gemma4 import XHGemma4HMONNXModel
 
 
+# HMSW-3948: after the dense gemma4 inference refactor split into the `gemma4e`
+# module, AutoLLMHONNXModel resolves Gemma4ForConditionalGeneration metas to
+# `XHGemma4_HMONNXModel` (gemma4e) instead of the legacy `XHGemma4HMONNXModel`
+# (gemma4). Accept both so older HMONNX artefacts still load through this
+# generate script.
+_ACCEPTED_HMONNX_CLASSES = {"XHGemma4HMONNXModel", "XHGemma4_HMONNXModel"}
+
+
 def main(args):
     xhquant_init(None, args.debug)
     logger = get_xhquant_logger()
     hmonnx_model: XHGemma4HMONNXModel = AutoLLMHONNXModel.from_pretrained(args.config)
-    assert type(hmonnx_model).__name__ == "XHGemma4HMONNXModel", (
-        f"Expected XHGemma4HMONNXModel, got {type(hmonnx_model).__name__}"
+    actual_cls = type(hmonnx_model).__name__
+    assert actual_cls in _ACCEPTED_HMONNX_CLASSES, (
+        f"Expected one of {_ACCEPTED_HMONNX_CLASSES}, got {actual_cls}"
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

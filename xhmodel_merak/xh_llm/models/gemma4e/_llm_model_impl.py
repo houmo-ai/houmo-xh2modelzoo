@@ -182,7 +182,12 @@ class _Gemma4TextAttention(DynamicModule):
             key_states, value_states = shared_kv[self.kv_shared_layer_index]
         else:
             key_states = self.k_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dim)
-            value_states = self.v_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dim)
+            # When attention_k_eq_v=True for global (non-sliding) layers, v_proj is None and K=V
+            value_states = (
+                self.v_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dim)
+                if self.v_proj is not None
+                else key_states
+            )
 
             key_states = self.k_norm(key_states)
             key_states = self.attn_compute_cast(key_states)

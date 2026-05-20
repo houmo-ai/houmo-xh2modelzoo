@@ -345,7 +345,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             )
             output.insert(4, local_attention_mask)
             output.insert(5, global_attention_mask)
-        if per_layer_inputs is None:
-            raise ValueError("Gemma4DataPreprocess requires per_layer_input_builder to produce per_layer_inputs.")
-        output.insert(0, per_layer_inputs.to(self._device, inputs_embeds.dtype))
+        if per_layer_inputs is not None:
+            output.insert(0, per_layer_inputs.to(self._device, inputs_embeds.dtype))
         return tuple(output)

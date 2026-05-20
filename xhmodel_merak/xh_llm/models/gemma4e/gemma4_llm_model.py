@@ -45,7 +45,7 @@ class Gemma4KVCacheMixin(KVCacheMixin):
             self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(shape, dtype=dtype)))
 
 
-class _Gemma4TextExportBridge(nn.Module):
+class _Gemma4TextExportBridgeBase(nn.Module):
     def __init__(self, hf_model: Gemma4ForConditionalGeneration):
         super().__init__()
         self.config = hf_model.config
@@ -55,17 +55,17 @@ class _Gemma4TextExportBridge(nn.Module):
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
-    def forward(
+    def _run(
         self,
-        per_layer_inputs,
         inputs_embeds,
         position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
         global_attention_mask,
-        past_key_cache=None,
-        past_value_cache=None,
+        past_key_cache,
+        past_value_cache,
+        per_layer_inputs,
     ):
         hidden_states = self.language_model(
             inputs_embeds=inputs_embeds,
@@ -85,6 +85,56 @@ class _Gemma4TextExportBridge(nn.Module):
             logits = torch.tanh(logits)
             logits = logits * final_logit_softcapping
         return logits
+
+
+class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
+    """Bridge for PLE models (hidden_size_per_layer_input > 0); per_layer_inputs is first arg."""
+
+    def forward(
+        self,
+        per_layer_inputs,
+        inputs_embeds,
+        position_ids,
+        past_seq_length,
+        current_input_length,
+        local_attention_mask,
+        global_attention_mask,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds, position_ids, past_seq_length, current_input_length,
+            local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
+            per_layer_inputs,
+        )
+
+
+class _Gemma4TextExportBridgeDense(_Gemma4TextExportBridgeBase):
+    """Bridge for dense models (hidden_size_per_layer_input = 0); no per_layer_inputs arg."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        position_ids,
+        past_seq_length,
+        current_input_length,
+        local_attention_mask,
+        global_attention_mask,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds, position_ids, past_seq_length, current_input_length,
+            local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
+            None,
+        )
+
+
+def _make_text_export_bridge(hf_model: Gemma4ForConditionalGeneration):
+    text_config = hf_model.config.get_text_config()
+    if getattr(text_config, "hidden_size_per_layer_input", 0):
+        return _Gemma4TextExportBridgePLE(hf_model)
+    return _Gemma4TextExportBridgeDense(hf_model)
 
 
 def _flatten_multimodal_features(features: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -515,7 +565,7 @@ class XHGemma4Model(VisionLLMModel):
         self.config.audio_token_id = hf_model.config.audio_token_id
         self.config.video_token_id = hf_model.config.video_token_id
         register_wrap_modules(hf_model)
-        wrap_model = super().init_wrap_model(_Gemma4TextExportBridge(hf_model))
+        wrap_model = super().init_wrap_model(_make_text_export_bridge(hf_model))
         wrap_model.language_model.rotary_emb.set_target_dtype(wrap_model.language_model.embed_tokens.weight.dtype)
         return wrap_model
 
@@ -578,18 +628,18 @@ class XHGemma4Model(VisionLLMModel):
         return Gemma4DataPreprocess(config)
 
     def get_export_cfg(self) -> dict[str, list[str]]:
-        export_cfg = {
-            "input_names": [
-                "per_layer_inputs",
-                "inputs_embeds",
-                "position_ids",
-                "past_seq_length",
-                "current_input_length",
-                "local_attention_mask",
-                "global_attention_mask",
-            ],
-            "output_names": ["logits"],
-        }
+        input_names = []
+        if self.per_layer_input_builder is not None:
+            input_names.append("per_layer_inputs")
+        input_names += [
+            "inputs_embeds",
+            "position_ids",
+            "past_seq_length",
+            "current_input_length",
+            "local_attention_mask",
+            "global_attention_mask",
+        ]
+        export_cfg = {"input_names": input_names, "output_names": ["logits"]}
         for layer_idx in range(self.kvcache_config.num_layers):
             export_cfg["input_names"].append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(self.kvcache_config.num_layers):

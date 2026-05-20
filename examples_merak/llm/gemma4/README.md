@@ -20,6 +20,11 @@ CUDA_VISIBLE_DEVICES=0 conda run -n gemma4 bash -c \
   'PYTHONPATH=/data01/home/yujy/work/xh2modelzoo:$PYTHONPATH \
    python examples_merak/llm/gemma4/gemma4_xh_export_hmonnx.py \
    --config configs_merak/xh2a/llm_models/gemma4/31b/gemma4_31b_it_xh2a_2k.py'
+
+CUDA_VISIBLE_DEVICES=0 conda run -n gemma4 bash -c \
+  'PYTHONPATH=/data01/home/yujy/work/xh2modelzoo:$PYTHONPATH \
+   python examples_merak/llm/gemma4/gemma4_xh_export_hmonnx.py \
+   --config configs_merak/xh2a/llm_models/gemma4/31b/gemma4_31b_it_xh2a_w4a8_autoround_2k.py'
 ```
 
 产出目录 `work_dirs/gemma4_31b_it_xh2a_2k/hmquant_xh2_gemma4_31b_it_w8a8_256_2k_<date>/`：
