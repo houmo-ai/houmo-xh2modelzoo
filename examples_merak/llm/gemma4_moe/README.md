@@ -12,7 +12,7 @@ transformers==5.5.0
 
 导出视觉部分：
 ```
-CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_visual_xh_export_onnx.py --config onfigs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_visual_26b_a4b_it_xh2a_448x448.py --image data/images/qwen2_vl_demo.jpeg 
+CUDA_VISIBLE_DEVICES=7 python examples_merak/llm/gemma4_moe/gemma4_moe_visual_xh_export_onnx.py --config onfigs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_visual_26b_a4b_it_xh2a_448x448.py --image data/images/qwen2_vl_demo.jpeg --upsample-token True --fuse-norm True
 ```
 在config中填写正确的模型路径和量化配置
 

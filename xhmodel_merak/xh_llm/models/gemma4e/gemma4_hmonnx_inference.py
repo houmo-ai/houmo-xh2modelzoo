@@ -244,25 +244,14 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
 
     @staticmethod
     def _build_visual_runtime(visual_meta):
-        onnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(visual_meta, "onnx", None))
         export_mode = getattr(visual_meta, "export_mode", "full")
-        if export_mode == "compact" and onnx_path is not None:
-            if not Path(onnx_path).exists():
-                raise FileNotFoundError(f"Gemma4 visual ONNX artifact not found: {onnx_path}")
-            return VisualONNXModel(onnx_path)
         hmonnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(visual_meta, "hmonnx", None))
         if hmonnx_path is not None:
             if not Path(hmonnx_path).exists():
                 raise FileNotFoundError(f"Gemma4 visual HMONNX artifact not found: {hmonnx_path}")
             output_scale = float(getattr(visual_meta, "output_scale", 1.0) or 1.0)
             return VisualHMONNXModel(hmonnx_path, export_mode=export_mode, output_scale=output_scale)
-        if onnx_path is not None:
-            if not Path(onnx_path).exists():
-                raise FileNotFoundError(f"Gemma4 visual ONNX artifact not found: {onnx_path}")
-            return VisualONNXModel(onnx_path)
-        if hmonnx_path is None:
-            raise ValueError("Gemma4 visual runtime requires an exported artifact.")
-        raise ValueError("Gemma4 visual runtime requires an exported artifact.")
+        raise ValueError("Gemma4 visual runtime requires an exported HMONNX artifact.")
 
     @staticmethod
     def _disable_kvcache_fast_mode(hmonnx_model: HMONNXModel) -> int:

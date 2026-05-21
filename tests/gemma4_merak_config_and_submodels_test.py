@@ -181,6 +181,49 @@ def test_gemma4_visual_export_hmonnx_preserves_plain_onnx_sidecar(monkeypatch, t
     assert (export_dir / "onnx" / "gemma4_visual.onnx.data").exists()
 
 
+def test_gemma4_visual_export_hmonnx_records_full_and_compact_hmonnx(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.base_vision_model import BaseVisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e import gemma4_vision_model as vision_mod
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
+
+    def _fake_export(self, output_dir: str):
+        output_path = Path(output_dir) / "gemma4_visual_hm.onnx"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.touch()
+        return str(output_path)
+
+    def _fake_sidecar(self, output_dir: str, cached_onnx_path=None):
+        del cached_onnx_path
+        onnx_path = Path(output_dir) / "onnx" / "gemma4_visual.onnx"
+        onnx_path.parent.mkdir(parents=True, exist_ok=True)
+        onnx_path.touch()
+        return onnx_path
+
+    monkeypatch.setattr(BaseVisionModel, "_export_hmonnx", _fake_export)
+    monkeypatch.setattr(XHGemma4VisionModel, "_export_plain_onnx_sidecar", _fake_sidecar)
+    monkeypatch.setattr(
+        vision_mod.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(vision_config=SimpleNamespace(hidden_size=768)),
+    )
+
+    for export_mode in ("full", "compact"):
+        config = XHGemma4VisualConfig(
+            model_name="gemma4_visual",
+            hf_model=str(MODEL_DIR),
+            export_mode=export_mode,
+        )
+        model = XHGemma4VisionModel(config)
+        export_dir = tmp_path / export_mode
+
+        meta = model.export_hmonnx(str(export_dir))
+
+        assert meta.hmonnx == str(export_dir / "gemma4_visual_hm.onnx")
+        assert meta.onnx == str(export_dir / "onnx" / "gemma4_visual.onnx")
+        assert meta.export_mode == export_mode
+
+
 def test_gemma4_visual_plain_onnx_sidecar_reuses_cached_onnx_after_quantized(tmp_path):
     from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
     from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4VisualConfig
@@ -528,7 +571,7 @@ def test_gemma4_audio_runtime_prefers_plain_onnx_artifact(monkeypatch, tmp_path)
     assert created["onnx"] == str(onnx_path)
 
 
-def test_gemma4_visual_runtime_prefers_plain_onnx_artifact(monkeypatch, tmp_path):
+def test_gemma4_visual_runtime_uses_hmonnx_for_compact_export(monkeypatch, tmp_path):
     from xhmodel_merak.xh_llm.models.gemma4e import gemma4_hmonnx_inference as inference_mod
 
     created = {}
@@ -556,8 +599,9 @@ def test_gemma4_visual_runtime_prefers_plain_onnx_artifact(monkeypatch, tmp_path
         SimpleNamespace(hmonnx=str(hmonnx_path), onnx=str(onnx_path), export_mode="compact"),
     )
 
-    assert isinstance(runtime, _FakeVisualONNXModel)
-    assert created["onnx"] == str(onnx_path)
+    assert isinstance(runtime, _FakeVisualHMONNXModel)
+    assert created["hmonnx"] == (str(hmonnx_path), "compact", 1.0)
+    assert "onnx" not in created
 
 
 def test_gemma4_visual_runtime_prefers_hmonnx_for_full_export(monkeypatch, tmp_path):
@@ -591,6 +635,20 @@ def test_gemma4_visual_runtime_prefers_hmonnx_for_full_export(monkeypatch, tmp_p
     assert isinstance(runtime, _FakeVisualHMONNXModel)
     assert created["hmonnx"] == (str(hmonnx_path), "full", 0.25)
     assert "onnx" not in created
+
+
+def test_gemma4_visual_runtime_rejects_onnx_only_artifact(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4e import gemma4_hmonnx_inference as inference_mod
+
+    onnx_dir = tmp_path / "visual" / "onnx"
+    onnx_dir.mkdir(parents=True)
+    onnx_path = onnx_dir / "gemma4_visual.onnx"
+    onnx_path.touch()
+
+    with pytest.raises(ValueError, match="HMONNX"):
+        inference_mod.XHGemma4_HMONNXModel._build_visual_runtime(
+            SimpleNamespace(onnx=str(onnx_path), export_mode="compact"),
+        )
 
 
 def test_gemma4_audio_runtime_requires_existing_hmonnx_artifact():
