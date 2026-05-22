@@ -65,6 +65,73 @@ def build_inputs(processor, messages: List[Dict[str, Any]], device: Optional[tor
     return inputs
 
 
+def parse_page_selection(page_selection: Optional[str], page_count: int) -> List[int]:
+    """Parse 1-based page selection into 0-based page indices."""
+    if page_selection is None or page_selection.strip() == "":
+        return list(range(page_count))
+
+    selected_pages: List[int] = []
+    for raw_part in page_selection.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start_page = int(start_text)
+            end_page = int(end_text)
+            if start_page > end_page:
+                raise ValueError(f"Invalid page range: {part}")
+            selected_pages.extend(range(start_page - 1, end_page))
+        else:
+            selected_pages.append(int(part) - 1)
+
+    selected_pages = sorted(set(selected_pages))
+    invalid_pages = [page + 1 for page in selected_pages if page < 0 or page >= page_count]
+    if invalid_pages:
+        raise ValueError(f"Page selection out of range 1-{page_count}: {invalid_pages}")
+    return selected_pages
+
+
+def render_pdf_to_images(
+    pdf_path: str | Path,
+    output_dir: str | Path,
+    dpi: int = 200,
+    pages: Optional[str] = None,
+) -> List[Path]:
+    """Render selected PDF pages to PNG files.
+
+    GLM-OCR HMONNX inference consumes images in this repository, so PDF input is
+    handled by rendering pages first. PyMuPDF is imported lazily to keep image
+    demos usable when PDF support dependencies are absent.
+    """
+    try:
+        import fitz  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise ImportError(
+            "PDF input requires PyMuPDF (`fitz`). Install `pymupdf`, or convert "
+            "the PDF pages to images and pass them via --image/--images_json."
+        ) from exc
+
+    pdf_path = Path(pdf_path).expanduser().resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rendered_paths: List[Path] = []
+    zoom = float(dpi) / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
+
+    with fitz.open(pdf_path) as document:
+        page_indices = parse_page_selection(pages, document.page_count)
+        for page_index in page_indices:
+            page = document.load_page(page_index)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            output_path = output_dir / f"{pdf_path.stem}_page_{page_index + 1:04d}.png"
+            pixmap.save(str(output_path))
+            rendered_paths.append(output_path)
+
+    return rendered_paths
+
+
 def msg_output_format(title: str) -> str:
     padding_str = "*" * 10
     return f"{padding_str} {title} {padding_str}"

@@ -108,9 +108,14 @@ class GlmOcrONNXModel(LLMONNXGraphModel):
     #  Vision session management                                          #
     # ------------------------------------------------------------------ #
 
+    def _get_image_feature_onnx_path(self):
+        if isinstance(self.image_feature_config, dict):
+            return self.image_feature_config["onnx"]
+        return self.image_feature_config.onnx
+
     def init_image_feature(self):
         self._vision_runtime = "hmonnx"
-        hmonnx_session = HMONNXGoldenInference(self.image_feature_config.onnx)
+        hmonnx_session = HMONNXGoldenInference(self._get_image_feature_onnx_path())
         hmonnx_session.exec_device = self._exec_device
         hmonnx_session.to(self.device)
         try:
@@ -122,7 +127,7 @@ class GlmOcrONNXModel(LLMONNXGraphModel):
             providers = ["CPUExecutionProvider"]
             if str(self._exec_device).startswith("cuda"):
                 providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            self.image_feature_session = ort.InferenceSession(self.image_feature_config.onnx, providers=providers)
+            self.image_feature_session = ort.InferenceSession(self._get_image_feature_onnx_path(), providers=providers)
             self._vision_runtime = "ort"
 
     def save_image_feature_golden(self, output_dir):
@@ -390,6 +395,7 @@ class GlmOcrONNXModel(LLMONNXGraphModel):
         do_sample: bool = False,
         max_new_tokens: int = 1024,
         keep_sessions: bool = False,
+        image_feature_fn=None,
     ) -> str:
         from tqdm import tqdm
 
@@ -426,21 +432,26 @@ class GlmOcrONNXModel(LLMONNXGraphModel):
 
         messages = build_messages(image, prompt)
         inputs = build_inputs(processor, messages, device=runtime_device)
+        inputs.pop("mm_token_type_ids", None)
 
         input_ids = inputs["input_ids"].to(runtime_device)
         pixel_values = inputs["pixel_values"].to(runtime_device)
         image_grid_thw = inputs["image_grid_thw"].to(runtime_device)
 
         # --- Vision ---
-        if self.image_feature_session is None:
+        if image_feature_fn is not None:
+            image_features = image_feature_fn(pixel_values, image_grid_thw)
+        elif self.image_feature_session is None:
             self.init_image_feature()
             self.to(runtime_device)
             self.set_exec_device(runtime_device)
             if use_fast and self._vision_runtime == "hmonnx":
                 self.image_feature_session.initialize()
                 self.image_feature_session._session.to_fast_mode()
-        image_features = self.extract_image_features(pixel_values, image_grid_thw)
-        if not keep_sessions:
+            image_features = self.extract_image_features(pixel_values, image_grid_thw)
+        else:
+            image_features = self.extract_image_features(pixel_values, image_grid_thw)
+        if image_feature_fn is None and not keep_sessions:
             self.release_image_feature()
 
         # --- Prefill ---

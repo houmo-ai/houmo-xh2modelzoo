@@ -12,6 +12,7 @@ import xhquant.utils.suppress_printing
 from PIL import Image, ImageOps
 from xhquant.api import (
     ConfigDict,
+    HMONNXGoldenInference,
     HMONNXInference,
     set_random_seed,
 )
@@ -45,9 +46,16 @@ def load_and_process_image(image_path: str, target_w: int, target_h: int):
     return image
 
 
+def _prepare_generate_inputs(inputs):
+    generate_inputs = dict(inputs)
+    generate_inputs.pop("token_type_ids", None)
+    generate_inputs.pop("mm_token_type_ids", None)
+    return generate_inputs
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--hf_model_dir", type=str, default="/data02/datasets/GLM-OCR",
+    parser.add_argument("--hf_model_dir", type=str, default="/data01/datasets/GLM-OCR",
                         help="HuggingFace model directory")
     parser.add_argument("--work_dir", type=str, default="work_dirs/glm_ocr_vision_xh2a_export_hmonnx",
                         help="output work directory")
@@ -63,7 +71,25 @@ def parse_arguments():
     parser.add_argument("--max_size_t", type=int, default=2, help="max temporal size")
     parser.add_argument("--patch_size", type=int, default=14, help="patch size")
     parser.add_argument("--temporal_patch_size", type=int, default=2, help="temporal patch size")
+    parser.add_argument("--skip_golden", action="store_true", help="skip HMONNX golden generation")
+    parser.add_argument("--golden_dir", type=str, default=None, help="golden output dir, default work_dir/golden/vision")
     return parser
+
+
+def _generate_vision_golden(hmonnx_file: Path, pixel_values: torch.Tensor, execution_device, args, logger):
+    golden_dir = Path(args.golden_dir) if args.golden_dir is not None else Path(args.work_dir) / "golden" / "vision"
+    golden_dir.mkdir(parents=True, exist_ok=True)
+
+    golden_session = HMONNXGoldenInference(str(hmonnx_file))
+    golden_session.save_golden = True
+    golden_session.golden_dir = str(golden_dir)
+    golden_session.step = 0
+    golden_session.to("cpu")
+    golden_session.exec_device = execution_device
+
+    with torch.no_grad():
+        golden_session(pixel_values.half().to(execution_device))
+    logger.info(f"Vision golden generated at: {golden_dir}")
 
 
 def _export_impl(cfg_name, work_dir, device, execution_device, dtype, model_cfg, quant_config, args):
@@ -108,7 +134,7 @@ def _export_impl(cfg_name, work_dir, device, execution_device, dtype, model_cfg,
         accelerate.hooks.remove_hook_from_module(native_model, recurse=True)
         native_model.to(execution_device)
         with torch.no_grad():
-            generated_ids = native_model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+            generated_ids = native_model.generate(**_prepare_generate_inputs(inputs), max_new_tokens=args.max_new_tokens)
         native_output = processor.decode(
             generated_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=False
         )
@@ -187,6 +213,9 @@ def _export_impl(cfg_name, work_dir, device, execution_device, dtype, model_cfg,
         )
         logger.info(f"Convert onnx to hmonnx success, out hmonnx file to: {out_hmonnx_file}")
 
+    if not args.skip_golden:
+        _generate_vision_golden(out_hmonnx_file, pixel_values, execution_device, args, logger)
+
     # -------------------------------------------------------------------------
     # 6. Validate HMONNX model (optional)
     # -------------------------------------------------------------------------
@@ -219,7 +248,7 @@ def _export_impl(cfg_name, work_dir, device, execution_device, dtype, model_cfg,
     native_model.model.visual = xh_model
 
     with torch.no_grad():
-        generated_ids = native_model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+        generated_ids = native_model.generate(**_prepare_generate_inputs(inputs), max_new_tokens=args.max_new_tokens)
     hmonnx_output = processor.decode(
         generated_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=False
     )

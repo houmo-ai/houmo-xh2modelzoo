@@ -1,6 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
-
 import json
 import numpy as np
 import sys
@@ -8,6 +6,8 @@ import torch
 import torch.nn as nn
 import xhquant.utils.suppress_printing
 from PIL import Image, ImageOps
+from transformers import PPDocLayoutV3ImageProcessor
+from xhquant.api import HMONNXGoldenInference
 
 project_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -31,6 +31,67 @@ def load_and_process_image(image_path: str, target_w: int, target_h: int) -> Ima
         pad_h = target_h - new_h
         image = ImageOps.expand(image, border=(0, 0, pad_w, pad_h), fill=(114, 114, 114))
     return image
+
+
+def _load_layout_image(image_path: str, pdf_page: int) -> Image.Image:
+    source = Path(image_path)
+    if source.suffix.lower() == ".pdf":
+        import fitz
+
+        doc = fitz.open(str(source))
+        if len(doc) == 0:
+            raise ValueError(f"PDF has no pages: {source}")
+        page_index = max(0, min(int(pdf_page) - 1, len(doc) - 1))
+        page = doc.load_page(page_index)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    return Image.open(source).convert("RGB")
+
+
+def _generate_layout_golden(args, golden_output_dir: Path, workspace_root: Path, exec_device: str, logger) -> dict:
+    layout_hmonnx = Path(_resolve_path(args.layout_hmonnx, workspace_root))
+    if not layout_hmonnx.exists():
+        raise FileNotFoundError(f"PP-DocLayoutV3 HMONNX not found: {layout_hmonnx}")
+
+    layout_model_dir = _resolve_path(args.layout_model_dir, workspace_root)
+    layout_image_path = _resolve_path(args.layout_image, workspace_root)
+    layout_golden_dir = golden_output_dir / "layout"
+    layout_golden_dir.mkdir(exist_ok=True, parents=True)
+
+    processor = PPDocLayoutV3ImageProcessor.from_pretrained(layout_model_dir)
+    image = _load_layout_image(layout_image_path, args.layout_pdf_page)
+    inputs = processor(images=[image], return_tensors="pt")
+    pixel_values = inputs["pixel_values"]
+
+    session = HMONNXGoldenInference(str(layout_hmonnx))
+    session.to("cpu")
+    session.exec_device = exec_device
+    session.save_golden = True
+    session.golden_dir = str(layout_golden_dir)
+    session.step = 0
+
+    with torch.no_grad():
+        outputs = session(pixel_values.half().to(exec_device))
+
+    if not isinstance(outputs, (tuple, list)):
+        outputs = [outputs]
+
+    np.save(layout_golden_dir / "pixel_values.npy", pixel_values.detach().cpu().numpy())
+    output_shapes = [list(output.shape) for output in outputs if isinstance(output, torch.Tensor)]
+    summary = {
+        "layout_model_dir": layout_model_dir,
+        "layout_hmonnx": str(layout_hmonnx),
+        "layout_image": layout_image_path,
+        "layout_pdf_page": args.layout_pdf_page,
+        "layout_golden_dir": str(layout_golden_dir),
+        "input_shape": list(pixel_values.shape),
+        "output_shapes": output_shapes,
+    }
+    with (layout_golden_dir / "layout_golden_summary.json").open("w", encoding="utf-8") as fout:
+        json.dump(summary, fout, ensure_ascii=False, indent=2)
+    logger.info(f"PP-DocLayoutV3 golden generated at: {layout_golden_dir}")
+    logger.info("PP-DocLayoutV3 output shapes: " + json.dumps(output_shapes))
+    return summary
 
 
 def _resolve_path(path_str: str, workspace_root: Path) -> str:
@@ -73,6 +134,15 @@ def parse_arguments():
     parser.add_argument("--image_size_w", type=int, default=672)
     parser.add_argument("--image_size_h", type=int, default=672)
     parser.add_argument("--eos_token_id", type=int, nargs="+", default=[151329])
+    parser.add_argument("--skip_layout_golden", action="store_true", help="skip PP-DocLayoutV3 HMONNX golden generation")
+    parser.add_argument("--layout_model_dir", type=str, default="/data01/datasets/ppdoclayoutv3_safetensors",
+                        help="PP-DocLayoutV3 safetensors directory")
+    parser.add_argument("--layout_hmonnx", type=str,
+                        default="work_dirs/ppdoclayoutv3_xh2a_export_hmonnx/hmonnx/ppdoclayoutv3_w16a16_sefp_XH2a.onnx",
+                        help="PP-DocLayoutV3 HMONNX file")
+    parser.add_argument("--layout_image", type=str, default="examples/llm/glm_ocr/data/18UF.pdf",
+                        help="image or PDF used for PP-DocLayoutV3 golden input")
+    parser.add_argument("--layout_pdf_page", type=int, default=1, help="1-based PDF page for PP-DocLayoutV3 golden input")
     return parser
 
 
@@ -110,6 +180,10 @@ def main():
     prefill_golden_dir = golden_output_dir / "prefill"
     decode_golden_dir = golden_output_dir / "decode"
 
+    layout_summary = None
+    if not args.skip_layout_golden:
+        layout_summary = _generate_layout_golden(args, golden_output_dir, workspace_root, exec_device, logger)
+
     if not args.resume and prefill_golden_dir.exists():
         logger.error(f"{prefill_golden_dir} already exists, please remove it first")
         exit(1)
@@ -131,16 +205,16 @@ def main():
     torch.serialization.clear_safe_globals()
 
     # Build model directly (matching qwen2_5_vl pattern: SimpleNamespace + direct construction)
-    image_feature_cfg = SimpleNamespace(onnx=_resolve_path(visual_onnx, workspace_root))
-    prefill_cfg = SimpleNamespace(
-        onnx=_resolve_path(prefill_onnx, workspace_root),
-        input_sequence_length=args.input_sequence_length,
-    )
-    decode_cfg = SimpleNamespace(onnx=_resolve_path(decode_onnx, workspace_root))
-    kv_cache_cfg = SimpleNamespace(
-        num_hidden_layers=args.num_hidden_layers,
-        shape=[1, args.num_kv_heads, args.cache_len, args.head_dim],
-    )
+    image_feature_cfg = {"onnx": _resolve_path(visual_onnx, workspace_root)}
+    prefill_cfg = {
+        "onnx": _resolve_path(prefill_onnx, workspace_root),
+        "input_sequence_length": args.input_sequence_length,
+    }
+    decode_cfg = {"onnx": _resolve_path(decode_onnx, workspace_root)}
+    kv_cache_cfg = {
+        "num_hidden_layers": args.num_hidden_layers,
+        "shape": [1, args.num_kv_heads, args.cache_len, args.head_dim],
+    }
 
     xh_model: GlmOcrONNXModel = GlmOcrONNXModel(
         image_feature=image_feature_cfg,
@@ -276,6 +350,7 @@ def main():
         "image": image_path,
         "prompt": prompt,
         "vision_output": str(image_embeds_npy),
+        "layout": layout_summary,
         "prefill_next_token_id": int(next_token_id.view(-1)[0].item()),
         "prefill_next_token_text": tokenizer.decode([int(next_token_id.view(-1)[0].item())], skip_special_tokens=False),
         "decode": decode_records,

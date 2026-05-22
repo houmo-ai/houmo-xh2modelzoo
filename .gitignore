@@ -216,3 +216,4 @@ hm_eval/outputs/
 hm_eval/tasks/
 # Added by code-review-graph
 .code-review-graph/
+examples/llm/glm_ocr/GLM-OCR

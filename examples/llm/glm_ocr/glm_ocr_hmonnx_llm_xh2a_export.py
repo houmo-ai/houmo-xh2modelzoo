@@ -1,7 +1,7 @@
-import sys
 import gc
 import json
 import shutil
+import sys
 import time
 
 from pathlib import Path
@@ -11,7 +11,7 @@ import torch
 import xhquant.utils.suppress_printing
 from PIL import Image, ImageOps
 from torch import Tensor
-from xhquant.api import ConfigDict, PrecisionMode, QTensor, ptq_quantize, set_random_seed
+from xhquant.api import ConfigDict, HMONNXGoldenInference, PrecisionMode, QTensor, ptq_quantize, set_random_seed
 
 # Keep behavior aligned with glm4v export script: ensure project root is importable
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -32,7 +32,7 @@ def parse_arguments():
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--hf_model_dir", type=str, default="/data02/datasets/GLM-OCR",
+    parser.add_argument("--hf_model_dir", type=str, default="/data01/datasets/GLM-OCR",
                         help="HuggingFace model directory")
     parser.add_argument("--work_dir", type=str, default="work_dirs/glm_ocr_llm_xh2a_2k_export",
                         help="output work directory")
@@ -51,6 +51,8 @@ def parse_arguments():
     parser.add_argument("--max_sequence_length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input_sequence_length", type=int, default=256, help="prefill input sequence length")
     parser.add_argument("--target_device", type=str, default="XH2a", help="target device")
+    parser.add_argument("--skip_golden", action="store_true", help="skip HMONNX golden generation")
+    parser.add_argument("--golden_dir", type=str, default=None, help="golden output dir, default work_dir/golden")
     return parser
 
 
@@ -144,6 +146,13 @@ def _align_inputs_device(inputs, device):
     return aligned
 
 
+def _prepare_generate_inputs(inputs):
+    generate_inputs = dict(inputs)
+    generate_inputs.pop("token_type_ids", None)
+    generate_inputs.pop("mm_token_type_ids", None)
+    return generate_inputs
+
+
 def _fix_image_token_id_if_needed(model_config, input_ids: Tensor, image_grid_thw: Tensor, logger):
     current_id = int(model_config.image_token_id)
     current_count = int((input_ids == current_id).sum().item())
@@ -179,7 +188,7 @@ def _safe_generate_text(model, inputs, processor, input_ids, max_new_tokens, log
         model_device = next(model.parameters()).device
     except Exception:
         pass
-    aligned_inputs = _align_inputs_device(inputs, model_device)
+    aligned_inputs = _align_inputs_device(_prepare_generate_inputs(inputs), model_device)
 
     with torch.no_grad():
         generate_kwargs = dict(max_new_tokens=max_new_tokens)
@@ -278,6 +287,39 @@ def _prepare_image_embeds(native_model, inputs, execution_device, dtype):
             image_embeds = torch.cat(image_embeds, dim=0)
         image_embeds = image_embeds.to(execution_device).to(dtype)
     return image_embeds
+
+
+def _generate_hmonnx_golden(onnx_file: str, inputs, golden_dir: Path, execution_device, logger, tag: str):
+    golden_dir.mkdir(parents=True, exist_ok=True)
+    golden_model = HMONNXGoldenInference(onnx_file)
+    golden_model.save_golden = True
+    golden_model.golden_dir = str(golden_dir)
+    golden_model.step = 0
+    golden_model.to("cpu")
+    golden_model.exec_device = execution_device
+
+    golden_inputs = []
+    for item in inputs:
+        if isinstance(item, Tensor):
+            value = item.to(execution_device)
+            if value.is_floating_point():
+                value = value.half()
+            golden_inputs.append(value)
+        else:
+            golden_inputs.append(item)
+    with torch.no_grad():
+        golden_model.forward(*golden_inputs)
+    logger.info(f"{tag} golden generated at: {golden_dir}")
+
+
+def _prepare_exported_graph_inputs(model: XHGlmOcrLLMModel, data: dict):
+    prepared = model.prepare_inputs_for_graph(data)
+    flat = _flatten_args(prepared)
+    if len(flat) >= 4 and isinstance(flat[0], Tensor) and isinstance(flat[3], Tensor):
+        exported_input_length = int(flat[0].shape[1])
+        if int(flat[3].reshape(-1)[0].item()) != exported_input_length:
+            flat[3] = torch.tensor([exported_input_length], dtype=flat[3].dtype, device=flat[3].device)
+    return flat
 
 
 def xhmodel_export_onnx(
@@ -536,6 +578,18 @@ def _export_impl(cfg, args):
     logger.info(f"save prefill onnx model to {prefill_onnx_file}")
     logger.info("*************** Finished export prefill model ***************")
 
+    golden_root = Path(args.golden_dir) if args.golden_dir is not None else Path(cfg.work_dir) / "golden"
+    if not args.skip_golden:
+        prefill_golden_inputs = _prepare_exported_graph_inputs(glm_ocr_llm_model, data_prefill)
+        _generate_hmonnx_golden(
+            prefill_onnx_file,
+            prefill_golden_inputs,
+            golden_root / "prefill",
+            execution_device,
+            logger,
+            "Prefill",
+        )
+
     glm_ocr_llm_model.change_eval_type(EvalModelType.QUANTED_ALIGNED)
     glm_ocr_llm_model.set_input_sequence_length(1)
 
@@ -570,6 +624,17 @@ def _export_impl(cfg, args):
     meta_info.decode_onnx_file = str(Path(decode_onnx_file).relative_to(cfg.work_dir))
     logger.info(f"save decode onnx model to {decode_onnx_file}")
     logger.info("*************** Finished export decode model ***************")
+
+    if not args.skip_golden:
+        decode_golden_inputs = _prepare_exported_graph_inputs(glm_ocr_llm_model, data_decode)
+        _generate_hmonnx_golden(
+            decode_onnx_file,
+            decode_golden_inputs,
+            golden_root / "decode",
+            execution_device,
+            logger,
+            "Decode",
+        )
 
     torch.save(
         {
@@ -612,7 +677,7 @@ def main(args):
         nodes_cfg=dict(
             lm_head=dict(
                 w_schema=dict(bits=8, fp_mode="sefp"),
-                act_schema=dict(bits=16, fp_mode="sefp"),
+                act_schema=dict(bits=8, fp_mode="sefp"),
             )
         ),
     )
