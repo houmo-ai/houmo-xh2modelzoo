@@ -128,14 +128,6 @@ def _clone_cache_value(value: torch.Tensor) -> torch.Tensor:
     return cloned
 
 
-def _parse_conv_cache_name(name: str) -> tuple[Optional[str], str]:
-    suffix = name[len("past_conv_cache_") :]
-    prefix, idx = suffix.rsplit("_", 1)
-    if prefix in {"q", "k", "v"}:
-        return prefix, idx
-    return None, idx
-
-
 def _ensure_logits_shape(logits: torch.Tensor) -> torch.Tensor:
     if logits.dim() == 3:
         return logits
@@ -163,6 +155,19 @@ def _is_kv_cache_name(name: str) -> bool:
         or "kcache_input" in name
         or "vcache_input" in name
     )
+
+
+def _parse_conv_cache_name(name: str) -> Tuple[Optional[str], str]:
+    """Parse past_conv_cache_X or past_conv_cache_{branch}_{idx}.
+
+    Returns (branch, idx) where branch is None for old-style names.
+    """
+    suffix = name[len("past_conv_cache_"):]
+    parts = suffix.rsplit("_", 1)
+    if len(parts) == 2 and parts[0] in ("q", "k", "v"):
+        return parts[0], parts[1]
+    # Old-style: past_conv_cache_{idx}
+    return None, suffix
 
 
 def _apply_repetition_penalty(
@@ -571,8 +576,6 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
                 continue
             if name.startswith("past_conv_cache_"):
                 branch, idx = _parse_conv_cache_name(name)
-                # Per-step verify export emits conv_cache_out_{idx}_{t};
-                # baseline path consumes only one valid token, so pick t=0.
                 if branch is None:
                     per_step = f"conv_cache_out_{idx}_0"
                     out_name = f"conv_cache_out_{idx}"

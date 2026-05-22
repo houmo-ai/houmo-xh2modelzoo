@@ -829,8 +829,8 @@ def _generate_golden(
             )
             decode_input_feed[name] = decode_pos
         elif name.startswith("past_conv_cache_"):
-            idx = name.split("_")[-1]
-            decode_input_feed[name] = prefill_output_map[f"conv_cache_out_{idx}"]
+            suffix = name[len("past_conv_cache_"):]
+            decode_input_feed[name] = prefill_output_map[f"conv_cache_out_{suffix}"]
         elif name.startswith("past_recurrent_state_"):
             idx = name.split("_")[-1]
             decode_input_feed[name] = prefill_output_map[f"recurrent_state_out_{idx}"]
@@ -2105,6 +2105,8 @@ def main(args):
     cfg.dtype = _resolve_compute_dtype_name(args.dtype, args.hf_model_dir)
     args.dtype = cfg.dtype
     cfg.debug = args.debug
+    if getattr(args, "split_conv_cache", False):
+        cfg.model.wrap_cfg.split_conv_cache = True
     if getattr(args, "golden_only", False):
         args.golden = True
 
@@ -2154,14 +2156,14 @@ def parse_arguments():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", type=str, default="configs/qwen3_5/qwen3_5_27b_xh2a.py")
-    parser.add_argument("--hf_model_dir", type=str, default="/data01/datasets/Qwen3.5-27B/")
+    parser.add_argument("--hf_model_dir", type=str, default="weights/Qwen3.5-27B")
     parser.add_argument(
         "--dtype",
         type=str,
         default="fp16",
         help="compute dtype for HF/wrap/export: auto/fp32/fp16/bf16",
     )
-    parser.add_argument("--work_dir", type=str, default='work_dirs')
+    parser.add_argument("--work_dir", type=str, default=None)
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
@@ -2181,7 +2183,7 @@ def parse_arguments():
             "support position_id > 65504. Default uses online rotary computation."
         ),
     )
-    parser.add_argument("--valid", default=True, help="run precision checks (HF/wrap/frontend/quant)")
+    parser.add_argument("--valid", action="store_true", help="run precision checks (HF/wrap/frontend/quant)")
     parser.add_argument("--valid_exported", action="store_true", help="validate exported graph before ONNX save")
     parser.add_argument("--num_logits_to_keep", type=int, default=1)
     parser.add_argument(
@@ -2299,6 +2301,15 @@ def parse_arguments():
         dest="force_rerank",
         action="store_true",
         help="Force regeneration of the reranked repo even if it already exists (use with --mtp-head-k).",
+    )
+    parser.add_argument(
+        "--split_conv_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
+            "Default False keeps the merged single-tensor format for backward compatibility."
+        ),
     )
     return parser
 

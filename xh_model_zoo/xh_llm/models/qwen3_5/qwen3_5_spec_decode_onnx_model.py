@@ -240,8 +240,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         for name, cache_tensor in list(cache_state.items()):
             if name.startswith("past_conv_cache_"):
                 branch, idx = _parse_conv_cache_name(name)
-                # New per-step naming: conv_cache_out_{layer}_{t}. Pick the
-                # (accepted_steps-1)-th snapshot by name (NPU-friendly, no slice).
                 step = max(accepted_steps - 1, 0)
                 if branch is None:
                     per_step_name = f"conv_cache_out_{idx}_{step}"
@@ -252,7 +250,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 if per_step_name in output_map:
                     cache_state[name] = _as_cache_value(cache_tensor, output_map[per_step_name])
                     continue
-                # Fallback to legacy continuous-window output that needs slicing.
                 if out_name not in output_map:
                     continue
                 conv_out = output_map[out_name]

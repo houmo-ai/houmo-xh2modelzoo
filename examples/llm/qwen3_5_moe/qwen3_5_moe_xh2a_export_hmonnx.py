@@ -83,6 +83,7 @@ def main(args):
         num_draft_tokens=num_draft_tokens,
         dflash_model_dir=args.dflash_model_dir,
         spec_draft_head_weight_bits=args.spec_draft_head_weight_bits,
+        split_conv_cache=args.split_conv_cache,
     )
 
     if args.draft_only:
@@ -231,6 +232,17 @@ if __name__ == "__main__":
         default=4,
         choices=[4, 8],
         help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
+    )
+    parser.add_argument(
+        "--split-conv-cache",
+        "--split_conv_cache",
+        dest="split_conv_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
+            "Default False keeps the merged single-tensor format for backward compatibility."
+        ),
     )
     args = parser.parse_args()
     if args.spec_decode_mode == "none":

@@ -73,6 +73,31 @@ python \
 2. 开启后会带来一定性能下降，通常大约增加 `10ms` 左右的耗时。
 
 
+## Split Conv Cache 导出
+
+`--split_conv_cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v），方便下游硬件按不同 shape 分别处理。默认不开启，保持向后兼容。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+python \
+  examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config configs/qwen3_5/qwen3_5_27b_xh2a.py \
+  --hf_model_dir weights/Qwen3.5-27B \
+  --dtype fp16 \
+  --split_conv_cache \
+  --work_dir work_dirs/qwen3_5_27b_split_export
+```
+
+开启后 meta.json 中 `linear_cache.layers` 的每层会输出 `conv_shapes`（3 个 shape 的列表）而非 `conv_shape`（单个 shape）。ONNX 模型的输入/输出命名也会变化：
+
+| 模式 | 输入名 | 输出名 |
+|------|--------|--------|
+| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
+| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+
+Spec decode 模式同样支持 `--split_conv_cache`，MTP 和 DFlash 均兼容。
+
 ## 六模型 8k Spec Decode 导出（命令版，不再使用 batch_export_8k.sh）
 
 下面命令覆盖六个模型的 W4A8 GPTQ/quant-weight 8k context 导出，每个模型都有 MTP 和 DFlash 两种 spec mode。目录名包含模型、8k、W4A8、GPTQ、spec mode、draft tokens、DFlash input length、draft head weight bits 和时间戳，避免产物混淆。

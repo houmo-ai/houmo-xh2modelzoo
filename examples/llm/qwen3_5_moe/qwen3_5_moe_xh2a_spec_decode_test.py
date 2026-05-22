@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compare_to_no_cuda_graph", action="store_true")
     parser.add_argument("--compare_baseline", action="store_true")
     parser.add_argument("--output_json", type=str, default=None)
+    parser.add_argument(
+        "--save_golden",
+        type=str,
+        default=None,
+        help="If set, export draft session golden data to this directory",
+    )
     return parser
 
 

@@ -210,6 +210,7 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
                 enable_rope=self.config.enable_rope,
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
+                split_conv_cache=self.config.split_conv_cache,
                 kv_cache=dict(
                     cache_axis=2,
                 ),
@@ -256,40 +257,66 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         linear_cache_meta = []
         for layer_idx in linear_attention_layer_indices:
             linear_attn = text_model.layers[layer_idx].linear_attn
-            cache_dtype = (
-                linear_attn.conv1d_q.weight.dtype
-                if hasattr(linear_attn, "conv1d_q")
-                else linear_attn.conv1d.weight.dtype
-            )
-            conv_shapes = ([
-                self.config.batch_size,
-                linear_attn.key_dim,
-                linear_attn.conv_kernel_size,
-            ], [
-                self.config.batch_size,
-                linear_attn.key_dim,
-                linear_attn.conv_kernel_size,
-            ], [
-                self.config.batch_size,
-                linear_attn.value_dim,
-                linear_attn.conv_kernel_size,
-            ])
-            recurrent_shape = [
-                self.config.batch_size,
-                linear_attn.num_v_heads,
-                linear_attn.head_k_dim,
-                linear_attn.head_v_dim,
-            ]
-            for conv_shape in conv_shapes:
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
-            past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
-            linear_cache_meta.append(
-                dict(
-                    layer_idx=layer_idx,
-                    conv_shapes=list(conv_shapes),
-                    recurrent_shape=recurrent_shape,
+            if self.config.split_conv_cache:
+                cache_dtype = (
+                    linear_attn.conv1d_q.weight.dtype
+                    if hasattr(linear_attn, "conv1d_q")
+                    else linear_attn.conv1d.weight.dtype
                 )
-            )
+                conv_shape_q = [
+                    self.config.batch_size,
+                    linear_attn.head_k_dim * linear_attn.num_v_heads,
+                    linear_attn.conv_kernel_size,
+                ]
+                conv_shape_k = [
+                    self.config.batch_size,
+                    linear_attn.head_k_dim * linear_attn.num_v_heads,
+                    linear_attn.conv_kernel_size,
+                ]
+                conv_shape_v = [
+                    self.config.batch_size,
+                    linear_attn.head_v_dim * linear_attn.num_v_heads,
+                    linear_attn.conv_kernel_size,
+                ]
+                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_q, dtype=cache_dtype)))
+                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_k, dtype=cache_dtype)))
+                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_v, dtype=cache_dtype)))
+                recurrent_shape = [
+                    self.config.batch_size,
+                    linear_attn.num_v_heads,
+                    linear_attn.head_k_dim,
+                    linear_attn.head_v_dim,
+                ]
+                past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                linear_cache_meta.append(
+                    dict(
+                        layer_idx=layer_idx,
+                        conv_shapes=[conv_shape_q, conv_shape_k, conv_shape_v],
+                        recurrent_shape=recurrent_shape,
+                    )
+                )
+            else:
+                cache_dtype = linear_attn.conv1d.weight.dtype
+                conv_shape = [
+                    self.config.batch_size,
+                    linear_attn.conv_dim,
+                    linear_attn.conv_kernel_size,
+                ]
+                recurrent_shape = [
+                    self.config.batch_size,
+                    linear_attn.num_v_heads,
+                    linear_attn.head_k_dim,
+                    linear_attn.head_v_dim,
+                ]
+                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
+                past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                linear_cache_meta.append(
+                    dict(
+                        layer_idx=layer_idx,
+                        conv_shape=conv_shape,
+                        recurrent_shape=recurrent_shape,
+                    )
+                )
 
         return (
             full_attention_layer_indices,
@@ -365,9 +392,9 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         )
         meta_info["linear_cache"] = dict(
             num_decoder_layers=len(linear_attention_layer_indices),
-            num_conv_caches=len(past_conv_caches),
             layer_indices=linear_attention_layer_indices,
             layers=linear_cache_meta,
+            num_conv_caches=len(past_conv_caches),
         )
 
         # Build inputs with M-RoPE position IDs
@@ -421,8 +448,11 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         for layer_idx in range(len(full_attention_layer_indices)):
             input_names.append(f"past_value_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
+            if self.config.split_conv_cache:
+                for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                    input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
+            else:
+                input_names.append(f"past_conv_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
             input_names.append(f"past_recurrent_state_{layer_idx}")
 
@@ -438,18 +468,23 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
             _verify_steps = int(wrap_cfg.input_sequence_length)
         if _verify_steps > 1:
             for layer_idx in range(len(linear_attention_layer_indices)):
-                for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                if self.config.split_conv_cache:
+                    for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                        for step_idx in range(_verify_steps):
+                            output_names.append(f"conv_cache_out_{branch}_{layer_idx}_{step_idx}")
+                else:
                     for step_idx in range(_verify_steps):
-                        output_names.append(
-                            f"conv_cache_out_{branch}_{layer_idx}_{step_idx}"
-                        )
+                        output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
             for layer_idx in range(len(linear_attention_layer_indices)):
                 for step_idx in range(_verify_steps):
                     output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
         else:
             for layer_idx in range(len(linear_attention_layer_indices)):
-                for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                    output_names.append(f"conv_cache_out_{branch}_{layer_idx}")
+                if self.config.split_conv_cache:
+                    for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                        output_names.append(f"conv_cache_out_{branch}_{layer_idx}")
+                else:
+                    output_names.append(f"conv_cache_out_{layer_idx}")
             for layer_idx in range(len(linear_attention_layer_indices)):
                 output_names.append(f"recurrent_state_out_{layer_idx}")
 

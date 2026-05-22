@@ -14,6 +14,29 @@ export PYTHONPATH=./
 
 > 对 35B-A3B 这类大 MoE，示例脚本默认关闭 `auto_offload`，优先让 prefill / decode 直接常驻 80G GPU；只有显存确实不够时，再显式加 `--enable-auto-offload` 或 `--resource-tight-mode`。
 
+## Split Conv Cache 导出
+
+`--split-conv-cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。默认不开启，保持向后兼容。
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model weights/Qwen3.5-35B-A3B \
+  --quant-type w8a8h0_sefp \
+  --context-length 2048 \
+  --input-sequence-length 256 \
+  --split-conv-cache
+```
+
+开启后 meta.json 中 `linear_cache.layers` 的每层会输出 `conv_shapes`（3 个 shape 的列表）而非 `conv_shape`（单个 shape）。ONNX 模型的输入/输出命名变化：
+
+| 模式 | 输入名 | 输出名 |
+|------|--------|--------|
+| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
+| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+
+Spec decode 模式（MTP / DFlash）同样支持 `--split-conv-cache`。
+
 ## 标准导出
 
 ```bash

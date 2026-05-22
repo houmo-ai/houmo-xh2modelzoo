@@ -645,8 +645,8 @@ def _generate_golden(
         elif name == decode_mask_name:
             decode_input_feed[name] = decode_linear_attn_mask
         elif name.startswith("past_conv_cache_"):
-            idx = name.split("_")[-1]
-            decode_input_feed[name] = prefill_output_map[f"conv_cache_out_{idx}"]
+            suffix = name[len("past_conv_cache_"):]
+            decode_input_feed[name] = prefill_output_map[f"conv_cache_out_{suffix}"]
         elif name.startswith("past_recurrent_state_"):
             idx = name.split("_")[-1]
             decode_input_feed[name] = prefill_output_map[f"recurrent_state_out_{idx}"]
@@ -939,6 +939,8 @@ def _prepare_export_context(cfg, args, logger):
     cfg.model.hf_model = args.hf_model_dir
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
+    if getattr(args, "split_conv_cache", False):
+        cfg.model.wrap_cfg.split_conv_cache = True
 
     qwen3_next_model: XHQwen3NextModel = MODELS.build(cfg.model)
     tokenizer = qwen3_next_model.get_tokenizer()
@@ -1326,6 +1328,15 @@ def parse_arguments():
     parser.add_argument("--release_modelscope_name", type=str, default=None)
     parser.add_argument("--release_wmix_amix", type=str, default=None)
     parser.add_argument("--release_date", type=str, default=None)
+    parser.add_argument(
+        "--split_conv_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
+            "Default False keeps the merged single-tensor format for backward compatibility."
+        ),
+    )
     return parser
 
 

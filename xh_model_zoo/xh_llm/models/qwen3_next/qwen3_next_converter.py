@@ -64,6 +64,9 @@ def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
     return tuple(outputs)
 
 
+_LINEAR_CONV_CACHE_BRANCHES = ("q", "k", "v")
+
+
 class Qwen3NextConverterXH2a(HFTransfromersConverter):
     target_device = DeviceType.XH2a
 
@@ -184,6 +187,7 @@ class Qwen3NextConverterXH2a(HFTransfromersConverter):
                 enable_rope=self.config.enable_rope,
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
+                split_conv_cache=self.config.split_conv_cache,
                 kv_cache=dict(
                     cache_axis=2,
                 ),
@@ -227,27 +231,43 @@ class Qwen3NextConverterXH2a(HFTransfromersConverter):
         linear_cache_meta = []
         for layer_idx in linear_attention_layer_indices:
             linear_attn = wraped_qwen_model.model.layers[layer_idx].linear_attn
-            cache_dtype = linear_attn.conv1d.weight.dtype
-            conv_shape = [
-                self.config.batch_size,
-                linear_attn.conv_dim,
-                linear_attn.conv_kernel_size,
-            ]
+            if self.config.split_conv_cache:
+                cache_dtype = (
+                    linear_attn.conv1d_q.weight.dtype
+                    if hasattr(linear_attn, "conv1d_q")
+                    else linear_attn.conv1d.weight.dtype
+                )
+                conv_shapes = [
+                    [self.config.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
+                    [self.config.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
+                    [self.config.batch_size, linear_attn.value_dim, linear_attn.conv_kernel_size],
+                ]
+                for shape in conv_shapes:
+                    past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+            else:
+                cache_dtype = linear_attn.conv1d.weight.dtype
+                conv_shape = [
+                    self.config.batch_size,
+                    linear_attn.conv_dim,
+                    linear_attn.conv_kernel_size,
+                ]
+                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
             recurrent_shape = [
                 self.config.batch_size,
                 linear_attn.num_v_heads,
                 linear_attn.head_k_dim,
                 linear_attn.head_v_dim,
             ]
-            past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
             past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
-            linear_cache_meta.append(
-                dict(
-                    layer_idx=layer_idx,
-                    conv_shape=conv_shape,
-                    recurrent_shape=recurrent_shape,
-                )
+            meta = dict(
+                layer_idx=layer_idx,
+                recurrent_shape=recurrent_shape,
             )
+            if self.config.split_conv_cache:
+                meta["conv_shapes"] = conv_shapes
+            else:
+                meta["conv_shape"] = conv_shape
+            linear_cache_meta.append(meta)
 
         return (
             full_attention_layer_indices,
@@ -322,6 +342,7 @@ class Qwen3NextConverterXH2a(HFTransfromersConverter):
             num_decoder_layers=len(linear_attention_layer_indices),
             layer_indices=linear_attention_layer_indices,
             layers=linear_cache_meta,
+            num_conv_caches=len(past_conv_caches),
         )
 
         input_ids_t = torch.randint(0, 1000, (self.config.batch_size, input_sequence_length), dtype=torch.long)
@@ -360,13 +381,21 @@ class Qwen3NextConverterXH2a(HFTransfromersConverter):
         for layer_idx in range(len(full_attention_layer_indices)):
             input_names.append(f"past_value_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            input_names.append(f"past_conv_cache_{layer_idx}")
+            if self.config.split_conv_cache:
+                for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                    input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
+            else:
+                input_names.append(f"past_conv_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
             input_names.append(f"past_recurrent_state_{layer_idx}")
 
         output_names = ["logits"]
         for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names.append(f"conv_cache_out_{layer_idx}")
+            if self.config.split_conv_cache:
+                for branch in _LINEAR_CONV_CACHE_BRANCHES:
+                    output_names.append(f"conv_cache_out_{branch}_{layer_idx}")
+            else:
+                output_names.append(f"conv_cache_out_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
             output_names.append(f"recurrent_state_out_{layer_idx}")
 

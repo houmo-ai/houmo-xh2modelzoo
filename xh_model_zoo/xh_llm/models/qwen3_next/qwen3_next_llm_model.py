@@ -181,6 +181,7 @@ class XHQwen3NextModel(LLMBaseModel):
         batch_size = self.wrap_cfg.batch_size
 
         self.layer_types = hf_model.model.config.layer_types
+        self.split_conv_cache = self.wrap_cfg.get("split_conv_cache", False)
         self.full_attention_layer_indices = [
             i for i, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
         ]
@@ -236,30 +237,54 @@ class XHQwen3NextModel(LLMBaseModel):
             layer = self.wrap_model.model.layers[layer_idx]
             assert layer.layer_type == "linear_attention", f"Layer {layer_idx} should be linear_attention"
             linear_attn = layer.linear_attn
-            conv_cache_shape = [
-                self.wrap_cfg.batch_size,
-                linear_attn.conv_dim,
-                linear_attn.conv_kernel_size,
-            ]
+            if self.split_conv_cache:
+                cache_dtype = (
+                    linear_attn.conv1d_q.weight.dtype
+                    if hasattr(linear_attn, "conv1d_q")
+                    else linear_attn.conv1d.weight.dtype
+                )
+                conv_shapes = [
+                    [self.wrap_cfg.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
+                    [self.wrap_cfg.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
+                    [self.wrap_cfg.batch_size, linear_attn.value_dim, linear_attn.conv_kernel_size],
+                ]
+                for shape in conv_shapes:
+                    self.past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+            else:
+                conv_cache_shape = [
+                    self.wrap_cfg.batch_size,
+                    linear_attn.conv_dim,
+                    linear_attn.conv_kernel_size,
+                ]
+                cache_dtype = linear_attn.conv1d.weight.dtype
+                self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
             recurrent_cache_shape = [
                 self.wrap_cfg.batch_size,
                 linear_attn.num_v_heads,
                 linear_attn.head_k_dim,
                 linear_attn.head_v_dim,
             ]
-            cache_dtype = linear_attn.conv1d.weight.dtype
-            self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
             self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
 
         if self.export_cfg is not None:
-            for cache_idx in range(num_linear_attention_layers):
-                self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}")
+            if self.split_conv_cache:
+                for cache_idx in range(num_linear_attention_layers):
+                    for branch in ("q", "k", "v"):
+                        self.export_cfg.input_names.append(f"past_conv_cache_{branch}_{cache_idx}")
+            else:
+                for cache_idx in range(num_linear_attention_layers):
+                    self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}")
             for cache_idx in range(num_linear_attention_layers):
                 self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
                 output_names = ["logits"]
-                for cache_idx in range(num_linear_attention_layers):
-                    output_names.append(f"conv_cache_out_{cache_idx}")
+                if self.split_conv_cache:
+                    for cache_idx in range(num_linear_attention_layers):
+                        for branch in ("q", "k", "v"):
+                            output_names.append(f"conv_cache_out_{branch}_{cache_idx}")
+                else:
+                    for cache_idx in range(num_linear_attention_layers):
+                        output_names.append(f"conv_cache_out_{cache_idx}")
                 for cache_idx in range(num_linear_attention_layers):
                     output_names.append(f"recurrent_state_out_{cache_idx}")
                 self.export_cfg.output_names = output_names

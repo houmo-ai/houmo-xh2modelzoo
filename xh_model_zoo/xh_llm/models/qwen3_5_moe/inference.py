@@ -12,6 +12,7 @@ from xhquant.core import CacheTensor
 from ..qwen3_5.qwen3_5_onnx_model import (
     Qwen3_5ONNXModel,
     _alloc_cache_inputs,
+    _parse_conv_cache_name,
 )
 
 
@@ -164,10 +165,17 @@ class Qwen3_5MoeInference(Qwen3_5ONNXModel):
 
         linear_cache_info = self.meta_info.get("linear_cache", {})
         self.linear_attention_layer_indices = linear_cache_info.get("layer_indices", [])
-        self.past_conv_caches = [
-            CacheTensor(torch.zeros(layer_meta["conv_shape"], dtype=cache_dtype))
-            for layer_meta in linear_cache_info.get("layers", [])
-        ]
+        self.past_conv_caches = []
+        for layer_meta in linear_cache_info.get("layers", []):
+            if "conv_shapes" in layer_meta:
+                for shape in layer_meta["conv_shapes"]:
+                    self.past_conv_caches.append(
+                        CacheTensor(torch.zeros(shape, dtype=cache_dtype))
+                    )
+            else:
+                self.past_conv_caches.append(
+                    CacheTensor(torch.zeros(layer_meta["conv_shape"], dtype=cache_dtype))
+                )
         self.past_recurrent_states = [
             CacheTensor(torch.zeros(layer_meta["recurrent_shape"], dtype=cache_dtype))
             for layer_meta in linear_cache_info.get("layers", [])
@@ -323,27 +331,32 @@ class Qwen3_5MoeInference(Qwen3_5ONNXModel):
             elif name.startswith("past_value_cache_"):
                 feed[name] = past_value_caches[int(name.rsplit("_", 1)[-1])]
             elif name.startswith("past_conv_cache_"):
-                feed[name] = past_conv_caches[int(name.rsplit("_", 1)[-1])]
+                branch, idx_str = _parse_conv_cache_name(name)
+                if branch is None:
+                    feed[name] = past_conv_caches[int(idx_str)]
+                else:
+                    offset = {"q": 0, "k": 1, "v": 2}[branch]
+                    feed[name] = past_conv_caches[int(idx_str) * 3 + offset]
             elif name.startswith("past_recurrent_state_"):
                 feed[name] = past_recurrent_states[int(name.rsplit("_", 1)[-1])]
             else:
                 info = session.get_input(name)
                 feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=self.device)
 
+        conv_cache_names = [
+            n for n in session.get_input_names() if n.startswith("past_conv_cache_")
+        ]
         _, output_map = self._run_hmonnx(session, feed)
         linear_cache_state = {
-            **{
-                f"past_conv_cache_{idx}": cache
-                for idx, cache in enumerate(past_conv_caches)
-            },
+            **{name: past_conv_caches[i] for i, name in enumerate(conv_cache_names)},
             **{
                 f"past_recurrent_state_{idx}": cache
                 for idx, cache in enumerate(past_recurrent_states)
             },
         }
         self._update_linear_cache(linear_cache_state, output_map)
-        for idx in range(len(past_conv_caches)):
-            past_conv_caches[idx] = linear_cache_state[f"past_conv_cache_{idx}"]
+        for i, name in enumerate(conv_cache_names):
+            past_conv_caches[i] = linear_cache_state[name]
         for idx in range(len(past_recurrent_states)):
             past_recurrent_states[idx] = linear_cache_state[
                 f"past_recurrent_state_{idx}"

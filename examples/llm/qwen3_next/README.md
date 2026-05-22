@@ -27,6 +27,29 @@ export PYTHONPATH=./
 | Golden 生成（`--golden`） | ✅ 已支持 | prefill + decode |
 | HMONNX 推理 Demo | ✅ 已支持 | 单轮文本 |
 
+## Split Conv Cache 导出
+
+`--split_conv_cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。默认不开启，保持向后兼容。
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4
+python \
+  examples/llm/qwen3_next/qwen3_next_xh2a_export_hmonnx.py \
+  --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct \
+  --split_conv_cache \
+  --valid \
+  --golden \
+  --golden_multi_gpu
+```
+
+开启后 meta.json 中 `linear_cache.layers` 的每层会输出 `conv_shapes`（3 个 shape 的列表）而非 `conv_shape`（单个 shape）。ONNX 模型的输入/输出命名变化：
+
+| 模式 | 输入名 | 输出名 |
+|------|--------|--------|
+| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
+| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+
 ## LLM 导出
 
 ### BF16 → XH2a（w8a8）

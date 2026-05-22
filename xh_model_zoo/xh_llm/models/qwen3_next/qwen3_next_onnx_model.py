@@ -457,8 +457,14 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
                 cache_state[name] = output_map[name]
                 continue
             if name.startswith("past_conv_cache_"):
-                idx = name.rsplit("_", 1)[-1]
-                out_name = f"conv_cache_out_{idx}"
+                suffix = name[len("past_conv_cache_"):]
+                parts = suffix.rsplit("_", 1)
+                if len(parts) == 2 and parts[0] in ("q", "k", "v"):
+                    branch, idx = parts[0], parts[1]
+                    out_name = f"conv_cache_out_{branch}_{idx}"
+                else:
+                    idx = suffix
+                    out_name = f"conv_cache_out_{idx}"
                 if out_name in output_map:
                     cache_state[name] = output_map[out_name]
             elif name.startswith("past_recurrent_state_"):
