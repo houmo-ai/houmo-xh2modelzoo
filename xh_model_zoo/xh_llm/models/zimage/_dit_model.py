@@ -191,11 +191,10 @@ class _Attention(DynamicModule):
         self.enable_rope = cfg.get("enable_rope", True)
         if self.enable_rope:
             self.rope = xhnn.Rope()
-        
         self.restore_m = get_restore_matrix(128).half().to(self.device)
         self.correct_m = get_correct_rearrange_matrix(128).half().to(self.device)
     
-    def apply_rotary_emb(self, x_in,  roper, ropei):
+    def apply_rotary_emb_depracated(self, x_in,  roper, ropei):
         if True:
             x_rearranged = torch.matmul(self.correct_m, x_in.unsqueeze(-1)).squeeze(-1)
             # cos2 = roper.repeat([1,1,1,2])
@@ -215,7 +214,27 @@ class _Attention(DynamicModule):
             x_rotated = torch.stack([out_real, out_imag], dim=-1)  # 形状：[... , n, 2]
             # 2. 展平最后两维（和原代码flatten(3)一致）
             x_out = x_rotated.flatten(3)  
-        return x_out  
+        return x_out 
+
+    @staticmethod
+    def _correct_rearrange(x: torch.Tensor) -> torch.Tensor:
+        """Move even positions before odd positions on the last dim.
+
+        This is equivalent to multiplying by ``get_correct_rearrange_matrix``
+        but avoids exporting a high-rank batched MatMul such as
+        ``[128, 128] @ [1, 4096, 30, 128, 1]``.
+        """
+        return torch.cat([x[..., 0::2], x[..., 1::2]], dim=-1)
+
+    @staticmethod
+    def _restore_rearrange(x: torch.Tensor) -> torch.Tensor:
+        """Inverse of ``_correct_rearrange`` on the last dim."""
+        return torch.stack([x[..., :64], x[..., 64:]], dim=-1).flatten(-2)
+
+    def apply_rotary_emb(self, x_in, roper, ropei):
+        x_rearranged = self._correct_rearrange(x_in)
+        x_out = self.rope(x_rearranged, roper, ropei)
+        return self._restore_rearrange(x_out)
 
     
 

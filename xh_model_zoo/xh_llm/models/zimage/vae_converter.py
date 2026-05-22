@@ -240,8 +240,12 @@ class VAE_ConverterXH2a(HFTransfromersConverter):
 
         # Export LLM model, prefill
 
-        # latent = torch.randn(1, 16, 128, 128).cuda()
-        latent = torch.load("examples/llm/zimage/vae/latent.pt")
+        latent_path = Path("examples/llm/zimage/vae/latent.pt")
+        if latent_path.exists():
+            latent = torch.load(str(latent_path))
+        else:
+            logger.warning(f"{latent_path} not found, use random latent for export/golden.")
+            latent = torch.randn(1, 16, 128, 128)
 
         # with torch.no_grad():
         #     output = hf_model.decode(latent.half().cuda())

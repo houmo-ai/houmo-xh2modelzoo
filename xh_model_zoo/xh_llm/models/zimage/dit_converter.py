@@ -289,7 +289,7 @@ class Dit_ConverterXH2a(HFTransfromersConverter):
             cap_feats = torch.concat( [ cap_feats[0], torch.zeros(pad_len, cap_feats[0].shape[1]).to(self.device)], dim=0)# .unsqueeze(0)  # [256, 2560]
             cap_mask = torch.concat([ cap_mask, torch.ones(pad_len).to(self.device).unsqueeze(0)*-65504], dim=1)
             cap_pos_ids = torch.concat(
-                        [ torch.range(0, 255).to(self.device).unsqueeze(-1), torch.zeros((256,2)).to(cap_feats.device) ], dim=1
+                        [ torch.arange(1, 257, device=self.device).unsqueeze(-1), torch.zeros((256,2)).to(cap_feats.device) ], dim=1
                     ).to(torch.long) # [256, 3]
                     
             c_freqs_cis = hf_model.rope_embedder( cap_pos_ids ).unsqueeze(0) # [256, 64]
@@ -298,7 +298,7 @@ class Dit_ConverterXH2a(HFTransfromersConverter):
             c_f_imag = c_freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
 
             # cap_feats[:, cap_pad_mask[0], :] = torch.zeros_like()
-            cap_pad_mask = torch.concat( [cap_pad_mask[0], torch.zeros(pad_len, device=self.device)] ).to(torch.bool).half().unsqueeze(-1)
+            cap_pad_mask = torch.concat( [cap_pad_mask[0], torch.ones(pad_len, device=self.device)] ).to(torch.bool).half().unsqueeze(-1)
             n_cap_pad_mask = 1 - cap_pad_mask
             
             # ------------------------------------------------------------------------------
@@ -324,7 +324,7 @@ class Dit_ConverterXH2a(HFTransfromersConverter):
         if True:
             with torch.no_grad():
                 output = wraped_llm_model(
-                    x[0], x_mask.half(), adaln_input,# f_real.half(), f_imag.half(), 
+                    x[0].half(), x_mask.half(), adaln_input.half(),# f_real.half(), f_imag.half(), 
                     cap_feats.half(), cap_mask.half(), cap_pad_mask, n_cap_pad_mask, # c_f_real.half(), c_f_imag.half(),
                 )
                 # Unpatchify
@@ -334,7 +334,7 @@ class Dit_ConverterXH2a(HFTransfromersConverter):
 
         target_device = self.config.quant_scheme.target_device
         input_names = ["latent", "latent_mask", "t_emb", "cap_feats", "cap_mask", "cap_pad_mask", "ncap_pad_mask"]
-        inputs = [x[0], x_mask.half(), adaln_input.half(), cap_feats.half(), cap_mask.half(), cap_pad_mask, n_cap_pad_mask,]
+        inputs = [x[0].half(), x_mask.half(), adaln_input.half(), cap_feats.half(), cap_mask.half(), cap_pad_mask, n_cap_pad_mask,]
         ## dit
         onnx_output_names = ["output_latent"]
 
@@ -359,7 +359,7 @@ class Dit_ConverterXH2a(HFTransfromersConverter):
             logger.info(f"{vae_onnx_file} exists, skip export vae model.")
 
         meta_info["onnx"] = str(Path(vae_onnx_file).relative_to(work_dir))
-        vae_golden_dir = "/data02/users/cc_work/golden/zimage" # str(work_dir / "golden" / f"{prefix}")
+        vae_golden_dir = str(work_dir / "golden" / f"{prefix}")
 
         if not Path(vae_golden_dir).exists():
             logger.info(f"start export vae model golden............")

@@ -129,62 +129,66 @@ class cus_ZImagePipeline(ZImagePipeline):
         return output_hidden
 
     def transformer_infer(self, latent_model_input_list, timestep_model_input, prompt_embeds_model_input):
-        # latent = torch.randn(1, 16, 128, 128).cuda()
-        latent = latent_model_input_list[0].cuda()
         timestep_model_input = timestep_model_input.cuda() * 1000.0
-        cap_feats = prompt_embeds_model_input[0].cuda() # [15, 2560]
         patch_size = 2
         f_patch_size = 1
+        batch_outputs = []
 
         # latent = torch.load("examples/llm/zimage/dit/input/latent.pt").cuda() # [16, 1, 128, 128]
         # cap_feats = torch.load("examples/llm/zimage/dit/input/prompt.pt").cuda() # [15, 2560]
 
         device = "cuda"
         with torch.no_grad():
-            adaln_input = self.transformer.t_embedder(timestep_model_input).to(torch.float16) 
+            for batch_index, (latent_input, prompt_embeds) in enumerate(
+                zip(latent_model_input_list, prompt_embeds_model_input)
+            ):
+                latent = latent_input.cuda()
+                cap_feats = prompt_embeds.cuda() # [15, 2560]
+                current_timestep = timestep_model_input[batch_index : batch_index + 1]
+                adaln_input = self.transformer.t_embedder(current_timestep).to(torch.float16)
 
-            (
-                x, # [4096, 64]
-                cap_feats, # [128, 2560]   # [L, 2560]
-                x_size,
-                x_pos_ids,
-                cap_pos_ids,
-                x_pad_mask,
-                cap_pad_mask,
-            ) = self.transformer.patchify_and_embed([latent], [cap_feats], patch_size, f_patch_size) # [16, 1, 128, 128]   [101, 2560]   2 1 
-            x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None     
+                (
+                    x, # [4096, 64]
+                    cap_feats, # [128, 2560]   # [L, 2560]
+                    x_size,
+                    x_pos_ids,
+                    cap_pos_ids,
+                    x_pad_mask,
+                    cap_pad_mask,
+                ) = self.transformer.patchify_and_embed([latent], [cap_feats], patch_size, f_patch_size) # [16, 1, 128, 128]   [101, 2560]   2 1 
+                x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None     
 
-            valid_len = int(cap_feats[0].shape[0])
-            required_len = int(256) # 256
+                valid_len = int(cap_feats[0].shape[0])
+                required_len = int(256) # 256
 
-            # ==================
-            x_freqs = self.transformer.rope_embedder( torch.cat(x_pos_ids, dim=0) ).unsqueeze(0)
-            freqs_cis_expanded = x_freqs.unsqueeze(2)
-            f_real = freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
-            f_imag = freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
+                # ==================
+                x_freqs = self.transformer.rope_embedder( torch.cat(x_pos_ids, dim=0) ).unsqueeze(0)
+                freqs_cis_expanded = x_freqs.unsqueeze(2)
+                f_real = freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
+                f_imag = freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
 
-            # Attention mask =========
-            attn_mask = torch.zeros((1, 4096), dtype=torch.bool, device=device) # [1,4096]
-            x_mask = attn_mask
+                # Attention mask =========
+                attn_mask = torch.zeros((1, 4096), dtype=torch.bool, device=device) # [1,4096]
+                x_mask = attn_mask
 
-            
-            # ------------------------------------------------------------------------------
-            pad_len = required_len - valid_len # 256 -32
-            cap_mask = torch.zeros((1, valid_len), device=device)
-            cap_feats = torch.concat( [ cap_feats[0], torch.zeros(pad_len, cap_feats[0].shape[1]).to(device)], dim=0)# .unsqueeze(0)  # [256, 2560]
-            cap_mask = torch.concat([ cap_mask, torch.ones(pad_len).to(device).unsqueeze(0)*-65504], dim=1)
-            cap_pos_ids = torch.concat(
-                        [ torch.range(0, required_len-1).to(device).unsqueeze(-1), torch.zeros((required_len,2)).to(cap_feats.device) ], dim=1
-                    ).to(torch.long) # [256, 3]
-                    
-            c_freqs_cis = self.transformer.rope_embedder( cap_pos_ids ).unsqueeze(0) # [256, 64]
-            c_freqs_cis_expanded = c_freqs_cis.unsqueeze(2)
-            c_f_real = c_freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
-            c_f_imag = c_freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
+                
+                # ------------------------------------------------------------------------------
+                pad_len = required_len - valid_len # 256 -32
+                cap_mask = torch.zeros((1, valid_len), device=device)
+                cap_feats = torch.concat( [ cap_feats[0], torch.zeros(pad_len, cap_feats[0].shape[1]).to(device)], dim=0)# .unsqueeze(0)  # [256, 2560]
+                cap_mask = torch.concat([ cap_mask, torch.ones(pad_len).to(device).unsqueeze(0)*-65504], dim=1)
+                cap_pos_ids = torch.concat(
+                            [ torch.arange(1, required_len + 1, device=device).unsqueeze(-1), torch.zeros((required_len,2)).to(cap_feats.device) ], dim=1
+                        ).to(torch.long) # [256, 3]
+                        
+                c_freqs_cis = self.transformer.rope_embedder( cap_pos_ids ).unsqueeze(0) # [256, 64]
+                c_freqs_cis_expanded = c_freqs_cis.unsqueeze(2)
+                c_f_real = c_freqs_cis_expanded.real  # 频率的实部，形状匹配x_real
+                c_f_imag = c_freqs_cis_expanded.imag  # 频率的虚部，形状匹配x_imag
 
-            cap_pad_mask = torch.concat( [cap_pad_mask[0], torch.zeros(pad_len, device=device)] ).half().unsqueeze(-1)
-            # ------------------------------------------------------------------------------
-            n_cap_pad_mask = 1 - cap_pad_mask
+                cap_pad_mask = torch.concat( [cap_pad_mask[0], torch.ones(pad_len, device=device)] ).half().unsqueeze(-1)
+                # ------------------------------------------------------------------------------
+                n_cap_pad_mask = 1 - cap_pad_mask
 
             # if self.wraped_transformer is None:
             #     from xh_model_zoo.xh_llm.models.zimage._dit_model import register_wrap_cls as llm_register_wrap_cls
@@ -209,16 +213,17 @@ class cus_ZImagePipeline(ZImagePipeline):
             #     wraped_transformer.to(torch.float16)
             #     self.wraped_transformer = wraped_transformer
 
-            if True:
-                # output = self.wraped_transformer(
-                output = self._transformer(
-                    x[0], x_mask.half(),  adaln_input, # f_real.half(), f_imag.half(),#
-                    cap_feats.half(), cap_mask.half(),  cap_pad_mask, n_cap_pad_mask, # c_f_real.half(), c_f_imag.half(),
-                )
-                # Unpatchify
-                output = output[:, :4096+valid_len]
-                x = self.transformer.unpatchify(list((output).unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
-        return x
+                if True:
+                    # output = self.wraped_transformer(
+                    output = self._transformer(
+                        x[0], x_mask.half(),  adaln_input, # f_real.half(), f_imag.half(),#
+                        cap_feats.half(), cap_mask.half(),  cap_pad_mask, n_cap_pad_mask, # c_f_real.half(), c_f_imag.half(),
+                    )
+                    # Unpatchify
+                    output = output[:, :4096+valid_len]
+                    x = self.transformer.unpatchify(list((output).unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
+                    batch_outputs.extend(x)
+        return batch_outputs
 
     def __setup__(self, text_encoder, transformer=None, vae=None):
         """"""

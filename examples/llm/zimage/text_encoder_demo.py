@@ -18,8 +18,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+
+import transformers.modeling_utils as modeling_utils
 from diffusers import ZImagePipeline
 import torch
+
+if not hasattr(modeling_utils, "no_init_weights"):
+    @contextlib.contextmanager
+    def no_init_weights(_enable=True):
+        yield
+
+    modeling_utils.no_init_weights = no_init_weights
+
 from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyConvertConfig
 # from xh_model_zoo.xh_llm.models.qwen_image.qwen2_5_vl_converter import Qwen2_5_VLConverterXH2a
 # from xh_model_zoo.xh_llm.models.qwen_image.pipeline_cus import cus_QwenImagePipeline
@@ -30,7 +41,7 @@ import argparse
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger, HMONNXGoldenInference, Config
 
 def main(args):
-    model_name = "/data02/datasets/zimage"
+    model_name = args.model
     device = "cuda"
     # target_device = DeviceType.XH2a
     # quant_type = args.quant_type
@@ -53,15 +64,18 @@ def main(args):
     )    
     pipe = pipe.to(device)
 
-    text_encoder_prefill = "work_dirs/zimage/hmonnx/prefill/zimage_llm-XH2a-2k-w8a8h1_sefp_prefill.onnx"
+    work_dir = Path(args.work_dir)
+    work_dir.mkdir(exist_ok=True, parents=True)
+
+    text_encoder_prefill = str(work_dir / "hmonnx" / "prefill" / "zimage_llm-XH2a-2k-w8a8h1_sefp_prefill.onnx")
     text_encoder = HMONNXGoldenInference(text_encoder_prefill)
     text_encoder.exec_device = torch.device("cuda:0")
 
-    hm_vae_path = "work_dirs/zimage/hmonnx/zimage_vae-XH2a-w8a8h1_sefp.onnx"
+    hm_vae_path = str(work_dir / "hmonnx" / "zimage_vae-XH2a-w8a8h1_sefp.onnx")
     hm_vae = HMONNXGoldenInference(hm_vae_path)
     hm_vae.exec_device = torch.device("cuda:0")
 
-    hm_dit_path = "work_dirs/zimage/hmonnx/zimage_dit-XH2a-w8a8h1_sefp.onnx"
+    hm_dit_path = str(work_dir / "hmonnx" / "zimage_dit-XH2a-w8a8h1_sefp.onnx")
     hm_dit = HMONNXGoldenInference(hm_dit_path)
     hm_dit = hm_dit.cuda()
     hm_dit.exec_device = torch.device("cuda:0")
@@ -71,13 +85,6 @@ def main(args):
     del pipe.text_encoder
     # del pipe.vae
     torch.cuda.empty_cache()
-
-    # Generate image
-    prompt = "一只长得像蝴蝶一样缤纷绚丽的奇异花朵，开在丛林中，散发着柔和的光芒"
-    negative_prompt = " " # using an empty string if you do not have specific concept to remove
-
-    work_dir = Path("work_dirs") / "zimage"
-    work_dir.mkdir(exist_ok=True, parents=True)
 
     # Qwen3LegacyConverterXH2a(config)._convert(pipe.text_encoder.half(), work_dir)
 
@@ -97,28 +104,40 @@ def main(args):
 
     # wraped_transformer = None
     
-    inference_engine = Qwen3LegacyInference("work_dirs/zimage/meta.json", fast_mode=True, tokenizer=pipe.tokenizer)
+    inference_engine = Qwen3LegacyInference(str(work_dir / "meta.json"), fast_mode=True, tokenizer=pipe.tokenizer)
     xhmodel = cus_ZImagePipeline.to_hf_compatible(
         pipe, text_encoder=inference_engine, vae=hm_vae, transformers=hm_dit,
-        meta_info="work_dirs/zimage/meta.json",
+        meta_info=str(work_dir / "meta.json"),
     )
 
     image = xhmodel(
-        prompt=prompt,
-        height=1024,
-        width=1024,
-        num_inference_steps=9,  # This actually results in 8 DiT forwards
-        guidance_scale=0.0,     # Guidance should be 0 for the Turbo models
-        generator=torch.Generator("cuda").manual_seed(42),
-        meta_info="work_dirs/zimage/meta.json",
+        prompt=args.prompt,
+        negative_prompt=args.negative_prompt,
+        height=args.height,
+        width=args.width,
+        cfg_normalization=args.cfg_normalization,
+        num_inference_steps=args.num_inference_steps,
+        guidance_scale=args.guidance_scale,
+        generator=torch.Generator("cuda").manual_seed(args.seed),
+        meta_info=str(work_dir / "meta.json"),
     )
-    image[0].save("example.png")
+    image[0].save(args.output)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default="/data02/datasets/zimage")
+    parser.add_argument("--work-dir", type=str, default="work_dirs/zimage")
+    parser.add_argument("--output", type=str, default="example.png", help="output image path")
+    parser.add_argument("--prompt", type=str, default="一只长得像蝴蝶一样缤纷绚丽的奇异花朵，开在丛林中，散发着柔和的光芒")
+    parser.add_argument("--negative-prompt", type=str, default="")
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--num-inference-steps", type=int, default=9)
+    parser.add_argument("--guidance-scale", type=float, default=0.0)
+    parser.add_argument("--cfg-normalization", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")

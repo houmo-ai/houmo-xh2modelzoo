@@ -18,8 +18,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+
+import transformers.modeling_utils as modeling_utils
 from diffusers import ZImagePipeline
 import torch
+
+if not hasattr(modeling_utils, "no_init_weights"):
+    @contextlib.contextmanager
+    def no_init_weights(_enable=True):
+        yield
+
+    modeling_utils.no_init_weights = no_init_weights
+
 from xh_model_zoo.xh_llm.models.qwen2_legacy import Qwen2LegacyConvertConfig
 from pathlib import Path
 from xh_model_zoo.xh_llm.models.zimage.vae_converter import VAE_ConverterXH2a
@@ -27,7 +38,7 @@ import argparse
 from xhquant.api import DeviceType, xhquant_init, QuantScheme, get_root_logger 
 
 def main(args):
-    model_name = "/data02/datasets/zimage"
+    model_name = args.model
     device = "cuda"
 
     target_device = DeviceType.XH2a
@@ -56,7 +67,7 @@ def main(args):
     prompt = "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights."
     negative_prompt = " " # using an empty string if you do not have specific concept to remove
 
-    work_dir = Path("work_dirs") / "zimage"
+    work_dir = Path(args.work_dir)
     work_dir.mkdir(exist_ok=True, parents=True)
 
     pipe.text_encoder = None
@@ -83,7 +94,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="debug mode")
-    parser.add_argument("--model", type=str, default="weights/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--model", type=str, default="/data02/datasets/zimage")
+    parser.add_argument("--work-dir", type=str, default="work_dirs/zimage")
     parser.add_argument("--batch-size", type=int, default=1, help="batch size")
     parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="input sequence length")
