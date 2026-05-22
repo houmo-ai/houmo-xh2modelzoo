@@ -207,7 +207,7 @@ class MinicpmoLLMConverterXH2a(HFTransfromersConverter):
                 kv_cache=dict(cache_axis=2),
                 image_slice_max_size=cfg.image_slice_max_size,
             ),
-            quant_config=ConfigDict(),
+            quant_config=cfg.quant_config,
             export_cfg=ConfigDict(
                 dict(
                     input_names=[

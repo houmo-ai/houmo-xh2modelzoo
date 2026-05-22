@@ -35,7 +35,11 @@ def main(args):
     model_name = Path(hf_model_path).name
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+    quant_scheme = QuantScheme(
+        target_device=DeviceType.XH2a,
+        quant_type=quant_type,
+        ops=dict(Normalize=dict(force_fp32=True)),
+    )
 
     config = MinicpmoLLMConvertConfig(
         quant_scheme=quant_scheme,

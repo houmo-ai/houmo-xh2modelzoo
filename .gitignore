@@ -217,3 +217,14 @@ hm_eval/tasks/
 # Added by code-review-graph
 .code-review-graph/
 examples/llm/glm_ocr/GLM-OCR
+.mcp.json
+label_task_info_engine.json
+QODER.md
+.claude
+.gemini
+.qoder
+.github
+.kiro
+analysis
+tmp
+1758c05d216dc2bc4221653c0f43329b
