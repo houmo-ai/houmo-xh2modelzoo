@@ -224,9 +224,14 @@ class XHQwen3_5Model(LLMBaseModel):
 
         if self.use_cache:
             only_first_block = self.wrap_cfg.get("only_first_block", False)
+            max_layers = self.wrap_cfg.get("max_layers", None)
             if only_first_block:
                 num_full_attn_layers = 1 if self.layer_types[0] == "full_attention" else 0
                 num_linear_attn_layers = 1 if self.layer_types[0] == "linear_attention" else 0
+            elif max_layers is not None and max_layers > 0:
+                truncated_types = self.layer_types[:max_layers]
+                num_full_attn_layers = sum(1 for t in truncated_types if t == "full_attention")
+                num_linear_attn_layers = sum(1 for t in truncated_types if t == "linear_attention")
             else:
                 num_full_attn_layers = self.num_full_attention_layers
                 num_linear_attn_layers = self.num_linear_attention_layers

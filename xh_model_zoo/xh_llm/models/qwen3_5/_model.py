@@ -1176,6 +1176,12 @@ class _Qwen3_5TextModel(DynamicModule):
     def _setup(self, cfg):
         self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
+        self.max_layers = -1
+        if self.only_first_block:
+            self.max_layers = 1
+        else:
+            if "max_layers" in cfg and cfg.max_layers is not None:
+                self.max_layers = cfg.max_layers
         self.num_logits_to_keep = cfg.num_logits_to_keep
         self.support_long_context_over_fp16_limit = cfg.get(
             "support_long_context_over_fp16_limit", False
@@ -1529,7 +1535,7 @@ class _Qwen3_5TextModel(DynamicModule):
             if self.output_hidden_state_indices is not None and idx in self._output_hidden_set:
                 collected_hidden_states.append(hidden_states)
 
-            if self.only_first_block:
+            if self.max_layers > 0 and idx + 1 >= self.max_layers:
                 break
 
         # Build target_hidden for DFlash: cat collected hidden states along last dim

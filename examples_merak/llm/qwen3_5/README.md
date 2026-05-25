@@ -46,5 +46,10 @@ python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_llm_xh_generate.py --con
 ## 原生 HF 对比
 
 ```bash
-python examples_merak/llm/qwen3_5/debug_scripts/native_qwen3_5_generate.py --model-dir data/models/Qwen3.5-9B
+python examples_merak/llm/qwen3_5/debug_scripts/native_qwen3_5_generate.py --model-dir data/models/Qwen3.5
+```
+
+## requirements
+- qwen-vl-utils==0.0.14
+- transformers==5.3.0
 ```

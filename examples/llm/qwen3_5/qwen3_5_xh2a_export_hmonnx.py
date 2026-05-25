@@ -1500,7 +1500,10 @@ def _prepare_export_context(cfg, args, logger):
         and len(qwen3_5_model.past_conv_caches) > 0
     ):
         meta_info.conv_cache_shape = list(qwen3_5_model.past_conv_caches[0].shape)
-        meta_info.num_linear_attention_layers = len(qwen3_5_model.past_conv_caches)
+        if getattr(cfg.model.wrap_cfg, "split_conv_cache", False):
+            meta_info.num_linear_attention_layers = len(qwen3_5_model.past_recurrent_states)
+        else:
+            meta_info.num_linear_attention_layers = len(qwen3_5_model.past_conv_caches)
     if (
         hasattr(qwen3_5_model, "past_recurrent_states")
         and qwen3_5_model.past_recurrent_states is not None
@@ -2107,6 +2110,8 @@ def main(args):
     cfg.debug = args.debug
     if getattr(args, "split_conv_cache", False):
         cfg.model.wrap_cfg.split_conv_cache = True
+    if getattr(args, "num_blocks", None) is not None:
+        cfg.model.wrap_cfg.max_layers = args.num_blocks
     if getattr(args, "golden_only", False):
         args.golden = True
 
@@ -2305,11 +2310,17 @@ def parse_arguments():
     parser.add_argument(
         "--split_conv_cache",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
         ),
+    )
+    parser.add_argument(
+        "--num_blocks",
+        type=int,
+        default=4,
+        help="Number of decoder blocks to export. Default exports all blocks.",
     )
     return parser
 
