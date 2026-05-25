@@ -179,8 +179,9 @@ class _Attention(DynamicModule):
         return output
     
 
-    def _setup(self, cfg: ConfigDict):
+    def _setup(self, cfg: ConfigDict, device="cuda"):
         self.cfg = cfg
+        self.device = device
 
         _kv_scale = 1 / math.sqrt(128)
         self.kv_scale = _kv_scale

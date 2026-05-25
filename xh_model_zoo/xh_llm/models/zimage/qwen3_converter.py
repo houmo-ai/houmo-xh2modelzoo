@@ -132,6 +132,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         # meta_info["hf_config"] = str(hf_config_dir.relative_to(work_dir))
 
         token_embedding = native_model.get_input_embeddings()
+        embedding_device = token_embedding.weight.device
 
         token_embedding_file = Path(work_dir) / "token_embedding.pt"
         torch.save(token_embedding.state_dict(), str(token_embedding_file))
@@ -187,7 +188,7 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         current_input_length = []
         # position_ids = []
         for _ in range(1):
-            input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long)
+            input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long, device=embedding_device)
             seq_length = input_id.shape[0]
             # past_seq_length = 0
             # position_id = torch.arange(past_seq_length, past_seq_length + seq_length, dtype=torch.long)
@@ -198,12 +199,12 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
             # position_ids.append(position_id)
             input_ids.append(input_id)
 
-        input_ids_t = torch.cat(input_ids, dim=0)
+        input_ids_t = torch.cat(input_ids, dim=0).to(embedding_device)
         # position_ids = torch.cat(position_ids, dim=0)
 
         inputs_embeds = token_embedding(input_ids_t)
-        past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32)
+        past_seq_length_t = torch.tensor([0], dtype=torch.int32, device=embedding_device)
+        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32, device=embedding_device)
 
         inputs = (
             inputs_embeds,
