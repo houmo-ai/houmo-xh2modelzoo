@@ -41,6 +41,7 @@ from transformers.image_transforms import (
 from transformers.image_utils import (
     ChannelDimension,
     PILImageResampling,
+    SizeDict,
     get_image_size,
     infer_channel_dimension_format,
     make_flat_list_of_images,
@@ -141,6 +142,8 @@ class Qwen3_5ImageProcessor(Qwen2VLImageProcessor):
             size = {"shortest_edge": min_pixels, "longest_edge": max_pixels}
         else:
             size = {**self.size}
+        if isinstance(size, dict):
+            size = SizeDict(**size)
 
         do_resize = do_resize if do_resize is not None else self.do_resize
         resample = resample if resample is not None else self.resample
@@ -178,7 +181,13 @@ class Qwen3_5ImageProcessor(Qwen2VLImageProcessor):
         if images is not None:
             pixel_values, vision_grid_thws, hm_pixel_values = [], [], []
             for image in images:
-                patches, image_grid_thw = self._preprocess(
+                raw_image = image
+                image = self._prepare_image_like_inputs(
+                    raw_image,
+                    do_convert_rgb=do_convert_rgb,
+                    input_data_format=input_data_format,
+                )
+                processed = self._preprocess(
                     image,
                     do_resize=do_resize,
                     size=size,
@@ -194,9 +203,13 @@ class Qwen3_5ImageProcessor(Qwen2VLImageProcessor):
                     data_format=data_format,
                     do_convert_rgb=do_convert_rgb,
                     input_data_format=input_data_format,
+                    disable_grouping=None,
+                    return_tensors=None,
                 )
+                patches = processed["pixel_values"].cpu().numpy()
+                image_grid_thw = processed["image_grid_thw"].cpu().numpy()[0]
                 hm_patches = self._hm_preprocess(
-                    image,
+                    raw_image,
                     do_resize=do_resize,
                     resample=resample,
                     do_convert_rgb=do_convert_rgb,
@@ -225,7 +238,12 @@ class Qwen3_5ImageProcessor(Qwen2VLImageProcessor):
             videos = make_batched_videos(videos)
             pixel_values_videos, vision_grid_thws_videos = [], []
             for vid_images in videos:
-                patches, video_grid_thw = self._preprocess(
+                vid_images = self._prepare_image_like_inputs(
+                    vid_images,
+                    do_convert_rgb=do_convert_rgb,
+                    input_data_format=input_data_format,
+                )
+                processed = self._preprocess(
                     vid_images,
                     do_resize=do_resize,
                     size=size,
@@ -241,7 +259,11 @@ class Qwen3_5ImageProcessor(Qwen2VLImageProcessor):
                     data_format=data_format,
                     do_convert_rgb=do_convert_rgb,
                     input_data_format=input_data_format,
+                    disable_grouping=None,
+                    return_tensors=None,
                 )
+                patches = processed["pixel_values"].cpu().numpy()
+                video_grid_thw = processed["image_grid_thw"].cpu().numpy()
                 pixel_values_videos.extend(patches)
                 vision_grid_thws_videos.append(video_grid_thw)
             data.update(
