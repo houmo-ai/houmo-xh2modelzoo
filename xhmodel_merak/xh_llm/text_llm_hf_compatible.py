@@ -305,10 +305,12 @@ class TextLLMHFCompatible(DynamicModule):  # noqa: N801
         self.forward = self._sample_forward
 
         self.prefill_input_sequence_length = self._llm_model.get_input_sequence_length()
-        out = super().generate(*args, **kwargs)
-        self._llm_model.set_input_sequence_length(self.prefill_input_sequence_length)
-        self.forward = self._xh_orig_forward
-        del self._xh_orig_forward
+        try:
+            out = super().generate(*args, **kwargs)
+        finally:
+            self._llm_model.set_input_sequence_length(self.prefill_input_sequence_length)
+            self.forward = self._xh_orig_forward
+            del self._xh_orig_forward
         return out
 
 

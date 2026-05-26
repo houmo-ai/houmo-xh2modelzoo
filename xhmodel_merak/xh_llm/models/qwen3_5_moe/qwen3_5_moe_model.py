@@ -77,10 +77,12 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
         if pixel_values is not None:
             image_embeds = list()
             for i in range(len(pixel_values)):
-                image_embeds_i = self._llm_model.visual.forward(
-                    pixel_values[i].type(self._llm_model.visual.dtype).to(self._llm_model.visual.device),
-                )
-                image_embeds.append(image_embeds_i)
+                pv = pixel_values[i].type(self._llm_model.visual.dtype).to(self._llm_model.visual.device)
+                if pv.dim() == 4:
+                    pv = pv.unsqueeze(0)
+                for j in range(pv.shape[0]):
+                    image_embeds_j = self._llm_model.visual.forward(pv[j:j+1])
+                    image_embeds.append(image_embeds_j)
 
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_embeds = image_embeds.squeeze(0)
@@ -88,43 +90,115 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
         seq_length = inputs_embeds.shape[1]
         data_processor = self._llm_model.get_data_preprocessor()
         net_input_seq_len = self._llm_model.get_input_sequence_length()
-        steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
 
-        data_batch = {
-            "input_ids": input_ids,
-            "image_embeds": image_embeds,
-            "past_seq_length": self._past_seq_length,
-            "image_grid_thw": image_grid_thw,
-            "video_grid_thw": video_grid_thw,
-        }
-        data_input = data_processor(data_batch)
-        (
-            inputs_embeds,
-            time_position_ids,
-            height_position_ids,
-            width_position_ids,
-            past_seq_length,
-            current_seq_length,
-            linear_mask,
-            past_key_values,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
-        ) = data_input
+        if seq_length <= net_input_seq_len:
+            data_batch = {
+                "input_ids": input_ids,
+                "image_embeds": image_embeds,
+                "past_seq_length": self._past_seq_length,
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+            }
+            data_input = data_processor(data_batch)
+            (
+                inputs_embeds,
+                time_position_ids,
+                height_position_ids,
+                width_position_ids,
+                past_seq_length,
+                current_seq_length,
+                linear_mask,
+                past_key_values,
+                past_value_caches,
+                past_conv_caches,
+                past_recurrent_states,
+            ) = data_input
 
-        logits, conv_cache_out_list, recurrent_state_out_list = self._llm_model.forward(
-            inputs_embeds,
-            time_position_ids,
-            height_position_ids,
-            width_position_ids,
-            past_seq_length,
-            current_seq_length,
-            linear_mask,
-            past_key_values,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
-        )
+            logits, conv_cache_out_list, recurrent_state_out_list = self._llm_model.forward(
+                inputs_embeds,
+                time_position_ids,
+                height_position_ids,
+                width_position_ids,
+                past_seq_length,
+                current_seq_length,
+                linear_mask,
+                past_key_values,
+                past_value_caches,
+                past_conv_caches,
+                past_recurrent_states,
+            )
+        else:
+            device = inputs_embeds.device
+
+            if image_embeds is not None and input_ids is not None:
+                image_token_id = data_processor.image_token_id
+                n_image_tokens = int((input_ids == image_token_id).sum().item())
+                if n_image_tokens > 0:
+                    n_image_features = int(image_embeds.shape[0])
+                    if n_image_features != n_image_tokens:
+                        raise ValueError(
+                            "Image features and image tokens do not match: "
+                            f"tokens={n_image_tokens}, features={n_image_features}"
+                        )
+                    image_mask = (input_ids == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                    image_embeds_merged = image_embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                    inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds_merged)
+
+            position_ids, rope_deltas = data_processor.get_rope_index(
+                input_ids, inputs_embeds, image_grid_thw, video_grid_thw, None
+            )
+            data_processor.rope_deltas = rope_deltas
+
+            steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
+            pad_len = steps * net_input_seq_len - seq_length
+            if pad_len > 0:
+                padding_embeds = self.get_input_embeddings()(
+                    torch.zeros((1, pad_len), dtype=torch.long, device=device)
+                )
+                inputs_embeds = torch.cat([inputs_embeds, padding_embeds], dim=1)
+                last_pos = position_ids[:, :, -1:].expand(-1, -1, pad_len)
+                position_ids = torch.cat([position_ids, last_pos], dim=2)
+
+            past_key_caches = data_processor.past_key_caches
+            past_value_caches = data_processor.past_value_caches
+            past_conv_caches = data_processor.past_conv_caches
+            past_recurrent_states = data_processor.past_recurrent_states
+            running_past_seq = self._past_seq_length
+
+            outputs_logits = []
+            for step_index in range(steps):
+                start = step_index * net_input_seq_len
+                end = (step_index + 1) * net_input_seq_len
+                sub_embeds = inputs_embeds[:, start:end, :]
+                sub_current_len = min(end, seq_length) - start
+
+                sub_time_pos = position_ids[0, 0, start:end].to(torch.int64)
+                sub_height_pos = position_ids[1, 0, start:end].to(torch.int64)
+                sub_width_pos = position_ids[2, 0, start:end].to(torch.int64)
+
+                linear_mask = torch.cat([
+                    torch.ones(sub_current_len, device=device),
+                    torch.zeros(net_input_seq_len - sub_current_len, device=device),
+                ]).unsqueeze(0).to(dtype=torch.float16)
+
+                chunk_logits, _, _ = self._llm_model.forward(
+                    sub_embeds,
+                    sub_time_pos,
+                    sub_height_pos,
+                    sub_width_pos,
+                    torch.tensor([running_past_seq], dtype=torch.int32, device=device),
+                    torch.tensor([sub_current_len], dtype=torch.int32, device=device),
+                    linear_mask,
+                    past_key_caches,
+                    past_value_caches,
+                    past_conv_caches,
+                    past_recurrent_states,
+                )
+                outputs_logits.append(chunk_logits)
+                running_past_seq += sub_current_len
+
+            last_valid = min(net_input_seq_len, seq_length - (steps - 1) * net_input_seq_len)
+            logits = outputs_logits[-1][:, :last_valid, :]
 
         return Qwen3_5MoeCausalLMOutputWithPast(
             logits=logits,
