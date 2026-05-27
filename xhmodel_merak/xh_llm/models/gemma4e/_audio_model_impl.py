@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from transformers.models.gemma4.modeling_gemma4 import Gemma4AudioAttention, Gemma4AudioModel
+from xhquant.nn import MaskedAdd
 from xhquant.utils.registry import DynamicModule
 
 from ...register import XHLLM_TRACEABLE_MODULES
@@ -84,7 +85,10 @@ class _Gemma4AudioAttention(_Gemma4AudioDynamicModule):
         attn_weights = attn_weights * self.softcap
 
         if attention_mask is not None:
-            attn_weights = attn_weights.masked_fill(attention_mask.logical_not(), self.config.attention_invalid_logits_value)
+            additive_mask = torch.zeros_like(attn_weights)
+            additive_mask.masked_fill_(attention_mask.logical_not(), self.config.attention_invalid_logits_value)
+            attn_weights = self.masked_add(attn_weights, additive_mask)
+            attn_weights = self.masked_add_2(attn_weights, additive_mask)
 
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
         attn_output = attn_weights @ value_states.permute(0, 3, 1, 2, 4)
@@ -104,6 +108,8 @@ class _Gemma4AudioAttention(_Gemma4AudioDynamicModule):
         self.max_past_horizon = self.config.attention_context_left - 1
         self.max_future_horizon = self.config.attention_context_right
         self.context_size = self.chunk_size + self.max_past_horizon + self.max_future_horizon
+        self.masked_add = MaskedAdd()
+        self.masked_add_2 = MaskedAdd()
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Gemma4AudioModel: "Gemma4AudioModel"})

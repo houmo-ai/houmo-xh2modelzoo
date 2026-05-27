@@ -88,11 +88,14 @@ class _FusedMultidimRope(nn.Module):
 
 def _patch_vision_attention(attn: nn.Module) -> None:
     """Replace manual RoPE in Gemma4VisionAttention with fused xhnn.Rope."""
+    from xhquant.nn import MaskedAdd
+
     fused_rope = _FusedMultidimRope(head_dim=attn.head_dim, ndim=2)
     attn._fused_multidim_rope = fused_rope
+    attn._masked_add = MaskedAdd()
+    attn._masked_add_2 = MaskedAdd()
 
     import types
-    from transformers.models.gemma4.modeling_gemma4 import eager_attention_forward
 
     def _patched_forward(
         self,
@@ -124,13 +127,18 @@ def _patch_vision_attention(attn: nn.Module) -> None:
         value_states = self.v_norm(value_states)
         value_states = value_states.transpose(1, 2)
 
-        attention_interface = eager_attention_forward
-        attn_output, attn_weights = attention_interface(
-            self, query_states, key_states, value_states,
-            attention_mask,
-            dropout=0.0,
-            scaling=self.scaling,
-        )
+        if n_kv != n_heads:
+            key_states = key_states.repeat_interleave(n_heads // n_kv, dim=1)
+            value_states = value_states.repeat_interleave(n_heads // n_kv, dim=1)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
+        if attention_mask is not None:
+            attn_weights = self._masked_add(attn_weights, attention_mask)
+            attn_weights = self._masked_add_2(attn_weights, attention_mask)
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, seq, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights

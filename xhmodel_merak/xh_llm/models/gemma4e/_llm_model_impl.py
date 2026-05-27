@@ -148,6 +148,7 @@ class _Gemma4TextAttention(DynamicModule):
         attention_max_length = getattr(self, "sliding_window", None)
         attention_max_length = int(attention_max_length) if attention_max_length is not None else -1
         self.masked_add = MaskedAdd()
+        self.masked_add_2 = MaskedAdd()
         self.softmax = SoftmaxPlus(dim=-1)
         if self.use_cache:
             cache_axis = cfg.kv_cache.cache_axis
@@ -215,9 +216,10 @@ class _Gemma4TextAttention(DynamicModule):
         key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
         value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
 
-        attn_weights = self.qk_matmul(query_states, key_states) * self.scaling
+        attn_weights = self.qk_matmul(query_states, key_states)
         if attention_mask is not None:
             attn_weights = self.masked_add(attn_weights, attention_mask)
+            attn_weights = self.masked_add_2(attn_weights, attention_mask)
         attn_weights = self.softmax(attn_weights).to(query_states.dtype)
 
         attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()

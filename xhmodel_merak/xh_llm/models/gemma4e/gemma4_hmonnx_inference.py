@@ -11,7 +11,7 @@ from xhquant.common import PrecisionMode
 
 from xhmodel_merak.xh_llm.utils import unfold_args
 
-from ...hmonnx.hmonnx_model import HMONNXModel
+from ...hmonnx.hmonnx_model import HMONNXModel, HMONNXGolden
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...kv_cache_mixin import KVCacheMixin
 from ...types import KVCacheConfig, LLMModelMeta
@@ -68,7 +68,29 @@ class VisualHMONNXModel(HMONNXModel):
 
 
 class AudioHMONNXModel(HMONNXModel):
+    def __init__(self, hmonnx: str, input_feature_length: int = 0):
+        self._enable_cuda_graph = False
+        self.hmonnx_session = HMONNXGolden(hmonnx)
+        self._enable_auto_offload = False
+        self._dtype = torch.float16
+        self._device = torch.device("cpu")
+        self._enable_golden = False
+        self.input_feature_length = input_feature_length
+
     def forward(self, *args):
+        args = list(args)
+        if self.input_feature_length > 0 and len(args) >= 2:
+            input_features, input_features_mask = args[0], args[1]
+            seq_len = input_features.shape[1]
+            target_len = self.input_feature_length
+            if seq_len > target_len:
+                input_features = input_features[:, :target_len, :]
+                input_features_mask = input_features_mask[:, :target_len]
+            elif seq_len < target_len:
+                pad_len = target_len - seq_len
+                input_features = torch.nn.functional.pad(input_features, (0, 0, 0, pad_len))
+                input_features_mask = torch.nn.functional.pad(input_features_mask, (0, pad_len), value=0)
+            args[0], args[1] = input_features, input_features_mask
         out = super().forward(*_cast_hmonnx_int_args(args))
         if isinstance(out, (tuple, list)) and len(out) == 1:
             return out[0]
@@ -132,6 +154,71 @@ class AudioONNXModel:
         audio_embeds = torch.from_numpy(outputs[0]).to(self._device, self._dtype)
         audio_embeds_mask = torch.from_numpy(outputs[1]).to(self._device)
         return audio_embeds, audio_embeds_mask
+
+
+class AudioPyTorchModel:
+    """PyTorch-based audio model that supports dynamic input length."""
+
+    def __init__(self, hf_model_dir: str):
+        from transformers import AutoModelForImageTextToText
+
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            hf_model_dir, dtype=torch.float16, device_map="cpu"
+        )
+        self._audio_tower = hf_model.model.audio_tower.eval()
+        self._embed_audio = hf_model.model.embed_audio.eval()
+        del hf_model.model.language_model
+        del hf_model.lm_head
+        del hf_model
+        self._dtype = torch.float16
+        self._device = torch.device("cpu")
+
+    def _set_device(self, device):
+        self._device = torch.device(device)
+        self._audio_tower.to(self._device)
+        self._embed_audio.to(self._device)
+        return self
+
+    def _set_dtype(self, dtype):
+        self._dtype = dtype
+        return self
+
+    def to(self, device):
+        return self._set_device(device)
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @torch.no_grad()
+    def forward(self, input_features, input_features_mask):
+        audio_outputs = self._audio_tower(
+            input_features=input_features,
+            attention_mask=input_features_mask,
+        )
+        if hasattr(audio_outputs, "last_hidden_state"):
+            hidden_states = audio_outputs.last_hidden_state
+            output_mask = getattr(audio_outputs, "attention_mask", None)
+        elif isinstance(audio_outputs, (tuple, list)):
+            hidden_states = audio_outputs[0]
+            output_mask = audio_outputs[1] if len(audio_outputs) > 1 else None
+        else:
+            hidden_states = audio_outputs
+            output_mask = None
+
+        audio_embeds = self._embed_audio(inputs_embeds=hidden_states)
+        if isinstance(audio_embeds, (tuple, list)):
+            audio_embeds = audio_embeds[0]
+
+        if output_mask is None:
+            output_mask = torch.ones(
+                audio_embeds.shape[:2], dtype=torch.bool, device=audio_embeds.device
+            )
+        return audio_embeds, output_mask
 
 
 class VisualONNXModel:
@@ -229,18 +316,32 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
         return None
 
     @staticmethod
-    def _build_audio_runtime(audio_meta):
+    def _build_audio_runtime(audio_meta, hf_model_dir=None):
+        force_backend = (os.environ.get("XHMODEL_GEMMA4_AUDIO_BACKEND") or "").lower()
+        if force_backend == "pytorch":
+            if hf_model_dir is None or not Path(hf_model_dir).exists():
+                raise ValueError(
+                    "XHMODEL_GEMMA4_AUDIO_BACKEND=pytorch requires a valid hf_model directory; "
+                    f"got {hf_model_dir!r}."
+                )
+            get_xhquant_logger().warning(
+                "Forcing Gemma4 audio runtime to PyTorch (XHMODEL_GEMMA4_AUDIO_BACKEND=pytorch)."
+            )
+            return AudioPyTorchModel(hf_model_dir)
+        hmonnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(audio_meta, "hmonnx", None))
+        if force_backend != "onnx" and hmonnx_path is not None:
+            if not Path(hmonnx_path).exists():
+                raise FileNotFoundError(f"Gemma4 audio HMONNX artifact not found: {hmonnx_path}")
+            input_feature_length = int(getattr(audio_meta, "input_feature_length", 0) or 0)
+            return AudioHMONNXModel(hmonnx_path, input_feature_length=input_feature_length)
         onnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(audio_meta, "onnx", None))
         if onnx_path is not None:
             if not Path(onnx_path).exists():
                 raise FileNotFoundError(f"Gemma4 audio ONNX artifact not found: {onnx_path}")
             return AudioONNXModel(onnx_path)
-        hmonnx_path = XHGemma4_HMONNXModel._get_path_str(getattr(audio_meta, "hmonnx", None))
-        if hmonnx_path is None:
-            raise ValueError("Gemma4 audio runtime requires an exported HMONNX artifact.")
-        if not Path(hmonnx_path).exists():
-            raise FileNotFoundError(f"Gemma4 audio HMONNX artifact not found: {hmonnx_path}")
-        return AudioHMONNXModel(hmonnx_path)
+        if hf_model_dir is not None and Path(hf_model_dir).exists():
+            return AudioPyTorchModel(hf_model_dir)
+        raise ValueError("Gemma4 audio runtime requires an exported HMONNX or ONNX artifact, or a valid HF model directory.")
 
     @staticmethod
     def _build_visual_runtime(visual_meta):
@@ -305,7 +406,8 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
         self.visual_meta = getattr(meta_info, "visual_config", None)
         self.audio_meta = getattr(meta_info, "audio_config", None)
         self.visual = self._build_visual_runtime(self.visual_meta) if self.visual_meta else None
-        self.audio = self._build_audio_runtime(self.audio_meta) if self.audio_meta else None
+        hf_model_path = getattr(meta_info.model_config, "hf_model", None) or self.hf_model_dir
+        self.audio = self._build_audio_runtime(self.audio_meta, hf_model_path) if self.audio_meta else None
         layer_kv_shapes = getattr(meta_info, "layer_kv_shapes", [])
         if layer_kv_shapes:
             self._kvcache_mixin = Gemma4KVCacheMixinHMONNX(self.kvcache_config, layer_kv_shapes)
@@ -362,9 +464,9 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
             )
         if getattr(model_config, "audio_config", None) is not None:
             processor.config.sampling_rate = model_config.audio_config.sampling_rate
-            processor.config.audio_feature_length = getattr(model_config.audio_config, "input_feature_length", None)
-        if self.audio_meta is not None and getattr(self.audio_meta, "input_feature_length", None) is not None:
-            processor.config.audio_feature_length = self.audio_meta.input_feature_length
+            input_feature_length = int(getattr(model_config.audio_config, "input_feature_length", 0) or 0)
+            if input_feature_length > 0:
+                processor.config.audio_feature_length = input_feature_length
         return processor
 
     def forward(self, *args):

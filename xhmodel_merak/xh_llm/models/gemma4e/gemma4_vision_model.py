@@ -186,7 +186,7 @@ class XHGemma4VisionModel(BaseVisionModel):
 
         register_wrap_modules(hf_model)
         if hf_model is not None and hasattr(hf_model, "model") and hasattr(hf_model.model, "vision_tower"):
-            _replace_rmsnorm(hf_model.model.vision_tower)
+            _wrap_compact_vision_modules(hf_model.model.vision_tower)
             hf_model = _Gemma4VisionExportBridge(hf_model)
         return super().init_wrap_model(hf_model)
 

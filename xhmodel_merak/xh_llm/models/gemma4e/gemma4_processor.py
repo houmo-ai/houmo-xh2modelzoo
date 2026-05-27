@@ -211,6 +211,17 @@ class XHGemma4Processor(Gemma4Processor):
             if key in kwargs:
                 retokenize_kwargs[key] = kwargs[key]
 
+        # The parent processor expands `<|image|>` into `image_seq_length` soft
+        # tokens only when `images` is provided. If we re-tokenize with text
+        # alone, the image placeholder collapses back to a single token while
+        # the already-computed `pixel_values` still hold all image features,
+        # producing a "Feature count does not match token count" error in the
+        # downstream scatter. Forward `images` (and skip audio so we don't
+        # overwrite the just-adjusted audio features) so both placeholders
+        # expand consistently.
+        if "images" in kwargs and kwargs["images"] is not None:
+            retokenize_kwargs["images"] = kwargs["images"]
+
         text_only_inputs = super().__call__(text=adjusted_text, **retokenize_kwargs)
         for key in ("input_ids", "attention_mask", "mm_token_type_ids"):
             if key in text_only_inputs:
