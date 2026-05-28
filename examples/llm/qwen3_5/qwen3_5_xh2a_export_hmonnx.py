@@ -2439,6 +2439,7 @@ def main(args):
         cfg.model.wrap_cfg.split_conv_cache = True
     if getattr(args, "num_blocks", None) is not None:
         cfg.model.wrap_cfg.max_layers = args.num_blocks
+    cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", True)
     normalize_force_fp32 = getattr(args, "normalize_force_fp32", True)
     cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
     if "ops_cfg" not in cfg.model.quant_config:
@@ -2648,6 +2649,20 @@ def parse_arguments():
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--fuse_gdr_ops",
+        action="store_true",
+        default=False,
+        help=(
+            "Use fused GDR operators (GDRBlockTriInverse, GDRChunkScan, GDRRecurrentScan) "
+            "as FX leaf nodes. Default False (use inline computation). "
+            "GDRBlockTriInverse (QTL-332), GDRChunkScan (QTL-333) and "
+            "GDRRecurrentScan (QTL-334) are routed through the xhquant first-class "
+            "custom ops; set XHQUANT_GDR_USE_LEGACY=1 to force the legacy in-tree "
+            "impls for all three (also re-enables variable-length "
+            "output_all_states=True for speculative decoding verification)."
         ),
     )
     parser.add_argument(

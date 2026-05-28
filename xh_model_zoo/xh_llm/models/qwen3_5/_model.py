@@ -40,11 +40,16 @@ from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
 
-# Re-use the chunk/recurrent gated delta rule implementations from Qwen3Next
-from ..qwen3_next._model import (
+# QTL-336: use local _delta_rule mirror that accepts optional fused GDR ops
+# (block_tri_inverse_op / chunk_scan_op / recurrent_scan_op). The original
+# helpers in qwen3_next/_model.py do not accept these kwargs, so we ported a
+# Qwen3.5-specific copy here instead of polluting the shared qwen3_next code.
+# Mirrors xhmodel_merak/xh_llm/models/qwen3_5/_delta_rule.py (QTL-331+).
+from ._delta_rule import (
     torch_chunk_gated_delta_rule,
     torch_recurrent_gated_delta_rule,
 )
+from ._gdr_ops import GDRBlockTriInverse, GDRChunkScan, GDRRecurrentScan
 
 try:
     from fla.modules import FusedRMSNormGated
@@ -723,6 +728,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                         batch_size=self.batch_size,
                         scale=self.chunk_scale,
                         sequence_length=1,
+                        recurrent_scan_op=self.recurrent_scan_op,
                     )
                     _core_parts.append(_out_t)
                     _recurrent_snapshots.append(_current_rs)
@@ -745,6 +751,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                     batch_size=self.batch_size,
                     scale=self.chunk_scale,
                     sequence_length=1,
+                    recurrent_scan_op=self.recurrent_scan_op,
                 )
         else:
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
@@ -771,6 +778,8 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 scale=self.chunk_scale,
                 chunk_row_masks=self.chunk_row_masks,
                 cumsum_matmul=self.cumsum_matmul,
+                block_tri_inverse_op=self.block_tri_inverse_op,
+                chunk_scan_op=self.chunk_scan_op,
             )
 
         if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
@@ -807,6 +816,11 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
         self.split_conv_cache = cfg.get("split_conv_cache", False)
+        # QTL-336: optional fused GDR ops. Default False to preserve byte-identical
+        # behavior with pre-GDR commits when wrap_cfg does not specify the flag.
+        # The production export (qwen3_5_xh2a_export_hmonnx.py) explicitly sets
+        # cfg.model.wrap_cfg.fuse_gdr_ops=True by default.
+        self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
@@ -1039,6 +1053,37 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
+        # QTL-336: GDR fused ops (conditional on fuse_gdr_ops flag).
+        # Mirrors xhmodel_merak/.../_llm_model_impl.py::_Qwen3_5GatedDeltaNet._setup
+        # (post QTL-331/332/333/334). When fuse_gdr_ops is True these modules
+        # dispatch to xhquant first-class custom ops (xh::GDRBlockTriInverse /
+        # GDRChunkScan / GDRRecurrentScan), exported as single ONNX nodes under
+        # the ai.houmo.xh2a domain. The legacy in-tree impls are kept behind
+        # XHQUANT_GDR_USE_LEGACY=1 for regression/diff testing.
+        if self.fuse_gdr_ops:
+            self.block_tri_inverse_op = GDRBlockTriInverse(
+                chunk_size=chunk_size, block_size=block_size
+            )
+            # QTL-343 / T7: eye buffers are externalized (chunk_eye_8_batched is
+            # registered on this module and passed through _delta_rule), so no
+            # ``.setup()`` is needed for either fused (xhquant first-class op,
+            # derives eye internally) or LegacyGDRBlockTriInverse (its setup()
+            # was removed — buffers became dead after QTL-339).
+            self.chunk_scan_op = GDRChunkScan(
+                num_chunks=num_chunks,
+                num_heads=self.num_v_heads,
+                k_head_dim=self.head_k_dim,
+                v_head_dim=self.head_v_dim,
+                chunk_size=chunk_size,
+            )
+            self.recurrent_scan_op = GDRRecurrentScan(
+                sequence_length=1, output_all_states=False
+            )
+        else:
+            self.block_tri_inverse_op = None
+            self.chunk_scan_op = None
+            self.recurrent_scan_op = None
+
         return self
 
     def _update_cfg(self, cfg: Optional[Dict] = None):
@@ -1089,6 +1134,13 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
             .contiguous()
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
+
+        # QTL-336: refresh GDR fused op buffers / num_chunks when batch/seq config
+        # changes between prefill/decode wrap stages.
+        if getattr(self, "fuse_gdr_ops", False) and self.block_tri_inverse_op is not None:
+            # QTL-343 / T7: no ``.setup()`` call needed (see fuse_gdr_ops
+            # branch in setup() for rationale).
+            self.chunk_scan_op.num_chunks = num_chunks
 
         self.conv_cache_slice = xhnn.DynamicSlice(
             [self.conv_kernel_size], [2], [1]
