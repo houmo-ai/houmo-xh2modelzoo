@@ -84,6 +84,7 @@ def main(args):
         dflash_model_dir=args.dflash_model_dir,
         spec_draft_head_weight_bits=args.spec_draft_head_weight_bits,
         split_conv_cache=args.split_conv_cache,
+        normalize_force_fp32=getattr(args, "normalize_force_fp32", True),
     )
 
     if args.draft_only:
@@ -243,6 +244,21 @@ if __name__ == "__main__":
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
         ),
+    )
+    parser.add_argument(
+        "--normalize-force-fp32",
+        "--normalize_force_fp32",
+        dest="normalize_force_fp32",
+        action="store_true",
+        default=True,
+        help="Force fp32 accumulation in Normalize operator (default: True for backward compatibility).",
+    )
+    parser.add_argument(
+        "--no-normalize-force-fp32",
+        "--no_normalize_force_fp32",
+        dest="normalize_force_fp32",
+        action="store_false",
+        help="Disable fp32 accumulation in Normalize operator (use fp16).",
     )
     args = parser.parse_args()
     if args.spec_decode_mode == "none":

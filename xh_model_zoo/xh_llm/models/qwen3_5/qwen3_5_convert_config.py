@@ -35,3 +35,4 @@ class Qwen3_5ConvertConfig(LLMConvertConfig):
     chunk_inverse_alpha: float = 0.5
     cumsum_matmul_quant_config: Optional[Dict] = None
     split_conv_cache: bool = False
+    normalize_force_fp32: bool = True

@@ -188,6 +188,45 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --release_xh_version xh2a \
   --support_long_context_over_fp16_limit
 
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=5
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_norm_fp32_False_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit \
+  --no-normalize-force-fp32
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=4
+TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_norm_fp32_True_${TS}"
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 8192 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --package_release \
+  --release_xh_version xh2a \
+  --support_long_context_over_fp16_limit
+  --normalize-force-fp32
+
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=6
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
@@ -867,3 +906,4 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_mtp_demo_benchmark.py \
       --out-dir tmp/mtp_demo_xh2a_benchmark1 \
       --enable_cuda_graph \
       --cuda_graph_modules prefill,decode,draft_prefill,draft_context,draft_context_decode,draft_decode
+

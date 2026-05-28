@@ -2112,6 +2112,11 @@ def main(args):
         cfg.model.wrap_cfg.split_conv_cache = True
     if getattr(args, "num_blocks", None) is not None:
         cfg.model.wrap_cfg.max_layers = args.num_blocks
+    normalize_force_fp32 = getattr(args, "normalize_force_fp32", True)
+    cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
+    if "ops_cfg" not in cfg.model.quant_config:
+        cfg.model.quant_config["ops_cfg"] = {}
+    cfg.model.quant_config["ops_cfg"]["Normalize"] = dict(force_fp32=normalize_force_fp32)
     if getattr(args, "golden_only", False):
         args.golden = True
 
@@ -2315,6 +2320,21 @@ def parse_arguments():
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
         ),
+    )
+    parser.add_argument(
+        "--normalize-force-fp32",
+        "--normalize_force_fp32",
+        dest="normalize_force_fp32",
+        action="store_true",
+        default=True,
+        help="Force fp32 accumulation in Normalize operator (default: True for backward compatibility).",
+    )
+    parser.add_argument(
+        "--no-normalize-force-fp32",
+        "--no_normalize_force_fp32",
+        dest="normalize_force_fp32",
+        action="store_false",
+        help="Disable fp32 accumulation in Normalize operator (use fp16).",
     )
     parser.add_argument(
         "--num_blocks",

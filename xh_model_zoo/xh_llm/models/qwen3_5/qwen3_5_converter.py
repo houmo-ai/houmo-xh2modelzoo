@@ -192,6 +192,9 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
             for key in key_candidates:
                 quant_config["nodes_cfg"][key] = dict(cumsum_quant_cfg)
 
+        quant_config.setdefault("ops_cfg", {})
+        quant_config["ops_cfg"]["Normalize"] = dict(force_fp32=self.config.normalize_force_fp32)
+
         return quant_config
 
     def _prepare_wrap_model(self, native_model):

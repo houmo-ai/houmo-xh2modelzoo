@@ -40,3 +40,4 @@ class Qwen3_5MoeConvertConfig(LLMConvertConfig):
     dflash_model_dir: Optional[str] = None
     spec_draft_head_weight_bits: int = 4
     split_conv_cache: bool = False
+    normalize_force_fp32: bool = True
