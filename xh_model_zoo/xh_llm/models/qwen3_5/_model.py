@@ -603,24 +603,37 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                     self.conv_cache_slice(key_states_new, current_input_length),
                     self.conv_cache_slice(value_states_new, current_input_length),
                 )
-            query_states = _manual_depthwise_conv1d_tail(
-                query_states_new,
-                self.conv1d_q_manual_weight,
-                getattr(self, "conv1d_q_manual_bias", None),
-                self.input_sequence_length,
-            )
-            key_states = _manual_depthwise_conv1d_tail(
-                key_states_new,
-                self.conv1d_k_manual_weight,
-                getattr(self, "conv1d_k_manual_bias", None),
-                self.input_sequence_length,
-            )
-            value_states = _manual_depthwise_conv1d_tail(
-                value_states_new,
-                self.conv1d_v_manual_weight,
-                getattr(self, "conv1d_v_manual_bias", None),
-                self.input_sequence_length,
-            )
+            # QTL-341: prefer nn.Conv1d module so hmonnx emits a single Conv
+            # node. nn.Conv1d here uses padding=K-1, so the output length is
+            # (K+L) + 2(K-1) - K + 1 = 2K+L-1; the slice that matches the
+            # manual tail (which itself equals F.conv1d(no pad)[..., -L:]) is
+            # [K : K+L] — NOT [-L:] (the trailing K-1 outputs mix right
+            # padding zeros for K>1).
+            if self.use_manual_depthwise_conv1d:
+                query_states = _manual_depthwise_conv1d_tail(
+                    query_states_new,
+                    self.conv1d_q_manual_weight,
+                    getattr(self, "conv1d_q_manual_bias", None),
+                    self.input_sequence_length,
+                )
+                key_states = _manual_depthwise_conv1d_tail(
+                    key_states_new,
+                    self.conv1d_k_manual_weight,
+                    getattr(self, "conv1d_k_manual_bias", None),
+                    self.input_sequence_length,
+                )
+                value_states = _manual_depthwise_conv1d_tail(
+                    value_states_new,
+                    self.conv1d_v_manual_weight,
+                    getattr(self, "conv1d_v_manual_bias", None),
+                    self.input_sequence_length,
+                )
+            else:
+                _k = self.conv_kernel_size
+                _l = self.input_sequence_length
+                query_states = self.conv1d_q(query_states_new)[:, :, _k : _k + _l]
+                key_states = self.conv1d_k(key_states_new)[:, :, _k : _k + _l]
+                value_states = self.conv1d_v(value_states_new)[:, :, _k : _k + _l]
             query_states = F.silu(query_states).to(query_states.dtype)
             key_states = F.silu(key_states).to(key_states.dtype)
             value_states = F.silu(value_states).to(value_states.dtype)
@@ -672,12 +685,20 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 conv_cache_out = self.conv_cache_slice(
                     hidden_states_new, current_input_length
                 )
-            conv_out = _manual_depthwise_conv1d_tail(
-                hidden_states_new,
-                self.conv1d_manual_weight,
-                getattr(self, "conv1d_manual_bias", None),
-                self.input_sequence_length,
-            )
+            if self.use_manual_depthwise_conv1d:
+                conv_out = _manual_depthwise_conv1d_tail(
+                    hidden_states_new,
+                    self.conv1d_manual_weight,
+                    getattr(self, "conv1d_manual_bias", None),
+                    self.input_sequence_length,
+                )
+            else:
+                # QTL-341: slice [K:K+L] strips both left/right padding zeros
+                # from nn.Conv1d(padding=K-1) output (length 2K+L-1) to match
+                # the causal manual tail exactly.
+                _k = self.conv_kernel_size
+                _l = self.input_sequence_length
+                conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
             mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
             mask_qkv = linear_attn_mask.unsqueeze(1)
             mixed_qkv = mixed_qkv * mask_qkv
@@ -821,6 +842,14 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         # The production export (qwen3_5_xh2a_export_hmonnx.py) explicitly sets
         # cfg.model.wrap_cfg.fuse_gdr_ops=True by default.
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
+        # QTL-341: route depthwise conv1d tail through self.conv1d_* modules
+        # (default) so hmonnx export emits a clean Conv op. xhquant 2d86b60+
+        # routes any-kernel depthwise conv2d (groups==in==out) into the VP
+        # triton impl, so the slice/mul/add manual unroll is no longer needed.
+        # Set True to fall back to the legacy _manual_depthwise_conv1d_tail.
+        self.use_manual_depthwise_conv1d = cfg.get(
+            "use_manual_depthwise_conv1d", False
+        )
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:

@@ -648,12 +648,20 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
         hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
         conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
-        conv_out = _manual_depthwise_conv1d_tail(
-            hidden_states_new,
-            self.conv1d_manual_weight,
-            getattr(self, "conv1d_manual_bias", None),
-            self.input_sequence_length,
-        )
+        if self.use_manual_depthwise_conv1d:
+            conv_out = _manual_depthwise_conv1d_tail(
+                hidden_states_new,
+                self.conv1d_manual_weight,
+                getattr(self, "conv1d_manual_bias", None),
+                self.input_sequence_length,
+            )
+        else:
+            # QTL-341: nn.Conv1d uses padding=K-1, so its output length is
+            # 2K+L-1; slice [K:K+L] strips left/right padding zeros and
+            # matches the causal manual tail exactly (NOT [-L:]).
+            _k = self.conv_kernel_size
+            _l = self.input_sequence_length
+            conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
         mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
         mask_qkv = linear_attn_mask.unsqueeze(1)
         mixed_qkv = mixed_qkv * mask_qkv
@@ -746,6 +754,12 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", True)
+        # QTL-341: route depthwise conv1d tail through self.conv1d so hmonnx
+        # export emits a clean Conv op. xhquant 2d86b60+ routes any-kernel
+        # depthwise conv2d (groups==in==out) into the VP triton impl, so the
+        # slice/mul/add manual unroll is no longer needed. Set True to fall
+        # back to the legacy _manual_depthwise_conv1d_tail.
+        self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:

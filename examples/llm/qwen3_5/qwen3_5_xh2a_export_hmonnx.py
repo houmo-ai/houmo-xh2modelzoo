@@ -2440,6 +2440,9 @@ def main(args):
     if getattr(args, "num_blocks", None) is not None:
         cfg.model.wrap_cfg.max_layers = args.num_blocks
     cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", True)
+    cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
+        args, "use_manual_depthwise_conv1d", False
+    )
     normalize_force_fp32 = getattr(args, "normalize_force_fp32", True)
     cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
     if "ops_cfg" not in cfg.model.quant_config:
@@ -2672,6 +2675,19 @@ def parse_arguments():
         action="store_true",
         default=False,
         help="Force fp32 accumulation in Normalize operator.",
+    )
+    parser.add_argument(
+        "--use_manual_depthwise_conv1d",
+        "--use-manual-depthwise-conv1d",
+        dest="use_manual_depthwise_conv1d",
+        action="store_true",
+        default=False,
+        help=(
+            "QTL-341: fall back to the slice/mul/add manual depthwise conv1d "
+            "unroll (legacy path). Default False routes the conv tail through "
+            "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
+            "Conv op (requires xhquant 2d86b60+ depthwise conv2d VP support)."
+        ),
     )
     parser.add_argument(
         "--num_blocks",
