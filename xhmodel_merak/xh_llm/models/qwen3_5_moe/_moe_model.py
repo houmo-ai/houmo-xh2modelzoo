@@ -564,12 +564,21 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
         hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
         conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
-        conv_out = _manual_depthwise_conv1d_tail(
-            hidden_states_new,
-            self.conv1d_manual_weight,
-            getattr(self, "conv1d_manual_bias", None),
-            self.input_sequence_length,
-        )
+        # QTL-341: prefer nn.Conv1d module so hmonnx emits a single Conv
+        # node. nn.Conv1d here uses padding=K-1, so output length is 2K+L-1;
+        # the slice matching the manual tail is [K : K+L] — NOT [-L:] (the
+        # trailing K-1 outputs read right-side padding zeros for K>1).
+        if self.use_manual_depthwise_conv1d:
+            conv_out = _manual_depthwise_conv1d_tail(
+                hidden_states_new,
+                self.conv1d_manual_weight,
+                getattr(self, "conv1d_manual_bias", None),
+                self.input_sequence_length,
+            )
+        else:
+            _k = self.conv_kernel_size
+            _l = self.input_sequence_length
+            conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
         mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
         mask_qkv = linear_attn_mask.unsqueeze(1)
         mixed_qkv = mixed_qkv * mask_qkv
@@ -658,6 +667,12 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.return_cache = cfg.get("return_cache", False)
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
+        # QTL-341: route depthwise conv1d tail through self.conv1d module
+        # (default) so hmonnx export emits a clean Conv op. Set True to fall
+        # back to the legacy _manual_depthwise_conv1d_tail manual unroll.
+        self.use_manual_depthwise_conv1d = cfg.get(
+            "use_manual_depthwise_conv1d", False
+        )
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
