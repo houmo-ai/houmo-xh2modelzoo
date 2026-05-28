@@ -98,7 +98,7 @@ work_dirs/qwen36moe-no-rotate-attn8-shared8-expert45-XH2a-8k-w4a8h0_ssfp-spec_df
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_demo.py \
-  --config work_dirs/qwen36moe-no-rotate-attn8-shared8-expert45-XH2a-8k-w4a8h0_ssfp/meta.json \
+  --config work_dirs/qwen3_6_35b_a3b_xh2a_2k_w4a8h0_ssfp_gptq_norm_fp32_False_20260526_221139/meta.json \
   --prompt "你好，请用中文介绍一下你自己。" \
   --max-new-tokens 256 \
   --enable_cuda_graph \
@@ -238,3 +238,124 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_bench.py \
   --enable-cuda-graph \
   --cuda-graph-modules prefill,decode,draft_context,draft_decode
 ```
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_6_35b_a3b
+MODEL_DIR=weights/Qwen3.6-35B-A3B
+QUANT_WEIGHT=weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8h0_ssfp_gptq_norm_fp32_True_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 2048 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h0_ssfp \
+  --quant-weight "$QUANT_WEIGHT" \
+  --golden \
+  --work-dir "$WORK_DIR"
+
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=2
+TS=$(date +%Y%m%d_%H%M%S)
+MODEL_KEY=qwen3_6_35b_a3b
+MODEL_DIR=weights/Qwen3.6-35B-A3B
+QUANT_WEIGHT=weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8h0_ssfp_gptq_norm_fp32_False_${TS}"
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 2048 \
+  --input-sequence-length 256 \
+  --quant-type w4a8h0_ssfp \
+  --quant-weight "$QUANT_WEIGHT" \
+  --work-dir "$WORK_DIR" \
+  --golden \
+  --package-release \
+  --release_xh_version xh2 \
+  --release_wmix_amix wmix_amix
+```
+
+## XH2 规范导出
+
+按照《HM 模型版本发布命名规则》一键导出 + 打包发布产物。导出脚本会把
+prefill / decode 按规范布局组织到 `work_dirs/<release_prefix>/` 下，并在末尾
+打成 `<release_prefix>.zip`。
+
+`<release_prefix>` 形如：
+
+```
+hmquant_<xh1|xh2>_<modelscope_name>_<wmix_amix>_<prefill>_<context>_<date>
+```
+
+全部小写。`xh_version` 仅允许 `xh1` / `xh2`；wmix_amix 字段必须是纯定点的
+`w<bits>a<bits>`（例如 `w4a8`、`w8a8`），其余一律归并为 `wmix_amix`。
+对 MoE 量化（`w8a8h0_sefp` / `w4a8h0_ssfp` 等子模式）默认会归并到 `wmix_amix`。
+
+> 旧版本：`README.md` 顶部沿用的命令使用脚本旧的目录结构（`prefill_onnx/`、
+> `decode_onnx/`、`token_embedding.pt`、`-spec_<mode>` 后缀工作目录），保留作为
+> 历史参考；新发布请优先使用以下 XH2 规范导出命令。
+
+最小化命令（MoE Qwen3.6-35B-A3B，xh2 规范导出 + 打包）：
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d)
+MODEL_DIR=/data01/nfs_shared/Qwen3.6-35B-A3B
+WORK_DIR="work_dirs/qwen3_6_35b_a3b_xh2_release_${TS}"
+
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 2048 \
+  --input-sequence-length 256 \
+  --quant-type w8a8h0_sefp \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --release_xh_version xh2 \
+  --release_modelscope_name qwen3_6_35b_a3b \
+  --release_wmix_amix wmix_amix \
+  --release_date "$TS" \
+  --package_release
+```
+
+导出后产物路径：
+
+- `<WORK_DIR>/<release_prefix>/prefill/<release_prefix>_prefill_with_act.onnx`
+- `<WORK_DIR>/<release_prefix>/prefill/<release_prefix>_prefill_external_data`
+- `<WORK_DIR>/<release_prefix>/prefill/step_0/`（指向上述两个文件的相对软链）
+- `<WORK_DIR>/<release_prefix>/decode/<release_prefix>_decode_with_act.onnx`
+- `<WORK_DIR>/<release_prefix>/decode/<release_prefix>_decode_external_data`
+- `<WORK_DIR>/<release_prefix>/decode/step_0/`
+- `<WORK_DIR>/<release_prefix>/golden_meta_info.json`
+- `<WORK_DIR>/<release_prefix>/quant_embedding.pt`
+- `<WORK_DIR>/<release_prefix>/<release_prefix>_hmonnx.py`
+- `<WORK_DIR>/<release_prefix>/<release_prefix>_hmonnx_debug.log`
+- `<WORK_DIR>/<release_prefix>.zip`（`zip -r -y` 保留软链）
+
+仅打包既有 work_dir（不重新导出）：
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL_DIR" \
+  --context-length 2048 \
+  --input-sequence-length 256 \
+  --work_dir "$WORK_DIR" \
+  --golden-only \
+  --release_xh_version xh2 \
+  --release_modelscope_name qwen3_6_35b_a3b \
+  --release_wmix_amix wmix_amix \
+  --release_date "$TS" \
+  --package_release
+```
+
+可用的发布 CLI 参数（均可省略，由脚本按规则推导默认值）：
+
+| 参数 | 含义 |
+|------|------|
+| `--release_xh_version`     | `xh1` 或 `xh2`，argparse 会拒绝 `xh2a` 等取值；脚本内部 `_build_release_prefix_moe` 也会再做一次 ValueError 兜底。 |
+| `--release_modelscope_name`| 默认取 `--model` 末段（小写化、`.`/`-` → `_`），例如 `Qwen3.6-35B-A3B` → `qwen3_6_35b_a3b`。 |
+| `--release_wmix_amix`      | 纯定点 `w\d+a\d+` 保留；其它一律归并为 `wmix_amix`。 |
+| `--release_date`           | 形如 `YYYYMMDD`，默认今天。 |
+| `--package_release`        | golden 完成后用 `zip -r -y` 打成 `.zip`。 |
+

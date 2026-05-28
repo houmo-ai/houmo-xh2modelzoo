@@ -185,46 +185,46 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
-  --release_xh_version xh2a \
+  --release_xh_version xh2 \
   --support_long_context_over_fp16_limit
 
 
 export PYTHONPATH=./
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=1
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_norm_fp32_False_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8_gptq_norm_fp32_False_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
   --dtype fp16 \
-  --max_sequence_length 8192 \
+  --max_sequence_length 2048 \
   --work_dir "$WORK_DIR" \
   --golden \
-  --package_release \
-  --release_xh_version xh2a \
+  --release_xh_version xh2 \
+  --release_wmix_amix w4a8 \
   --support_long_context_over_fp16_limit \
-  --no-normalize-force-fp32
+  --package_release
+
 
 export PYTHONPATH=./
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=0
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
 HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_norm_fp32_True_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8_gptq_spec_norm_fp32_True_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
   --hf_model_dir "$HF_MODEL_DIR" \
   --dtype fp16 \
-  --max_sequence_length 8192 \
+  --max_sequence_length 2048 \
   --work_dir "$WORK_DIR" \
   --golden \
-  --package_release \
-  --release_xh_version xh2a \
-  --support_long_context_over_fp16_limit
+  --release_xh_version xh2 \
+  --support_long_context_over_fp16_limit \
   --normalize-force-fp32
 
 export PYTHONPATH=./
@@ -245,7 +245,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --work_dir "$WORK_DIR" \
   --golden \
   --package_release \
-  --release_xh_version xh2a \
+  --release_xh_version xh2 \
   --support_long_context_over_fp16_limit
 
 export PYTHONPATH=./
@@ -268,7 +268,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --mtp-head-k "$MTPK" \
   --golden \
   --package_release \
-  --release_xh_version xh2a \
+  --release_xh_version xh2 \
   --support_long_context_over_fp16_limit
 
 export PYTHONPATH=./
@@ -291,7 +291,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --mtp-head-k "$MTPK" \
   --golden \
   --package_release \
-  --release_xh_version xh2a \
+  --release_xh_version xh2 \
   --support_long_context_over_fp16_limit
 ```
 
@@ -535,7 +535,7 @@ export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
 python \
   examples/llm/qwen3_5/qwen3_5_xh2a_demo.py \
-  --config work_dirs/qwen3_5_27b_bf16_export/meta.json \
+  --config work_dirs/qwen3_5_9b_xh2a_2k_w4a8_gptq_norm_fp32_False_20260526_210917/meta.json \
   --prompt "你好呀，你是谁，中文回答" \
   --max-new-tokens 256 \
   --dtype fp16
@@ -906,4 +906,91 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_mtp_demo_benchmark.py \
       --out-dir tmp/mtp_demo_xh2a_benchmark1 \
       --enable_cuda_graph \
       --cuda_graph_modules prefill,decode,draft_prefill,draft_context,draft_context_decode,draft_decode
+
+
+
+## XH2 规范导出
+
+按照《HM 模型版本发布命名规则》一键导出 + 打包发布产物。导出脚本会把
+prefill / decode（以及可选的 MTP / DFlash draft）按规范布局组织到
+`work_dirs/<release_prefix>/` 下，并在末尾打成 `<release_prefix>.zip`。
+
+`<release_prefix>` 形如：
+
+```
+hmquant_<xh1|xh2>_<modelscope_name>_<wmix_amix>_<prefill>_<context>_<date>
+```
+
+全部小写。`xh_version` 仅允许 `xh1` / `xh2`；wmix_amix 字段必须是纯定点的
+`w<bits>a<bits>`（例如 `w4a8`、`w8a8`），其余一律归并为 `wmix_amix`。
+
+最小化命令（Dense Qwen3.5-9B，xh2 规范导出 + 打包）：
+
+```bash
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+TS=$(date +%Y%m%d)
+MODEL_KEY=qwen3_5_9b
+CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
+HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2_release_${TS}"
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --dtype fp16 \
+  --max_sequence_length 2048 \
+  --work_dir "$WORK_DIR" \
+  --golden \
+  --release_xh_version xh2 \
+  --release_wmix_amix wmix_amix \
+  --release_date "$TS" \
+  --package_release \
+  --support_long_context_over_fp16_limit \
+  --no-normalize-force-fp32 \
+  --no_fuse_gdr_ops
+```
+
+导出后产物路径：
+
+- `<WORK_DIR>/<release_prefix>/prefill/<release_prefix>_prefill_with_act.onnx`
+- `<WORK_DIR>/<release_prefix>/prefill/<release_prefix>_prefill_external_data`
+- `<WORK_DIR>/<release_prefix>/prefill/step_0/`（指向上述两个文件的相对软链）
+- `<WORK_DIR>/<release_prefix>/decode/<release_prefix>_decode_with_act.onnx`
+- `<WORK_DIR>/<release_prefix>/decode/<release_prefix>_decode_external_data`
+- `<WORK_DIR>/<release_prefix>/decode/step_0/`
+- `<WORK_DIR>/<release_prefix>/golden_meta_info.json`
+- `<WORK_DIR>/<release_prefix>/quant_embedding.pt`
+- `<WORK_DIR>/<release_prefix>/<release_prefix>_hmonnx.py`
+- `<WORK_DIR>/<release_prefix>/<release_prefix>_hmonnx_debug.log`
+- `<WORK_DIR>/<release_prefix>.zip`（`zip -r -y` 保留软链）
+
+MTP / DFlash draft 在打开 `--spec_decode_mode` 时会落到
+`<release_prefix>/mtp/{draft_prefill,draft_decode}/` 或
+`<release_prefix>/dflash/{draft_context,draft_context_decode,draft_decode}/`，
+命名与目录结构和 prefill / decode 完全对齐。
+
+仅打包既有 work_dir（不重新导出）：
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --config "$CONFIG" \
+  --hf_model_dir "$HF_MODEL_DIR" \
+  --work_dir "$WORK_DIR" \
+  --golden_only \
+  --release_xh_version xh2 \
+  --release_wmix_amix wmix_amix \
+  --release_date "$TS" \
+  --package_release
+```
+
+可用的发布 CLI 参数（均可省略，由脚本按规则推导默认值）：
+
+| 参数 | 含义 |
+|------|------|
+| `--release_xh_version`     | `xh1` 或 `xh2`，传 `xh2a` 等其它值会直接报错。 |
+| `--release_modelscope_name`| 默认取 `--hf_model_dir` 末段（小写化、`.`/`-` → `_`）。 |
+| `--release_wmix_amix`      | 纯定点 `w\d+a\d+` 保留；其它一律归并为 `wmix_amix`。 |
+| `--release_date`           | 形如 `YYYYMMDD`，默认今天。 |
+| `--package_release`        | golden 完成后用 `zip -r -y` 打成 `.zip`。 |
 

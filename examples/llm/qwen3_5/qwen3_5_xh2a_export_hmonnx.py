@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -121,9 +122,28 @@ def _detect_export_quant_type(hf_model_dir: str) -> str:
     return "w4a8h0_ssfp" if quant_method == "gptq" else "w8a8h1_sefp"
 
 
+_PURE_FIXED_POINT_WMIX_RE = re.compile(r"^w\d+a\d+$")
+
+
+def _normalize_wmix_amix(value: str) -> str:
+    """Normalize wmix_amix to HM 命名规则.
+
+    - Pure fixed-point like ``w4a8`` / ``w8a8`` → keep lowercase.
+    - Anything else (mixed / h-bit / ssfp / sefp / underscore-form) → ``wmix_amix``.
+    """
+    if value is None:
+        return "wmix_amix"
+    s = str(value).strip().lower()
+    if _PURE_FIXED_POINT_WMIX_RE.match(s):
+        return s
+    return "wmix_amix"
+
+
 def _detect_release_wmix_amix(hf_model_dir: str) -> str:
-    quant_method = _detect_source_quant_method(hf_model_dir)
-    return "w4_a8" if quant_method == "gptq" else "w8_a8"
+    """Default release wmix_amix for this repo: mixed precision → wmix_amix."""
+    # NOTE: All quant_type configs in this repo (gptq w4a8h0_ssfp / w8a8h1_sefp)
+    # are mixed precision, so release wmix_amix is always the literal ``wmix_amix``.
+    return "wmix_amix"
 
 
 def _normalize_dtype_name(dtype_name: str) -> str:
@@ -413,7 +433,12 @@ def _build_release_prefix(cfg) -> str:
     from datetime import datetime as _dt
 
     release_cfg = cfg.get("release", {})
-    xh_version = str(release_cfg.get("xh_version", "xh2"))
+    xh_version = str(release_cfg.get("xh_version", "xh2")).strip().lower()
+    if xh_version not in ("xh1", "xh2"):
+        raise ValueError(
+            f"release.xh_version 必须是 'xh1' 或 'xh2'，当前: {xh_version!r}. "
+            f"参考 HM 模型版本发布命名规则。"
+        )
     modelscope_name = str(release_cfg.get("modelscope_name", "qwen3_5"))
     model_size = _extract_model_size_from_candidates(
         release_cfg.get("model_size", ""),
@@ -421,7 +446,7 @@ def _build_release_prefix(cfg) -> str:
         getattr(cfg, "cfg_name", ""),
     )
     release_model_name = _with_model_size_in_name(modelscope_name, model_size)
-    wmix_amix = str(release_cfg.get("wmix_amix", "w8_a8"))
+    wmix_amix = _normalize_wmix_amix(release_cfg.get("wmix_amix", "wmix_amix"))
     prefill_length = int(release_cfg.get("prefill_length", cfg.model.wrap_cfg.get("input_sequence_length", 256)))
     context_length = _to_context_length_str(
         release_cfg.get("context_length", cfg.model.wrap_cfg.get("max_sequence_length", 2048))
@@ -453,6 +478,109 @@ def _find_external_data(onnx_path: Path):
     return None
 
 
+def _save_onnx_with_renamed_external_data(
+    src_onnx_path: Path,
+    dst_onnx_path: Path,
+    new_external_data_name: str,
+    logger,
+) -> None:
+    """Load ONNX (with external data) and re-save with external_data renamed.
+
+    Rewrites internal protobuf ``external_data`` location entries to point to
+    ``new_external_data_name`` (single-file, in same dir as ``dst_onnx_path``).
+    Removes the destination external_data file beforehand to avoid stale appends.
+    """
+    import onnx as _onnx
+
+    dst_onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    model = _onnx.load(str(src_onnx_path), load_external_data=True)
+    if dst_onnx_path.exists() or dst_onnx_path.is_symlink():
+        dst_onnx_path.unlink()
+    new_ext_path = dst_onnx_path.parent / new_external_data_name
+    if new_ext_path.exists() or new_ext_path.is_symlink():
+        new_ext_path.unlink()
+    _onnx.save_model(
+        model,
+        str(dst_onnx_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=new_external_data_name,
+        size_threshold=1024,
+        convert_attribute=False,
+    )
+    logger.info(
+        f"Re-saved ONNX with renamed external_data: {dst_onnx_path.name} "
+        f"(location={new_external_data_name})"
+    )
+
+
+def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -> None:
+    """Inside ``step_0/`` create *relative* symlinks back to the named ONNX
+    and its external_data sidecar at ``golden_dir`` root.
+
+    Fu Shengguo's naming rule: step_0 symlink name uses only the model-name portion
+    (e.g. hmquant_qwen3_5_9b_with_act.onnx), while the actual outer ONNX file
+    at golden_dir root keeps the full release_prefix.
+    """
+    step0_dir = golden_dir / "step_0"
+    step0_dir.mkdir(exist_ok=True, parents=True)
+
+    # Extract model_name from release_prefix = "hmquant_{backend}_{model_name}_{rest}"
+    # e.g. "hmquant_xh2_qwen3_5_9b_wmix_amix_256_2k_20260526" -> "qwen3_5_9b"
+    prefix_stripped = release_prefix.split("_", 2)[-1]
+    segments = prefix_stripped.split("_")
+    scheme_keywords = {"xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
+                       "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
+                       "ssfp", "sefp", "fp16", "fp32", "gptq"}
+    model_parts = []
+    for seg in segments:
+        if seg.lower() in scheme_keywords:
+            break
+        model_parts.append(seg)
+    model_name = "_".join(model_parts)
+
+    # ONNX short name (Fu Shengguo rule); external_data keeps full name to avoid runtime risk
+    onnx_short = f"hmquant_{model_name}_with_act.onnx"
+    onnx_actual = f"{release_prefix}_with_act.onnx"
+    # external_data symlink: keep full release_prefix (do NOT shorten) — changing this name
+    # breaks the ONNX internal location reference even though the file is renamed correctly
+    ext_actual = f"{release_prefix}_external_data"
+
+    # ONNX symlink: short name -> actual
+    src = golden_dir / onnx_actual
+    link = step0_dir / onnx_short
+    if src.exists():
+        if link.exists() or link.is_symlink():
+            try:
+                link.unlink()
+            except IsADirectoryError:
+                shutil.rmtree(link)
+        try:
+            rel_target = os.path.relpath(src, step0_dir)
+            os.symlink(rel_target, link)
+            logger.info(f"step_0 symlink: {link} -> {rel_target}")
+        except OSError as exc:
+            logger.warning(f"symlink failed ({exc}); falling back to copy")
+            shutil.copy2(src, link)
+
+    # external_data symlink: full name -> full name (no shortening)
+    src = golden_dir / ext_actual
+    link = step0_dir / ext_actual
+    if src.exists():
+        if link.exists() or link.is_symlink():
+            try:
+                link.unlink()
+            except IsADirectoryError:
+                shutil.rmtree(link)
+        try:
+            rel_target = os.path.relpath(src, step0_dir)
+            os.symlink(rel_target, link)
+            logger.info(f"step_0 symlink: {link} -> {rel_target}")
+        except OSError as exc:
+            logger.warning(f"symlink failed ({exc}); falling back to copy")
+            shutil.copy2(src, link)
+
+
 def _ensure_step0_layout(golden_dir: Path, logger) -> None:
     step0_dir = golden_dir / "step_0"
     step0_dir.mkdir(exist_ok=True, parents=True)
@@ -474,8 +602,119 @@ def _ensure_step0_layout(golden_dir: Path, logger) -> None:
             shutil.move(str(item), str(target))
 
 
-def _cleanup_hmonnx_in_golden(golden_dir: Path, release_prefix: str, logger) -> None:
+def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: str, logger) -> None:
+    """Rename golden .npy files and with_act/ dir inside step_0 to short format.
+
+    Fu Shengguo naming rule:
+      hmquant_{model_name}_{io_name}_{direction}.npy
+      e.g. hmquant_qwen3_5_9b_conv_cache_out_0_output.npy
+
+    HMONNX golden files use tensor names (e.g. xh2a_prefill_conv_cache_out_0_output)
+    as the filename prefix, NOT the release_prefix. The tensor name in the golden file
+    embeds the mode/role (e.g. xh2a_prefill), which must be stripped.
+
+    Strategy:
+      1. Extract model_name from release_prefix via scheme_keywords.
+      2. Find the direction suffix (_output/_input) in the filename.
+      3. The io_name = everything between model_name and direction, minus any
+         {mode}_{role}_ prefix that appears in the golden file tensor name.
+         We detect this by checking if the part between model_name and direction
+         starts with a known role token (prefill/decode/draft_prefill/etc.).
+      4. Reconstruct: hmquant_{model_name}_{io_name}_{direction}.npy
+    """
+    if role is None:
+        return
+    step0_dir = golden_dir / "step_0"
+    if not step0_dir.is_dir():
+        return
+
+    # Extract model_name from release_prefix = "hmquant_{backend}_{model_name}_{rest}"
+    prefix_stripped = release_prefix.split("_", 2)[-1]
+    segments = prefix_stripped.split("_")
+    scheme_keywords = {"xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
+                       "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
+                       "ssfp", "sefp", "fp16", "fp32", "gptq"}
+    model_parts = []
+    for seg in segments:
+        if seg.lower() in scheme_keywords:
+            break
+        model_parts.append(seg)
+    model_name = "_".join(model_parts)
+    short_prefix = f"hmquant_{model_name}"
+
+    # Role tokens that appear in golden file tensor names between model and io_name.
+    # The golden file tensor name = {mode}_{role}_{io_name}, e.g. xh2a_prefill_conv_cache_out_0.
+    role_tokens = [
+        "prefill", "decode",
+        "draft_prefill", "draft_decode",
+        "draft_context", "draft_context_decode",
+    ]
+
+    for fpath in list(step0_dir.iterdir()):
+        if fpath.is_dir():
+            # Rename with_act dir if it contains role suffix
+            if fpath.name.endswith("_with_act") and not fpath.name.startswith(short_prefix):
+                new_name = f"{short_prefix}_with_act"
+                new_path = step0_dir / new_name
+                if new_path.exists():
+                    shutil.rmtree(new_path)
+                logger.info(f"Rename golden dir: {fpath.name} → {new_name}")
+                shutil.move(str(fpath), str(new_path))
+            continue
+        if not fpath.name.endswith(".npy"):
+            continue
+
+        name_without_ext = fpath.name[:-4]
+        if "_output" in name_without_ext:
+            suffix_idx = name_without_ext.rfind("_output")
+            direction = "_output"
+        elif "_input" in name_without_ext:
+            suffix_idx = name_without_ext.rfind("_input")
+            direction = "_input"
+        else:
+            logger.warning(f"Cannot parse golden file name (no _output/_input): {fpath.name}")
+            continue
+
+        model_prefix = short_prefix
+        after_model = name_without_ext[len(model_prefix):suffix_idx]  # e.g. "_xh2a_prefill_conv_cache_out_0"
+
+        # Strip leading underscore then find and strip role prefix from the tensor name.
+        # e.g. "_xh2a_prefill_conv_cache_out_0" → strip role → "conv_cache_out_0"
+        rest = after_model.lstrip("_")  # "xh2a_prefill_conv_cache_out_0"
+        io_name = rest
+        for rt in role_tokens:
+            # Check if rest starts with {rt}_ (role token as a complete segment)
+            if rest.startswith(rt + "_"):
+                io_name = rest[len(rt) + 1:]  # strip "rt_" prefix
+                break
+            # Also handle case where role has mode prefix like "xh2a_prefill_"
+            for mode_prefix in ("xh2a_", "xh2_", "xh1a_", "xh1_"):
+                combined = mode_prefix + rt + "_"
+                if rest.startswith(combined):
+                    io_name = rest[len(combined):]
+                    break
+                # Also check reverse: "prefill" role with "xh2a_prefill_" or just "prefill_"
+                if rt in ("prefill", "decode") and rest.startswith(rt + "_"):
+                    io_name = rest[len(rt) + 1:]
+                    break
+            else:
+                continue
+            break
+
+        new_name = f"{model_prefix}_{io_name}{direction}.npy"
+        new_path = step0_dir / new_name
+        logger.info(f"Rename golden file: {fpath.name} → {new_name}")
+        shutil.move(str(fpath), str(new_path))
+
+
+def _cleanup_hmonnx_in_golden(
+    golden_dir: Path, release_prefix: str, role: Optional[str], logger
+) -> None:
     _ensure_step0_layout(golden_dir, logger)
+
+    # Fu Shengguo: strip role prefix from golden file names
+    if role:
+        _rename_golden_to_short_format(golden_dir, release_prefix, role, logger)
 
     for step_dir in sorted(golden_dir.glob("step_*")):
         if not step_dir.is_dir():
@@ -615,6 +854,15 @@ def _load_token_embedding(embed_path: Path) -> nn.Module:
     raise TypeError(f"Unsupported token embedding object type: {type(obj)}")
 
 
+def _resolve_token_embedding_path(work_dir: Path) -> Optional[Path]:
+    """Look up embedding file. Prefer ``quant_embedding.pt``, fall back to ``token_embedding.pt``."""
+    for name in ("quant_embedding.pt", "token_embedding.pt"):
+        candidate = work_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _create_golden_session(
     onnx_file: str,
     golden_dir: Path,
@@ -661,7 +909,13 @@ def _generate_golden(
     device = torch.device("cpu") if multi_gpu else _get_default_device()
     dtype = getattr(torch, cfg.dtype)
 
-    token_embedding_file = Path(cfg.work_dir) / "token_embedding.pt"
+    work_dir = Path(cfg.work_dir)
+    token_embedding_file = _resolve_token_embedding_path(work_dir)
+    if token_embedding_file is None:
+        raise FileNotFoundError(
+            f"Neither quant_embedding.pt nor token_embedding.pt found under {work_dir}. "
+            "Re-run the export step or supply a completed work_dir."
+        )
     token_embedding = _load_token_embedding(token_embedding_file).to(device).to(dtype)
     token_embedding.eval()
 
@@ -683,13 +937,23 @@ def _generate_golden(
 
     prefill_onnx_path = Path(prefill_onnx_file)
     decode_onnx_path = Path(decode_onnx_file)
-    named_prefill_onnx = prefill_dir / f"{release_prefix}_prefill_with_act.onnx"
-    named_decode_onnx = decode_dir / f"{release_prefix}_decode_with_act.onnx"
+    # Fu Shengguo naming rule: ONNX file is hmquant_{prefix}_with_act.onnx (no role suffix)
+    named_prefill_onnx = prefill_dir / f"{release_prefix}_with_act.onnx"
+    named_decode_onnx = decode_dir / f"{release_prefix}_with_act.onnx"
 
     quant_embedding_file = release_dir / "quant_embedding.pt"
     if token_embedding_file.exists() and not quant_embedding_file.exists():
         shutil.copy2(token_embedding_file, quant_embedding_file)
-        logger.info(f"Copied quant_embedding.pt to {quant_embedding_file}")
+        logger.info(f"Copied {token_embedding_file.name} -> {quant_embedding_file}")
+
+    # HM 模型版本发布命名规则: bundle hf_config/ (config.json, tokenizer*, etc.) into release_dir
+    hf_config_src = Path(cfg.work_dir) / "hf_config"
+    hf_config_dst = release_dir / "hf_config"
+    if hf_config_src.exists() and not hf_config_dst.exists():
+        shutil.copytree(hf_config_src, hf_config_dst)
+        logger.info(f"Copied hf_config -> {hf_config_dst}")
+    elif not hf_config_src.exists():
+        logger.warning(f"hf_config not found under {cfg.work_dir}; release dir will be incomplete per HM 命名规则")
 
     logger.info("Generating prefill golden...")
     prefill_session = _create_golden_session(
@@ -853,24 +1117,31 @@ def _generate_golden(
     del decode_session
     cleanup_memory()
 
-    if prefill_onnx_path.exists() and not named_prefill_onnx.exists():
-        _copy_path(prefill_onnx_path, named_prefill_onnx)
-    if decode_onnx_path.exists() and not named_decode_onnx.exists():
-        _copy_path(decode_onnx_path, named_decode_onnx)
+    if prefill_onnx_path.exists():
+        _save_onnx_with_renamed_external_data(
+            prefill_onnx_path,
+            named_prefill_onnx,
+            f"{release_prefix}_external_data",
+            logger,
+        )
+    if decode_onnx_path.exists():
+        _save_onnx_with_renamed_external_data(
+            decode_onnx_path,
+            named_decode_onnx,
+            f"{release_prefix}_external_data",
+            logger,
+        )
 
-    prefill_ext = _find_external_data(prefill_onnx_path)
-    decode_ext = _find_external_data(decode_onnx_path)
-    if prefill_ext is not None:
-        _copy_path(prefill_ext, prefill_dir / prefill_ext.name)
-    if decode_ext is not None:
-        _copy_path(decode_ext, decode_dir / decode_ext.name)
-
-    _cleanup_hmonnx_in_golden(prefill_dir, release_prefix, logger)
-    _cleanup_hmonnx_in_golden(decode_dir, release_prefix, logger)
+    _cleanup_hmonnx_in_golden(prefill_dir, release_prefix, "prefill", logger)
+    _cleanup_hmonnx_in_golden(decode_dir, release_prefix, "decode", logger)
+    _create_step0_onnx_symlinks(prefill_dir, release_prefix, logger)
+    _create_step0_onnx_symlinks(decode_dir, release_prefix, logger)
 
     # ── Spec draft golden (MTP / DFlash) ────────────────────────────────────
-    # MTP:   draft_prefill/ + draft_decode/
-    # DFlash: draft_context/ + draft_decode/
+    # Li Wanyu: flat structure with mtp/dflash as prefix, NOT nested subdirectory.
+    #   MTP:  mtp_draft_prefill/  mtp_draft_decode/
+    #   DFlash: dflash_draft_context/  dflash_draft_context_decode/  dflash_draft_decode/
+    # Fu Shengguo: ONNX = hmquant_{prefix}_with_act.onnx (no role suffix in filename).
     draft_golden_paths: Dict[str, Path] = {}
     if draft_onnx_files and spec_decode_mode in ("mtp", "dflash"):
         if spec_decode_mode == "mtp":
@@ -885,6 +1156,7 @@ def _generate_golden(
                 ("draft_decode_onnx", "draft_decode", True),
             ]
 
+        # Flat structure: each draft dir directly under release_dir with spec_mode_ prefix
         for onnx_key, dir_name, is_decode_step in draft_items:
             onnx_path_str = draft_onnx_files.get(onnx_key)
             if not onnx_path_str:
@@ -895,17 +1167,20 @@ def _generate_golden(
                 logger.warning(f"[draft golden] ONNX not on disk: {onnx_path}, skipping.")
                 continue
 
-            draft_golden_dir = release_dir / dir_name
+            # Li Wanyu flat naming: mtp_draft_prefill instead of mtp/draft_prefill
+            draft_golden_dir = release_dir / f"{spec_decode_mode}_{dir_name}"
             draft_golden_dir.mkdir(exist_ok=True, parents=True)
 
-            named_draft_onnx = draft_golden_dir / f"{release_prefix}_{dir_name}_with_act.onnx"
-            if not named_draft_onnx.exists():
-                _copy_path(onnx_path, named_draft_onnx)
-            draft_ext = _find_external_data(onnx_path)
-            if draft_ext is not None:
-                _copy_path(draft_ext, draft_golden_dir / draft_ext.name)
+            # Fu Shengguo: ONNX and external_data carry no role suffix
+            named_draft_onnx = draft_golden_dir / f"{release_prefix}_with_act.onnx"
+            _save_onnx_with_renamed_external_data(
+                onnx_path,
+                named_draft_onnx,
+                f"{release_prefix}_external_data",
+                logger,
+            )
 
-            logger.info(f"Generating draft golden [{dir_name}] from {onnx_path.name} ...")
+            logger.info(f"Generating draft golden [{spec_decode_mode}/{dir_name}] from {onnx_path.name} ...")
             _generate_draft_golden_for_onnx(
                 onnx_file=str(onnx_path),
                 golden_dir=draft_golden_dir,
@@ -918,9 +1193,12 @@ def _generate_golden(
                 golden_max_memory=golden_max_memory,
                 logger=logger,
             )
-            _cleanup_hmonnx_in_golden(draft_golden_dir, release_prefix, logger)
-            draft_golden_paths[dir_name] = draft_golden_dir
-            logger.info(f"Draft golden [{dir_name}] saved: {draft_golden_dir}")
+            # Extract role from dir_name: "draft_prefill" → "prefill"
+            role = dir_name.split("_", 1)[1] if dir_name.startswith("draft_") else dir_name
+            _cleanup_hmonnx_in_golden(draft_golden_dir, release_prefix, role, logger)
+            _create_step0_onnx_symlinks(draft_golden_dir, release_prefix, logger)
+            draft_golden_paths[f"{spec_decode_mode}_{dir_name}"] = draft_golden_dir
+            logger.info(f"Draft golden [{spec_decode_mode}/{dir_name}] saved: {draft_golden_dir}")
 
     golden_meta = {
         "release_prefix": release_prefix,
@@ -934,16 +1212,63 @@ def _generate_golden(
         "decode_onnx": str(named_decode_onnx.relative_to(release_dir)) if named_decode_onnx.exists() else None,
         "spec_decode_mode": spec_decode_mode,
     }
-    for dir_name, dir_path in draft_golden_paths.items():
-        golden_meta[f"{dir_name}_golden_dir"] = dir_name
-        named_onnx = dir_path / f"{release_prefix}_{dir_name}_with_act.onnx"
-        golden_meta[f"{dir_name}_onnx"] = str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
+    # Li Wanyu: flat keys mtp_draft_prefill instead of nested mtp/draft_prefill
+    for key, dir_path in draft_golden_paths.items():
+        golden_meta[f"{key}_golden_dir"] = key
+        named_onnx = dir_path / f"{release_prefix}_with_act.onnx"
+        golden_meta[f"{key}_onnx"] = (
+            str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
+        )
     with (release_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
         json.dump(golden_meta, fout, ensure_ascii=False, indent=2)
+
+    # ── HM 模型版本发布命名规则: drop hmonnx.py + debug logs at release_dir root ──
+    _copy_release_root_assets(cfg, release_dir, release_prefix, logger)
 
     logger.info(f"Golden generation done. Release dir: {release_dir}")
     logger.info(f"To package: {golden_meta['zip_cmd']}")
     return release_dir
+
+
+def _copy_release_root_assets(cfg, release_dir: Path, release_prefix: str, logger) -> None:
+    """Drop the export script and debug logs into the release_dir root.
+
+    Per HM 模型版本发布命名规则: the zip artifact must contain
+        <prefix>_hmonnx.py
+        <prefix>_hmonnx_debug.log
+        <prefix>_hmonnx_debug_xhquant.log   (optional, if produced)
+    """
+    release_dir.mkdir(parents=True, exist_ok=True)
+    script_src = Path(__file__).resolve()
+    script_dst = release_dir / f"{release_prefix}_hmonnx.py"
+    try:
+        if script_dst.exists() or script_dst.is_symlink():
+            script_dst.unlink()
+        shutil.copy2(script_src, script_dst)
+        logger.info(f"Release root: copied script -> {script_dst.name}")
+    except OSError as exc:
+        logger.warning(f"Failed to copy export script into release_dir: {exc}")
+
+    cfg_name = getattr(cfg, "cfg_name", None)
+    work_dir = Path(cfg.work_dir)
+    if cfg_name:
+        log_pairs = [
+            (work_dir / f"{cfg_name}_debug.log", release_dir / f"{release_prefix}_hmonnx_debug.log"),
+            (
+                work_dir / f"{cfg_name}_debug_xhquant.log",
+                release_dir / f"{release_prefix}_hmonnx_debug_xhquant.log",
+            ),
+        ]
+        for src, dst in log_pairs:
+            if not src.exists():
+                continue
+            try:
+                if dst.exists() or dst.is_symlink():
+                    dst.unlink()
+                shutil.copy2(src, dst)
+                logger.info(f"Release root: copied log {src.name} -> {dst.name}")
+            except OSError as exc:
+                logger.warning(f"Failed to copy log {src} into release_dir: {exc}")
 
 
 def _package_release_dir(release_dir: Path, logger) -> Optional[Path]:
@@ -1459,7 +1784,9 @@ def _prepare_export_context(cfg, args, logger):
         token_embedding = native_model.model.language_model.get_input_embeddings()
     else:
         token_embedding = native_model.model.get_input_embeddings()
-    token_embedding_file = Path(cfg.work_dir) / "token_embedding.pt"
+    # Per HM 模型版本发布命名规则: write as ``quant_embedding.pt``. Read-side
+    # still falls back to legacy ``token_embedding.pt`` via ``_resolve_token_embedding_path``.
+    token_embedding_file = Path(cfg.work_dir) / "quant_embedding.pt"
     torch.save(token_embedding.state_dict(), str(token_embedding_file))
     meta_info.token_embedding_file = str(token_embedding_file.relative_to(cfg.work_dir))
 
@@ -1719,10 +2046,10 @@ def _run_golden_generation(
 def _golden_only_impl(cfg, args):
     logger = get_root_logger()
     work_dir = Path(cfg.work_dir)
-    token_embedding_file = work_dir / "token_embedding.pt"
-    if not token_embedding_file.exists():
+    token_embedding_file = _resolve_token_embedding_path(work_dir)
+    if token_embedding_file is None:
         raise FileNotFoundError(
-            f"token_embedding.pt not found in existing work_dir: {token_embedding_file}. "
+            f"Neither quant_embedding.pt nor token_embedding.pt found under existing work_dir: {work_dir}. "
             "Please reuse a completed export directory."
         )
 
@@ -2127,7 +2454,9 @@ def main(args):
         cfg.release = {}
     if cfg.release.get("wmix_amix", None) is None:
         if getattr(args, "draft_only", False):
-            cfg.release["wmix_amix"] = "w8_a8"
+            # Draft-only path mixes quant schemes; per HM 命名规则 forbids literal
+            # underscored forms like "w8_a8", so fall back to the conservative tag.
+            cfg.release["wmix_amix"] = "wmix_amix"
         else:
             cfg.release["wmix_amix"] = _detect_release_wmix_amix(args.hf_model_dir)
     for key in ("xh_version", "modelscope_name", "wmix_amix", "date"):
@@ -2326,15 +2655,8 @@ def parse_arguments():
         "--normalize_force_fp32",
         dest="normalize_force_fp32",
         action="store_true",
-        default=True,
-        help="Force fp32 accumulation in Normalize operator (default: True for backward compatibility).",
-    )
-    parser.add_argument(
-        "--no-normalize-force-fp32",
-        "--no_normalize_force_fp32",
-        dest="normalize_force_fp32",
-        action="store_false",
-        help="Disable fp32 accumulation in Normalize operator (use fp16).",
+        default=False,
+        help="Force fp32 accumulation in Normalize operator.",
     )
     parser.add_argument(
         "--num_blocks",
