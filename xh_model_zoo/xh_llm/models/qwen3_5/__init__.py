@@ -1,0 +1,37 @@
+# Copyright 2025 HOUMO AI
+#
+# File: __init__.py
+# Description:
+#   Qwen3.5 module initialization.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+from .qwen3_5_convert_config import Qwen3_5ConvertConfig
+from .qwen3_5_converter import Qwen3_5ConverterXH2a
+from .qwen3_5_llm_model import XHQwen3_5Model
+from .qwen3_5_onnx_model import Qwen3_5ONNXModel
+from .qwen3_5_spec_decode_onnx_model import Qwen3_5SpecDecodeONNXModel
+from .processing_qwen3_5 import Qwen3_5Processor
+from .qwen3_5_vision_model import XHQwen3_5VisionModel
+
+__all__ = [
+    "Qwen3_5ConvertConfig",
+    "Qwen3_5ConverterXH2a",
+    "XHQwen3_5Model",
+    "Qwen3_5ONNXModel",
+    "Qwen3_5SpecDecodeONNXModel",
+    "Qwen3_5Processor",
+    "XHQwen3_5VisionModel",
+]

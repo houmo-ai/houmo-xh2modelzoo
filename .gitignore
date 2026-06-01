@@ -1,0 +1,215 @@
+# Initially taken from Github's Python gitignore file
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+*.tar
+*.pt
+*.png
+*.npy
+*.onnx
+
+# tests and logs
+tests/fixtures/cached_*_text.txt
+logs/
+lightning_logs/
+lang_code_data/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# vscode
+.vs
+.vscode
+
+# Pycharm
+.idea
+
+# TF code
+tensorflow_code
+
+# Models
+proc_data
+
+# examples
+runs
+/runs_old
+/wandb
+/examples/runs
+/examples/**/*.args
+/examples/rag/sweep
+
+# data
+# /data
+serialization_dir
+
+# emacs
+*.*~
+debug.env
+
+# vim
+.*.swp
+
+#ctags
+tags
+
+# pre-commit
+.pre-commit*
+
+# .lock
+*.lock
+
+# DS_Store (MacOS)
+.DS_Store
+
+# ruff
+.ruff_cache
+report_dynamo_export.sarif
+
+# users
+/work_dirs/
+/work_dirs
+/data/models/
+/xhquant
+/dev
+/gptqmodel
+/gptqmodel_offload
+/output
+
+/xh2_model_zoo.egg-info/
+mypy.ini
+./data/datasets
+data/量化示例数据_
+data/output
+data/output_456
+data/output_bfp16
+data/calib_data/LMUData
+!data/calib_data/sampledata/
+!data/calib_data/sampledata/*.png
+data/datasets
+work_dirs
+
+data/
+benchmark_test/allure-results
+/drafts
+/weights
+xhmodel_merak/xh_llm/models/spark_xh/grouped-gemm-v1.1.4i/third_party/cutlass/include
+xh_model_zoo/xh_llm/models/groot/gr00t
+examples/llm/whisper/data/models/whisper-medium
+
+examples/llm/paddle_ocr_v5/PPOCRv3/*
+examples/llm/paddle_ocr_v5/houmo/*
+.omx/
+hm_eval/logs/
+hm_eval/outputs/
+hm_eval/tasks/
+# Added by code-review-graph
+.code-review-graph/

@@ -1,0 +1,97 @@
+flowchart TD
+    A([音频输入<br/>waveform<br/>shape N])
+    A2[采样率<br/>16 kHz 单声道]
+    A --> A2 --> B
+
+    subgraph S0[Step 1 载入与分块]
+        B[load_audio_text_image_video<br/>输入 wav/url/pcm/tensor<br/>输出 waveform shape N]
+        C{chunk_size}
+        D[离线单块<br/>chunk_size=120000 ms<br/>输出: 1 chunk]
+        E[流式多块<br/>每块输出局部结果<br/>保留 prev_samples]
+        B --> C
+        C -->|长于阈值| E
+        C -->|当前示例| D
+    end
+
+    subgraph S1[Step 2 前端特征]
+        F[WavFrontendOnline<br/>frame_length=25 ms<br/>frame_shift=10 ms]
+        G[fbank<br/>80 mel / frame<br/>shape 1xTx80]
+        H[LFR 拼帧<br/>lfr_m=5 lfr_n=1<br/>shape 1xTx400]
+        I[CMVN 归一化<br/>am.mvn]
+        D --> F
+        E --> F
+        F --> G --> H --> I
+    end
+
+    subgraph S2[Step 3 FSMN 编码器]
+        J[Encoder 输入<br/>speech shape 1xTx400]
+        K[in_linear1<br/>400 -> 140<br/>shape 1xTx140]
+        L[in_linear2 + ReLU<br/>140 -> 250<br/>shape 1xTx250]
+        M[FSMN Block x4<br/>linear 250 -> 128<br/>depthwise conv 左看19帧<br/>affine 128 -> 250<br/>输出 shape 1xTx250]
+        N[out_linear1<br/>250 -> 140<br/>shape 1xTx140]
+        O[out_linear2<br/>140 -> 248<br/>shape 1xTx248]
+        P[Softmax<br/>frame posterior<br/>shape 1xTx248]
+        I --> J --> K --> L --> M --> N --> O --> P
+    end
+
+    subgraph S3[Step 4 流式缓存]
+        Q[in_cache0~3<br/>shape 1x128x19x1]
+        R[out_cache0~3<br/>shape 1x128x19x1]
+        S[cache.encoder<br/>按层保存 FSMN 左上下文]
+        Q --> M
+        M --> R --> S
+    end
+
+    subgraph S4[Step 5 分数与能量统计]
+        T[ComputeScores<br/>累计 scores<br/>cache.stats.scores<br/>shape 1xT_totalx248]
+        U[ComputeDecibel<br/>逐帧能量<br/>cache.stats.decibel<br/>长度=T_total]
+        V[waveform cache<br/>cache.stats.waveform<br/>shape 1xN_chunk]
+        P --> T
+        D --> V
+        E --> V
+        V --> U
+    end
+
+    subgraph S5[Step 6 帧级状态判定]
+        W[GetFrameState<br/>输入: posterior + decibel]
+        X{speech/noise<br/>阈值判断}
+        Y[FrameStateSpeech]
+        Z[FrameStateSil]
+        T --> W
+        U --> W
+        W --> X
+        X -->|speech| Y
+        X -->|silence| Z
+    end
+
+    subgraph S6[Step 7 状态机后处理]
+        AA[DetectCommonFrames / DetectLastFrames]
+        AB[VadStateMachine<br/>StartNotDetected<br/>InSpeechSegment<br/>EndPointDetected]
+        AC[窗口参数<br/>window_size=200 ms<br/>sil_to_speech=150 ms<br/>speech_to_sil=150 ms]
+        AD[输出缓冲<br/>output_data_buf]
+        Y --> AA
+        Z --> AA
+        AC --> AA
+        AA --> AB --> AD
+    end
+
+    subgraph S7[Step 8 片段输出]
+        AE[segment merge<br/>离线 beg,end<br/>流式 beg,-1 或 -1,end]
+        AF[最终结果<br/>value start_ms,end_ms 列表]
+        AD --> AE --> AF
+    end
+
+    AG[当前样例结果<br/>12 段语音<br/>首段 70,2340<br/>末段 59820,70450]
+    AF --> AG
+
+    classDef io fill:#E8F4FF,stroke:#4A90E2,color:#16324F,stroke-width:1px;
+    classDef feat fill:#EEF9F1,stroke:#5B9B6B,color:#183A1D,stroke-width:1px;
+    classDef net fill:#FFF3E8,stroke:#D97A2B,color:#4A2A12,stroke-width:1px;
+    classDef post fill:#F8EEFF,stroke:#8B67C8,color:#30194D,stroke-width:1px;
+    classDef out fill:#FFF8D9,stroke:#C9A227,color:#4D3D12,stroke-width:1px;
+
+    class A,A2,B,C,D,E io;
+    class F,G,H,I feat;
+    class J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z net;
+    class AA,AB,AC,AD post;
+    class AE,AF,AG out;

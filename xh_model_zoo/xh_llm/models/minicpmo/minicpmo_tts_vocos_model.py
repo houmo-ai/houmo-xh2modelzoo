@@ -1,0 +1,101 @@
+# Copyright 2025 HOUMO AI
+#
+# File: minicpmo_tts_vocos_model.py
+# Description:
+#   Minicpmo Tts Vocos Model model implementation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
+from torch import Tensor
+
+# import transformers_modules
+from transformers import AutoModel
+from types import MethodType
+from ..base_model import BaseModel
+from ..builder import MODELS, wrap_llm_model
+from .minicpmo_base_model import XHMiniCPMOBaseModel
+from ..base_llm_model import LLMBaseModel
+
+@MODELS.register_module()
+class XHMiniCPMOTTSVOCOSModel(XHMiniCPMOBaseModel):
+    def __init__(
+        self,
+        hf_model: str,
+        wrap_cfg,
+        quant_config,
+        frontend_type,
+        allow_quant=True,
+        export_cfg=None,
+    ):
+        super().__init__(
+            hf_model,
+            wrap_cfg=wrap_cfg,
+            quant_config=quant_config,
+            frontend_type=frontend_type,
+            allow_quant=allow_quant,
+            export_cfg=export_cfg,
+        )
+
+    def get_hf_model(self, device_map="cpu", **kwargs):
+        hf_model = super().get_hf_model(device_map=device_map, **kwargs)
+        return hf_model
+
+    def init_wrap_model(self, hf_model=None):
+        if hf_model is None:
+            hf_model = self.get_hf_model()
+        from ._tts_vocos_model_impl import register_wrap_cls as tts_register_wrap_cls  # noqa F401
+
+        # dvae_model = hf_model.tts
+        hf_model.init_tts()
+        super().init_wrap_model(hf_model.vocos)
+
+    def _set_device(self, device: torch.device) -> None:
+        super()._set_device(device)
+
+    def prepare_inputs_for_graph(self, data: Dict[str, Union[torch.Tensor, Any]]) -> Any:
+        inputs = self.prepare_inputs(data)
+        return inputs
+
+    def prepare_inputs(self, data: Dict[str, Union[torch.Tensor, Any]]) -> Any:
+        inputs_embeds = data["inputs_embeds"]
+        past_seq_length = data["past_seq_length"]
+        current_input_length = data["current_input_length"]
+        past_key_caches = self.past_key_caches
+        past_value_caches = self.past_value_caches
+        attention_mask = data["attention_mask"]
+        return (inputs_embeds, past_seq_length, current_input_length, attention_mask, past_key_caches, past_value_caches)
+
+    def _forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        attention_mask,
+        past_key_caches,
+        past_value_caches,
+    ) -> List[Tensor]:
+        out = self(
+            inputs_embeds,
+            past_seq_length,
+            current_input_length,
+            attention_mask,
+            past_key_caches,
+            past_value_caches,
+        )
+
+        return out

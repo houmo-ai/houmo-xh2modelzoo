@@ -1,0 +1,539 @@
+# -*- coding: utf-8 -*-
+# Copyright 2025 HOUMO AI
+#
+# File: _vision_model_impl.py
+# Description:
+#   Qwen2.5-VL vision-tower xh2modelzoo wrapper (HOUMO export glue).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import math
+from typing import Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from xhquant import nn as xhnn
+from xhquant.api import ConfigDict
+from xhquant.utils.registry import DynamicModule
+
+from ..builder import XHLLM_TRACEABLE_MODULES
+from .modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,  # apply_rotary_pos_emb_vision,; PatchEmbed,; VisionSdpaAttention,
+)
+from .modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+from .modeling_qwen2_5_vl import Qwen2_5_VLVisionAttention
+from .modeling_qwen2_5_vl import Qwen2_5_VLPatchMerger
+from .modeling_qwen2_5_vl import Qwen2_5_VLVisionBlock
+from .modeling_qwen2_5_vl import rotate_half
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VLVisionAttention: "Qwen2_5_VLVisionAttention",
+    }
+)
+class _Qwen2_5_VLVisionAttention(DynamicModule):
+    def apply_rotary_pos_emb(
+        self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.enable_rope:
+            q_embed = self.rope(q, cos, sin)
+            k_embed = self.rope(k, cos, sin)
+        else:
+            q_embed = (q * cos) + (rotate_half(q) * sin)
+            k_embed = (k * cos) + (rotate_half(k) * sin)
+        return q_embed, k_embed
+
+    def _setup(self, cfg: ConfigDict):
+        self.only_first_block = False
+
+        self.enable_rope = cfg.get("enable_rope", False)
+        if self.enable_rope:
+            self.rope = xhnn.Rope()
+
+        self.max_size_w = cfg.max_size_w
+        self.max_size_h = cfg.max_size_h
+        self.patch_size = cfg.patch_size
+
+        self.window_size = 112
+
+        self.window_nums = self.window_size // self.patch_size * self.window_size // self.patch_size
+        
+        self.window_optimizer = not (self.max_size_w % self.window_size and self.max_size_h % self.window_size)
+
+        head_dim = self.qkv.out_features // 3 // self.num_heads
+        # assert head_dim == 80  # 80
+
+        self.kv_scale = 1 / math.sqrt(head_dim)
+
+        weight = self.qkv.weight.data.clone()
+        bias = self.qkv.bias.data.clone()
+
+        dim = weight.shape[0] // 3
+
+        weight = weight.permute(1, 0).reshape(dim, 3, dim).permute(1, 2, 0)
+        bias = bias.reshape(3, dim)
+        self.q_proj = nn.Linear(dim, dim, bias=True)
+        self.k_proj = nn.Linear(dim, dim, bias=True)
+        self.v_proj = nn.Linear(dim, dim, bias=True)
+
+        self.q_proj.weight.data = weight[0]
+        self.q_proj.bias.data = bias[0]
+        self.k_proj.weight.data = weight[1]
+        self.k_proj.bias.data = bias[1]
+        self.v_proj.weight.data = weight[2]
+        self.v_proj.bias.data = bias[2]
+        self.masked_softmax = xhnn.MaskedSoftmax(-1)
+
+        if head_dim % 64 != 0:
+            new_head_dim = math.ceil(head_dim / 64) * 64
+            padding_size = new_head_dim - head_dim
+            assert padding_size % 2 == 0, "padding_size must keep rotary halves aligned"
+            qk_padding_size = padding_size // 2
+            in_features = self.q_proj.in_features
+            device = self.q_proj.weight.device
+            weight_dtype = self.q_proj.weight.dtype
+            bias_dtype = self.q_proj.bias.dtype
+
+            def _expand_qk(linear: nn.Linear) -> nn.Linear:
+                weight = linear.weight.data.transpose(0,1).reshape(in_features, self.num_heads, 2, head_dim // 2)
+                padded_weight = torch.zeros(
+                    (in_features, self.num_heads, 2, head_dim // 2 + qk_padding_size),
+                    device=device,
+                    dtype=weight_dtype,
+                )
+                padded_weight[:, :, :, : head_dim // 2] = weight
+                padded_weight = padded_weight.reshape(in_features, self.num_heads * new_head_dim).transpose(0, 1)
+
+                bias = linear.bias.data.reshape(self.num_heads, 2, head_dim // 2)
+                padded_bias = torch.zeros(
+                    (self.num_heads, 2, head_dim // 2 + qk_padding_size),
+                    device=device,
+                    dtype=bias_dtype,
+                )
+                padded_bias[:, :, : head_dim // 2] = bias
+                padded_bias = padded_bias.reshape(self.num_heads * new_head_dim)
+
+                expanded = nn.Linear(in_features, self.num_heads * new_head_dim, bias=True)
+                expanded = expanded.to(device=device, dtype=weight_dtype)
+                expanded.weight.data.copy_(padded_weight)
+                expanded.bias.data.copy_(padded_bias.to(weight_dtype))
+                return expanded
+
+            self.q_proj = _expand_qk(self.q_proj)
+            self.k_proj = _expand_qk(self.k_proj)
+
+            v_weight = self.v_proj.weight.data.transpose(0, 1).reshape(in_features, self.num_heads, head_dim)
+            padded_v_weight = torch.zeros(
+                (in_features, self.num_heads, head_dim + padding_size),
+                device=device,
+                dtype=weight_dtype,
+            )
+            padded_v_weight[:, :, :head_dim] = v_weight
+            padded_v_weight = padded_v_weight.reshape(in_features, self.num_heads * new_head_dim).transpose(0, 1)
+
+            v_bias = self.v_proj.bias.data.reshape(self.num_heads, head_dim)
+            padded_v_bias = torch.zeros(
+                (self.num_heads, head_dim + padding_size),
+                device=device,
+                dtype=bias_dtype,
+            )
+            padded_v_bias[:, :head_dim] = v_bias
+            padded_v_bias = padded_v_bias.reshape(self.num_heads * new_head_dim)
+
+            expanded_v = nn.Linear(in_features, self.num_heads * new_head_dim, bias=True)
+            expanded_v = expanded_v.to(device=device, dtype=weight_dtype)
+            expanded_v.weight.data.copy_(padded_v_weight)
+            expanded_v.bias.data.copy_(padded_v_bias.to(weight_dtype))
+            self.v_proj = expanded_v
+            
+            padded_proj_weight = torch.zeros(
+                (self.proj.out_features, self.num_heads, new_head_dim),
+                device=device,
+                dtype=weight_dtype,
+            )
+            padded_proj_weight[:, :, :head_dim] = self.proj.weight.data.reshape(
+                self.proj.out_features, self.num_heads, head_dim
+            )
+            padded_proj_weight = padded_proj_weight.reshape(self.proj.out_features, self.num_heads * new_head_dim)
+            proj_bias = self.proj.bias.data.clone()
+            proj_out_features, proj_in_features = self.proj.weight.shape
+            expanded_proj = nn.Linear(self.num_heads * new_head_dim, proj_out_features, bias=True)
+            expanded_proj.weight.data.copy_(padded_proj_weight)
+            expanded_proj.bias.data.copy_(proj_bias)
+            self.proj = expanded_proj
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch, seq_length = hidden_states.shape[:2]
+        # q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q = self.q_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        v = self.v_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
+        cos, sin = position_embeddings
+        cos = cos.unsqueeze(0)
+        sin = sin.unsqueeze(0)
+        q, k = self.apply_rotary_pos_emb(q, k, cos, sin)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.window_optimizer and attention_mask is not None:
+            q = q.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
+            k = k.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
+            v = v.reshape(batch, self.num_heads, seq_length // self.window_nums, self.window_nums, -1)
+
+            k = k.transpose(-2, -1)
+            q = q * self.kv_scale
+            dtype = q.dtype
+            attn_weights = torch.matmul(q, k).to(dtype)
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+            attn_output = torch.matmul(attn_weights, v)
+
+            attn_output = attn_output.reshape(batch, self.num_heads, seq_length, -1)
+            attn_output = attn_output.transpose(1, 2)
+            attn_output = attn_output.reshape(batch, seq_length, -1)
+            attn_output = self.proj(attn_output)
+            return attn_output
+        else:
+            k = k.transpose(-2, -1)
+            q = q * self.kv_scale
+            dtype = q.dtype
+            attn_weights = torch.matmul(q, k).to(dtype)
+            if attention_mask is not None:
+                attn_weights += attention_mask
+                attn_weights += attention_mask
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+            attn_output = torch.matmul(attn_weights, v)
+            
+            attn_output = attn_output.transpose(1, 2)
+            attn_output = attn_output.reshape(batch, seq_length, -1)
+            attn_output = self.proj(attn_output)
+            return attn_output
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VLVisionBlock: "Qwen2_5_VLVisionBlock",
+    }
+)
+class _Qwen2_5_VLVisionBlock(DynamicModule):
+    @torch.no_grad()
+    def _setup(self, cfg: ConfigDict):
+        pass
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        hidden_states = hidden_states + self.attn(
+            self.norm1(hidden_states),
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+        )
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        return hidden_states
+
+
+def weight_denorm(
+    conv2d: nn.Conv2d,
+):
+    norm = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(1, -1, 1, 1).to(conv2d.weight.device) * 255
+    std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(1, -1, 1, 1).to(conv2d.weight.device) * 255
+    conv2d.weight.data = conv2d.weight.data / std
+    bias_data = -(norm * conv2d.weight.data).sum(dim=[1, 2, 3])
+    conv2d.bias = nn.Parameter(bias_data)
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VisionPatchEmbed: "Qwen2_5_VisionPatchEmbed",
+    }
+)
+class _Qwen2_5_VisionPatchEmbed(DynamicModule):
+    @torch.no_grad
+    def _setup(self, cfg: ConfigDict):
+        self.only_first_block = False
+        self.max_size_w = cfg.max_size_w
+        self.max_size_h = cfg.max_size_h
+        self.patch_size = cfg.patch_size
+
+        kernel_size = [self.patch_size, self.patch_size]
+        dev = self.proj.weight.device
+        self.proj1 = nn.Conv2d(
+            self.in_channels,
+            self.embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=False,
+            device=dev,
+        )
+        self.proj2 = nn.Conv2d(
+            self.in_channels,
+            self.embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=False,
+            device=dev,
+        )
+        self.proj1.weight.data.copy_(self.proj.weight[:, :, 0, :, :].contiguous())
+        self.proj2.weight.data.copy_(self.proj.weight[:, :, 1, :, :].contiguous())
+
+        weight_denorm(self.proj1)
+        weight_denorm(self.proj2)
+
+        self.proj1.to(self.proj.weight.device, dtype=self.proj.weight.dtype)
+        self.proj2.to(self.proj.weight.device, dtype=self.proj.weight.dtype)
+
+        # self.proj1.weight.data = self.proj.weight[:, :, 0, :, :].contiguous()
+        # self.proj2.weight.data = self.proj.weight[:, :, 1, :, :].contiguous()
+        del self.proj
+        assert self.temporal_patch_size == 2, "temporal_patch_size must be 2"
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # hidden_states: [b, c, t, h, w]
+        b, c, t, h, w = hidden_states.shape
+        t_new = t // self.temporal_patch_size
+        hidden_states = hidden_states.reshape(b, c, t_new, self.temporal_patch_size, h, w)
+        hidden_states = hidden_states.permute(0, 2, 1, 3, 4, 5).reshape(b * t_new, c, self.temporal_patch_size, h, w)
+        hidden_states0, hidden_states1 = hidden_states.unbind(2)
+        y1 = self.proj1(hidden_states0)
+        y2 = self.proj2(hidden_states1)
+        hidden_states = y1 + y2
+        
+        _, c, h, w = hidden_states.shape
+        hidden_states = hidden_states.reshape(b, t_new, c, h // 2, 2, w // 2, 2)
+        hidden_states = hidden_states.permute(0, 1, 3, 5, 4, 6, 2)
+        hidden_states = hidden_states.reshape(b, -1, c)
+        return hidden_states
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VLPatchMerger: "Qwen2_5_VLPatchMerger",
+    }
+)
+class _Qwen2_5_VLPatchMerger(DynamicModule):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.shape[0]
+        return self.mlp(self.ln_q(x).view(batch, -1, self.hidden_size))
+
+    def _setup(self, cfg: ConfigDict):
+        pass
+
+
+@XHLLM_TRACEABLE_MODULES.register_module(
+    {
+        Qwen2_5_VisionTransformerPretrainedModel: "Qwen2_5_VisionTransformerPretrainedModel",
+    }
+)
+class Qwen2_5_VisionTransformerPretrainedModel(DynamicModule):
+    @torch.no_grad()
+    def _setup(self, cfg: ConfigDict):
+        self.only_first_block = False
+        self.patch_size = cfg.patch_size
+        device = next(self.parameters()).device
+        self.max_size_w = cfg.max_size_w
+        self.max_size_h = cfg.max_size_h
+        self.max_size_t = cfg.max_size_t
+        self.temporal_patch_size = cfg.temporal_patch_size
+        grid_size_w = self.max_size_w // self.patch_size
+        grid_size_h = self.max_size_h // self.patch_size
+        grid_size_t = self.max_size_t // self.temporal_patch_size
+        seq_length = grid_size_t * grid_size_h * grid_size_w
+
+        assert self.max_size_w % self.patch_size == 0, "max_size_w must be divisible by patch_size"
+        assert self.max_size_h % self.patch_size == 0, "max_size_h must be divisible by patch_size"
+        cu_seqlens = torch.tensor([0, seq_length]).to(device)
+        self.register_buffer("cu_seqlens", cu_seqlens, persistent=False)
+
+        grid_thw = torch.tensor([[1, self.max_size_h // self.patch_size, self.max_size_w // self.patch_size]]).to(
+            device
+        )
+        self._rot_pos_emb(grid_thw)
+
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+        cu_window_seqlens = torch.tensor(cu_window_seqlens, dtype=torch.int32, device=device)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        reverse_indices = torch.argsort(window_index)
+
+        self.register_buffer("cu_window_seqlens", cu_window_seqlens)
+        self.register_buffer("window_index", window_index)
+        self.register_buffer("reverse_indices", reverse_indices)
+
+        rotary_pos_emb = self.rotary_pos_emb_full(self.pos_ids).flatten(1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_length // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        rotary_pos_emb = rotary_pos_emb[self.window_index, :, :]
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_length, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = emb.cos().unsqueeze(-2)
+        sin = emb.sin().unsqueeze(-2)
+
+        # update cos, sin last dim to 64的倍数
+        last_rope_dim = emb.shape[-1]
+        if last_rope_dim % 64 != 0:
+            padding_size = (64 - last_rope_dim % 64) // 2
+            cos_first, cos_second = cos.chunk(2, dim=-1)
+            sin_first, sin_second = sin.chunk(2, dim=-1)
+            cos_first = F.pad(cos_first, (0, padding_size))
+            cos_second = F.pad(cos_second, (0, padding_size))
+            sin_first = F.pad(sin_first, (0, padding_size))
+            sin_second = F.pad(sin_second, (0, padding_size))
+            cos = torch.cat((cos_first, cos_second), dim=-1)
+            sin = torch.cat((sin_first, sin_second), dim=-1)
+
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+        attention_mask = torch.zeros([1, seq_length, seq_length], dtype=torch.bool)
+        cu_seqlens = self.cu_window_seqlens
+        for i in range(1, len(cu_seqlens)):
+            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+        attention_mask = attention_mask.to(device)
+        attention_bias = torch.zeros(1, seq_length, seq_length, dtype=torch.float16, device=device)
+        attention_bias.masked_fill_(attention_mask.logical_not(), -torch.finfo(torch.float16).max)
+        self.register_buffer("attention_bias", attention_bias, persistent=False)
+
+    @torch.no_grad
+    def get_dynamic_buffer(self, grid_thw):
+        res = {}
+        self.only_first_block = False
+
+        device = next(self.parameters()).device
+        seq_length = torch.sum(grid_thw.prod(dim=1)).item()
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0, dtype=torch.int32
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        # cu_seqlens = torch.tensor([0, seq_length]).to(device)
+        # # res["cu_seqlens"] = cu_seqlens
+        # self.cu_seqlens = cu_seqlens
+
+        self._rot_pos_emb(grid_thw)
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+        cu_window_seqlens = torch.tensor(cu_window_seqlens, dtype=torch.int32, device=device)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        reverse_indices = torch.argsort(window_index)
+
+        self.cu_window_seqlens = cu_window_seqlens
+        self.window_index = window_index
+        self.reverse_indices = reverse_indices
+        res["window_index"] = window_index
+        res["reverse_indices"] = reverse_indices
+        # res["cu_window_seqlens"] = cu_window_seqlens
+
+        rotary_pos_emb = self.rotary_pos_emb_full(self.pos_ids).flatten(1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_length // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        rotary_pos_emb = rotary_pos_emb[self.window_index, :, :]
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_length, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = emb.cos().unsqueeze(-2)
+        sin = emb.sin().unsqueeze(-2)
+        self.cos = cos
+        self.sin = sin
+        res["cos"] = cos
+        res["sin"] = sin
+        # self.register_buffer("cos", cos, persistent=False)
+        # self.register_buffer("sin", sin, persistent=False)
+
+        for layer_num, blk in enumerate(self.blocks):
+            if layer_num in self.fullatt_block_indexes:
+                cu_seqlens = self.cu_seqlens
+            else:
+                cu_seqlens = self.cu_window_seqlens
+
+            # attention_mask = torch.zeros(
+            #     [1, seq_length, seq_length], dtype=torch.bool)
+
+            # for i in range(1, len(cu_seqlens)):
+            #     attention_mask[..., cu_seqlens[i - 1]: cu_seqlens[i],
+            #                    cu_seqlens[i - 1]: cu_seqlens[i]] = True
+            # attention_mask = attention_mask.to(device)
+            # attention_bias = torch.zeros(
+            #     1, seq_length, seq_length, dtype=torch.float16, device=device)
+            # attention_bias.masked_fill_(
+            #     attention_mask.logical_not(), -torch.finfo(torch.float16).max)
+            # blk.attn.attention_bias = attention_bias
+            # del attention_mask
+            torch.cuda.empty_cache()
+            # key = "blocks.%d.attn.attention_bias" % layer_num
+            # res[key] = attention_bias
+        return res
+
+    def _rot_pos_emb(self, grid_thw):
+        pos_ids = []
+        for t, h, w in grid_thw:
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            hpos_ids = hpos_ids.permute(0, 2, 1, 3)
+            hpos_ids = hpos_ids.flatten()
+
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            wpos_ids = wpos_ids.permute(0, 2, 1, 3)
+            wpos_ids = wpos_ids.flatten()
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+        self.pos_ids = torch.cat(pos_ids, dim=0).to(grid_thw.device)
+        max_grid_size = grid_thw[:, 1:].max()
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        self.rotary_pos_emb_full = nn.Embedding(*list(rotary_pos_emb_full.shape))
+        self.rotary_pos_emb_full.weight.data = rotary_pos_emb_full
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        window_index: torch.Tensor,
+        window_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_states = self.patch_embed(hidden_states)
+        cos = self.cos
+        sin = self.sin
+        position_embeddings = (cos, sin)
+        batch, seq_len, dim = hidden_states.size()
+        hidden_states = hidden_states.reshape(batch, -1, self.spatial_merge_unit, dim)
+        hidden_states = hidden_states[:, window_index, :, :]
+        hidden_states = hidden_states.reshape(batch, seq_len, -1)
+
+        for layer_num, blk in enumerate(self.blocks):
+            if layer_num in self.fullatt_block_indexes:
+                hidden_states = blk(hidden_states, position_embeddings=position_embeddings)
+            else:
+                hidden_states = blk(hidden_states, position_embeddings=position_embeddings, attention_mask=window_mask)
+
+        hidden_states = self.merger(hidden_states)
+        reverse_indices = torch.argsort(window_index)
+        hidden_states = hidden_states[:, reverse_indices, :]
+        return hidden_states
+
+
+def register_wrap_cls(hf_model):
+    pass

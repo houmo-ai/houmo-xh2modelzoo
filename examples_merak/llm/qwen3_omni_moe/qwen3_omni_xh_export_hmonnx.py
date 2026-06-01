@@ -1,0 +1,123 @@
+import argparse
+import os.path as osp
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import torch
+
+from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel, format_model_name, support_llm_model_types
+from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
+from xhquant.utils import MemoryTracker, TimeProfiler
+
+
+SUPPORTED_MODEL_TYPES = [
+    "Qwen3OmniMoeForConditionalGeneration_text",
+    "Qwen3OmniMoeTalkerForConditionalGeneration",
+    "Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration",
+]
+
+
+if TYPE_CHECKING:
+    pass
+
+
+def _build_cfg_from_model(args) -> Config:
+    hf_model_path = osp.normpath(osp.abspath(args.model))
+    model_name = Path(hf_model_path).name
+    target_device = args.chip_arch
+    quant_type = args.quant_type
+    model_type = args.model_type
+    cfg_name = (
+        f"{target_device}_{model_name}_{quant_type}_{args.prefill_chunk_length}_{args.context_length // 1024}k_cli"
+    ).lower()
+
+    cfg = dict(
+        chip_arch=target_device,
+        model=dict(
+            model_type=model_type,
+            hf_model=hf_model_path,
+            model_name=model_name,
+            context_max_length=args.context_length,
+            prefill_chunk_length=args.prefill_chunk_length,
+            use_cache=True,
+            num_logits_to_keep=1,
+            quant_scheme=dict(
+                quant_type=quant_type,
+            ),
+            quant_weight=args.quant_weight,
+        ),
+    )
+    cfg = format_model_name(cfg)
+    return cfg_name, Config(cfg)
+
+
+def main(args):
+    config_file = args.config
+    model_dir = args.model
+    if config_file and model_dir:
+        raise ValueError("Cannot specify both --config and --model at the same time. Please choose one.")
+    if config_file:
+        cfg_name = Path(config_file).stem
+        cfg = Config.fromfile(config_file)
+    elif model_dir:
+        cfg_name, cfg = _build_cfg_from_model(args)
+    else:
+        raise ValueError("Either --config or --model must be specified.")
+
+    if args.debug:
+        cfg_name += "_debug"
+
+    work_dir = Path("./work_dirs") / cfg_name
+    if work_dir.exists():
+        if args.force:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
+        else:
+            from loguru import logger
+
+            logger.info(f"Exported model already exists at {work_dir}, use --force to overwrite.")
+            return -1
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    log_file = str(work_dir / "export_hmonnx.log")
+    xhquant_init(log_file, args.debug)
+
+    seed = 1024
+    set_random_seed(seed)
+    logger = get_xhquant_logger()
+    cfg.seed = seed
+    logger.info(f"Config:\n{cfg.pretty_text}")
+    cfg.dump(work_dir / f"{cfg_name}.py")
+
+    dtype = torch.float16
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}, dtype: {dtype}")
+
+    model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
+    logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
+    xh_model = AutoLLMModel.from_pretrained(config=model_cfg)
+
+    with TimeProfiler("convert", logger), MemoryTracker("cuda:0", "convert2hmonnx", logger):
+        xh_model.export_hmonnx(str(work_dir))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="", help="model config file, for development and debugging.")
+    parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing work_dir")
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="Qwen3OmniMoeForConditionalGeneration_text",
+        choices=[model_type for model_type in support_llm_model_types if model_type in SUPPORTED_MODEL_TYPES],
+    )
+    parser.add_argument("--chip-arch", type=str, default="XH2a", choices=["XH2a", "YueHui"])
+    parser.add_argument("--model", type=str, default="")
+    parser.add_argument("--context-length", type=int, default=2048, help="max context sequence length")
+    parser.add_argument("--prefill-chunk-length", type=int, default=256, help="prefill chunk length")
+    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type")
+    parser.add_argument("--quant-weight", type=str, default=None, help="optional quant weight path")
+    args = parser.parse_args()
+    main(args)

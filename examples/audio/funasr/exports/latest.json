@@ -1,0 +1,7 @@
+{
+  "export_dir": "work_dirs/funasr_export",
+  "encoder_onnx": "work_dirs/funasr_export/encoder.onnx",
+  "decoder_onnx": "work_dirs/funasr_export/decoder.onnx",
+  "predictor_onnx": "work_dirs/funasr_export/predictor.onnx",
+  "raw_result": "work_dirs/funasr_export"
+}

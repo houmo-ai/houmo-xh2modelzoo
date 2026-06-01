@@ -1,0 +1,3324 @@
+{
+  "dashboards": [
+    {
+      "id": "model_category",
+      "name": "模型类别看板",
+      "description": "按模型类型分类展示模型",
+      "tags": [
+        "模型",
+        "分类"
+      ],
+      "is_default": true,
+      "charts": [
+        {
+          "id": "model_category_distribution",
+          "title": "模型类别分布",
+          "type": "pie",
+          "data": {
+            "labels": [
+              "CV",
+              "文本生成",
+              "多模态",
+              "音频",
+              "OCR",
+              "embedding",
+              "图像特征提取",
+              "图像生成",
+              "光流模型",
+              "代码生成",
+              "检测",
+              "VLA",
+              "深度估计",
+              "超分",
+              "分割",
+              "开放世界目标检测"
+            ],
+            "datasets": [
+              {
+                "data": [
+                  38,
+                  35,
+                  22,
+                  11,
+                  7,
+                  6,
+                  6,
+                  4,
+                  3,
+                  2,
+                  2,
+                  2,
+                  2,
+                  1,
+                  1,
+                  1
+                ],
+                "backgroundColor": [
+                  "#FF6384",
+                  "#36A2EB",
+                  "#FFCE56",
+                  "#4BC0C0",
+                  "#9966FF",
+                  "#FF9F40",
+                  "#FF6384",
+                  "#C9CBCF",
+                  "#4BC0C0",
+                  "#FF6384",
+                  "#36A2EB",
+                  "#FFCE56",
+                  "#4BC0C0",
+                  "#9966FF",
+                  "#FF9F40",
+                  "#C9CBCF"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "model_performance",
+      "name": "模型性能看板",
+      "description": "展示各种模型的性能指标",
+      "tags": [
+        "性能",
+        "模型",
+        "AI"
+      ],
+      "is_default": false,
+      "charts": [
+        {
+          "id": "accuracy_comparison",
+          "title": "模型准确率对比",
+          "type": "bar",
+          "data": {
+            "labels": [
+              "rtdetr",
+              "efficientnet",
+              "resnet_cilp",
+              "yolov8 系列",
+              "CLIP",
+              "inception",
+              "deim",
+              "VIT",
+              "SD3 2B ",
+              "yolov10"
+            ],
+            "datasets": [
+              {
+                "label": "准确率 (%)",
+                "data": [
+                  98.0,
+                  97.9,
+                  97.5,
+                  96.9,
+                  96.8,
+                  96.7,
+                  96.6,
+                  96.6,
+                  96.1,
+                  96.0
+                ],
+                "backgroundColor": [
+                  "#FF6384",
+                  "#36A2EB",
+                  "#FFCE56",
+                  "#4BC0C0",
+                  "#9966FF",
+                  "#FF9F40",
+                  "#FF6384",
+                  "#C9CBCF",
+                  "#4BC0C0",
+                  "#FF6384"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "inference_time",
+          "title": "推理时间对比 (ms)",
+          "type": "line",
+          "data": {
+            "labels": [
+              "rtdetr",
+              "efficientnet",
+              "resnet_cilp",
+              "yolov8 系列",
+              "CLIP",
+              "inception",
+              "deim",
+              "VIT",
+              "SD3 2B ",
+              "yolov10"
+            ],
+            "datasets": [
+              {
+                "label": "推理时间",
+                "data": [
+                  42,
+                  59,
+                  43,
+                  60,
+                  74,
+                  43,
+                  22,
+                  64,
+                  70,
+                  34
+                ],
+                "borderColor": "#36A2EB",
+                "backgroundColor": "rgba(54, 162, 235, 0.1)"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "test_coverage",
+      "name": "测试覆盖率看板",
+      "description": "展示测试覆盖率和测试结果",
+      "tags": [
+        "测试",
+        "覆盖率",
+        "质量"
+      ],
+      "is_default": true,
+      "charts": [
+        {
+          "id": "coverage_pie",
+          "title": "测试覆盖率分布",
+          "type": "pie",
+          "data": {
+            "labels": [
+              "已覆盖",
+              "未覆盖",
+              "部分覆盖"
+            ],
+            "datasets": [
+              {
+                "data": [
+                  65,
+                  20,
+                  15
+                ],
+                "backgroundColor": [
+                  "#4BC0C0",
+                  "#FF6384",
+                  "#FFCE56"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "test_results",
+          "title": "测试结果统计",
+          "type": "bar",
+          "data": {
+            "labels": [
+              "YOLO系列",
+              "Qwen系列",
+              "ResNet系列",
+              "其他模型"
+            ],
+            "datasets": [
+              {
+                "label": "通过",
+                "data": [
+                  45,
+                  38,
+                  22,
+                  31
+                ],
+                "backgroundColor": "#4BC0C0"
+              },
+              {
+                "label": "失败",
+                "data": [
+                  3,
+                  5,
+                  2,
+                  4
+                ],
+                "backgroundColor": "#FF6384"
+              },
+              {
+                "label": "跳过",
+                "data": [
+                  2,
+                  1,
+                  1,
+                  2
+                ],
+                "backgroundColor": "#FFCE56"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "tags": [
+    {
+      "id": "tag_model_type",
+      "name": "模型类型",
+      "color": "#FF6384",
+      "type": "model_type"
+    },
+    {
+      "id": "tag_quantization",
+      "name": "量化状态",
+      "color": "#36A2EB",
+      "type": "quantization"
+    },
+    {
+      "id": "tag_algorithm_doc",
+      "name": "算法文档",
+      "color": "#FFCE56",
+      "type": "algorithm_doc"
+    },
+    {
+      "id": "tag_owner",
+      "name": "负责人",
+      "color": "#4BC0C0",
+      "type": "owner"
+    },
+    {
+      "id": "tag_accuracy",
+      "name": "精度",
+      "color": "#9966FF",
+      "type": "accuracy"
+    },
+    {
+      "id": "tag_test_passed",
+      "name": "测试通过",
+      "color": "#FF9F40",
+      "type": "test_passed"
+    },
+    {
+      "id": "tag_inference_time",
+      "name": "推理时间",
+      "color": "#C9CBCF",
+      "type": "inference_time"
+    },
+    {
+      "id": "tag_memory_usage",
+      "name": "内存使用",
+      "color": "#7BC225",
+      "type": "memory_usage"
+    },
+    {
+      "id": "tag_chip_type",
+      "name": "芯片类型",
+      "color": "#E91E63",
+      "type": "chip_type"
+    },
+    {
+      "id": "tag_performance",
+      "name": "性能",
+      "color": "#FF6384",
+      "type": "general"
+    },
+    {
+      "id": "tag_model",
+      "name": "模型",
+      "color": "#36A2EB",
+      "type": "general"
+    },
+    {
+      "id": "tag_ai",
+      "name": "AI",
+      "color": "#FFCE56",
+      "type": "general"
+    },
+    {
+      "id": "tag_test",
+      "name": "测试",
+      "color": "#4BC0C0",
+      "type": "general"
+    },
+    {
+      "id": "tag_coverage",
+      "name": "覆盖率",
+      "color": "#9966FF",
+      "type": "general"
+    },
+    {
+      "id": "tag_quality",
+      "name": "质量",
+      "color": "#FF9F40",
+      "type": "general"
+    },
+    {
+      "id": "tag_resource",
+      "name": "资源",
+      "color": "#C9CBCF",
+      "type": "general"
+    },
+    {
+      "id": "tag_monitor",
+      "name": "监控",
+      "color": "#7BC225",
+      "type": "general"
+    },
+    {
+      "id": "tag_system",
+      "name": "系统",
+      "color": "#4BC0C0",
+      "type": "general"
+    }
+  ],
+  "tag_values": {
+    "内存使用": [
+      "低内存",
+      "中内存",
+      "高内存"
+    ],
+    "推理时间": [
+      "快速",
+      "中等",
+      "慢速"
+    ],
+    "模型类型": [
+      "CV",
+      "OCR",
+      "VLA",
+      "embedding",
+      "代码生成",
+      "光流模型",
+      "分割",
+      "图像特征提取",
+      "图像生成",
+      "多模态",
+      "开放世界目标检测",
+      "文本生成",
+      "检测",
+      "深度估计",
+      "超分",
+      "音频"
+    ],
+    "测试通过": [
+      "全部通过",
+      "部分通过",
+      "未测试"
+    ],
+    "算法文档": [
+      "已完善"
+    ],
+    "精度": [
+      "高精度",
+      "中精度",
+      "低精度"
+    ],
+    "芯片类型": [
+      "XH1",
+      "XH2",
+      "XH2-CV",
+      "XH2-老版本模型"
+    ],
+    "负责人": [
+      "余江勇",
+      "徐祖康",
+      "未分配",
+      "李哲",
+      "李辉",
+      "胡幸",
+      "许晨",
+      "陈志轩",
+      "高射"
+    ],
+    "量化状态": [
+      "已完成",
+      "计划中",
+      "适配中"
+    ]
+  },
+  "models": [
+    {
+      "id": "83a25e8f-3f79-4384-88ef-df0455c4649e",
+      "name": "Qwen3 Next 80BA3B",
+      "type": "文本生成",
+      "accuracy": 92.0,
+      "inference_time": 148,
+      "memory_usage": 45,
+      "tests_passed": 11,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "适配中",
+        "算法文档": "Qwen3 Next 80B A3B",
+        "jira链接": "http://jira.houmo.ai/browse/QTL-86",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "20f972b8-bbe7-46f8-bde6-5cea745e6577",
+      "name": "Deepseek-0528-Qwen3-8B",
+      "type": "文本生成",
+      "accuracy": 89.3,
+      "inference_time": 147,
+      "memory_usage": 58,
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "84ff339e-b318-4818-a491-8613324ce60e",
+      "name": "GPT-OSS-120B",
+      "type": "文本生成",
+      "accuracy": 93.4,
+      "inference_time": 119,
+      "memory_usage": 24,
+      "tests_passed": 10,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7bcf0c7b-a80b-4d55-8df2-d843b5708330",
+      "name": "GPT-OSS-20B",
+      "type": "文本生成",
+      "accuracy": 90.4,
+      "inference_time": 116,
+      "memory_usage": 26,
+      "tests_passed": 9,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "80034eb3-c691-4616-8c71-c043c9eda6b0",
+      "name": "Gemma3_12B",
+      "type": "文本生成",
+      "accuracy": 86.1,
+      "inference_time": 165,
+      "memory_usage": 64,
+      "tests_passed": 16,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "19bce9e1-8d42-423d-b11f-2b04847f17e7",
+      "name": "Gemma3_4B",
+      "type": "文本生成",
+      "accuracy": 88.6,
+      "inference_time": 107,
+      "memory_usage": 34,
+      "tests_passed": 9,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "94cf6b58-0f7e-443f-b4c6-f56d573a9c07",
+      "name": "InterlVL-3 2B",
+      "type": "文本生成",
+      "accuracy": 91.0,
+      "inference_time": 94,
+      "memory_usage": 58,
+      "tests_passed": 15,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "19e6e32f-3f82-447d-adfa-9314203eafde",
+      "name": "InterlVL-3 8B",
+      "type": "文本生成",
+      "accuracy": 89.6,
+      "inference_time": 118,
+      "memory_usage": 31,
+      "tests_passed": 18,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c6b1ee06-870c-45db-b0bf-37a4d07acb5c",
+      "name": "InterlVL-3.5 1B",
+      "type": "文本生成",
+      "accuracy": 92.6,
+      "inference_time": 186,
+      "memory_usage": 40,
+      "tests_passed": 10,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ec8f3d95-4a31-431a-bd9f-2c4c7fc6346e",
+      "name": "Kimi_30B_A3B",
+      "type": "文本生成",
+      "accuracy": 85.8,
+      "inference_time": 105,
+      "memory_usage": 28,
+      "tests_passed": 18,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "a0fc9842-bf4d-4e6e-8392-f41530faa057",
+      "name": "Qwen1.5-7B",
+      "type": "文本生成",
+      "accuracy": 85.6,
+      "inference_time": 164,
+      "memory_usage": 17,
+      "tests_passed": 9,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7f280bdb-384c-46dd-9c8c-c2ac8068a7e2",
+      "name": "Qwen2-7B",
+      "type": "文本生成",
+      "accuracy": 89.0,
+      "inference_time": 119,
+      "memory_usage": 41,
+      "tests_passed": 7,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "923b6c0e-b27e-4d87-8354-01b2205b78d1",
+      "name": "Qwen2-7B\n",
+      "type": "文本生成",
+      "accuracy": 85.6,
+      "inference_time": 92,
+      "memory_usage": 39,
+      "tests_passed": 15,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "0355b21e-f550-45fa-81cc-921b020c3165",
+      "name": "Qwen2-7B-instruct",
+      "type": "文本生成",
+      "accuracy": 88.0,
+      "inference_time": 123,
+      "memory_usage": 34,
+      "tests_passed": 6,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e25b8cdf-780e-4986-bea6-62573bdb1c0a",
+      "name": "Qwen2.5 ",
+      "type": "文本生成",
+      "accuracy": 90.6,
+      "inference_time": 103,
+      "memory_usage": 35,
+      "tests_passed": 11,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "22283967-8b19-4559-8b35-a03a62d57b8c",
+      "name": "Qwen2.5_0.5B",
+      "type": "文本生成",
+      "accuracy": 93.7,
+      "inference_time": 163,
+      "memory_usage": 41,
+      "tests_passed": 9,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7e201983-43b5-4fb0-bb4a-8b8d1887d444",
+      "name": "Qwen2.5_14B",
+      "type": "文本生成",
+      "accuracy": 86.0,
+      "inference_time": 154,
+      "memory_usage": 41,
+      "tests_passed": 18,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen2.5-14B",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "53fee52b-cdca-4cfa-ae23-74ed109f891e",
+      "name": "Qwen2.5_14B",
+      "type": "文本生成",
+      "accuracy": 87.3,
+      "inference_time": 191,
+      "memory_usage": 18,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2b8891c7-445e-4d59-b01a-5447f3066b33",
+      "name": "Qwen2.5_30B",
+      "type": "文本生成",
+      "accuracy": 94.1,
+      "inference_time": 98,
+      "memory_usage": 61,
+      "tests_passed": 14,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "27ab43f8-6e57-44b3-ba75-cf935c87cc8b",
+      "name": "Qwen2.5_32B",
+      "type": "文本生成",
+      "accuracy": 87.7,
+      "inference_time": 141,
+      "memory_usage": 35,
+      "tests_passed": 11,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "1107bab7-50fb-49be-a9fa-65628d6ff574",
+      "name": "Qwen2.5_3B",
+      "type": "文本生成",
+      "accuracy": 85.6,
+      "inference_time": 161,
+      "memory_usage": 31,
+      "tests_passed": 12,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen2.5 Inference/导出/训练资源消耗",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "687af305-d72e-4ce3-8635-c2cb286b772c",
+      "name": "Qwen2.5_72B",
+      "type": "文本生成",
+      "accuracy": 89.2,
+      "inference_time": 147,
+      "memory_usage": 33,
+      "tests_passed": 16,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ffa44c96-a8a0-4ed7-b603-fa93d033f250",
+      "name": "Qwen2.5_7B",
+      "type": "文本生成",
+      "accuracy": 92.7,
+      "inference_time": 82,
+      "memory_usage": 49,
+      "tests_passed": 14,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "qwen2.5系列参数量计算",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "08107604-a680-4308-a4a7-2f074364232f",
+      "name": "Qwen3-14B",
+      "type": "文本生成",
+      "accuracy": 86.8,
+      "inference_time": 193,
+      "memory_usage": 37,
+      "tests_passed": 12,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f595e7aa-687b-46ae-b3c9-96ee7ee9a827",
+      "name": "Qwen3-30B-A3B",
+      "type": "文本生成",
+      "accuracy": 91.0,
+      "inference_time": 166,
+      "memory_usage": 33,
+      "tests_passed": 9,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "cddb1d7b-b98f-4a9f-acb8-9abc0bfd0034",
+      "name": "Qwen3-30B-A3B-2507-Instruct",
+      "type": "文本生成",
+      "accuracy": 91.0,
+      "inference_time": 180,
+      "memory_usage": 40,
+      "tests_passed": 8,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "bd53ec8a-8329-4612-9d66-27aff0b60188",
+      "name": "Qwen3-32B",
+      "type": "文本生成",
+      "accuracy": 93.0,
+      "inference_time": 92,
+      "memory_usage": 35,
+      "tests_passed": 9,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3-32B-AWQ.md",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "3c7c8ddc-1aa4-4455-83b3-fbccc85948d0",
+      "name": "Qwen3-4B",
+      "type": "文本生成",
+      "accuracy": 94.9,
+      "inference_time": 149,
+      "memory_usage": 45,
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c47ddc84-71ed-4183-9491-8f04f6f483c4",
+      "name": "Qwen3-4B",
+      "type": "文本生成",
+      "accuracy": 93.0,
+      "inference_time": 176,
+      "memory_usage": 25,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e9e3bcc3-d309-4b69-93e5-801456231f74",
+      "name": "Qwen3-4B-2507-Instruct",
+      "type": "文本生成",
+      "accuracy": 85.3,
+      "inference_time": 133,
+      "memory_usage": 43,
+      "tests_passed": 14,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3-4B-Instruct-2507",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "db995e96-132b-4746-8832-6b3605ff690a",
+      "name": "Qwen3-8B",
+      "type": "文本生成",
+      "accuracy": 93.1,
+      "inference_time": 103,
+      "memory_usage": 63,
+      "tests_passed": 13,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3-8B产品case验证",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "0b3290bf-ff3c-4324-8152-64709a4f5895",
+      "name": "Qwen3-8B",
+      "type": "文本生成",
+      "accuracy": 92.8,
+      "inference_time": 149,
+      "memory_usage": 54,
+      "tests_passed": 12,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c384113c-c69b-448f-9556-577f6846b905",
+      "name": "llama3.3 70B",
+      "type": "文本生成",
+      "accuracy": 87.2,
+      "inference_time": 123,
+      "memory_usage": 56,
+      "tests_passed": 6,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "daca1a3e-ae03-4415-adc6-ddba7ddac582",
+      "name": "MiniCPM4",
+      "type": "文本生成",
+      "accuracy": 91.1,
+      "inference_time": 112,
+      "memory_usage": 31,
+      "tests_passed": 8,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "计划中",
+        "算法文档": "MiniCPM4",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "b644d811-71d2-4e5b-acce-98ca6b04aaed",
+      "name": "MiniMax-M2 230B-A10B",
+      "type": "文本生成",
+      "accuracy": 87.2,
+      "inference_time": 133,
+      "memory_usage": 40,
+      "tests_passed": 19,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "文本生成",
+        "量化状态": "计划中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "9d5da39c-4cdd-443b-94f8-2a1a17fdc0fe",
+      "name": "Flux",
+      "type": "图像生成",
+      "accuracy": 93.7,
+      "inference_time": 53,
+      "memory_usage": 8,
+      "tests_passed": 6,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像生成",
+        "量化状态": "已完成",
+        "算法文档": "FLUX 量化",
+        "jira链接": "",
+        "负责人": "胡幸",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "3e704fcb-d440-4211-ad9c-7adbe36f7c92",
+      "name": "SD3 2B ",
+      "type": "图像生成",
+      "accuracy": 96.1,
+      "inference_time": 70,
+      "memory_usage": 2,
+      "tests_passed": 7,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ec06060a-8243-4e4b-8fcb-b5749e2f43ea",
+      "name": "SD3.5 8b",
+      "type": "图像生成",
+      "accuracy": 92.2,
+      "inference_time": 80,
+      "memory_usage": 10,
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e001487e-bf0e-4963-bb42-973728ab816a",
+      "name": "Zimage",
+      "type": "图像生成",
+      "accuracy": 90.7,
+      "inference_time": 63,
+      "memory_usage": 12,
+      "tests_passed": 19,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "http://jira.houmo.ai/browse/QTL-84",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "5210604c-2b54-4b63-a160-c3ae8831ec35",
+      "name": "Qwen3-VL-30B-A3B-Instruct",
+      "type": "多模态",
+      "accuracy": 93.6,
+      "inference_time": 119,
+      "memory_usage": 40,
+      "tests_passed": 6,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "适配中",
+        "算法文档": "Qwen3-VL-Moe",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7c7f827d-24c5-4f42-9d51-5da664710457",
+      "name": "CogVLM2-LLama3_19B",
+      "type": "多模态",
+      "accuracy": 85.7,
+      "inference_time": 102,
+      "memory_usage": 35,
+      "tests_passed": 12,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "61e569ed-afe8-4f9e-83d1-f3924d81a66d",
+      "name": "GLM-4.7-Flash",
+      "type": "多模态",
+      "accuracy": 86.1,
+      "inference_time": 84,
+      "memory_usage": 33,
+      "tests_passed": 6,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2c90d064-242d-427b-9f43-f931b70ed1f5",
+      "name": "MiniCPM-O-2_6",
+      "type": "多模态",
+      "accuracy": 90.2,
+      "inference_time": 163,
+      "memory_usage": 58,
+      "tests_passed": 18,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "MiniCPM-o 2.6",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "9347f216-09d8-4811-b52e-f469f94e266b",
+      "name": "MiniCPM-V-2_6",
+      "type": "多模态",
+      "accuracy": 89.6,
+      "inference_time": 160,
+      "memory_usage": 32,
+      "tests_passed": 6,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "MiniCPM-V",
+        "jira链接": "",
+        "负责人": "高射",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4f6fc684-77ad-4d32-89e4-08a4787f3e4e",
+      "name": "Qwen2-VL-2B",
+      "type": "多模态",
+      "accuracy": 92.2,
+      "inference_time": 155,
+      "memory_usage": 51,
+      "tests_passed": 16,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "200f9082-757e-4562-8b9d-aaf27acc0a3d",
+      "name": "Qwen2-VL-7B",
+      "type": "多模态",
+      "accuracy": 87.6,
+      "inference_time": 106,
+      "memory_usage": 29,
+      "tests_passed": 5,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c71111c2-f30f-44f0-b90c-7e15b5224209",
+      "name": "Qwen2-VL-7B",
+      "type": "多模态",
+      "accuracy": 86.0,
+      "inference_time": 117,
+      "memory_usage": 38,
+      "tests_passed": 6,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "010b5f73-5577-4612-8930-640f44934fa4",
+      "name": "Qwen2.5-VL-7B",
+      "type": "多模态",
+      "accuracy": 91.0,
+      "inference_time": 121,
+      "memory_usage": 53,
+      "tests_passed": 16,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e0691f16-16c6-43c2-806d-289499070f15",
+      "name": "Qwen2.5_VL_3B",
+      "type": "多模态",
+      "accuracy": 87.3,
+      "inference_time": 88,
+      "memory_usage": 24,
+      "tests_passed": 6,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "Qwen2.5VL",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "0e952717-8374-4c1a-a6c2-f136e2974e86",
+      "name": "Qwen2.5_VL_7B",
+      "type": "多模态",
+      "accuracy": 91.7,
+      "inference_time": 200,
+      "memory_usage": 17,
+      "tests_passed": 16,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "Qwen2.5VL",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "d334a84b-c9f1-44b6-a73b-d96fe3b95622",
+      "name": "Qwen3-VL-2B",
+      "type": "多模态",
+      "accuracy": 89.3,
+      "inference_time": 90,
+      "memory_usage": 27,
+      "tests_passed": 19,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3 VL评测",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "fb41a7ee-4dfb-4636-9f94-2ab137f17d5c",
+      "name": "Qwen3-VL-2B",
+      "type": "多模态",
+      "accuracy": 85.5,
+      "inference_time": 85,
+      "memory_usage": 24,
+      "tests_passed": 12,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "6b707417-d6c5-4a96-b715-663f02afce58",
+      "name": "Qwen3-VL-4B",
+      "type": "多模态",
+      "accuracy": 89.3,
+      "inference_time": 150,
+      "memory_usage": 26,
+      "tests_passed": 12,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3 VL评测",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "3dde1bde-84a7-4629-a3fd-a47c66e79a08",
+      "name": "Qwen3-VL-4B",
+      "type": "多模态",
+      "accuracy": 88.1,
+      "inference_time": 159,
+      "memory_usage": 19,
+      "tests_passed": 15,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4001d777-606a-48c4-ab34-69cea649b67d",
+      "name": "Qwen3-VL-8B",
+      "type": "多模态",
+      "accuracy": 87.1,
+      "inference_time": 128,
+      "memory_usage": 29,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "Qwen3 VL评测",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "41c39ea4-0cae-491b-b92e-3c9995548681",
+      "name": "Qwen3-VL-8B",
+      "type": "多模态",
+      "accuracy": 90.5,
+      "inference_time": 103,
+      "memory_usage": 28,
+      "tests_passed": 16,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH1",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "9c71ab4d-2e1e-4035-b6d8-06b651d5986b",
+      "name": "mineru2.5",
+      "type": "多模态",
+      "accuracy": 93.6,
+      "inference_time": 110,
+      "memory_usage": 64,
+      "tests_passed": 10,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "算法文档": "MinerU2.5-2509-1.2B",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "350aeda2-c901-4cc7-8cce-a885dbc3e938",
+      "name": "MiniCPM-V-4",
+      "type": "多模态",
+      "accuracy": 93.6,
+      "inference_time": 196,
+      "memory_usage": 61,
+      "tests_passed": 10,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "计划中",
+        "算法文档": "MiniCPM-V-4",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "09e7cb94-c83b-4fa1-b12b-939fa79ea606",
+      "name": "MiniCPM-V-4_5",
+      "type": "多模态",
+      "accuracy": 94.2,
+      "inference_time": 159,
+      "memory_usage": 30,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "计划中",
+        "算法文档": "MiniCPM-V-4_5",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f7e6f4cd-a608-4859-b121-01c7b6c81da6",
+      "name": "\nMiniCPM-o-4_5",
+      "type": "多模态",
+      "accuracy": 90.7,
+      "inference_time": 118,
+      "memory_usage": 26,
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "计划中",
+        "算法文档": "MiniCPM-o-4_5",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "0d99c2c7-e9dd-4603-a72d-45e8a94f8032",
+      "name": "STEP3-VL-10B",
+      "type": "多模态",
+      "accuracy": 91.3,
+      "inference_time": 138,
+      "memory_usage": 20,
+      "tests_passed": 10,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "计划中",
+        "算法文档": "Qwen3 VL不够惊艳，寻找替代",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "108724e1-c57d-4911-b79e-379c1222af26",
+      "name": "CosyVoice3-0.5B-2512",
+      "type": "音频",
+      "accuracy": 91.8,
+      "inference_time": 81,
+      "memory_usage": 5,
+      "tests_passed": 14,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "适配中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "高射",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "3a7c0ca1-2181-4b99-a08e-7ab7110c303f",
+      "name": "FunASR",
+      "type": "音频",
+      "accuracy": 85.9,
+      "inference_time": 63,
+      "memory_usage": 5,
+      "tests_passed": 5,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "适配中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "004bfcc6-4118-4c0f-91e1-e2707c80bde6",
+      "name": "Qwen3 TTS",
+      "type": "音频",
+      "accuracy": 89.0,
+      "inference_time": 47,
+      "memory_usage": 19,
+      "tests_passed": 11,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "适配中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c55be91c-352f-4295-ac23-adf25bc2bc66",
+      "name": "CosyVoice2-0.5B",
+      "type": "音频",
+      "accuracy": 86.8,
+      "inference_time": 42,
+      "memory_usage": 6,
+      "tests_passed": 11,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "高射",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "86b9e4fa-77da-4220-aa48-54fe7fec806f",
+      "name": "SenseVoiceSmall",
+      "type": "音频",
+      "accuracy": 88.1,
+      "inference_time": 51,
+      "memory_usage": 4,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "‌‬‍‬⁠⁠⁠ ‌‍‬﻿‬‬⁠⁠ ‌‍‍‌⁠‌‌SenseVoiceSmall适配 - 飞书云文档",
+        "jira链接": "[HMSW-3435] 【xh2】支持SenseVoiceSmall量化编译 - Jira",
+        "负责人": "李哲",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "87b71fdb-ce6e-42d8-8e7a-c3ba14fa49c7",
+      "name": "WeNet",
+      "type": "音频",
+      "accuracy": 91.8,
+      "inference_time": 86,
+      "memory_usage": 21,
+      "tests_passed": 10,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "Wenet wenet加速方案",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "abe776a1-915a-4f26-a458-5447bd43b26f",
+      "name": "Whisper-meduim",
+      "type": "音频",
+      "accuracy": 86.1,
+      "inference_time": 45,
+      "memory_usage": 10,
+      "tests_passed": 13,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "6a7ce7b3-7397-426a-a0fd-5ebe92a0e891",
+      "name": "Whisper-small",
+      "type": "音频",
+      "accuracy": 86.4,
+      "inference_time": 60,
+      "memory_usage": 21,
+      "tests_passed": 5,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "Whisper 和 Sensevoice初步的性能评估",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "a2788af8-a89f-4e38-aa49-7a729a7b6f8f",
+      "name": "whisper-large-v3-turbo",
+      "type": "音频",
+      "accuracy": 89.9,
+      "inference_time": 80,
+      "memory_usage": 13,
+      "tests_passed": 18,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "已完成",
+        "算法文档": "‍‬‍⁠﻿‍⁠‌‌‬⁠﻿‍ ⁠‬ ⁠‍⁠‌whisper-large-v3-turbo适配 - 飞书云文档",
+        "jira链接": "[HMSW-3433] 【xh2】支持Whisper-large-v3-turbo-0.8B量化编译 - Jira",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2b54e538-4fe2-48e3-91c3-8967aa0806e3",
+      "name": "GLM-ASR-Nano-2512",
+      "type": "音频",
+      "accuracy": 88.6,
+      "inference_time": 41,
+      "memory_usage": 13,
+      "tests_passed": 10,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "计划中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "6d257e4c-784f-4b3d-9f51-595e9019dee0",
+      "name": "VibeVoice-ASR",
+      "type": "音频",
+      "accuracy": 94.1,
+      "inference_time": 45,
+      "memory_usage": 23,
+      "tests_passed": 8,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "音频",
+        "量化状态": "计划中",
+        "算法文档": "最强语音识别模型，支持中文，适用于会议纪要和客服记录。",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ec8e5f96-94c2-4cc9-87a0-d142f087a10f",
+      "name": "Embedding-Qwen3",
+      "type": "embedding",
+      "accuracy": 87.6,
+      "inference_time": 98,
+      "memory_usage": 15,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "适配中",
+        "算法文档": "",
+        "jira链接": "http://jira.houmo.ai/browse/QTL-103",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4b1e83c7-12ab-4014-a71a-905a15810427",
+      "name": "ReRanker-Qwen2.5",
+      "type": "embedding",
+      "accuracy": 88.1,
+      "inference_time": 52,
+      "memory_usage": 5,
+      "tests_passed": 7,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7c8cc750-0e13-4c34-bb23-c57e8f6f0b67",
+      "name": "Reranker-Qwen3",
+      "type": "embedding",
+      "accuracy": 88.8,
+      "inference_time": 44,
+      "memory_usage": 18,
+      "tests_passed": 8,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "http://jira.houmo.ai/browse/QTL-104",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ce152497-7e5c-403c-b0df-925a972e6a31",
+      "name": "bert-base chinese",
+      "type": "embedding",
+      "accuracy": 92.3,
+      "inference_time": 73,
+      "memory_usage": 16,
+      "tests_passed": 20,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4d92751f-f49c-4f66-9dce-aafde2866c5f",
+      "name": "paddle_gte",
+      "type": "embedding",
+      "accuracy": 94.8,
+      "inference_time": 77,
+      "memory_usage": 14,
+      "tests_passed": 8,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "123652db-6873-4ba3-8432-d44f41eab49d",
+      "name": "qwen2_gte",
+      "type": "embedding",
+      "accuracy": 86.6,
+      "inference_time": 45,
+      "memory_usage": 14,
+      "tests_passed": 13,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "embedding",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c74fa1f7-3287-425b-bce4-f344834e3c2b",
+      "name": "Real-ESRGAN",
+      "type": "超分",
+      "accuracy": 91.1,
+      "inference_time": 75,
+      "memory_usage": 2,
+      "tests_passed": 10,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "超分",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2-老版本模型",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "46c45abc-39fc-49f5-a8c4-186eea07bf3d",
+      "name": "Qwen2.5_Coder_7B",
+      "type": "代码生成",
+      "accuracy": 92.2,
+      "inference_time": 31,
+      "memory_usage": 15,
+      "tests_passed": 20,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "代码生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c7b3e4f3-1455-4e01-a669-9fb691907d3b",
+      "name": "Qwen3-30B-A3B-Coder",
+      "type": "代码生成",
+      "accuracy": 87.5,
+      "inference_time": 44,
+      "memory_usage": 22,
+      "tests_passed": 11,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "代码生成",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "44e4517b-0e08-4cb1-9eb2-e17181f7a164",
+      "name": "SAM1 & 2",
+      "type": "分割",
+      "accuracy": 93.9,
+      "inference_time": 51,
+      "memory_usage": 16,
+      "tests_passed": 17,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "分割",
+        "量化状态": "已完成",
+        "算法文档": "SAM",
+        "jira链接": "",
+        "负责人": "余江勇",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "26032bff-a30d-40d2-b58a-0c5306bb6cb4",
+      "name": "OMDet",
+      "type": "检测",
+      "accuracy": 91.8,
+      "inference_time": 50,
+      "memory_usage": 4,
+      "tests_passed": 11,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "检测",
+        "量化状态": "已完成",
+        "算法文档": "OmDet",
+        "jira链接": "",
+        "负责人": "李辉",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4da2772d-d08c-4c81-a4e9-59c8ee0345dd",
+      "name": "rtdetr",
+      "type": "检测",
+      "accuracy": 98.0,
+      "inference_time": 42,
+      "memory_usage": 14,
+      "tests_passed": 13,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "检测",
+        "量化状态": "已完成",
+        "算法文档": "RTDETR",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "6c475292-1348-49b7-a26f-a2efbcd800f9",
+      "name": "deepseek ocr",
+      "type": "OCR",
+      "accuracy": 94.2,
+      "inference_time": 57,
+      "memory_usage": 4,
+      "tests_passed": 10,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "适配中",
+        "算法文档": "",
+        "jira链接": "http://jira.houmo.ai/browse/QTL-102",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "1faf693b-52c3-4c7d-beb5-b74e76c71974",
+      "name": "DeepSeek OCR",
+      "type": "OCR",
+      "accuracy": 92.2,
+      "inference_time": 53,
+      "memory_usage": 2,
+      "tests_passed": 13,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "徐祖康",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "0a8f632a-f752-4502-a763-9872813d1f35",
+      "name": "PP-OCRv4",
+      "type": "OCR",
+      "accuracy": 91.4,
+      "inference_time": 45,
+      "memory_usage": 5,
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "78e5d516-903d-45e1-97dc-637bb1fd09c8",
+      "name": "PaaldeOCR V5",
+      "type": "OCR",
+      "accuracy": 91.4,
+      "inference_time": 62,
+      "memory_usage": 8,
+      "tests_passed": 17,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "http://jira.houmo.ai/browse/CMS-374",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "a6810080-9615-453c-ab39-3888034ae135",
+      "name": "paddle_ocr",
+      "type": "OCR",
+      "accuracy": 94.8,
+      "inference_time": 42,
+      "memory_usage": 3,
+      "tests_passed": 15,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "65f70501-f855-4f78-bd9a-2216e16f8be6",
+      "name": "DeepSeek OCR V2",
+      "type": "OCR",
+      "accuracy": 95.3,
+      "inference_time": 43,
+      "memory_usage": 5,
+      "tests_passed": 15,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "计划中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "4c9cea2b-1897-4129-9575-ac098f729fbb",
+      "name": "PaddleOCRVL",
+      "type": "OCR",
+      "accuracy": 90.4,
+      "inference_time": 69,
+      "memory_usage": 9,
+      "tests_passed": 10,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "OCR",
+        "量化状态": "计划中",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "326185ca-f58c-4b97-806c-37c777c26e5e",
+      "name": "GR00T N1.5",
+      "type": "VLA",
+      "accuracy": 93.0,
+      "inference_time": 90,
+      "memory_usage": 17,
+      "tests_passed": 11,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "VLA",
+        "量化状态": "适配中",
+        "算法文档": "nvidia 面向人行机器人",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "30441942-9482-4989-bac4-ecbe4e7bb938",
+      "name": "Pi-0.5",
+      "type": "VLA",
+      "accuracy": 91.8,
+      "inference_time": 194,
+      "memory_usage": 58,
+      "tests_passed": 12,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "VLA",
+        "量化状态": "适配中",
+        "算法文档": "面向扫地（服务）机器人",
+        "jira链接": "jira.houmo.ai",
+        "负责人": "高射",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "211e30ed-3552-4d8b-9308-318dca53f6a5",
+      "name": "Fcos",
+      "type": "CV",
+      "accuracy": 88.3,
+      "inference_time": 22,
+      "memory_usage": 14,
+      "tests_passed": 20,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "dcee71bb-af3b-48ac-90d8-b568df92550a",
+      "name": "LPRNet_24x94",
+      "type": "CV",
+      "accuracy": 91.9,
+      "inference_time": 26,
+      "memory_usage": 8,
+      "tests_passed": 20,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "fce8fea5-8f61-4d96-98dc-cf83dfb5b60a",
+      "name": "c3_camera_v2",
+      "type": "CV",
+      "accuracy": 95.8,
+      "inference_time": 22,
+      "memory_usage": 14,
+      "tests_passed": 18,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "5e75bcb5-d6b6-4c30-802d-1aa7fbf568be",
+      "name": "centernet",
+      "type": "CV",
+      "accuracy": 91.5,
+      "inference_time": 36,
+      "memory_usage": 13,
+      "tests_passed": 15,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "3a08a825-7526-41e3-a9aa-5b74967111a7",
+      "name": "centernet",
+      "type": "CV",
+      "accuracy": 90.7,
+      "inference_time": 45,
+      "memory_usage": 16,
+      "tests_passed": 13,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "5a5f539d-f8f3-4b80-af6b-41f19ccaa3f7",
+      "name": "deeplabv3",
+      "type": "CV",
+      "accuracy": 89.5,
+      "inference_time": 21,
+      "memory_usage": 12,
+      "tests_passed": 15,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "dad9da5a-c498-43cd-b50a-058632a919b9",
+      "name": "deformable_detr",
+      "type": "CV",
+      "accuracy": 90.8,
+      "inference_time": 51,
+      "memory_usage": 16,
+      "tests_passed": 20,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f11ad588-48dd-47ee-b14c-674e4fbbfc6f",
+      "name": "deim",
+      "type": "CV",
+      "accuracy": 96.6,
+      "inference_time": 22,
+      "memory_usage": 14,
+      "tests_passed": 12,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "5d8122a6-8a79-4cc5-8dfe-f53fdac99026",
+      "name": "detr",
+      "type": "CV",
+      "accuracy": 90.1,
+      "inference_time": 43,
+      "memory_usage": 11,
+      "tests_passed": 10,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f91e8411-40e7-4bb7-94e9-c06ea8470dd3",
+      "name": "efficientnet",
+      "type": "CV",
+      "accuracy": 97.9,
+      "inference_time": 59,
+      "memory_usage": 16,
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e3e02d69-f51b-457e-ba57-581bec34e818",
+      "name": "inception",
+      "type": "CV",
+      "accuracy": 96.7,
+      "inference_time": 43,
+      "memory_usage": 11,
+      "tests_passed": 16,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "8ffc0ee0-b4c4-449d-91fb-4e51ba56a89d",
+      "name": "iresnet18_112x112_RGB，iresnet50_112x112_RGB",
+      "type": "CV",
+      "accuracy": 88.6,
+      "inference_time": 32,
+      "memory_usage": 8,
+      "tests_passed": 7,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2f6640ff-e245-49ef-b8ae-2d869e001f3f",
+      "name": "maskrcnn",
+      "type": "CV",
+      "accuracy": 93.7,
+      "inference_time": 22,
+      "memory_usage": 16,
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c7882bb2-46ef-45f0-ae70-da178c6d0181",
+      "name": "mbf_112x112_RGB，mbf_l_RGB_112x112",
+      "type": "CV",
+      "accuracy": 93.2,
+      "inference_time": 56,
+      "memory_usage": 10,
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "194a4cc7-d289-4ace-ab16-193344453901",
+      "name": "mobilenetV3",
+      "type": "CV",
+      "accuracy": 95.3,
+      "inference_time": 22,
+      "memory_usage": 4,
+      "tests_passed": 14,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "277db06e-d560-4d10-9c18-e98162551547",
+      "name": "mobilleNetv2",
+      "type": "CV",
+      "accuracy": 90.8,
+      "inference_time": 21,
+      "memory_usage": 12,
+      "tests_passed": 18,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "44796af4-b872-448e-a7c2-0fbcaa40d2c7",
+      "name": "openpose",
+      "type": "CV",
+      "accuracy": 91.2,
+      "inference_time": 26,
+      "memory_usage": 13,
+      "tests_passed": 16,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "39ef585b-1e3f-4185-b257-61606a3b72ce",
+      "name": "posenet",
+      "type": "CV",
+      "accuracy": 94.2,
+      "inference_time": 46,
+      "memory_usage": 7,
+      "tests_passed": 16,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f8f9ffcd-d9b2-42bc-895d-d6e539a4b6c6",
+      "name": "resnet_cilp",
+      "type": "CV",
+      "accuracy": 97.5,
+      "inference_time": 43,
+      "memory_usage": 6,
+      "tests_passed": 9,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "dd857cff-7437-4bc2-b795-409053e1ea97",
+      "name": "se-resnet50",
+      "type": "CV",
+      "accuracy": 92.5,
+      "inference_time": 46,
+      "memory_usage": 5,
+      "tests_passed": 20,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "de232448-b435-4e72-9bc6-4564cb43c038",
+      "name": "small_net_96x96",
+      "type": "CV",
+      "accuracy": 89.6,
+      "inference_time": 56,
+      "memory_usage": 16,
+      "tests_passed": 15,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "64b607ce-9a97-482f-b3ab-67d7cab5eeb6",
+      "name": "unet",
+      "type": "CV",
+      "accuracy": 94.8,
+      "inference_time": 27,
+      "memory_usage": 13,
+      "tests_passed": 7,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "8aee020e-1c22-47df-bc5f-6566d67520cb",
+      "name": "vit",
+      "type": "CV",
+      "accuracy": 95.7,
+      "inference_time": 41,
+      "memory_usage": 4,
+      "tests_passed": 15,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "18804844-8a66-440f-88a7-1052db7a4bfd",
+      "name": "yolov10",
+      "type": "CV",
+      "accuracy": 96.0,
+      "inference_time": 34,
+      "memory_usage": 8,
+      "tests_passed": 11,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e29315d2-cb72-4590-91ba-a36c6b367948",
+      "name": "yolov11",
+      "type": "CV",
+      "accuracy": 92.1,
+      "inference_time": 35,
+      "memory_usage": 8,
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "800e88a4-2b0c-4b1f-9297-2350af6150a7",
+      "name": "yolov3",
+      "type": "CV",
+      "accuracy": 94.9,
+      "inference_time": 29,
+      "memory_usage": 9,
+      "tests_passed": 14,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "7257cfce-a5bf-428b-8b34-eb143f3acb13",
+      "name": "yolov4",
+      "type": "CV",
+      "accuracy": 94.0,
+      "inference_time": 37,
+      "memory_usage": 12,
+      "tests_passed": 5,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e34e35e9-a836-4aff-8daa-b89808b4572b",
+      "name": "yolov5",
+      "type": "CV",
+      "accuracy": 92.2,
+      "inference_time": 54,
+      "memory_usage": 7,
+      "tests_passed": 20,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2264ca31-5019-454c-bd1a-04dca5d6d0bc",
+      "name": "yolov6",
+      "type": "CV",
+      "accuracy": 93.8,
+      "inference_time": 54,
+      "memory_usage": 12,
+      "tests_passed": 14,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "e5addf75-66ec-4ca5-9519-b13c9ca0c257",
+      "name": "yolov7 系列",
+      "type": "CV",
+      "accuracy": 92.2,
+      "inference_time": 22,
+      "memory_usage": 12,
+      "tests_passed": 18,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "162c2f01-1b86-48ce-a516-0271b01bce5f",
+      "name": "yolov7-face",
+      "type": "CV",
+      "accuracy": 89.8,
+      "inference_time": 38,
+      "memory_usage": 4,
+      "tests_passed": 7,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ff3e5bf2-0fbf-4628-b6e2-3836a5c16a5e",
+      "name": "yolov7_plate",
+      "type": "CV",
+      "accuracy": 89.5,
+      "inference_time": 48,
+      "memory_usage": 10,
+      "tests_passed": 6,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "119d97dd-1e1b-4d78-b8b0-7c1b0bae0636",
+      "name": "yolov7s_face_640x640",
+      "type": "CV",
+      "accuracy": 94.0,
+      "inference_time": 34,
+      "memory_usage": 15,
+      "tests_passed": 14,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "b5452a68-9856-4cc4-bd67-3efb62169467",
+      "name": "yolov8 系列",
+      "type": "CV",
+      "accuracy": 96.9,
+      "inference_time": 60,
+      "memory_usage": 13,
+      "tests_passed": 15,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "ff84f8e7-f910-417d-adc0-ab00562603c3",
+      "name": "yolov8s",
+      "type": "CV",
+      "accuracy": 88.8,
+      "inference_time": 29,
+      "memory_usage": 16,
+      "tests_passed": 6,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "a79ae1ce-cd80-45dd-96b2-27f6bca24a30",
+      "name": "yolov8s-pose",
+      "type": "CV",
+      "accuracy": 90.3,
+      "inference_time": 24,
+      "memory_usage": 15,
+      "tests_passed": 12,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c6cca468-0b23-4f94-a8e2-7367fa175999",
+      "name": "yolox",
+      "type": "CV",
+      "accuracy": 91.5,
+      "inference_time": 27,
+      "memory_usage": 6,
+      "tests_passed": 17,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "dd5eb839-1460-41e6-bfd0-8a366cbb0d2d",
+      "name": "yolox_s_640x640",
+      "type": "CV",
+      "accuracy": 88.8,
+      "inference_time": 45,
+      "memory_usage": 8,
+      "tests_passed": 19,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "CV",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2-CV",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "23b64f93-de96-4846-b962-f1945aaf7a29",
+      "name": "SigLIP 2",
+      "type": "图像特征提取",
+      "accuracy": 91.5,
+      "inference_time": 63,
+      "memory_usage": 12,
+      "tests_passed": 13,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "已完成",
+        "算法文档": "多模态 Agent、端侧搜索",
+        "jira链接": "",
+        "负责人": "许晨",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "c43501f8-f074-4ac8-aba4-f4be262755e6",
+      "name": "VIT",
+      "type": "图像特征提取",
+      "accuracy": 96.6,
+      "inference_time": 64,
+      "memory_usage": 10,
+      "tests_passed": 8,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f077fe55-e2e7-4c01-a2aa-4448cb46aae7",
+      "name": "CLIP",
+      "type": "图像特征提取",
+      "accuracy": 96.8,
+      "inference_time": 74,
+      "memory_usage": 6,
+      "tests_passed": 8,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "计划中",
+        "算法文档": "行业标准，兼容性最强",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "962b9d33-4770-4ee7-93fa-2c8f4aeaa67f",
+      "name": "DINOV2",
+      "type": "图像特征提取",
+      "accuracy": 91.3,
+      "inference_time": 72,
+      "memory_usage": 8,
+      "tests_passed": 14,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "计划中",
+        "算法文档": "特征提取模型对比",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "2de0c02c-7034-4df5-9778-60f15282a20a",
+      "name": "DINOv3",
+      "type": "图像特征提取",
+      "accuracy": 93.5,
+      "inference_time": 61,
+      "memory_usage": 12,
+      "tests_passed": 10,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "计划中",
+        "算法文档": "语义分割、实时检测的不二之选",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "b3674af3-9f42-4ea2-97a2-d0e5ba325c85",
+      "name": "Hira",
+      "type": "图像特征提取",
+      "accuracy": 93.9,
+      "inference_time": 59,
+      "memory_usage": 12,
+      "tests_passed": 19,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "图像特征提取",
+        "量化状态": "计划中",
+        "算法文档": "专注于边缘计算与端侧优化",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "997f72e8-92f9-402d-8ca8-376958f4bea0",
+      "name": "Depth Anything V2",
+      "type": "深度估计",
+      "accuracy": 86.1,
+      "inference_time": 48,
+      "memory_usage": 5,
+      "tests_passed": 18,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "深度估计",
+        "量化状态": "计划中",
+        "算法文档": "在端侧（手机、机器人）和云端都有极高的占有率",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "607b9cc4-7ea7-4af8-b108-99ef25f4da33",
+      "name": "Depth Anything V3",
+      "type": "深度估计",
+      "accuracy": 88.5,
+      "inference_time": 64,
+      "memory_usage": 14,
+      "tests_passed": 6,
+      "tests_failed": 1,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "深度估计",
+        "量化状态": "计划中",
+        "算法文档": "大幅提升了空间几何精度",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f09bd0e6-4ee4-47f2-8939-d93d7a502757",
+      "name": "FastFlowNet",
+      "type": "光流模型",
+      "accuracy": 88.5,
+      "inference_time": 79,
+      "memory_usage": 18,
+      "tests_passed": 9,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "光流模型",
+        "量化状态": "计划中",
+        "算法文档": "广泛应用于手机端实时视频防抖、扫地机器人避障",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "8c475023-5db4-48e5-bb65-99fed6552821",
+      "name": "GMFlow",
+      "type": "光流模型",
+      "accuracy": 85.7,
+      "inference_time": 65,
+      "memory_usage": 19,
+      "tests_passed": 6,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "光流模型",
+        "量化状态": "计划中",
+        "算法文档": "当前的 SOTA 选型",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "f93743c9-eee8-4bcd-9510-ee74ed2b5d58",
+      "name": "RAFT",
+      "type": "光流模型",
+      "accuracy": 94.0,
+      "inference_time": 56,
+      "memory_usage": 17,
+      "tests_passed": 10,
+      "tests_failed": 2,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "光流模型",
+        "量化状态": "计划中",
+        "算法文档": "永恒的工业基准，光流界的 \"ResNet50\"",
+        "jira链接": "",
+        "负责人": "未分配",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "053022dc-6b6e-4281-af80-8abf757c87f3",
+      "name": "Grounding DINO",
+      "type": "开放世界目标检测",
+      "accuracy": 95.0,
+      "inference_time": 36,
+      "memory_usage": 9,
+      "tests_passed": 5,
+      "tests_failed": 3,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "开放世界目标检测",
+        "量化状态": "已完成",
+        "算法文档": "",
+        "jira链接": "",
+        "负责人": "陈志轩",
+        "芯片类型": "XH2",
+        "精度": "FP16"
+      }
+    },
+    {
+      "id": "model_1770969704714",
+      "name": "Step3_vl",
+      "type": "多模态",
+      "accuracy": 90,
+      "inference_time": 50,
+      "memory_usage": 8,
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "status": "正常",
+      "attributes": {
+        "模型类型": "多模态",
+        "量化状态": "已完成",
+        "负责人": "胡幸",
+        "算法文档": "",
+        "jira链接": "",
+        "芯片类型": "XH2"
+      },
+      "category": "未分类",
+      "tags": [],
+      "metrics": {},
+      "last_test_date": "2026-02-13"
+    }
+  ]
+}

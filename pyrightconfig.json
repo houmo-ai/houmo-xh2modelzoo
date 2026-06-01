@@ -1,0 +1,17 @@
+{
+  "typeCheckingMode": "off",
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.git",
+    "**/checkpoints",
+    "**/data/**",
+    "**/logs/**",
+    "**/output",
+    "**/work_dirs/**",
+    "**/dev/**"
+  ]
+}
