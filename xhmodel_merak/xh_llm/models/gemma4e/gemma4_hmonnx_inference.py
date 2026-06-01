@@ -54,6 +54,9 @@ class VisualHMONNXModel(HMONNXModel):
         if graph_session is None:
             raise RuntimeError("Gemma4 visual HMONNX session failed to initialize.")
         self._patch_visual_session_precision(graph_session)
+        expected_inputs = len(graph_session.inputs)
+        if len(args) > expected_inputs:
+            args = args[:expected_inputs]
         out = graph_session.forward(*args)
         if isinstance(out, (tuple, list)) and len(out) == 1:
             out = out[0]

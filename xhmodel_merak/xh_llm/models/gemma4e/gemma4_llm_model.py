@@ -226,19 +226,16 @@ def _run_visual_model(
     def _trim_visual_patch_padding(
         visual_pixel_values: torch.Tensor,
         visual_position_ids: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if export_mode == "compact" or visual_position_ids is None or visual_pixel_values.ndim < 3:
-            return visual_pixel_values, visual_position_ids
+    ) -> torch.Tensor:
+        if visual_position_ids is None or visual_pixel_values.ndim < 3:
+            return visual_pixel_values
         if visual_position_ids.ndim == 2:
             visual_position_ids = visual_position_ids.unsqueeze(0)
         valid_positions = ~(visual_position_ids == -1).all(dim=-1)
         real_patch_count = int(valid_positions[0].sum().item())
         if real_patch_count <= 0 or visual_pixel_values.shape[1] == real_patch_count:
-            return visual_pixel_values, visual_position_ids
-        return (
-            visual_pixel_values[:, :real_patch_count, :].contiguous(),
-            visual_position_ids[:, :real_patch_count, :].contiguous(),
-        )
+            return visual_pixel_values
+        return visual_pixel_values[:, :real_patch_count, :].contiguous()
 
     def _forward_one(image_index: int | None = None):
         if image_index is None:
@@ -252,17 +249,19 @@ def _run_visual_model(
                 else image_position_ids
             )
 
-        visual_pixel_values, visual_position_ids = _trim_visual_patch_padding(
+        visual_pixel_values = _trim_visual_patch_padding(
             visual_pixel_values,
             visual_position_ids,
         )
 
-        visual_inputs = [visual_pixel_values]
-        if export_mode != "compact":
-            visual_inputs.append(
-                visual_position_ids.to(visual_model.device) if visual_position_ids is not None else None
-            )
-        return visual_model.forward(*visual_inputs)
+        if visual_position_ids is not None:
+            trimmed_position_ids = visual_position_ids
+            if trimmed_position_ids.ndim == 2:
+                trimmed_position_ids = trimmed_position_ids.unsqueeze(0)
+            real_count = visual_pixel_values.shape[1]
+            trimmed_position_ids = trimmed_position_ids[:, :real_count, :].contiguous()
+            return visual_model.forward(visual_pixel_values, trimmed_position_ids)
+        return visual_model.forward(visual_pixel_values)
 
     if image_count <= 1:
         return _forward_one()
@@ -477,8 +476,14 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
                     chunk_logits = chunk_logits[0]
                 output_logits.append(chunk_logits)
 
+            # Last chunk's tail is padded up to ``net_input_seq_len`` for the
+            # static-shape kernel. Trim it to the real-token count so that
+            # HF generate's ``logits[:, -1, :]`` lands on the actual last token
+            # rather than a padded slot — without this, the first generated
+            # token (prefill output) is garbage. Decode is unaffected.
+            last_valid = min(net_input_seq_len, seq_length - (steps - 1) * net_input_seq_len)
             if logits_to_keep != 0:
-                logits = output_logits[-1]
+                logits = output_logits[-1][:, :last_valid, :]
             else:
                 logits = torch.cat(output_logits, dim=1)[:, :seq_length, :]
         return CausalLMOutputWithPast(logits=logits, past_key_values=past_key_values)

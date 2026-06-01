@@ -58,46 +58,28 @@ def _infer_rmsnorm_dim(parent: nn.Module, name: str, norm: Gemma4RMSNorm) -> int
     return 72  # safe default for gemma4 vision
 
 
-class _FusedMultidimRope(nn.Module):
-    """Fused multi-dimensional RoPE using xhnn.Rope for each spatial dimension."""
+def _make_vision_attn_traceable(attn: nn.Module) -> None:
+    """Override Gemma4VisionAttention.forward to be torch.fx-traceable.
 
-    def __init__(self, head_dim: int, ndim: int = 2):
-        super().__init__()
-        self.ndim = ndim
-        self.rope = xhnn.Rope()
-        # Pre-compute split size to avoid shape-dependent computation during tracing
-        self.split_size = 2 * (head_dim // (2 * ndim))
+    HF's forward uses ``(*input_shape, -1, head_dim)`` and
+    ``apply_multidimensional_rope`` derives ``ndim`` from
+    ``position_ids.shape[-1]`` then iterates ``range(ndim)``. Both unpack /
+    iterate Proxy values that ``torch.fx.Tracer`` cannot handle. Additionally
+    HF's ``rotate_half`` does ``x.shape[-1] // 2`` which produces a ``FloorDiv``
+    node the xh2a quant pipeline cannot lower.
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """Apply multi-dimensional RoPE.
-
-        x: [B, seq, heads, head_dim]
-        cos, sin: [B, seq, head_dim] (concatenated over ndim spatial dims)
-        """
-        x_parts = torch.split(x, self.split_size, dim=-1)
-        cos_parts = torch.split(cos, self.split_size, dim=-1)
-        sin_parts = torch.split(sin, self.split_size, dim=-1)
-
-        y_parts = []
-        for k in range(self.ndim):
-            c = cos_parts[k].unsqueeze(2)  # [B, seq, 1, dim_k]
-            s = sin_parts[k].unsqueeze(2)
-            y_parts.append(self.rope(x_parts[k], c, s))
-        return torch.cat(y_parts, dim=-1)
-
-
-def _patch_vision_attention(attn: nn.Module) -> None:
-    """Replace manual RoPE in Gemma4VisionAttention with fused xhnn.Rope."""
-    from xhquant.nn import MaskedAdd
+    This rewrite hardcodes ``[B, S, ...]`` rank and ``ndim=2`` (vision RoPE
+    operates on x/y spatial dims), and replaces HF ``apply_rotary_pos_emb``
+    with ``xhnn.Rope`` — an FX leaf module whose rotate_half internals stay
+    opaque to fx (so no shape-dependent FloorDiv leaks into the graph).
+    The Split + Rope op pattern matches the gemma4_moe export onnx.
+    """
+    import types
 
     fused_rope = _FusedMultidimRope(head_dim=attn.head_dim, ndim=2)
     attn._fused_multidim_rope = fused_rope
-    attn._masked_add = MaskedAdd()
-    attn._masked_add_2 = MaskedAdd()
 
-    import types
-
-    def _patched_forward(
+    def _forward(
         self,
         hidden_states,
         position_embeddings=None,
@@ -105,52 +87,66 @@ def _patch_vision_attention(attn: nn.Module) -> None:
         position_ids=None,
         **kwargs,
     ):
-        cos, sin = position_embeddings
-
         bsz = hidden_states.shape[0]
         seq = hidden_states.shape[1]
-        n_heads = self.config.num_attention_heads
+        n_q = self.config.num_attention_heads
         n_kv = self.config.num_key_value_heads
         hd = self.head_dim
+        cos, sin = position_embeddings
 
-        query_states = self.q_proj(hidden_states).view(bsz, seq, n_heads, hd)
-        query_states = self.q_norm(query_states)
-        query_states = self._fused_multidim_rope(query_states, cos, sin)
-        query_states = query_states.transpose(1, 2)
+        q = self.q_proj(hidden_states).view(bsz, seq, n_q, hd)
+        q = self.q_norm(q)
+        q = self._fused_multidim_rope(q, cos, sin).transpose(1, 2)
 
-        key_states = self.k_proj(hidden_states).view(bsz, seq, n_kv, hd)
-        key_states = self.k_norm(key_states)
-        key_states = self._fused_multidim_rope(key_states, cos, sin)
-        key_states = key_states.transpose(1, 2)
+        k = self.k_proj(hidden_states).view(bsz, seq, n_kv, hd)
+        k = self.k_norm(k)
+        k = self._fused_multidim_rope(k, cos, sin).transpose(1, 2)
 
-        value_states = self.v_proj(hidden_states).view(bsz, seq, n_kv, hd)
-        value_states = self.v_norm(value_states)
-        value_states = value_states.transpose(1, 2)
+        v = self.v_proj(hidden_states).view(bsz, seq, n_kv, hd)
+        v = self.v_norm(v)
+        v = v.transpose(1, 2)
 
-        if n_kv != n_heads:
-            key_states = key_states.repeat_interleave(n_heads // n_kv, dim=1)
-            value_states = value_states.repeat_interleave(n_heads // n_kv, dim=1)
+        if n_kv != n_q:
+            k = k.repeat_interleave(n_q // n_kv, dim=1)
+            v = v.repeat_interleave(n_q // n_kv, dim=1)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
         if attention_mask is not None:
-            attn_weights = self._masked_add(attn_weights, attention_mask)
-            attn_weights = self._masked_add_2(attn_weights, attention_mask)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_weights = attn_weights + attention_mask
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn_output = torch.matmul(attn_weights, v).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, seq, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
+        return self.o_proj(attn_output), None
 
-    attn.forward = types.MethodType(_patched_forward, attn)
+    attn.forward = types.MethodType(_forward, attn)
 
 
-def _wrap_vision_modules(vision_tower: nn.Module) -> None:
-    """Replace unfused ops in vision tower with xhquant fused equivalents."""
-    _replace_rmsnorm(vision_tower)
-    for layer in vision_tower.encoder.layers:
-        _patch_vision_attention(layer.self_attn)
+class _FusedMultidimRope(nn.Module):
+    """Multi-dim RoPE = split head_dim into ndim halves, apply xhnn.Rope per half, concat.
+
+    For Gemma4 vision (ndim=2), x is split along the head_dim into x/y halves,
+    each half gets its own xhnn.Rope call (with the matching cos/sin half), and
+    the results are concatenated back. The split sizes are baked in at module
+    construction so they never depend on traced Proxy shapes.
+    """
+
+    def __init__(self, head_dim: int, ndim: int = 2):
+        super().__init__()
+        self.ndim = ndim
+        self.split_size = head_dim // ndim
+        self.rope = xhnn.Rope()
+
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        # x: [B, S, n_heads, head_dim]; cos/sin: [B, S, head_dim] (concat over ndim spatial dims)
+        x_parts = torch.split(x, self.split_size, dim=-1)
+        cos_parts = torch.split(cos, self.split_size, dim=-1)
+        sin_parts = torch.split(sin, self.split_size, dim=-1)
+        y_parts = []
+        for k in range(self.ndim):
+            c = cos_parts[k].unsqueeze(2)  # [B, S, 1, half_hd] — xhnn.Rope requires rank 4
+            s = sin_parts[k].unsqueeze(2)
+            y_parts.append(self.rope(x_parts[k], c, s))
+        return torch.cat(y_parts, dim=-1)
 
 
 class Gemma4VisualAdapter(nn.Module):
@@ -159,14 +155,14 @@ class Gemma4VisualAdapter(nn.Module):
     Avoids two trace-unsafe operations:
 
     1. ``create_bidirectional_mask`` in transformers 5.5 (trace failure) — replaced by
-       manually iterating encoder layers with a pre-computed eager mask.
+       manually iterating encoder layers with ``attention_mask=None``.
     2. ``Gemma4VisionPooler._avg_pool_by_positions`` which uses ``F.one_hot`` and
        integer division (``NonZero`` / ``one_hot`` not supported in frontend graph) —
        replaced by a pre-computed constant pooling weight matrix stored as a buffer.
 
-    ``pooler_weights`` is ``(B, num_patches, output_length)`` and ``num_image_tokens``
-    is the count of pooled tokens.  Both are deterministic for a fixed image size
-    and are computed once during ``init_wrap_model``.
+    ``pooler_weights`` is ``(B, output_length, num_patches)`` (pre-transposed) and
+    ``num_image_tokens`` is the count of pooled tokens.  Both are deterministic for a
+    fixed image size and are computed once during ``init_wrap_model``.
 
     Only *real* (non-padding) patches are fed to the adapter.  For a 224×224 image
     this gives 2304 patches and 256 pooled tokens — no padding handling required.
@@ -180,8 +176,8 @@ class Gemma4VisualAdapter(nn.Module):
         num_image_tokens: int,
         rope_cos: torch.Tensor,
         rope_sin: torch.Tensor,
-        attn_mask_4d: torch.Tensor,
         pos_embed: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ):
         super().__init__()
         self.vision_tower = vision_tower
@@ -191,42 +187,36 @@ class Gemma4VisualAdapter(nn.Module):
         self.register_buffer("pooler_weights", pooler_weights)
         self.register_buffer("rope_cos", rope_cos)
         self.register_buffer("rope_sin", rope_sin)
-        self.register_buffer("attn_mask_4d", attn_mask_4d)
         self.register_buffer("pos_embed", pos_embed)
+        if position_ids is not None:
+            self.register_buffer("position_ids", position_ids)
+        else:
+            self.position_ids = None
 
     def forward(self, pixel_values: torch.Tensor):
         vt = self.vision_tower
         pe = vt.patch_embedder
 
-        # --- patch embedding ---
         pixel_values_norm = 2 * (pixel_values - 0.5)
         hidden_states = pe.input_proj(pixel_values_norm.to(pe.input_proj.weight.dtype))
         hidden_states = hidden_states + self.pos_embed.to(hidden_states.dtype)
 
-        # --- encoder forward ---
         rope_cos_sin = (self.rope_cos.to(hidden_states.dtype), self.rope_sin.to(hidden_states.dtype))
-        attn_mask = self.attn_mask_4d.to(hidden_states.dtype)
-
         for layer in vt.encoder.layers[: self.num_layers]:
             hidden_states = layer(
                 hidden_states,
-                attention_mask=attn_mask,
+                attention_mask=None,
                 position_embeddings=rope_cos_sin,
+                position_ids=self.position_ids,
             )
-        # --- end encoder forward ---
 
-        # --- pooler (pre-computed weights) ---
-        pw = self.pooler_weights.to(dtype=torch.float32)
-        hidden_states = (pw.transpose(1, 2) @ hidden_states.float()).to(hidden_states.dtype)
-        hidden_states = hidden_states * self.vision_tower.pooler.root_hidden_size
+        pooled = (self.pooler_weights @ hidden_states.float()).to(hidden_states.dtype)
+        pooled = pooled * vt.pooler.root_hidden_size
 
-        # All patches are real (no padding) → all pooled tokens are valid
-        hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+        if vt.config.standardize:
+            pooled = (pooled - vt.std_bias) * vt.std_scale
 
-        if self.vision_tower.config.standardize:
-            hidden_states = (hidden_states - self.vision_tower.std_bias) * self.vision_tower.std_scale
-
-        return self.embed_vision(inputs_embeds=hidden_states)
+        return self.embed_vision(inputs_embeds=pooled)
 
 
 def _set_vision_attn_impl(adapter: Gemma4VisualAdapter, impl: str):  # noqa: ARG001
@@ -314,15 +304,16 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
         num_image_tokens = output_length  # all pooled tokens are valid
 
         # Pre-compute pooler weight matrix (no padding — every row is real)
+        # Pre-transpose to (B, output_length, num_patches) so forward is a single matmul
         max_x = pid[..., 0].max(dim=-1, keepdim=True)[0] + 1
         kernel_idxs = torch.div(pid, k, rounding_mode="floor")
         kernel_idxs = kernel_idxs[..., 0] + (max_x // k) * kernel_idxs[..., 1]
         pooler_weights = F.one_hot(kernel_idxs.long(), output_length).float() / k2
+        pooler_weights = pooler_weights.transpose(1, 2)
 
         vt = hf_model.model.vision_tower
         embed_vision = hf_model.model.embed_vision
 
-        # Pre-compute RoPE cos/sin manually
         with torch.no_grad():
             pid_cpu = pid.cpu()
             rope_cfg = vt.config
@@ -344,21 +335,10 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
             rope_cos = torch.cat(all_cos, dim=-1).to(dtype=torch.bfloat16)
             rope_sin = torch.cat(all_sin, dim=-1).to(dtype=torch.bfloat16)
 
-        # Pre-compute pure positional embeddings.
-        # NOTE: do NOT use ``pe(zero_pixel_values, ids, no_pad)`` to derive this — the
-        # patch-embedder normalizes inputs as ``2*(x-0.5)`` *before* ``input_proj``, so
-        # zero pixel_values map to ``-1`` and ``input_proj(-ones)`` is a non-zero per-channel
-        # constant that contaminates ``pos_embed``. The adapter forward already applies the
-        # same normalization and ``input_proj`` to real pixel_values, so we must add the
-        # *pure* positional contribution here. Calling ``_position_embeddings`` directly
-        # gives that contribution and bumps single-image cos vs HF from ~0.87 to ~0.99996.
         pe = vt.patch_embedder
         with torch.no_grad():
             no_padding = torch.zeros(1, num_patches, dtype=torch.bool)
             pos_embed = pe._position_embeddings(pid_cpu, no_padding).to(dtype=torch.bfloat16)
-
-        # Attention mask: fully bidirectional (no padding to mask out)
-        attn_mask_4d = torch.zeros(1, 1, num_patches, num_patches)
 
         visual = Gemma4VisualAdapter(
             vt,
@@ -367,10 +347,12 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
             num_image_tokens=num_image_tokens,
             rope_cos=rope_cos,
             rope_sin=rope_sin,
-            attn_mask_4d=attn_mask_4d,
             pos_embed=pos_embed,
+            position_ids=pid,
         )
-        _wrap_vision_modules(visual.vision_tower)
+        _replace_rmsnorm(visual.vision_tower)
+        for layer in visual.vision_tower.encoder.layers:
+            _make_vision_attn_traceable(layer.self_attn)
         return super().init_wrap_model(visual)
 
     def get_tf_processor(self):

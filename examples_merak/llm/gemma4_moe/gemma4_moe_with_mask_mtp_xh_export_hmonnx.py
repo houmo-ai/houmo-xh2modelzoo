@@ -21,7 +21,7 @@ from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel, format_model_name,
 from xhmodel_merak.xh_llm.types import LLMModelState, ModelSwitcher
 from xhmodel_merak.xh_llm.utils import unfold_args
 from xhmodel_merak.utils import calculate_file_md5
-from xhquant.api import Config, ConfigDict, PrecisionMode, get_xhquant_logger, ptq_quantize, set_random_seed, xhquant_init
+from xhquant.api import Config, ConfigDict, HMONNXGoldenInference, PrecisionMode, get_xhquant_logger, ptq_quantize, set_random_seed, xhquant_init
 from xhquant.api import to_export_graph, to_export_hmonnx_v2
 from xhquant.utils import MemoryTracker, TimeProfiler
 
@@ -581,6 +581,55 @@ def _write_mtp_meta(base_meta_path: Path, draft_onnx_file: str, verify_hmonnx: s
     return output_path
 
 
+def _generate_golden_for_hmonnx(hmonnx_file: str, golden_dir: Path, device: torch.device, logger) -> None:
+    golden_dir.mkdir(parents=True, exist_ok=True)
+    session = HMONNXGoldenInference(hmonnx_file)
+    session.to(device)
+    session.save_golden = True
+    session.golden_dir = str(golden_dir)
+    session.initialize()
+
+    input_names = session.get_input_names()
+    net_inputs = []
+    for input_name in input_names:
+        input_info = session.get_input(input_name)
+        if input_info.dtype in (torch.float32, torch.float16, torch.float64):
+            tensor = torch.randn(input_info.shape, dtype=input_info.dtype, device=device)
+        elif input_info.dtype in (torch.int32, torch.int64, torch.int16):
+            tensor = torch.randint(0, 100, input_info.shape, dtype=input_info.dtype, device=device)
+        elif input_info.dtype == torch.bool:
+            tensor = torch.randint(0, 2, input_info.shape, dtype=input_info.dtype, device=device)
+        else:
+            tensor = torch.zeros(input_info.shape, dtype=input_info.dtype, device=device)
+        net_inputs.append(tensor)
+
+    with torch.no_grad():
+        session(*net_inputs)
+    logger.info(f"Golden saved to: {golden_dir}")
+
+
+def _generate_golden_for_export(export_dir: Path, device: torch.device, logger) -> None:
+    hmonnx_patterns = [
+        ("prefill", "*_prefill_with_act.onnx"),
+        ("decode", "*_decode_with_act.onnx"),
+        ("verify", "*_verify_with_act.onnx"),
+        ("draft_onnx", "*.onnx"),
+    ]
+    for subdir, pattern in hmonnx_patterns:
+        onnx_dir = export_dir / subdir
+        if not onnx_dir.exists():
+            continue
+        onnx_files = sorted(onnx_dir.glob(pattern))
+        for onnx_file in onnx_files:
+            golden_name = onnx_file.stem
+            golden_path = export_dir / "golden" / golden_name
+            logger.info(f"Generating golden for {onnx_file.relative_to(export_dir)}")
+            try:
+                _generate_golden_for_hmonnx(str(onnx_file), golden_path, device, logger)
+            except Exception as e:
+                logger.warning(f"Failed to generate golden for {onnx_file}: {e}")
+
+
 def main(args):
     config_file = args.config
     model_dir = args.model
@@ -646,6 +695,11 @@ def main(args):
     mtp_meta_path = _write_mtp_meta(base_meta_path, draft_onnx_file, verify_hmonnx, verify_hmonnx_md5, cfg)
     logger.info(f"MTP meta saved to {mtp_meta_path}")
 
+    if args.golden:
+        golden_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("Generating golden data for all exported HMONNX modules")
+        _generate_golden_for_export(export_dir, golden_device, logger)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -657,6 +711,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
     parser.add_argument("--force", default=True, action="store_true", help="Whether to force export even if the model exists.")
+    parser.add_argument("--golden", action="store_true", help="Generate golden data for each exported HMONNX module.")
     parser.add_argument(
         "--valid",
         default=False,
