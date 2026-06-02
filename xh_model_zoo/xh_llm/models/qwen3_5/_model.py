@@ -1356,17 +1356,6 @@ class _Qwen3_5TextModel(DynamicModule):
         width_mask.unsqueeze_(0).unsqueeze_(0)
         self.rotary_emb.register_buffer("width_mask", width_mask.half(), persistent=False)
 
-        # Mark specific linear_attention layers for alpha scaling
-        alpha_scaling_layers = cfg.get("alpha_scaling_layers", [8, 20])
-        chunk_inverse_alpha = cfg.get("chunk_inverse_alpha", 0.5)
-        for idx, decoder_layer in enumerate(self.layers):
-            if (
-                self.layer_types[idx] == "linear_attention"
-                and idx in alpha_scaling_layers
-            ):
-                gdn = decoder_layer.linear_attn
-                gdn._alpha_scaling_config = {"alpha": chunk_inverse_alpha}
-
         # Set up cos/sin cache only for long-context mode.
         if self.support_long_context_over_fp16_limit:
             if not hasattr(self.rotary_emb, "cos_cached"):

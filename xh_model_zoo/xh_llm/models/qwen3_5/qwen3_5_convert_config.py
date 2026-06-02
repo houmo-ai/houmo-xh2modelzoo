@@ -18,8 +18,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from ...llm_convert_config import LLMConvertConfig
 
@@ -31,8 +31,11 @@ class Qwen3_5ConvertConfig(LLMConvertConfig):
     linear_attention_mode: str = "auto"
     linear_chunk_size: int = 64
     enable_rope: bool = True
-    alpha_scaling_layers: List[int] = field(default_factory=lambda: [8, 20])
-    chunk_inverse_alpha: float = 0.5
     cumsum_matmul_quant_config: Optional[Dict] = None
+    # Speculative decoding
+    spec_decode_mode: Optional[str] = None  # "mtp", "dflash", or None
+    num_draft_tokens: int = 4
+    dflash_model_dir: Optional[str] = None
+    spec_draft_head_weight_bits: int = 4
     split_conv_cache: bool = False
     normalize_force_fp32: bool = True
