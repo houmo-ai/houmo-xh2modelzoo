@@ -24,6 +24,7 @@ from xhquant.xhonnxruntime import (
     AutoOffloadGraphModel,
     HMONNXCUDAGraphInference,
     HMONNXGrapInference,
+    HMONNXInference,
 )
 from xhquant.core import CacheTensor
 
@@ -65,7 +66,7 @@ def _build_inputs_embeds(
     return inputs_embeds
 
 
-HMONNXSession = Union[HMONNXGrapInference, HMONNXCUDAGraphInference]
+HMONNXSession = Union[HMONNXInference, HMONNXGrapInference, HMONNXCUDAGraphInference]
 
 
 def _resolve_input_name(
@@ -363,7 +364,7 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
             return
         if not torch.cuda.is_available():
             return
-        if session.graph_module is None:
+        if getattr(session, "graph_module", None) is None:
             return
         if AutoOffloadGraphModel.is_auto_offload_model(session.graph_module):
             return
@@ -396,7 +397,12 @@ class Qwen3_5ONNXModel(DeviceDtypeMixin):
                 clone_outputs=self.cuda_graph_clone_outputs,
             )
         else:
-            session = HMONNXGrapInference(onnx_path)
+            try:
+                session = HMONNXGrapInference(onnx_path)
+            except AttributeError as e:
+                if "'str' object has no attribute 'name'" not in str(e):
+                    raise
+                session = HMONNXInference(onnx_path)
         if not self.auto_offload:
             session.to(self.device)
         session.exec_device = self.exec_device

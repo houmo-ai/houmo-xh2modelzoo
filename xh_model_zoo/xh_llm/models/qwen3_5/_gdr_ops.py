@@ -83,7 +83,7 @@ class LegacyGDRBlockTriInverse(nn.Module):
             stacklevel=2,
         )
 
-def forward(self, attn: torch.Tensor, eye_b_batched: torch.Tensor) -> torch.Tensor:
+    def forward(self, attn: torch.Tensor, eye_b_batched: torch.Tensor) -> torch.Tensor:
         # QTL-339: eye_b_batched is externally provided (was self.eye_8_batched
         # registered via setup()). Keeps signature aligned with the xhquant
         # first-class op (xh::GDRBlockTriInverse) post QTL-338.
