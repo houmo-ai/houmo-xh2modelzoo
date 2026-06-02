@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -534,6 +534,89 @@ def _cleanup_hmonnx_in_golden(
             fpath.unlink()
 
 
+def _generate_draft_golden_for_onnx(
+    onnx_file: str,
+    golden_dir: Path,
+    token_embedding: nn.Module,
+    pad_token_id: int,
+    input_ids_full: torch.Tensor,
+    is_decode: bool,
+    device: torch.device,
+    logger,
+) -> None:
+    """Run draft ONNX once and let HMONNXGoldenInference dump step_0 golden."""
+    golden_dir.mkdir(exist_ok=True, parents=True)
+    valid_len = input_ids_full.shape[1]
+    past_seq_val = valid_len if is_decode else 0
+
+    session = _create_golden_session(onnx_file, golden_dir, device, logger)
+    if hasattr(session, "legacy_mode"):
+        session.legacy_mode = False
+
+    cache_inputs = _alloc_cache_inputs(session, device)
+    float3d_names = [
+        name
+        for name in session.get_input_names()
+        if session.get_input(name).dtype in (torch.float16, torch.float32, torch.bfloat16)
+        and len(session.get_input(name).shape) == 3
+        and name not in cache_inputs
+    ]
+    model_seq_len = session.get_input(float3d_names[0]).shape[1] if float3d_names else 1
+
+    input_feed: Dict[str, torch.Tensor] = {}
+    for name in session.get_input_names():
+        if name in cache_inputs:
+            input_feed[name] = cache_inputs[name]
+            continue
+
+        info = session.get_input(name)
+        if name in ("past_seq_length", "valid_length"):
+            batch = info.shape[0] if info.shape else 1
+            input_feed[name] = torch.tensor([past_seq_val] * batch, dtype=info.dtype, device=device)
+        elif name in ("current_input_length", "current_length"):
+            batch = info.shape[0] if info.shape else 1
+            input_feed[name] = torch.tensor([model_seq_len] * batch, dtype=info.dtype, device=device)
+        elif name in ("linear_attn_mask", "attention_mask", "attn_mask"):
+            input_feed[name] = torch.ones(info.shape, dtype=info.dtype, device=device)
+        elif info.dtype in (torch.float16, torch.float32, torch.bfloat16) and len(info.shape) == 3:
+            embed_dim = token_embedding.weight.shape[1]
+            if info.shape[2] == embed_dim:
+                input_feed[name] = _build_inputs_embeds(
+                    token_embedding, input_ids_full, info.shape[1], pad_token_id, device, info.dtype
+                )
+            else:
+                input_feed[name] = torch.zeros(info.shape, dtype=info.dtype, device=device)
+        elif info.dtype in (torch.int32, torch.int64) and len(info.shape) == 2:
+            seq_len = info.shape[1]
+            if seq_len <= input_ids_full.shape[1]:
+                ids = input_ids_full[:, :seq_len].to(device=device, dtype=info.dtype)
+            else:
+                pad_ids = torch.full(
+                    (input_ids_full.shape[0], seq_len - input_ids_full.shape[1]),
+                    pad_token_id,
+                    dtype=info.dtype,
+                    device=device,
+                )
+                ids = torch.cat([input_ids_full.to(device=device, dtype=info.dtype), pad_ids], dim=1)
+            input_feed[name] = ids
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+            numel = 1
+            for dim in info.shape:
+                numel *= dim
+            pos = torch.arange(past_seq_val, past_seq_val + numel, device=device, dtype=info.dtype)
+            input_feed[name] = pos.reshape(info.shape)
+        else:
+            tensor = torch.zeros(info.shape, dtype=info.dtype, device=device)
+            if _is_cache_input_name(name):
+                tensor = _ensure_cache_tensor(tensor)
+            input_feed[name] = tensor
+
+    _run_hmonnx_with_golden(session, input_feed)
+    del session
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _generate_golden(
     work_dir: Path,
     args,
@@ -542,6 +625,8 @@ def _generate_golden(
     prefill_onnx_file: str,
     decode_onnx_file: str,
     logger,
+    draft_onnx_files: Optional[Dict[str, str]] = None,
+    spec_decode_mode: Optional[str] = None,
 ) -> Path:
     device = _get_default_device()
     dtype = torch.float16
@@ -756,13 +841,70 @@ def _generate_golden(
     _create_step0_onnx_symlinks(prefill_dir, release_prefix, logger)
     _create_step0_onnx_symlinks(decode_dir, release_prefix, logger)
 
+    # Li Wanyu: flat draft release dirs, e.g. mtp_draft_prefill/ and mtp_draft_decode/.
+    draft_golden_paths: Dict[str, Path] = {}
+    if draft_onnx_files and spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode == "mtp":
+            draft_items: List[Tuple[str, str, bool]] = [
+                ("draft_prefill_onnx", "draft_prefill", False),
+                ("draft_decode_onnx", "draft_decode", True),
+            ]
+        else:
+            draft_items = [
+                ("draft_context_onnx", "draft_context", False),
+                ("draft_context_decode_onnx", "draft_context_decode", False),
+                ("draft_decode_onnx", "draft_decode", True),
+            ]
+
+        for onnx_key, dir_name, is_decode_step in draft_items:
+            onnx_path_str = draft_onnx_files.get(onnx_key)
+            if not onnx_path_str:
+                logger.warning(f"[draft golden] '{onnx_key}' not found in draft_onnx_files, skipping.")
+                continue
+            onnx_path = Path(onnx_path_str)
+            if not onnx_path.exists():
+                logger.warning(f"[draft golden] ONNX not on disk: {onnx_path}, skipping.")
+                continue
+
+            draft_golden_dir = release_dir / f"{spec_decode_mode}_{dir_name}"
+            draft_golden_dir.mkdir(exist_ok=True, parents=True)
+            named_draft_onnx = draft_golden_dir / f"{release_prefix}_with_act.onnx"
+            _save_onnx_with_renamed_external_data(
+                onnx_path,
+                named_draft_onnx,
+                f"{release_prefix}_external_data",
+                logger,
+            )
+
+            logger.info(f"Generating draft golden [{spec_decode_mode}/{dir_name}] from {onnx_path.name} ...")
+            _generate_draft_golden_for_onnx(
+                onnx_file=str(onnx_path),
+                golden_dir=draft_golden_dir,
+                token_embedding=token_embedding,
+                pad_token_id=pad_token_id,
+                input_ids_full=input_ids_full,
+                is_decode=is_decode_step,
+                device=device,
+                logger=logger,
+            )
+            role = dir_name.split("_", 1)[1] if dir_name.startswith("draft_") else dir_name
+            _cleanup_hmonnx_in_golden(draft_golden_dir, release_prefix, role, logger)
+            _create_step0_onnx_symlinks(draft_golden_dir, release_prefix, logger)
+            draft_golden_paths[f"{spec_decode_mode}_{dir_name}"] = draft_golden_dir
+            logger.info(f"Draft golden [{spec_decode_mode}/{dir_name}] saved: {draft_golden_dir}")
+
     golden_meta = {
         "release_prefix": release_prefix,
         "zip_name": f"{release_prefix}.zip",
         "zip_cmd": f"zip -r -y {release_prefix}.zip {release_prefix}/",
         "prefill_onnx": str(named_prefill_onnx.relative_to(release_dir)) if named_prefill_onnx.exists() else None,
         "decode_onnx": str(named_decode_onnx.relative_to(release_dir)) if named_decode_onnx.exists() else None,
+        "spec_decode_mode": spec_decode_mode,
     }
+    for key, dir_path in draft_golden_paths.items():
+        golden_meta[f"{key}_golden_dir"] = key
+        named_onnx = dir_path / f"{release_prefix}_with_act.onnx"
+        golden_meta[f"{key}_onnx"] = str(named_onnx.relative_to(release_dir)) if named_onnx.exists() else None
     with (release_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
         json.dump(golden_meta, fout, ensure_ascii=False, indent=2)
 
@@ -785,7 +927,7 @@ def _package_release_dir(release_dir: Path, logger) -> Optional[Path]:
         zip_file.unlink()
     logger.info(f"Packing release: {release_dir} -> {zip_file}")
     subprocess.run(
-        ["zip", "-r", "-y", zip_file.name, release_dir.name],
+        ["zip", "-r", "-y", "-0", "-q", zip_file.name, release_dir.name],
         cwd=str(release_dir.parent),
         check=True,
     )
@@ -807,10 +949,73 @@ def _resolve_onnx_file(work_dir: Path, subdir: str, logger) -> Optional[str]:
     return str(onnx_files[0])
 
 
+def _load_work_meta(work_dir: Path, logger) -> Dict:
+    meta_path = work_dir / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        with meta_path.open("r", encoding="utf-8") as fin:
+            return json.load(fin)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"Failed to load work_dir meta.json: {exc}")
+        return {}
+
+
+def _resolve_draft_onnx_files(
+    work_dir: Path, spec_decode_mode: Optional[str], meta_info: Dict, logger
+) -> Optional[Dict[str, str]]:
+    if spec_decode_mode not in ("mtp", "dflash"):
+        return None
+
+    if spec_decode_mode == "mtp":
+        draft_items = [
+            ("draft_prefill_onnx_file", "draft_prefill_onnx", "*mtp_prefill.onnx"),
+            ("draft_decode_onnx_file", "draft_decode_onnx", "*mtp_decode.onnx"),
+        ]
+    else:
+        draft_items = [
+            ("draft_context_onnx_file", "draft_context_onnx", "*dflash_context.onnx"),
+            ("draft_context_decode_onnx_file", "draft_context_decode_onnx", "*dflash_context_decode.onnx"),
+            ("draft_decode_onnx_file", "draft_decode_onnx", "*dflash_decode.onnx"),
+        ]
+
+    draft_onnx_dir = work_dir / "draft_onnx"
+    draft_onnx_files: Dict[str, str] = {}
+    for meta_key, onnx_key, pattern in draft_items:
+        candidates = []
+        rel_path = meta_info.get(meta_key)
+        if rel_path:
+            candidates.append(work_dir / rel_path)
+        candidates.extend(sorted(draft_onnx_dir.glob(pattern)))
+
+        for candidate in candidates:
+            if candidate.exists():
+                draft_onnx_files[onnx_key] = str(candidate.resolve())
+                logger.info(f"Found draft ONNX [{onnx_key}]: {candidate}")
+                break
+        else:
+            logger.warning(f"Draft ONNX not found for {onnx_key} (meta key={meta_key}, glob={pattern})")
+
+    return draft_onnx_files or None
+
+
 def _run_golden(work_dir: Path, args, logger) -> Optional[Path]:
     from transformers import AutoTokenizer
 
+    meta_info = _load_work_meta(work_dir, logger)
+    spec_decode_mode = getattr(args, "spec_decode_mode", None) or meta_info.get("spec_decode_mode")
+    if spec_decode_mode == "none":
+        spec_decode_mode = None
+
     hf_model_path = osp.normpath(osp.abspath(args.model))
+    meta_hf_model_path = meta_info.get("hf_model_path")
+    if meta_hf_model_path and getattr(args, "existing_work_dir", None) and Path(args.model).name == "Qwen3.5-35B-A3B":
+        candidate_model_path = osp.normpath(osp.abspath(meta_hf_model_path))
+        if Path(candidate_model_path).exists():
+            hf_model_path = candidate_model_path
+            args.model = candidate_model_path
+            logger.info(f"Golden-only: using hf_model_path from meta.json: {hf_model_path}")
+
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
 
     prompt = "你好，请介绍一下你自己。"
@@ -822,10 +1027,24 @@ def _run_golden(work_dir: Path, args, logger) -> Optional[Path]:
         logger.error("Cannot find prefill/decode ONNX files for golden generation.")
         return None
 
+    draft_onnx_files = _resolve_draft_onnx_files(work_dir, spec_decode_mode, meta_info, logger)
+
     logger.info(f"Prefill ONNX: {prefill_onnx}")
     logger.info(f"Decode ONNX: {decode_onnx}")
+    if draft_onnx_files:
+        logger.info(f"Draft ONNX files: {draft_onnx_files}")
 
-    return _generate_golden(work_dir, args, input_ids, tokenizer, prefill_onnx, decode_onnx, logger)
+    return _generate_golden(
+        work_dir,
+        args,
+        input_ids,
+        tokenizer,
+        prefill_onnx,
+        decode_onnx,
+        logger,
+        draft_onnx_files=draft_onnx_files,
+        spec_decode_mode=spec_decode_mode,
+    )
 
 
 def _build_draft_only_default_work_dir(
@@ -867,6 +1086,7 @@ def main(args):
         spec_draft_head_weight_bits=args.spec_draft_head_weight_bits,
         split_conv_cache=args.split_conv_cache,
         normalize_force_fp32=getattr(args, "normalize_force_fp32", False),
+        use_manual_depthwise_conv1d=getattr(args, "use_manual_depthwise_conv1d", False),
     )
 
     if args.draft_only:
@@ -1067,6 +1287,19 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Force fp32 accumulation in Normalize operator.",
+    )
+    parser.add_argument(
+        "--use_manual_depthwise_conv1d",
+        "--use-manual-depthwise-conv1d",
+        dest="use_manual_depthwise_conv1d",
+        action="store_true",
+        default=False,
+        help=(
+            "QTL-341: fall back to the slice/mul/add manual depthwise conv1d "
+            "unroll (legacy path). Default False routes the conv tail through "
+            "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
+            "Conv op."
+        ),
     )
     parser.add_argument("--golden", action="store_true", help="Generate HMONNX golden after export")
     parser.add_argument(

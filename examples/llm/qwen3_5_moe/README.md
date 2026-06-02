@@ -262,7 +262,7 @@ TS=$(date +%Y%m%d_%H%M%S)
 MODEL_KEY=qwen3_6_35b_a3b
 MODEL_DIR=weights/Qwen3.6-35B-A3B
 QUANT_WEIGHT=weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400
-WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8h0_ssfp_gptq_norm_fp32_False_${TS}"
+WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8h0_ssfp_gptq_norm_mtp_${TS}"
 python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --model "$MODEL_DIR" \
   --context-length 2048 \
@@ -273,7 +273,10 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
   --golden \
   --package-release \
   --release_xh_version xh2 \
-  --release_wmix_amix wmix_amix
+  --release_wmix_amix wmix_amix \
+  --spec-decode-mode mtp \
+  --num-draft-tokens 4 \
+  --split_conv_cache
 ```
 
 ## XH2 规范导出

@@ -941,6 +941,9 @@ def _prepare_export_context(cfg, args, logger):
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
     if getattr(args, "split_conv_cache", False):
         cfg.model.wrap_cfg.split_conv_cache = True
+    cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
+        args, "use_manual_depthwise_conv1d", False
+    )
 
     qwen3_next_model: XHQwen3NextModel = MODELS.build(cfg.model)
     tokenizer = qwen3_next_model.get_tokenizer()
@@ -1106,6 +1109,9 @@ def _prepare_golden_only_context(cfg, args, logger):
     cfg.model.hf_model = tokenizer_source
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
+    cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
+        args, "use_manual_depthwise_conv1d", False
+    )
 
     qwen3_next_model: XHQwen3NextModel = MODELS.build(cfg.model)
     tokenizer = qwen3_next_model.get_tokenizer()
@@ -1335,6 +1341,19 @@ def parse_arguments():
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--use_manual_depthwise_conv1d",
+        "--use-manual-depthwise-conv1d",
+        dest="use_manual_depthwise_conv1d",
+        action="store_true",
+        default=False,
+        help=(
+            "QTL-341: fall back to the slice/mul/add manual depthwise conv1d "
+            "unroll (legacy path). Default False routes the conv tail through "
+            "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
+            "Conv op."
         ),
     )
     return parser

@@ -329,6 +329,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 output_hidden_state_indices=output_hidden_state_indices,
                 output_post_norm_hidden=output_post_norm_hidden,
                 split_conv_cache=self.config.split_conv_cache,
+                use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d,
                 kv_cache=dict(
                     cache_axis=2,
                 ),
