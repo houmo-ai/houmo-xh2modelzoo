@@ -257,7 +257,7 @@ class XHBaseModel(DeviceMixin):
     def get_quant_cfg(self):
         quant_scheme = self.config.quant_scheme if hasattr(self.config, "quant_scheme") else None
         if quant_scheme is not None:
-            quant_cfg = quant_scheme.to_dict()
+            quant_cfg = quant_scheme.to_dict() if hasattr(quant_scheme, "to_dict") else dict(quant_scheme)
         else:
             quant_cfg = {}
         quant_cfg = ConfigDict(quant_cfg)

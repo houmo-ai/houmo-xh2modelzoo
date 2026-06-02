@@ -692,7 +692,9 @@ class BaseLLMModel(XHBaseModel):
             logger.info(f"Exporting Decode for {model_name} model .........")
             self.set_decode()
             data_processor = self.get_data_preprocessor()
-            self.set_input_sequence_length(1)
+            for k, v in getattr(self, '_decode_wrap_cfg_overrides', {}).items():
+                self.wrap_cfg[k] = v
+            self.set_input_sequence_length(getattr(self, '_decode_input_sequence_length', 1))
             dummy_input = self.get_dummy_inputs()
             inputs = data_processor(dummy_input)
             inputs = unfold_args(inputs)

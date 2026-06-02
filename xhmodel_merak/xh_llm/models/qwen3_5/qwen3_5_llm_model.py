@@ -37,6 +37,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5CausalLMOutputWi
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
+from xhquant.core import CacheTensor
 from xhquant.utils import get_xhquant_logger, log_function_call
 from xhquant.utils.registry import _DMRegistryCls
 
@@ -57,6 +58,47 @@ try:
     from transformers.modeling_utils import no_init_weights
 except ImportError:
     no_init_weights = init_empty_weights
+
+
+class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):
+    """Extended mixin supporting split_conv_cache (3 separate q/k/v caches per layer)."""
+
+    def __init__(self, kv_cache_config: KVCacheWithLinearConfig) -> None:
+        super().__init__(kv_cache_config)
+        self.split_conv_cache: bool = False
+        self._linear_key_dim: int = -1
+        self._linear_value_dim: int = -1
+
+    def prepare_other_cache(self):
+        if not self.split_conv_cache:
+            return super().prepare_other_cache()
+        linear_cfg = self.kvcache_config.linear_kv_cache_config
+        cache_dtype = linear_cfg.cache_torch_dtype
+        batch_size = linear_cfg.batch_size
+        kernel_size = linear_cfg.conv_kernel_size
+        for _i in range(linear_cfg.num_layers):
+            conv_cache_q = CacheTensor(torch.zeros(
+                batch_size, self._linear_key_dim, kernel_size,
+                dtype=cache_dtype, device=self._device,
+            ))
+            conv_cache_k = CacheTensor(torch.zeros(
+                batch_size, self._linear_key_dim, kernel_size,
+                dtype=cache_dtype, device=self._device,
+            ))
+            conv_cache_v = CacheTensor(torch.zeros(
+                batch_size, self._linear_value_dim, kernel_size,
+                dtype=cache_dtype, device=self._device,
+            ))
+            self.past_conv_caches.append((conv_cache_q, conv_cache_k, conv_cache_v))
+            recurrent_cache_shape = [
+                batch_size,
+                linear_cfg.num_v_heads,
+                linear_cfg.head_k_dim,
+                linear_cfg.head_v_dim,
+            ]
+            self.past_recurrent_states.append(
+                CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype, device=self._device))
+            )
 
 
 def _copy_model_shared_params(model: nn.Module) -> nn.Module:
@@ -147,7 +189,7 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
             past_recurrent_states,
         ) = data_input
 
-        logits, conv_cache_out_list, recurrent_state_out_list = self._llm_model.forward(
+        result = self._llm_model.forward(
             inputs_embeds,
             time_position_ids,
             height_position_ids,
@@ -160,6 +202,7 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
             past_conv_caches,
             past_recurrent_states,
         )
+        logits = result[0]
 
         return Qwen3_5CausalLMOutputWithPast(
             logits=logits,
@@ -191,7 +234,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     HMONNXINFERENCE_CLS = XHQwen3_5_HMONNXModel
     CONFIG_CLS = XHQwen3_5ModelConfig
     BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_qwen3_5_hf_compatible_model)
-    transformers_min_version = "5.2.0"
+    transformers_min_version = "5.5.0"
 
     def __init__(self, config: XHQwen3_5ModelConfig):
         super().__init__(config)
@@ -205,12 +248,30 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.linear_attention_layer_indices: list[int] = []
         self._kvcache_config = KVCacheWithLinearConfig()
         self._kvcache_config.use_cache = self.config.use_cache
-        self._kvcache_mixin = KVCacheWithLinearMixin(self.kvcache_config)
+        self._kvcache_mixin = _Qwen3_5KVCacheMixin(self.kvcache_config)
         self.config = cast(XHQwen3_5ModelConfig, self.config)
         self.wrap_cfg["linear_attention_mode"] = "auto"
+        self.wrap_cfg["linear_chunk_size"] = self.config.linear_chunk_size
+        self.wrap_cfg["split_conv_cache"] = self.config.split_conv_cache
+        if self.config.spec_decode_mode == "dflash":
+            self.wrap_cfg["output_hidden_state_indices"] = self._get_dflash_target_layer_ids()
 
-        # self.wrap_cfg["linear_attention_mode"] = "chunk"  # for prefill
-        # self.wrap_cfg["linear_attention_mode"] = "recurrent"  # for decode
+    def _get_dflash_target_layer_ids(self) -> list[int]:
+        configured = getattr(self.config, "output_hidden_state_indices", None)
+        if configured is not None:
+            return list(configured)
+
+        dflash_config = self.config.dflash_config
+        if dflash_config is None:
+            raise ValueError("dflash_config is required when spec_decode_mode='dflash'")
+
+        dflash_model_dir = Path(dflash_config.dflash_model_dir)
+        config_path = dflash_model_dir / "config.json"
+        with open(config_path, encoding="utf-8") as f:
+            target_layer_ids = json.load(f).get("dflash_config", {}).get("target_layer_ids")
+        if not target_layer_ids:
+            raise ValueError(f"Failed to read dflash_config.target_layer_ids from {config_path}")
+        return list(target_layer_ids)
 
     @VisionLLMModel.work_dir.setter
     def work_dir(self, work_dir: str):
@@ -302,6 +363,12 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         decode_fronted_model = frontend_model.decode
         self.set_decode()
+
+        spec_decode_mode = self.config.spec_decode_mode
+        if spec_decode_mode in ("mtp", "dflash"):
+            spec_seq_len = self.config.num_draft_tokens + 1
+            self.set_input_sequence_length(spec_seq_len)
+
         decode_quanted_model = super()._to_quanted(decode_fronted_model, state)
         self.set_prefill()
         model = ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
@@ -319,7 +386,31 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         self._wrap_model = decode_wrap_model
         self.set_decode()
+
+        spec_decode_mode = self.config.spec_decode_mode
+        if spec_decode_mode in ("mtp", "dflash"):
+            spec_seq_len = self.config.num_draft_tokens + 1
+            self.wrap_cfg["verify_output_intermediates"] = True
+            self.wrap_cfg["num_logits_to_keep"] = 0
+            if spec_decode_mode == "mtp":
+                self.wrap_cfg["output_post_norm_hidden"] = True
+            self.set_input_sequence_length(spec_seq_len)
+
+            def _apply_spec_flags(module):
+                if hasattr(module, "num_logits_to_keep"):
+                    module.num_logits_to_keep = 0
+                if hasattr(module, "output_post_norm_hidden") and spec_decode_mode == "mtp":
+                    module.output_post_norm_hidden = True
+
+            decode_wrap_model.apply(_apply_spec_flags)
+
         decode_frontend_model = super()._to_fronted(decode_wrap_model)
+
+        if spec_decode_mode in ("mtp", "dflash"):
+            self.wrap_cfg["verify_output_intermediates"] = False
+            self.wrap_cfg.pop("output_post_norm_hidden", None)
+            self.wrap_cfg.pop("num_logits_to_keep", None)
+
         self._wrap_model = prefill_wrap_model
         self.set_prefill()
         fronted_model = ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
@@ -380,6 +471,12 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         linear_kv_cache_config.head_v_dim = linear_attn.head_v_dim
         linear_kv_cache_config.num_layers = len(self.linear_attention_layer_indices)
 
+        split_conv_cache = self.wrap_cfg.get("split_conv_cache", False)
+        self._kvcache_mixin.split_conv_cache = split_conv_cache
+        if split_conv_cache:
+            self._kvcache_mixin._linear_key_dim = linear_attn.key_dim
+            self._kvcache_mixin._linear_value_dim = linear_attn.value_dim
+
         if self.use_cache:
             num_decoder_layers = len(self.full_attention_layer_indices)
             head_dim = self_attn.head_dim
@@ -402,17 +499,35 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         return wrap_model
 
     def forward(self, *args, **kwargs):
-        logits, conv_cache_out_list, recurrent_state_out_list = super().forward(*args, **kwargs)
-        past_conv_caches = self._kvcache_mixin.past_conv_caches
-        past_recurrent_states = self._kvcache_mixin.past_recurrent_states
-        # 更新cache
-        for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
-            past_conv_cache[:] = conv_cache_out[:]
+        result = super().forward(*args, **kwargs)
+        logits = result[0]
+        conv_cache_out_list = result[1]
+        recurrent_state_out_list = result[2]
+        spec_decode_hidden = result[3] if len(result) > 3 else None
 
-        for past_recurrent_state, recurrent_state_out in zip(
-            past_recurrent_states, recurrent_state_out_list, strict=True
-        ):
-            past_recurrent_state[:] = recurrent_state_out[:]
+        verify_output_intermediates = bool(self.wrap_cfg.get("verify_output_intermediates", False))
+        if not verify_output_intermediates:
+            past_conv_caches = self._kvcache_mixin.past_conv_caches
+            past_recurrent_states = self._kvcache_mixin.past_recurrent_states
+            if self._kvcache_mixin.split_conv_cache:
+                for (pq, pk, pv), (oq, ok, ov) in zip(
+                    past_conv_caches, conv_cache_out_list, strict=True
+                ):
+                    pq[:] = oq[:]
+                    pk[:] = ok[:]
+                    pv[:] = ov[:]
+            else:
+                for past_conv_cache, conv_cache_out in zip(
+                    past_conv_caches, conv_cache_out_list, strict=True
+                ):
+                    past_conv_cache[:] = conv_cache_out[:]
+            for past_recurrent_state, recurrent_state_out in zip(
+                past_recurrent_states, recurrent_state_out_list, strict=True
+            ):
+                past_recurrent_state[:] = recurrent_state_out[:]
+
+        if spec_decode_hidden is not None:
+            return logits, conv_cache_out_list, recurrent_state_out_list, spec_decode_hidden
         return logits, conv_cache_out_list, recurrent_state_out_list
 
     def _set_device(self, device):
@@ -465,14 +580,60 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             export_cfg["input_names"].append(f"past_value_cache_{layer_idx}")
 
         linear_num_layers = self.kvcache_config.linear_kv_cache_config.num_layers
-        for cache_idx in range(linear_num_layers):
-            export_cfg["input_names"].append(f"past_conv_cache_{cache_idx}")
+        split_conv_cache = self._kvcache_mixin.split_conv_cache
+
+        if split_conv_cache:
+            for cache_idx in range(linear_num_layers):
+                for branch in ("q", "k", "v"):
+                    export_cfg["input_names"].append(f"past_conv_cache_{branch}_{cache_idx}")
+        else:
+            for cache_idx in range(linear_num_layers):
+                export_cfg["input_names"].append(f"past_conv_cache_{cache_idx}")
         for cache_idx in range(linear_num_layers):
             export_cfg["input_names"].append(f"past_recurrent_state_{cache_idx}")
-        for cache_idx in range(linear_num_layers):
-            export_cfg["output_names"].append(f"conv_cache_out_{cache_idx}")
-        for cache_idx in range(linear_num_layers):
-            export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}")
+
+        verify_steps = 1
+        if (
+            bool(self.wrap_cfg.get("verify_output_intermediates", False))
+            and int(self.wrap_cfg.get("input_sequence_length", 1)) > 1
+        ):
+            verify_steps = int(self.wrap_cfg.input_sequence_length)
+
+        if verify_steps > 1:
+            if split_conv_cache:
+                for cache_idx in range(linear_num_layers):
+                    for branch in ("q", "k", "v"):
+                        for step_idx in range(verify_steps):
+                            export_cfg["output_names"].append(
+                                f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"
+                            )
+            else:
+                for cache_idx in range(linear_num_layers):
+                    for step_idx in range(verify_steps):
+                        export_cfg["output_names"].append(
+                            f"conv_cache_out_{cache_idx}_{step_idx}"
+                        )
+            for cache_idx in range(linear_num_layers):
+                for step_idx in range(verify_steps):
+                    export_cfg["output_names"].append(
+                        f"recurrent_state_out_{cache_idx}_{step_idx}"
+                    )
+        else:
+            if split_conv_cache:
+                for cache_idx in range(linear_num_layers):
+                    for branch in ("q", "k", "v"):
+                        export_cfg["output_names"].append(f"conv_cache_out_{branch}_{cache_idx}")
+            else:
+                for cache_idx in range(linear_num_layers):
+                    export_cfg["output_names"].append(f"conv_cache_out_{cache_idx}")
+            for cache_idx in range(linear_num_layers):
+                export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}")
+
+        if self.wrap_cfg.get("output_hidden_state_indices") is not None:
+            export_cfg["output_names"].append("target_hidden")
+        elif self.wrap_cfg.get("output_post_norm_hidden", False):
+            export_cfg["output_names"].append("post_norm_hidden")
+
         return export_cfg
 
     def export_llm_hmonnx(self, output_dir):
@@ -531,7 +692,134 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         meta_info = cast(VLLMModelMeta, meta_info)
         assert isinstance(meta_info, VLLMModelMeta), f"meta_info expected VLLMModelMeta, but get {type(meta_info)}"
         meta_info.visual_config = visual_meta
+        spec_decode_mode = self.config.spec_decode_mode
+        if spec_decode_mode in ("mtp", "dflash"):
+            self._decode_input_sequence_length = self.config.num_draft_tokens + 1
+            self._decode_wrap_cfg_overrides = {
+                "verify_output_intermediates": True,
+            }
+            self.wrap_cfg["num_logits_to_keep"] = 0
+            if spec_decode_mode == "mtp":
+                self.wrap_cfg["output_post_norm_hidden"] = True
+
+            def _apply_spec_decode_flags(module):
+                if hasattr(module, "num_logits_to_keep"):
+                    module.num_logits_to_keep = 0
+                if hasattr(module, "output_post_norm_hidden") and spec_decode_mode == "mtp":
+                    module.output_post_norm_hidden = True
+
+            self._quanted_model.prefill.apply(_apply_spec_decode_flags)
+            self._quanted_model.decode.apply(_apply_spec_decode_flags)
         self._export_hmonnx(exported_info)
+
+        # 导出 draft 模型 (MTP / DFlash)
+        spec_decode_mode = self.config.spec_decode_mode
+        if spec_decode_mode == "mtp" and self.config.mtp_config is not None:
+            from .qwen3_5_mtp_model import XHQwen3_5MTPDraftModel
+
+            mtp_base_cfg = self.config.mtp_config
+
+            mtp_prefill_cfg = copy.deepcopy(mtp_base_cfg)
+            mtp_prefill_cfg.model_name = f"{mtp_base_cfg.model_name}_mtp_prefill"
+            mtp_prefill_cfg.input_sequence_length = self.config.prefill_chunk_length
+            mtp_prefill_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp" / "prefill")
+            mtp_prefill_model = XHQwen3_5MTPDraftModel(mtp_prefill_cfg)
+            mtp_prefill_model.to_quanted_aligned()
+            mtp_prefill_meta = mtp_prefill_model.export_hmonnx(mtp_prefill_cfg.work_dir)
+            mtp_prefill_meta.hmonnx = str(
+                Path(mtp_prefill_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix()
+            )
+
+            mtp_decode_cfg = copy.deepcopy(mtp_base_cfg)
+            mtp_decode_cfg.model_name = f"{mtp_base_cfg.model_name}_mtp_decode"
+            mtp_decode_cfg.input_sequence_length = 1
+            mtp_decode_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp" / "decode")
+            mtp_decode_model = XHQwen3_5MTPDraftModel(mtp_decode_cfg)
+            mtp_decode_model.to_quanted_aligned()
+            mtp_decode_meta = mtp_decode_model.export_hmonnx(mtp_decode_cfg.work_dir)
+            mtp_decode_meta.hmonnx = str(
+                Path(mtp_decode_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix()
+            )
+
+            meta_info.mtp_prefill_config = mtp_prefill_meta
+            meta_info.mtp_decode_config = mtp_decode_meta
+            logger.info(
+                f"MTP draft models exported to: {mtp_prefill_cfg.work_dir}, {mtp_decode_cfg.work_dir}"
+            )
+
+        elif spec_decode_mode == "dflash" and self.config.dflash_config is not None:
+            from .qwen3_5_dflash_model import XHQwen3_5DFlashDraftModel
+
+            dflash_base_cfg = self.config.dflash_config
+            dflash_output_dir = str(Path(exported_info.exported_dir) / "dflash")
+            dflash_verify_seq_len = self.config.num_draft_tokens + 1
+
+            # context mode
+            ctx_cfg = copy.deepcopy(dflash_base_cfg)
+            ctx_cfg.model_name = f"{dflash_base_cfg.model_name}_context"
+            ctx_cfg.mode = "context"
+            ctx_cfg.work_dir = str(Path(dflash_output_dir) / "context")
+            ctx_model = XHQwen3_5DFlashDraftModel(ctx_cfg)
+            ctx_model.to_quanted_aligned()
+            ctx_meta = ctx_model.export_hmonnx(ctx_cfg.work_dir)
+            ctx_meta.hmonnx = str(Path(ctx_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+
+            # context_decode mode uses context inputs over the verify length.
+            ctx_dec_cfg = copy.deepcopy(dflash_base_cfg)
+            ctx_dec_cfg.model_name = f"{dflash_base_cfg.model_name}_context_decode"
+            ctx_dec_cfg.mode = "context"
+            ctx_dec_cfg.input_sequence_length = dflash_verify_seq_len
+            ctx_dec_cfg.work_dir = str(Path(dflash_output_dir) / "context_decode")
+            ctx_dec_model = XHQwen3_5DFlashDraftModel(ctx_dec_cfg)
+            ctx_dec_model.to_quanted_aligned()
+            ctx_dec_meta = ctx_dec_model.export_hmonnx(ctx_dec_cfg.work_dir)
+            ctx_dec_meta.hmonnx = str(Path(ctx_dec_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+
+            # decode mode also uses the verify length for draft-token generation.
+            dec_cfg = copy.deepcopy(dflash_base_cfg)
+            dec_cfg.model_name = f"{dflash_base_cfg.model_name}_decode"
+            dec_cfg.mode = "decode"
+            dec_cfg.input_sequence_length = dflash_verify_seq_len
+            dec_cfg.work_dir = str(Path(dflash_output_dir) / "decode")
+            dec_model = XHQwen3_5DFlashDraftModel(dec_cfg)
+            dec_model.to_quanted_aligned()
+            dec_meta = dec_model.export_hmonnx(dec_cfg.work_dir)
+            dec_meta.hmonnx = str(Path(dec_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+
+            meta_info.dflash_context_config = ctx_meta
+            meta_info.dflash_context_decode_config = ctx_dec_meta
+            meta_info.dflash_decode_config = dec_meta
+            logger.info(f"DFlash draft models exported to: {dflash_output_dir}")
+
+        # 兼容 spec_decode test/bench 脚本的 meta 格式
+        meta_info.prefill_onnx = meta_info.prefill_hmonnx
+        meta_info.decode_onnx = meta_info.decode_hmonnx
+        meta_info.token_embedding_file = meta_info.quant_embedding
+        meta_info.max_context_tokens = self.config.context_max_length
+        if spec_decode_mode in ("mtp", "dflash"):
+            num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
+            hidden_output_name = (
+                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+            )
+            spec_decode_section = {
+                "mode": spec_decode_mode,
+                "block_size": num_draft_tokens,
+                "hidden_output_name": hidden_output_name,
+            }
+            if spec_decode_mode == "mtp":
+                if hasattr(meta_info, "mtp_prefill_config"):
+                    spec_decode_section["draft_prefill_onnx"] = meta_info.mtp_prefill_config.hmonnx
+                if hasattr(meta_info, "mtp_decode_config"):
+                    spec_decode_section["draft_decode_onnx"] = meta_info.mtp_decode_config.hmonnx
+            elif spec_decode_mode == "dflash":
+                if hasattr(meta_info, "dflash_context_config"):
+                    spec_decode_section["draft_context_onnx"] = meta_info.dflash_context_config.hmonnx
+                if hasattr(meta_info, "dflash_context_decode_config"):
+                    spec_decode_section["draft_context_decode_onnx"] = meta_info.dflash_context_decode_config.hmonnx
+                if hasattr(meta_info, "dflash_decode_config"):
+                    spec_decode_section["draft_decode_onnx"] = meta_info.dflash_decode_config.hmonnx
+            meta_info.spec_decode = spec_decode_section
+
         json.dump(
             meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4
         )

@@ -118,10 +118,25 @@ def load_spec_decode_runtime(
     model_dir = meta_file.parent
     meta_info = json.load(open(meta_file, "r", encoding="utf-8"))
 
-    prefill_onnx = resolve_path(model_dir, meta_info.get("prefill_onnx") or meta_info["prefill_onnx_file"])
-    decode_onnx = resolve_path(model_dir, meta_info.get("decode_onnx") or meta_info["decode_onnx_file"])
+    prefill_onnx = resolve_path(
+        model_dir,
+        meta_info.get("prefill_onnx")
+        or meta_info.get("prefill_hmonnx")
+        or meta_info["prefill_onnx_file"],
+    )
+    decode_onnx = resolve_path(
+        model_dir,
+        meta_info.get("decode_onnx")
+        or meta_info.get("decode_hmonnx")
+        or meta_info["decode_onnx_file"],
+    )
     hf_model_config_dir = resolve_path(model_dir, meta_info["hf_config"])
-    token_embedding_file = resolve_path(model_dir, meta_info["token_embedding_file"])
+    token_embedding_file = resolve_path(
+        model_dir,
+        meta_info.get("token_embedding_file")
+        or meta_info.get("quant_embedding")
+        or meta_info["token_embedding_file"],
+    )
 
     spec_decode = meta_info.get("spec_decode")
     if spec_decode is None:
