@@ -563,13 +563,18 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     projection_quant_type = args.projection_quant_type
-    # Build QuantScheme with per-node precision override for projection layers
+    # Build QuantScheme with per-node precision override for projection layers.
+    # FX graph node names use underscored full paths (from convert.log):
+    #   hidden_projection_linear_fc1, hidden_projection_linear_fc2
+    #   text_projection_linear_fc1, text_projection_linear_fc2
     quant_scheme = QuantScheme(
         target_device=target_device,
         quant_type=quant_type,
         nodes={
-            "hidden_projection": projection_quant_type,
-            "text_projection": projection_quant_type,
+            "hidden_projection_linear_fc1": projection_quant_type,
+            "hidden_projection_linear_fc2": projection_quant_type,
+            "text_projection_linear_fc1": projection_quant_type,
+            "text_projection_linear_fc2": projection_quant_type,
         },
     )
     quant_config = ConfigDict(create_quant_config(quant_scheme))
