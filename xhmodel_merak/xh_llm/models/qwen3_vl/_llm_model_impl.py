@@ -363,7 +363,7 @@ class _Qwen3VLTextModel(_Qwen3VLTextModelBase):
         self.max_layers = -1
         if self.only_first_block:
             self.max_layers = 1
-        if "max_layers" in cfg:
+        if "max_layers" in cfg and cfg.max_layers is not None:
             self.max_layers = cfg.max_layers
 
         if not hasattr(self.rotary_emb, "cos_cached"):
