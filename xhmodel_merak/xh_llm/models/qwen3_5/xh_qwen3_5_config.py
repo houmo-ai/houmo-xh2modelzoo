@@ -107,6 +107,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         use_cache: bool = True,
         linear_chunk_size: int = 64,
         split_conv_cache: bool = False,
+        normalize_force_fp32: bool = True,
+        cumsum_matmul_quant_config: dict | None = None,
         visual_config: dict | XHQwen3_5_VisualConfig | None = None,
         spec_decode_mode: str | None = None,
         mtp_config: dict | XHQwen3_5_MTPConfig | None = None,
@@ -139,6 +141,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
 
         self.linear_chunk_size = linear_chunk_size
         self.split_conv_cache = split_conv_cache
+        self.normalize_force_fp32 = normalize_force_fp32
+        self.cumsum_matmul_quant_config = cumsum_matmul_quant_config
 
         self.spec_decode_mode = spec_decode_mode
         self.num_draft_tokens = num_draft_tokens

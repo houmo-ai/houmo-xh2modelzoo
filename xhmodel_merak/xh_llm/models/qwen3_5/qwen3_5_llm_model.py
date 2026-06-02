@@ -38,7 +38,7 @@ from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
 from xhquant.core import CacheTensor
-from xhquant.utils import get_xhquant_logger, log_function_call
+from xhquant.utils import get_xhquant_logger, log_function_call, ConfigDict
 from xhquant.utils.registry import _DMRegistryCls
 
 from ...builder import register_llm_model
@@ -355,6 +355,30 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         elif self._state in [LLMModelState.QUANTED_ALIGNED, LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_DISABLE]:
             self._quanted_model.set_activate_model("decode")
         super().set_decode()
+
+    def get_quant_cfg(self):
+        quant_cfg = super().get_quant_cfg()
+        quant_cfg.setdefault("ops_cfg", ConfigDict())
+        quant_cfg["ops_cfg"]["Normalize"] = ConfigDict(
+            force_fp32=self.config.normalize_force_fp32
+        )
+
+        cumsum_quant_cfg = self.config.cumsum_matmul_quant_config
+        if cumsum_quant_cfg is None:
+            cumsum_quant_cfg = dict(
+                act_schema=dict(fp_mode="sefp", man_bit=16),
+                act_schema_2=dict(fp_mode="fp16", man_bit=8),
+            )
+        quant_cfg.setdefault("nodes_cfg", ConfigDict())
+        wrap_model = self._wrap_model or self.get_inference_model()
+        if wrap_model is not None:
+            for name, _ in wrap_model.named_modules():
+                if "cumsum_matmul" not in name:
+                    continue
+                for key in (name, name.replace(".", "_")):
+                    if key not in quant_cfg["nodes_cfg"]:
+                        quant_cfg["nodes_cfg"][key] = ConfigDict(dict(cumsum_quant_cfg))
+        return quant_cfg
 
     def _to_quanted(self, frontend_model, state):
         prefill_fronted_model = frontend_model.prefill

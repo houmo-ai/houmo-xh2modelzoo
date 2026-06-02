@@ -2648,7 +2648,7 @@ def parse_arguments():
     parser.add_argument(
         "--split_conv_cache",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
             "Default False keeps the merged single-tensor format for backward compatibility."
@@ -2692,7 +2692,7 @@ def parse_arguments():
     parser.add_argument(
         "--num_blocks",
         type=int,
-        default=4,
+        default=None,
         help="Number of decoder blocks to export. Default exports all blocks.",
     )
     return parser
