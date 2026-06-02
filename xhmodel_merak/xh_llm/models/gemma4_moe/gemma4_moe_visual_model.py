@@ -12,6 +12,7 @@ from ...base_vision_model import BaseVisionModel
 from ...builder import register_llm_model
 from ...types import VisualModelMeta
 from ...utils import unfold_args
+from ..gemma4.gemma4_visual_model import _make_vision_attn_traceable
 from .xh_gemma4_moe_config import XHGemma4MoeVisualConfig
 
 
@@ -313,6 +314,8 @@ class XHGemma4MoeVisualModel(BaseVisionModel):
 
         processed = processor(images=Image.new("RGB", (self.config.max_size_w, self.config.max_size_h)))
         vision_wrapper.precompute_constants(processed["pixel_values"], processed["image_position_ids"])
+        for layer in vision_wrapper.vision_tower.encoder.layers:
+            _make_vision_attn_traceable(layer.self_attn)
         return super().init_wrap_model(vision_wrapper)
 
     def get_tf_processor(self) -> XHGemma4MoeVisualProcessor:

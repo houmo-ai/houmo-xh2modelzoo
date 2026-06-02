@@ -110,7 +110,7 @@ def _make_vision_attn_traceable(attn: nn.Module) -> None:
             k = k.repeat_interleave(n_q // n_kv, dim=1)
             v = v.repeat_interleave(n_q // n_kv, dim=1)
 
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+        attn_weights = torch.matmul(q, k.transpose(-2, -1))
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
