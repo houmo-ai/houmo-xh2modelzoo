@@ -27,6 +27,7 @@ import torch.nn as nn
 from torch import Tensor
 from transformers import AutoTokenizer
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
+from xhquant.xhonnxruntime import HMONNXCUDAGraphInference
 
 from ....utils import DeviceDtypeMixin
 from ....xh_llm.utils import decode_next_token
@@ -45,6 +46,13 @@ class Qwen3LegacyLoRAInference(DeviceDtypeMixin):
         self.fast_mode = fast_mode
         self._device = torch.device(device)
         self.set_exec_device(torch.device(execution_device))
+
+        # opt-in CUDA graph acceleration for prefill/decode HMONNX sessions.
+        # decode is the big win (fixed shape=1, in-place KV cache, 1000s of steps
+        # replaying one captured graph); prefill chunks are also fixed-shape (ISL).
+        # default OFF so existing eval/production paths are byte-identical until enabled.
+        import os
+        self.use_cuda_graph = os.environ.get("XH2A_CUDA_GRAPH", "0") == "1"
 
         model_dir = Path(model_config_file).parent
         meta_info = json.load(open(model_config_file, "r"))
@@ -123,7 +131,14 @@ class Qwen3LegacyLoRAInference(DeviceDtypeMixin):
     def init_prefill(self):
         if self.prefill_session is not None:
             return
-        self.prefill_session = HMONNXInference(self.prefill_onnx_file)
+        if self.use_cuda_graph:
+            self.prefill_session = HMONNXCUDAGraphInference(str(self.prefill_onnx_file))
+            # graph session is a GoldenMixin; forward() calls update_step() which
+            # asserts step is set. plain HMONNXInference is not a GoldenMixin so
+            # this is only needed on the cuda-graph path.
+            self.prefill_session.reset_step()
+        else:
+            self.prefill_session = HMONNXInference(self.prefill_onnx_file)
         if self.fast_mode:
             self.prefill_session.to_fast_mode()
         self.prefill_session.exec_device = self.execution_device
@@ -132,7 +147,11 @@ class Qwen3LegacyLoRAInference(DeviceDtypeMixin):
     def init_decode(self):
         if self.decode_session is not None:
             return
-        self.decode_session = HMONNXInference(self.decode_onnx_file)
+        if self.use_cuda_graph:
+            self.decode_session = HMONNXCUDAGraphInference(str(self.decode_onnx_file))
+            self.decode_session.reset_step()
+        else:
+            self.decode_session = HMONNXInference(self.decode_onnx_file)
         if self.fast_mode:
             self.decode_session.to_fast_mode()
         self.decode_session.exec_device = self.execution_device

@@ -36,19 +36,32 @@ def main(args):
     target_device = DeviceType.XH2a
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+    if args.matmul_a2_bits:
+        quant_scheme.ops["MatMul"] = dict(
+            act_scheme=dict(bits=8, fp_mode="sefp"),
+            act_schema_2=dict(bits=args.matmul_a2_bits, fp_mode="sefp"),
+        )
+    # common quant (no quarot/gptq state-dict): pass "", "none" or "None" to skip
+    quant_weight = args.quant_weight
+    if quant_weight is not None and quant_weight.strip().lower() in ("", "none"):
+        quant_weight = None
+    # Note: QK (attention Q@K^T) matmul 2nd-operand precision is encoded directly
+    # in quant_type via a second 'a' field, e.g. w4a8a16h1_sefp => act_bit_2=16.
     # quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
     config = Qwen3LegacyLoRAConvertConfig(
         batch_size=1,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
         quant_scheme=quant_scheme,
-        quant_weight=args.quant_weight,
+        quant_weight=quant_weight,
         mix_search=args.mix_search,
         num_logits_to_keep=args.num_logits_to_keep,
         lora_checkpoint=args.lora_checkpoint,
     )
 
     prefix = f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}-lora"
+    if args.method_tag:
+        prefix += f"-{args.method_tag}"
     work_dir = Path("work_dirs") / prefix
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
@@ -81,5 +94,9 @@ if __name__ == "__main__":
         default="/data01/nfs_shared/customer_models/kylin_qwen3-8b-lora/lora_sq_intent_fp32_v1.0.1_20260123.gguf",
         help="lora checkpoint path, should be in gguf format, and should contain the LoRA weights",
     )
+    parser.add_argument("--method-tag", type=str, default=None,
+                        help="tag appended to output dir, e.g. common/quarot/gptq")
+    parser.add_argument("--matmul-a2-bits", type=int, default=None,
+                        help="if set, override MatMul ops act_schema_2 bits (e.g. 16)")
     args = parser.parse_args()
     main(args)
