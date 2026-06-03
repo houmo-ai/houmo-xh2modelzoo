@@ -127,12 +127,17 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         outs = super().forward(*args)
 
         logits, *linear_caches = outs
-        conv_cache_out_list, recurrent_state_out_list = (
-            linear_caches[: len(linear_caches) // 2],
-            linear_caches[len(linear_caches) // 2 :],
-        )
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
+        if self._kvcache_mixin.split_conv_cache:
+            recurrent_state_count = len(past_recurrent_states)
+            conv_cache_out_list = linear_caches[:-recurrent_state_count]
+            recurrent_state_out_list = linear_caches[-recurrent_state_count:]
+        else:
+            conv_cache_out_list, recurrent_state_out_list = (
+                linear_caches[: len(linear_caches) // 2],
+                linear_caches[len(linear_caches) // 2 :],
+            )
         # 更新cache
         if self._kvcache_mixin.split_conv_cache:
             grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)

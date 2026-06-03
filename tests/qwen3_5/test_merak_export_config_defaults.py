@@ -209,6 +209,49 @@ def test_qwen3_5_moe_text_model_regroups_flat_split_conv_cache_before_layer_inde
     assert "_flatten_split_conv_cache_outputs" in names
 
 
+def test_qwen3_5_hmonnx_forward_splits_qkv_conv_outputs_from_recurrent_tail(monkeypatch):
+    import torch
+
+    from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
+        XHQwen3_5_HMONNXModel,
+    )
+
+    conv_outputs = [torch.full((1,), float(i)) for i in range(9)]
+    recurrent_outputs = [torch.full((1,), 100.0 + i) for i in range(3)]
+
+    def fake_forward(self, *args):
+        return torch.tensor([42.0]), *conv_outputs, *recurrent_outputs
+
+    monkeypatch.setattr(VisonLLMHMONNXModel, "forward", fake_forward)
+
+    class DummyKVCacheMixin:
+        split_conv_cache = True
+
+        def __init__(self):
+            self.past_conv_caches = [
+                (torch.zeros(1), torch.zeros(1), torch.zeros(1)) for _ in range(3)
+            ]
+            self.past_recurrent_states = [torch.zeros(1) for _ in range(3)]
+
+    model = XHQwen3_5_HMONNXModel.__new__(XHQwen3_5_HMONNXModel)
+    model._kvcache_mixin = DummyKVCacheMixin()
+
+    logits, conv_cache_out_list, recurrent_state_out_list = model.forward(torch.tensor([1]))
+
+    assert logits.tolist() == [42.0]
+    assert conv_cache_out_list == conv_outputs
+    assert recurrent_state_out_list == recurrent_outputs
+    for layer_idx, (past_q, past_k, past_v) in enumerate(model._kvcache_mixin.past_conv_caches):
+        assert torch.equal(past_q, conv_outputs[layer_idx * 3])
+        assert torch.equal(past_k, conv_outputs[layer_idx * 3 + 1])
+        assert torch.equal(past_v, conv_outputs[layer_idx * 3 + 2])
+    for past_state, recurrent_out in zip(
+        model._kvcache_mixin.past_recurrent_states, recurrent_outputs, strict=True
+    ):
+        assert torch.equal(past_state, recurrent_out)
+
+
 
 def test_qwen3_5_moe_text_model_forward_regroups_and_reflattens_split_conv_cache():
     import torch
