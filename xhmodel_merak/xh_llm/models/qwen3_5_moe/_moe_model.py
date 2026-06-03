@@ -214,15 +214,28 @@ def _get_activation_name(act_fn) -> str:
     return act_fn.__class__.__name__.lower()
 
 
-def _init_moe_linear_storage(moeblock: MoeBlock, experts, linear_name: str, device: torch.device):
-    linear = getattr(experts[0], linear_name)
+def _move_parameter_to_meta(module: nn.Module, parameter_name: str) -> None:
+    parameter = getattr(module, parameter_name)
+    meta_parameter = nn.Parameter(
+        torch.empty_like(parameter.data, device="meta"),
+        requires_grad=parameter.requires_grad,
+    )
+    setattr(module, parameter_name, meta_parameter)
+
+
+def _move_buffer_to_meta(module: nn.Module, buffer_name: str) -> None:
+    buffer = getattr(module, buffer_name)
+    module._buffers[buffer_name] = torch.empty_like(buffer, device="meta")
+
+
+def _init_single_moe_linear_storage(moeblock: MoeBlock, experts, linear, linear_name: str, device: torch.device):
     weight = linear.weight
 
     setattr(
         moeblock,
         f"expert_{linear_name}_weight",
         nn.Parameter(
-            torch.zeros(
+            torch.empty(
                 len(experts),
                 weight.shape[0],
                 weight.shape[1],
@@ -237,7 +250,7 @@ def _init_moe_linear_storage(moeblock: MoeBlock, experts, linear_name: str, devi
         setattr(
             moeblock,
             f"expert_{linear_name}_quant_weight",
-            torch.zeros(
+            torch.empty(
                 len(experts),
                 quant_weight.shape[0],
                 quant_weight.shape[1],
@@ -252,7 +265,7 @@ def _init_moe_linear_storage(moeblock: MoeBlock, experts, linear_name: str, devi
             moeblock,
             f"expert_{linear_name}_bias",
             nn.Parameter(
-                torch.zeros(
+                torch.empty(
                     len(experts),
                     bias.shape[0],
                     device=device,
@@ -264,22 +277,36 @@ def _init_moe_linear_storage(moeblock: MoeBlock, experts, linear_name: str, devi
         setattr(moeblock, f"expert_{linear_name}_bias", None)
 
 
-def _copy_defused_expert_weights_to_moeblock(moeblock: MoeBlock, experts, device: torch.device):
+def _pack_defused_expert_linear_to_moeblock(moeblock: MoeBlock, experts, linear_name: str, device: torch.device):
+    _init_single_moe_linear_storage(moeblock, experts, getattr(experts[0], linear_name), linear_name, device)
+
     with torch.no_grad():
         for expert_idx, expert in enumerate(experts):
-            for linear_name in ("gate_proj", "up_proj", "down_proj"):
-                linear = getattr(expert, linear_name)
-                getattr(moeblock, f"expert_{linear_name}_weight")[expert_idx].copy_(linear.weight.data.to(device))
+            linear = getattr(expert, linear_name)
+            weight_data = linear.weight.data
+            if weight_data.device != device:
+                weight_data = weight_data.to(device)
+            getattr(moeblock, f"expert_{linear_name}_weight")[expert_idx].copy_(weight_data)
 
-                quant_weight = getattr(linear, "quant_weight", None)
-                if quant_weight is not None and hasattr(moeblock, f"expert_{linear_name}_quant_weight"):
-                    getattr(moeblock, f"expert_{linear_name}_quant_weight")[expert_idx].copy_(
-                        quant_weight.data.to(device)
-                    )
+            quant_weight = getattr(linear, "quant_weight", None)
+            if quant_weight is not None and hasattr(moeblock, f"expert_{linear_name}_quant_weight"):
+                quant_weight_data = quant_weight.data
+                if quant_weight_data.device != device:
+                    quant_weight_data = quant_weight_data.to(device)
+                getattr(moeblock, f"expert_{linear_name}_quant_weight")[expert_idx].copy_(quant_weight_data)
 
-                bias = linear.bias
-                if bias is not None and getattr(moeblock, f"expert_{linear_name}_bias") is not None:
-                    getattr(moeblock, f"expert_{linear_name}_bias")[expert_idx].copy_(bias.data.to(device))
+            bias = linear.bias
+            if bias is not None and getattr(moeblock, f"expert_{linear_name}_bias") is not None:
+                bias_data = bias.data
+                if bias_data.device != device:
+                    bias_data = bias_data.to(device)
+                getattr(moeblock, f"expert_{linear_name}_bias")[expert_idx].copy_(bias_data)
+
+            _move_parameter_to_meta(linear, "weight")
+            if bias is not None:
+                _move_parameter_to_meta(linear, "bias")
+            if quant_weight is not None:
+                _move_buffer_to_meta(linear, "quant_weight")
 
 
 # ============================================================================
@@ -848,9 +875,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         # QTL-341: route depthwise conv1d tail through self.conv1d module
         # (default) so hmonnx export emits a clean Conv op. Set True to fall
         # back to the legacy _manual_depthwise_conv1d_tail manual unroll.
-        self.use_manual_depthwise_conv1d = cfg.get(
-            "use_manual_depthwise_conv1d", False
-        )
+        self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)
 
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
@@ -1204,18 +1229,37 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
             # Split packed gate_up_proj -> gate_proj + up_proj
             # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
             intermediate_dim = experts.intermediate_dim
-            gate_up = experts.gate_up_proj.data.to(self.device)
-            gate_proj_weight = gate_up[:, :intermediate_dim, :].contiguous()
-            up_proj_weight = gate_up[:, intermediate_dim:, :].contiguous()
-            down_proj_weight = experts.down_proj.data.to(self.device).contiguous()
+            gate_up = experts.gate_up_proj.data
+            num_experts = gate_up.shape[0]
+            target_dtype = gate_up.dtype
 
-            self.moeblock.expert_gate_proj_weight = nn.Parameter(gate_proj_weight)
+            self.moeblock.expert_gate_proj_weight = nn.Parameter(
+                torch.empty(num_experts, intermediate_dim, hidden_dim, device=self.device, dtype=target_dtype)
+            )
             self.moeblock.expert_gate_proj_bias = None
-            self.moeblock.expert_up_proj_weight = nn.Parameter(up_proj_weight)
-            self.moeblock.expert_up_proj_bias = None
-            self.moeblock.expert_down_proj_weight = nn.Parameter(down_proj_weight)
-            self.moeblock.expert_down_proj_bias = None
+            self.moeblock.expert_gate_proj_weight.data.copy_(gate_up[:, :intermediate_dim, :].to(self.device))
 
+            self.moeblock.expert_up_proj_weight = nn.Parameter(
+                torch.empty(num_experts, intermediate_dim, hidden_dim, device=self.device, dtype=target_dtype)
+            )
+            self.moeblock.expert_up_proj_bias = None
+            self.moeblock.expert_up_proj_weight.data.copy_(gate_up[:, intermediate_dim:, :].to(self.device))
+
+            # Release the packed gate_up tensor before wiring the remaining
+            # expert weights so the wrap peak does not hold both layouts longer
+            # than necessary.
+            _move_parameter_to_meta(experts, "gate_up_proj")
+            del gate_up
+
+            down_proj = experts.down_proj
+            if down_proj.device == self.device and down_proj.is_contiguous():
+                self.moeblock.expert_down_proj_weight = down_proj
+            else:
+                self.moeblock.expert_down_proj_weight = nn.Parameter(down_proj.data.to(self.device).contiguous())
+            _move_parameter_to_meta(experts, "down_proj")
+
+            self.moeblock.expert_down_proj_bias = None
+            del down_proj
             # Release original packed experts to free memory
             del self.experts
         elif (
@@ -1225,16 +1269,13 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
             and hasattr(experts[0], "down_proj")
         ):
             for linear_name in ("gate_proj", "up_proj", "down_proj"):
-                _init_moe_linear_storage(self.moeblock, experts, linear_name, self.device)
-
-            _copy_defused_expert_weights_to_moeblock(self.moeblock, experts, self.device)
+                _pack_defused_expert_linear_to_moeblock(self.moeblock, experts, linear_name, self.device)
 
             # Release expert modules after packing to reduce memory.
             self.experts = nn.ModuleList()
         else:
             raise RuntimeError(f"Unsupported Qwen3.5-MoE experts structure: {type(experts)}")
         torch.cuda.empty_cache()
-
         return self
 
 

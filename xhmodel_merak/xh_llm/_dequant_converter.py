@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from xhquant.nn import FX_LEAF_MODULES
+
 
 def qlinear_cuda_old_converter(self: nn.Module):
     from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
@@ -74,6 +76,9 @@ def qlinear_cuda_old_converter(self: nn.Module):
         delattr(self, "g_idx")
     weight = weight.t()
     quant_weight = quant_weight.t()
+    assert quant_weight.dtype in [torch.int8, torch.int16], (
+        f"Expected quant_weight to be int8 or int16, but got {quant_weight.dtype}"
+    )
     self.register_parameter("weight", nn.Parameter(weight))
     self.register_buffer("quant_weight", quant_weight)
     self.__class__ = nn.Linear
@@ -207,10 +212,43 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     self.__class__ = nn.Linear
 
 
+@FX_LEAF_MODULES.register_module()
+class DequantLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__(in_features, out_features, bias)
+
+    def __getattr__(self, name):
+        if name == "weight":
+            # Prefer an already materialized weight and skip lazy reconstruction.
+            weight_param = self._parameters.get("weight") if hasattr(self, "_parameters") else None
+            if weight_param is not None:
+                return weight_param
+
+            weight = self.quant_weight.to("meta") * self.scale_or_exp.to("meta")
+            weight = torch.empty_like(weight, device=self.quant_weight.device)
+            return weight
+
+        return super().__getattr__(name)
+
+
 def autoround_torch_qlinear_converter(self: nn.Module):
     quant_module_name = type(self).__module__
     add_one_to_zeros = quant_module_name.endswith("qlinear_torch_zp")
+    old_device = None
+    try:
+        old_device = next(iter(self.parameters())).device  # make sure parameters are initialized
+    except StopIteration:
+        pass
 
+    if old_device is None:
+        try:
+            old_device = next(iter(self.buffers())).device  # try buffers if no parameters
+        except StopIteration:
+            pass
+    if old_device is None:
+        old_device = torch.device("cpu")  # default to CPU if no parameters or buffers
+    device = torch.device("cuda") if torch.cuda.is_available() else old_device
+    self.to(device)
     if self.bits in [2, 4, 8]:
         if self.wf.device != self.qzeros.device:
             self.wf = torch.tensor(
@@ -265,11 +303,13 @@ def autoround_torch_qlinear_converter(self: nn.Module):
     if hasattr(self, "g_idx"):
         quant_weight = weight - zeros[self.g_idx.long()]
         dense_weight = self.scales[self.g_idx.long()] * quant_weight
+        scale_or_exp = self.scales[self.g_idx.long()].contiguous()
     else:
         repeat_scales = self.scales.repeat_interleave(self.group_size, dim=0)
         repeat_zeros = zeros.repeat_interleave(self.group_size, dim=0)
         quant_weight = weight - repeat_zeros
         dense_weight = repeat_scales * quant_weight
+        scale_or_exp = repeat_scales.contiguous()
 
     if hasattr(self, "qweight"):
         delattr(self, "qweight")
@@ -282,11 +322,16 @@ def autoround_torch_qlinear_converter(self: nn.Module):
 
     dense_weight = dense_weight.t().contiguous()
     quant_weight = quant_weight.t().contiguous()
+    scale_or_exp = scale_or_exp.t().contiguous()
+
     self.register_parameter("weight", nn.Parameter(dense_weight, requires_grad=False))
     self.register_buffer("quant_weight", quant_weight)
+    # self.register_buffer("scale_or_exp", scale_or_exp)
     self.__class__ = nn.Linear
+    # self.__class__ = DequantLinear
     self.out_features = self.outfeatures
     self.in_features = self.infeatures
+    self.to(old_device)
 
 
 def restore_autoround_qwen3_5_moe_sparse_block(module: nn.Module, model_config) -> nn.Module:

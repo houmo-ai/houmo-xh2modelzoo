@@ -19,6 +19,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+
+from dataclasses import dataclass
+
 import torch
 
 from xhquant.utils.registry import DynamicModule
@@ -198,3 +201,53 @@ def is_graph_module(model):
     import torch.fx as fx
 
     return isinstance(model, (fx.GraphModule, fx.Interpreter))
+
+
+@dataclass
+class MemoryInfo:
+    VmRSS: float = 0.0
+    VmHWM: float = 0.0
+    VmSize: float = 0.0
+    VmPeak: float = 0.0
+
+    def __repr__(self):
+        return f"VmRSS={self.VmRSS:.2f} GB, VmHWM={self.VmHWM:.2f} GB, VmSize={self.VmSize:.2f} GB, VmPeak={self.VmPeak:.2f} GB"
+
+
+def get_cpu_memory_mb() -> MemoryInfo:
+    result = MemoryInfo(VmRSS=0.0, VmHWM=0.0, VmSize=0.0, VmPeak=0.0)
+
+    with open("/proc/self/status", "r") as f:
+        for line in f:
+            if line.startswith(("VmRSS:", "VmHWM:", "VmSize:", "VmPeak:")):
+                key, value, unit = line.split()
+                key = key.rstrip(":")
+                kb = int(value)
+                setattr(result, key, kb / 1024 / 1024)
+
+    return result
+
+
+def get_model_param_buffer_size_gb(model) -> tuple[float, float]:
+    param_numel = 0
+    param_bytes = 0
+
+    buffer_numel = 0
+    buffer_bytes = 0
+
+    for p in model.parameters():
+        if p.device.type == "meta":
+            continue
+        param_numel += p.numel()
+        param_bytes += p.numel() * p.element_size()
+
+    for b in model.buffers():
+        if b.device.type == "meta":
+            continue
+        buffer_numel += b.numel()
+        buffer_bytes += b.numel() * b.element_size()
+
+    total_numel = param_numel + buffer_numel
+    total_bytes = param_bytes + buffer_bytes
+
+    return total_numel / 1000**3, total_bytes / 1024**3

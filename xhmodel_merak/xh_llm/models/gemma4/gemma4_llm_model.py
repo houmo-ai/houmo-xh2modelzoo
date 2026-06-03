@@ -11,7 +11,9 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration as XHGemma4ForConditionalGeneration
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4ForConditionalGeneration as XHGemma4ForConditionalGeneration,
+)
 
 from xhquant.utils import get_xhquant_logger, log_function_call
 from xhquant.utils.registry import DynamicModule, _DMRegistryCls
@@ -28,14 +30,35 @@ from .xh_gemma4_config import XHGemma4ModelConfig
 
 
 def _copy_model_shared_params(model: nn.Module) -> nn.Module:
-    """Deep-copy model structure; all parameters and buffers share data with the original (zero extra VRAM)."""
+    """Deep-copy model structure while sharing every tensor object with the original."""
+
+    def _share_tensors(obj: Any, memo: dict[int, Any], seen: set[int]) -> None:
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+
+        if isinstance(obj, nn.Parameter):
+            memo.setdefault(obj_id, nn.Parameter(obj.data, requires_grad=obj.requires_grad))
+            return
+        if torch.is_tensor(obj):
+            memo.setdefault(obj_id, obj)
+            return
+        if isinstance(obj, nn.Module):
+            for value in obj.__dict__.values():
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                _share_tensors(key, memo, seen)
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                _share_tensors(item, memo, seen)
+
     memo: dict[int, Any] = {}
-    for param in model.parameters():
-        if id(param) not in memo:
-            memo[id(param)] = nn.Parameter(param.data, requires_grad=param.requires_grad)
-    for buf in model.buffers():
-        if id(buf) not in memo:
-            memo[id(buf)] = buf
+    _share_tensors(model, memo, set())
     return copy.deepcopy(model, memo)
 
 
@@ -187,9 +210,7 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
             steps = (seq_length + chunk_len - 1) // chunk_len
             pad_len = steps * chunk_len - seq_length
             if pad_len > 0:
-                pad_embeds = self.get_input_embeddings()(
-                    torch.zeros(1, pad_len, dtype=torch.long, device=device)
-                )
+                pad_embeds = self.get_input_embeddings()(torch.zeros(1, pad_len, dtype=torch.long, device=device))
                 inputs_embeds = torch.cat([inputs_embeds, pad_embeds], dim=1)
                 mm_full = torch.cat([mm_full, torch.zeros(pad_len, dtype=torch.long, device=device)])
 
@@ -482,6 +503,8 @@ class XHGemma4Model(VisionLLMModel):  # noqa: N801
         meta_info = cast(VLLMModelMeta, exported_info.meta)
         meta_info.visual_config = visual_meta
         self._export_hmonnx(exported_info)
-        json.dump(meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4)
+        json.dump(
+            meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4
+        )
         logger.info(f"Exporting completed! Exported model is saved at: {exported_info.exported_dir}")
         return meta_info

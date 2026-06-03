@@ -22,9 +22,11 @@
 #   Qwen3.5 LLM model adapted for the xh2 model zoo (xh2modelzoo).
 
 import copy
+import gc
 import json
 from datetime import datetime
 from pathlib import Path
+from re import I
 from typing import Any, Optional, Union, cast
 
 import torch
@@ -34,17 +36,20 @@ from transformers import AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5CausalLMOutputWithPast
 
+from xhmodel_merak.xh_llm.base_model import get_model_param_buffer_size_gb
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
-from xhquant.core import CacheTensor
-from xhquant.utils import get_xhquant_logger, log_function_call, ConfigDict
+from xhquant import nn as xhnn
+from xhquant.api import CacheTensor, get_xhquant_logger
+from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import _DMRegistryCls
 
 from ...builder import register_llm_model
 from ...kv_cache_mixin import KVCacheWithLinearMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import ExportData, KVCacheWithLinearConfig, LLMModelState, ModelSwitcher, VLLMModelMeta
+from ...utils import get_cpu_memory_mb
 from ...vision_llm_model import VisionLLMModel
 from .data_preprocess import Qwen3_5_DataPreprocess
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
@@ -53,7 +58,6 @@ from .modeling_qwen3_5_patch import qwen3_5_patch
 from .qwen3_5_hmonnx_inference import XHQwen3_5_HMONNXModel
 from .split_conv_cache_utils import (
     _flatten_split_conv_cache_outputs,
-    _is_flat_split_conv_cache,
     _is_grouped_split_conv_cache,
     _regroup_flat_split_conv_cache,
 )
@@ -66,7 +70,7 @@ except ImportError:
     no_init_weights = init_empty_weights
 
 
-class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):
+class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
     """Extended mixin supporting split_conv_cache (3 separate q/k/v caches per layer)."""
 
     def __init__(self, kv_cache_config: KVCacheWithLinearConfig) -> None:
@@ -83,18 +87,33 @@ class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):
         batch_size = linear_cfg.batch_size
         kernel_size = linear_cfg.conv_kernel_size
         for _i in range(linear_cfg.num_layers):
-            conv_cache_q = CacheTensor(torch.zeros(
-                batch_size, self._linear_key_dim, kernel_size,
-                dtype=cache_dtype, device=self._device,
-            ))
-            conv_cache_k = CacheTensor(torch.zeros(
-                batch_size, self._linear_key_dim, kernel_size,
-                dtype=cache_dtype, device=self._device,
-            ))
-            conv_cache_v = CacheTensor(torch.zeros(
-                batch_size, self._linear_value_dim, kernel_size,
-                dtype=cache_dtype, device=self._device,
-            ))
+            conv_cache_q = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    self._linear_key_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
+            conv_cache_k = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    self._linear_key_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
+            conv_cache_v = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    self._linear_value_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
             self.past_conv_caches.append((conv_cache_q, conv_cache_k, conv_cache_v))
             recurrent_cache_shape = [
                 batch_size,
@@ -108,14 +127,35 @@ class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):
 
 
 def _copy_model_shared_params(model: nn.Module) -> nn.Module:
-    """深拷贝模型结构，所有 parameter 和 buffer 与原模型共享数据（零额外显存）。"""
+    """深拷贝模型结构，所有 tensor/parameter/buffer 与原模型共享数据。"""
+
+    def _share_tensors(obj: Any, memo: dict[int, Any], seen: set[int]) -> None:
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+
+        if isinstance(obj, nn.Parameter):
+            memo.setdefault(obj_id, nn.Parameter(obj.data, requires_grad=obj.requires_grad))
+            return
+        if torch.is_tensor(obj):
+            memo.setdefault(obj_id, obj)
+            return
+        if isinstance(obj, nn.Module):
+            for value in obj.__dict__.values():
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                _share_tensors(key, memo, seen)
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                _share_tensors(item, memo, seen)
+
     memo: dict[int, Any] = {}
-    for param in model.parameters():
-        if id(param) not in memo:
-            memo[id(param)] = nn.Parameter(param.data, requires_grad=param.requires_grad)
-    for buf in model.buffers():
-        if id(buf) not in memo:
-            memo[id(buf)] = buf
+    _share_tensors(model, memo, set())
     return copy.deepcopy(model, memo)
 
 
@@ -439,9 +479,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     def get_quant_cfg(self):
         quant_cfg = super().get_quant_cfg()
         quant_cfg.setdefault("ops_cfg", ConfigDict())
-        quant_cfg["ops_cfg"]["Normalize"] = ConfigDict(
-            force_fp32=self.config.normalize_force_fp32
-        )
+        quant_cfg["ops_cfg"]["Normalize"] = ConfigDict(force_fp32=self.config.normalize_force_fp32)
 
         cumsum_quant_cfg = self.config.cumsum_matmul_quant_config
         if cumsum_quant_cfg is None:
@@ -463,7 +501,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     def _to_quanted(self, frontend_model, state):
         prefill_fronted_model = frontend_model.prefill
         self.set_prefill()
-        prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state)
+        prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state, infer_shape=False)
 
         decode_fronted_model = frontend_model.decode
         self.set_decode()
@@ -477,6 +515,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         if spec_decode_mode in ("mtp", "dflash"):
             self._restore_prefill_wrap_cfg()
         self.set_prefill()
+
         model = ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
         model.set_activate_model("prefill")
         return model
@@ -496,11 +535,19 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.set_prefill()
         prefill_wrap_model = wrap_model
         decode_wrap_model = wrap_model
+        logger = get_xhquant_logger()
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage 1: {str(memory_info)}")
         decode_wrap_model = _copy_model_shared_params(wrap_model)
         self._wrap_model = prefill_wrap_model
         self._sync_split_conv_cache_state()
+
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage 2: {str(memory_info)}")
         prefill_frontend_model = super()._to_fronted(prefill_wrap_model)
 
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage 3: {str(memory_info)}")
         self._wrap_model = decode_wrap_model
         self.set_decode()
         self._sync_split_conv_cache_state()
@@ -529,6 +576,19 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         self._wrap_model = prefill_wrap_model
         self.set_prefill()
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage 4: {str(memory_info)}")
+        name2modules = {}
+        reuse_types = (nn.Linear, nn.Conv2d, nn.Conv2d, xhnn.MoeBlock)
+        for name, module in prefill_frontend_model.named_modules():
+            if isinstance(module, reuse_types):
+                name2modules[name] = module
+
+        for name, module in decode_frontend_model.named_modules():
+            if isinstance(module, reuse_types):
+                if name in name2modules:
+                    decode_frontend_model.set_submodule(name, name2modules[name])
+
         fronted_model = ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
         fronted_model.set_activate_model("prefill")
 
@@ -558,6 +618,13 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                 idx for idx, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
             ]
         del hf_model.model.visual
+
+        logger = get_xhquant_logger()
+        language_count, language_bytes = get_model_param_buffer_size_gb(hf_model)
+
+        logger.info(f"_wraped_pre model parameters: {language_count} B ({language_bytes:.2f} GB)")
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"CPU memory usage _wraped_pre: {str(memory_info)}")
         return hf_model
 
     def _wraped_post(self, hf_model: XHQwen3_5ForConditionalGeneration):
@@ -605,6 +672,25 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                 self.config.context_max_length,
                 head_dim,
             ]
+        fp32_tensors = {}
+        for name, param in self._wrap_model.named_parameters():
+            if param.dtype in [torch.float32]:
+                fp32_tensors[name] = param
+        for name, buffer in self._wrap_model.named_buffers():
+            if buffer.dtype in [torch.float32]:
+                fp32_tensors[name] = buffer
+
+        logger = get_xhquant_logger()
+        for name, tensor in fp32_tensors.items():
+            logger.info(
+                f"Tensor {name} is {tensor.dtype}, consider converting it to lower precision for better performance."
+            )
+        language_count, language_bytes = get_model_param_buffer_size_gb(self._wrap_model)
+
+        logger.info(f"_wraped_post model parameters: {language_count} B ({language_bytes:.2f} GB)")
+
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"CPU memory usage _wraped_post: {str(memory_info)}")
 
         hf_model = None
 
@@ -628,16 +714,12 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             past_recurrent_states = self._kvcache_mixin.past_recurrent_states
             if self._kvcache_mixin.split_conv_cache:
                 grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)
-                for (pq, pk, pv), (oq, ok, ov) in zip(
-                    past_conv_caches, grouped_conv_cache_out_list, strict=True
-                ):
+                for (pq, pk, pv), (oq, ok, ov) in zip(past_conv_caches, grouped_conv_cache_out_list, strict=True):
                     pq[:] = oq[:]
                     pk[:] = ok[:]
                     pv[:] = ov[:]
             else:
-                for past_conv_cache, conv_cache_out in zip(
-                    past_conv_caches, conv_cache_out_list, strict=True
-                ):
+                for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
                     past_conv_cache[:] = conv_cache_out[:]
             for past_recurrent_state, recurrent_state_out in zip(
                 past_recurrent_states, recurrent_state_out_list, strict=True
@@ -725,20 +807,14 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                 for cache_idx in range(linear_num_layers):
                     for branch in ("q", "k", "v"):
                         for step_idx in range(verify_steps):
-                            export_cfg["output_names"].append(
-                                f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"
-                            )
+                            export_cfg["output_names"].append(f"conv_cache_out_{branch}_{cache_idx}_{step_idx}")
             else:
                 for cache_idx in range(linear_num_layers):
                     for step_idx in range(verify_steps):
-                        export_cfg["output_names"].append(
-                            f"conv_cache_out_{cache_idx}_{step_idx}"
-                        )
+                        export_cfg["output_names"].append(f"conv_cache_out_{cache_idx}_{step_idx}")
             for cache_idx in range(linear_num_layers):
                 for step_idx in range(verify_steps):
-                    export_cfg["output_names"].append(
-                        f"recurrent_state_out_{cache_idx}_{step_idx}"
-                    )
+                    export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}_{step_idx}")
         else:
             if split_conv_cache:
                 for cache_idx in range(linear_num_layers):
@@ -792,25 +868,48 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
         logger = get_xhquant_logger()
         self.work_dir = str(output_dir)
+
+        self.to_wrap()
+
+        exported_info = self.get_export_info(output_dir)
+        meta_info = exported_info.meta
+        meta_info = cast(VLLMModelMeta, meta_info)
+        assert isinstance(meta_info, VLLMModelMeta), f"meta_info expected VLLMModelMeta, but get {type(meta_info)}"
+
+        visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
+        # 导出visual
+        assert hasattr(self, "visual") and self.visual is not None, (
+            "Visual model is not initialized, cannot export hmonnx."
+        )
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage before exporting visual hmonnx: {str(memory_info)}")
+        logger.info(f"Start exporting visual hmonnx to {visual_output_dir}")
+        self.visual.config.model_name = (
+            f"{exported_info.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
+        )
+        self.visual.to_quanted_aligned()
+        visual_meta = self.visual.export_hmonnx(visual_output_dir)
+        visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+        meta_info.visual_config = visual_meta
+        json.dump(
+            meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4
+        )
+
+        del self.visual
+        gc.collect()
+
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage after exporting visual hmonnx: {str(memory_info)}")
+
         if self._state != LLMModelState.QUANTED_ALIGNED:
             self.to_quanted_aligned()
         self._quanted_model.prefill.fixed()
         self._quanted_model.decode.fixed()
-        assert hasattr(self, "visual") and self.visual is not None, (
-            "Visual model is not initialized, cannot export hmonnx."
-        )
-        self.visual.quanted_model.fixed()
-        exported_info = self.get_export_info(output_dir)
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage after quantization: {str(memory_info)}")
+
         self.config.model_name = exported_info.model_name
-        visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
-        # 导出visual
-        self.visual.config.model_name = f"{exported_info.model_name}_visual"
-        visual_meta = self.visual.export_hmonnx(visual_output_dir)
-        visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
-        meta_info = exported_info.meta
-        meta_info = cast(VLLMModelMeta, meta_info)
-        assert isinstance(meta_info, VLLMModelMeta), f"meta_info expected VLLMModelMeta, but get {type(meta_info)}"
-        meta_info.visual_config = visual_meta
+
         spec_decode_mode = self.config.spec_decode_mode
         if spec_decode_mode in ("mtp", "dflash"):
             self._decode_input_sequence_length = self.config.num_draft_tokens + 1
@@ -829,6 +928,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
             self._quanted_model.prefill.apply(_apply_spec_decode_flags)
             self._quanted_model.decode.apply(_apply_spec_decode_flags)
+
         self._export_hmonnx(exported_info)
 
         # 导出 draft 模型 (MTP / DFlash)
@@ -862,9 +962,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
             meta_info.mtp_prefill_config = mtp_prefill_meta
             meta_info.mtp_decode_config = mtp_decode_meta
-            logger.info(
-                f"MTP draft models exported to: {mtp_prefill_cfg.work_dir}, {mtp_decode_cfg.work_dir}"
-            )
+            logger.info(f"MTP draft models exported to: {mtp_prefill_cfg.work_dir}, {mtp_decode_cfg.work_dir}")
 
         elif spec_decode_mode == "dflash" and self.config.dflash_config is not None:
             from .qwen3_5_dflash_model import XHQwen3_5DFlashDraftModel
@@ -908,8 +1006,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             meta_info.dflash_context_decode_config = ctx_dec_meta
             meta_info.dflash_decode_config = dec_meta
             logger.info(
-                "DFlash draft models exported to: "
-                f"{ctx_cfg.work_dir}, {ctx_dec_cfg.work_dir}, {dec_cfg.work_dir}"
+                f"DFlash draft models exported to: {ctx_cfg.work_dir}, {ctx_dec_cfg.work_dir}, {dec_cfg.work_dir}"
             )
 
         # 兼容 spec_decode test/bench 脚本的 meta 格式
@@ -919,12 +1016,9 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         meta_info.max_context_tokens = self.config.context_max_length
         if spec_decode_mode in ("mtp", "dflash"):
             num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
-            hidden_output_name = (
-                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
-            )
-            spec_block_size = (
-                num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
-            )
+            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+            spec_block_size = num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
+            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
             spec_decode_section = {
                 "mode": spec_decode_mode,
                 "block_size": spec_block_size,

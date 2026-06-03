@@ -1,6 +1,8 @@
+import gc
 from functools import partial
 
 import torch.nn as nn
+from tqdm import tqdm
 
 from xhquant.api import ConfigDict, get_xhquant_logger
 
@@ -36,14 +38,19 @@ def _wrap_llm_model(llm_model: nn.Module, config: ConfigDict, registry) -> nn.Mo
     except ImportError:
         pass
     logger = get_xhquant_logger()
-    for _, module in list(llm_model.named_modules()):
+    wrapping_modules = []
+    for _, module in llm_model.named_modules():
         if type(module) in registry:
             logger.debug(f"Model {type(module)} will be wrapped")
-            convert_module(module, config, registry)
+            wrapping_modules.append(module)
+
     wrap_llm_model = llm_model
     if type(llm_model) in registry:
         logger.debug(f"Model {type(llm_model)} will be wrapped")
-        wrap_llm_model = convert_module(llm_model, config, registry)  # id(wrap_llm_model) == id(llm_model)
+        wrapping_modules.append(llm_model)
+    for module in tqdm(wrapping_modules, desc="wrap modules"):
+        convert_module(module, config, registry)
+    gc.collect()
     return wrap_llm_model
 
 

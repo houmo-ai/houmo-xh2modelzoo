@@ -1,3 +1,5 @@
+import ctypes
+import gc
 import weakref
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -13,6 +15,12 @@ from tqdm import tqdm
 from transformers import AutoConfig, GenerationConfig
 from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
+
+from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
+from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
+from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
+from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
 from xhquant.api import (
     FXInterpreter,
     PrecisionMode,
@@ -31,17 +39,12 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import DynamicModule
 from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
-from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
-from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
-from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
-from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
-from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
-
 from ._dequant_converter import autoround_torch_qlinear_converter, restore_autoround_qwen3_5_moe_sparse_block
 from .device_mixin import DeviceMixin
 from .types import LLMModelMeta, LLMModelState, ModelMeta, ModelSwitcher
-from .utils import hf_auto_offload, unfold_args
+from .utils import get_cpu_memory_mb, get_model_param_buffer_size_gb, hf_auto_offload, unfold_args
 from .wrap_model import wrap_llm_model
+
 
 if TYPE_CHECKING:
     from .hmonnx import BaseLLMHMONNXModel
@@ -94,9 +97,15 @@ class XHBaseModel(DeviceMixin):
         return wrap_config
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if isinstance(value, XHBaseModel):
+        old_value = getattr(self, name, None)
+        if isinstance(old_value, XHBaseModel):
             self._models[name] = value
         return super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self._models:
+            del self._models[name]
+        return super().__delattr__(name)
 
     def get_kvcache_mixin(self):
         raise NotImplementedError(
@@ -191,7 +200,11 @@ class XHBaseModel(DeviceMixin):
         for _, sub_model in self._models.items():
             sub_model.to_wrap(hf_model)
         logger.info(f"Converting model {type(self).__name__} to wrap mode...")
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage before converting to wrap mode: {str(memory_info)}")
         self._to_wrap(hf_model)
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage after converting to wrap mode: {str(memory_info)}")
         self._state = LLMModelState.WRAP
 
     def _to_eager(self, aligned: bool = True):
@@ -276,7 +289,7 @@ class XHBaseModel(DeviceMixin):
                 )
         return quant_cfg
 
-    def _to_quanted(self, frontend_model, state):
+    def _to_quanted(self, frontend_model, state, auto_release_unused_parameters: bool = True, infer_shape: bool = True):
         target_device = self.config.chip_arch
         quant_cfg = self.get_quant_cfg()
         quanted_model = to_quant_graph(frontend_model, target_device, quant_cfg)
@@ -299,7 +312,8 @@ class XHBaseModel(DeviceMixin):
                     [calib_data],
                     PrecisionMode.ALIGNED if state == LLMModelState.QUANTED_ALIGNED else PrecisionMode.FAST,
                     [device],
-                    auto_release_unused_parameters=True,
+                    auto_release_unused_parameters=auto_release_unused_parameters,
+                    infer_shape=infer_shape,
                 )
         elif state == LLMModelState.QUANTED_DISABLE:
             pass
@@ -411,6 +425,15 @@ class XHBaseModel(DeviceMixin):
     def _wraped_pre(self, hf_model: Any):
         pass
 
+    @staticmethod
+    def _trim_cpu_allocator() -> None:
+        gc.collect()
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except Exception:
+            pass
+
     def init_wrap_model(self, hf_model: Any) -> Any:
         if hf_model is None:
             hf_model = self.get_native_model()
@@ -432,6 +455,7 @@ class XHBaseModel(DeviceMixin):
 
         check_wraped(self._wrap_model)
         self._wraped_post(hf_model)
+        self._trim_cpu_allocator()
         hf_model.to(self._dtype)
         return self._wrap_model
 
@@ -830,6 +854,7 @@ class XHBaseModel(DeviceMixin):
         This handles models loaded through `_load_gptqmodel` which contain QuantLinear layers.
         """
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
         from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
 
         hf_model = native_hf_model
@@ -887,7 +912,6 @@ class XHBaseModel(DeviceMixin):
         module_name: str,
         module: nn.Linear,
     ) -> nn.Linear:
-
         def _expand_compressed_tensors_group_param(
             module_name: str,
             value: Tensor,
@@ -1088,9 +1112,23 @@ class XHBaseModel(DeviceMixin):
             for _, module in hf_model.named_modules():
                 if isinstance(module, quantlinear_types):
                     dequant_linears.append(module)
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Found {len(dequant_linears)} AutoRound torch QuantLinear modules to dequantize.")
 
-        for module in tqdm(dequant_linears, desc="Dequantizing AutoRound QuantLinear modules"):
+        logger.info(f"Initial CPU memory usage before autoround dequantization: {str(memory_info)}")
+
+        for _, module in enumerate(tqdm(dequant_linears, desc="Dequantizing AutoRound QuantLinear modules")):
             autoround_torch_qlinear_converter(module)
+        gc.collect()
+
+        memory_info = get_cpu_memory_mb()
+        logger.info(f"Initial CPU memory usage After autoround dequantization: {str(memory_info)}")
+        visual_count, visual_bytes = get_model_param_buffer_size_gb(hf_model.model.visual)
+        language_count, language_bytes = get_model_param_buffer_size_gb(hf_model.model.language_model)
+        logger.info(
+            f"visual_count={visual_count} B, visual_bytes={visual_bytes:.2f} GB, "
+            f"language_count={language_count} B, language_bytes={language_bytes:.2f} GB"
+        )
 
         restored_moe_blocks = 0
         try:
@@ -1109,6 +1147,8 @@ class XHBaseModel(DeviceMixin):
         logger.info(f"Converted {len(dequant_linears)} AutoRound torch QuantLinear modules to nn.Linear.")
         if restored_moe_blocks > 0:
             logger.info(f"Restored {restored_moe_blocks} AutoRound Qwen3.5-MoE sparse blocks back to HF modules.")
+            memory_info = get_cpu_memory_mb()
+            logger.info(f"CPU memory usage after restoring MoE blocks: {str(memory_info)}")
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model

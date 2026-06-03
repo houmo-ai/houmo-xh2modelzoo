@@ -5,14 +5,15 @@
 # These modules are registered as FX leaf nodes so the tracer treats them
 # as opaque ops, producing a single node in the graph.
 
+import os as _os
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from xhquant.nn.builder import FX_LEAF_MODULES
 
-import os as _os
-import warnings
 
 # QTL-332: route GDRBlockTriInverse through the xhquant first-class custom op
 # (xh::GDRBlockTriInverse). The legacy in-file implementation is preserved
@@ -20,6 +21,7 @@ import warnings
 # ``XHQUANT_GDR_USE_LEGACY=1`` in the environment to force it.
 try:
     from xhquant.nn.modules import GDRBlockTriInverse as _XHQuantGDRBlockTriInverse
+
     _HAS_XHQUANT_GDR = True
 except ImportError:  # pragma: no cover - xhquant always installed in CI
     _HAS_XHQUANT_GDR = False
@@ -29,6 +31,7 @@ except ImportError:  # pragma: no cover - xhquant always installed in CI
 # ``LegacyGDRChunkScan``; set ``XHQUANT_GDR_USE_LEGACY=1`` to force it.
 try:
     from xhquant.nn.modules import GDRChunkScan as _XHQuantGDRChunkScan
+
     _HAS_XHQUANT_GDR_CHUNK_SCAN = True
 except ImportError:  # pragma: no cover - xhquant always installed in CI
     _HAS_XHQUANT_GDR_CHUNK_SCAN = False
@@ -40,6 +43,7 @@ except ImportError:  # pragma: no cover - xhquant always installed in CI
 # speculative decoding verification).
 try:
     from xhquant.nn.modules import GDRRecurrentScan as _XHQuantGDRRecurrentScan
+
     _HAS_XHQUANT_GDR_RECURRENT_SCAN = True
 except ImportError:  # pragma: no cover - xhquant always installed in CI
     _HAS_XHQUANT_GDR_RECURRENT_SCAN = False
@@ -273,7 +277,6 @@ class LegacyGDRRecurrentScan(nn.Module):
         if self.output_all_states:
             return (core_attn_out, last_recurrent_state, *state_snapshots)
         return core_attn_out, last_recurrent_state
-
 
 
 # --- QTL-332 dispatch -----------------------------------------------------
