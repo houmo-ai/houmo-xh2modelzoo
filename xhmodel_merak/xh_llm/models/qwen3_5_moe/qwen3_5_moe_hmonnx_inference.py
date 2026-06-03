@@ -1,12 +1,16 @@
 import torch
 
-from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheWithLinearMixin
 from xhmodel_merak.xh_llm.utils import unfold_args
 
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
 from .data_preprocess import Qwen3_5_DataPreprocess
+from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
+from ..qwen3_5.split_conv_cache_utils import (
+    _flatten_split_conv_cache_outputs,
+    _regroup_flat_split_conv_cache,
+)
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 
 
@@ -21,11 +25,14 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         self.visual = VisualHMONNXModel(self.visual_meta.hmonnx)
-        self._kvcache_mixin = KVCacheWithLinearMixin(self.kvcache_config)
+        self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
+        self._kvcache_mixin.split_conv_cache = bool(
+            getattr(meta_info.model_config, "split_conv_cache", False)
+        )
 
     @property
     def past_conv_caches(self):
-        return self._kvcache_mixin.past_conv_caches
+        return _flatten_split_conv_cache_outputs(self._kvcache_mixin.past_conv_caches)
 
     @property
     def past_recurrent_states(self):
@@ -73,8 +80,17 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
         # 更新cache
-        for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
-            past_conv_cache[:] = conv_cache_out[:]
+        if self._kvcache_mixin.split_conv_cache:
+            grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)
+            for (pq, pk, pv), (oq, ok, ov) in zip(
+                past_conv_caches, grouped_conv_cache_out_list, strict=True
+            ):
+                pq[:] = oq[:]
+                pk[:] = ok[:]
+                pv[:] = ov[:]
+        else:
+            for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
+                past_conv_cache[:] = conv_cache_out[:]
 
         for past_recurrent_state, recurrent_state_out in zip(
             past_recurrent_states, recurrent_state_out_list, strict=True

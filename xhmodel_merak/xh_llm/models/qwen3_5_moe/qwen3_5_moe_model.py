@@ -15,7 +15,11 @@ from xhquant.utils.registry import _DMRegistryCls
 from ...builder import register_llm_model
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...vision_llm_model import VisionLLMModel
-from ..qwen3_5.qwen3_5_llm_model import Qwen3_5_ModelMeta, XHQwen3_5Model
+from ..qwen3_5.qwen3_5_llm_model import (
+    Qwen3_5_ModelMeta,
+    XHQwen3_5Model,
+    _enforce_split_conv_cache_wrap_cfg,
+)
 from .qwen3_5_moe_hmonnx_inference import XHQwen3_5MoeHMONNXModel
 from .xh_qwen3_5_moe_config import XHQwen3_5MoeModelConfig
 
@@ -250,6 +254,25 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
 
         # self.wrap_cfg["linear_attention_mode"] = "chunk"  # for prefill
         # self.wrap_cfg["linear_attention_mode"] = "recurrent"  # for decode
+
+    def _wraped_post(self, hf_model: Qwen3_5MoeForConditionalGeneration):
+        super()._wraped_post(hf_model)
+
+        # The MoE wrapper follows the dense Qwen3.5 cache contract: external
+        # export/runtime signatures are flat q/k/v conv-cache tensors, while
+        # trace-time linear attention consumes per-layer (q, k, v) tuples.
+        # Re-apply the split flag after MoE wrapping so child DynamicModules do
+        # not silently trace the merged qkv path when the cache mixin/export
+        # side is already split.
+        language_model = self._get_language_model(self._wrap_model)
+        _enforce_split_conv_cache_wrap_cfg(language_model, self.wrap_cfg)
+
+        split_conv_cache = bool(self.wrap_cfg.get("split_conv_cache", False))
+        self._kvcache_mixin.split_conv_cache = split_conv_cache
+        if split_conv_cache and self.linear_attention_layer_indices:
+            linear_attn = language_model.layers[self.linear_attention_layer_indices[0]].linear_attn
+            self._kvcache_mixin._linear_key_dim = linear_attn.key_dim
+            self._kvcache_mixin._linear_value_dim = linear_attn.value_dim
 
     def init_wrap_model(self, hf_model: Qwen3_5MoeForConditionalGeneration) -> Any:
         from ._moe_model import register_wrap_modules

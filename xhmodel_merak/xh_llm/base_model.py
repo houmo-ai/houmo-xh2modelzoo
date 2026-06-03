@@ -503,7 +503,7 @@ class XHBaseModel(DeviceMixin):
     @classmethod
     def _load_quant_weight(cls, quant_weight_path: str, native_hf_model: nn.Module, strict: bool = True) -> bool:
         logger = get_xhquant_logger()
-        archive_file = quant_weight_path
+        archive_file = cls._resolve_quant_weight_archive(quant_weight_path)
         logger.info(f"Load previously saved checkpoint from: {archive_file}")
         is_safetensors = archive_file.endswith(".safetensors")
         state_dict: dict[str, Tensor]
@@ -540,6 +540,43 @@ class XHBaseModel(DeviceMixin):
         native_hf_model.load_state_dict(state_dict, strict=strict)
         del state_dict
         return True
+
+    @staticmethod
+    def _resolve_quant_weight_archive(quant_weight_path: str) -> str:
+        archive_path = Path(quant_weight_path)
+        if not archive_path.is_dir():
+            return str(archive_path)
+
+        preferred_names = (
+            "quant_weight.pt",
+            "quantized_weight.pt",
+            "model.pt",
+            "pytorch_model.bin",
+        )
+        for name in preferred_names:
+            candidate = archive_path / name
+            if candidate.is_file():
+                return str(candidate)
+
+        candidates = sorted(
+            path
+            for pattern in ("*.pt", "*.pth", "*.bin")
+            for path in archive_path.glob(pattern)
+            if path.is_file()
+        )
+        if len(candidates) == 1:
+            return str(candidates[0])
+        if not candidates:
+            raise FileNotFoundError(
+                f"quant_weight directory {archive_path} does not contain a torch checkpoint "
+                "(.pt, .pth, or .bin). safetensors/GPTQ HF directories are not supported here."
+            )
+
+        candidate_list = ", ".join(str(path) for path in candidates)
+        raise ValueError(
+            f"quant_weight directory {archive_path} contains multiple checkpoint candidates; "
+            f"please pass one file explicitly. Candidates: {candidate_list}"
+        )
 
     @classmethod
     def _load_gptqmodel(cls, hf_model_dir: str, device_map="cpu", **kwargs):

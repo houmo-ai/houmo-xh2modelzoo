@@ -22,19 +22,19 @@ source env.sh
 使用配置文件导出：
 
 ```bash
-python examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_export_hmonnx.py --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py
+python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py
 ```
 
 或者直接指定模型目录：
 
 ```bash
-python examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_export_hmonnx.py --model /data01/nfs_shared/Qwen3.5-35B-A3B --context-length 2048 --prefill-chunk-length 256 --quant-type w8a8h1_sefp
+python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py --model /data01/nfs_shared/Qwen3.5-35B-A3B --context-length 2048 --prefill-chunk-length 256
 ```
 
 如果要验证 GPTQModel 权重流程，可额外传入量化权重目录：
 
 ```bash
-python examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_export_hmonnx.py \
+python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
   --model /data01/nfs_shared/Qwen3.5-35B-A3B \
   --context-length 2048 \
   --prefill-chunk-length 256 \

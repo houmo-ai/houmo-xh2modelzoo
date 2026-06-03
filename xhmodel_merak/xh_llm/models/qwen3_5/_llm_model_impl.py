@@ -36,6 +36,7 @@ import types
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
@@ -74,6 +75,16 @@ except ImportError:
     FusedRMSNormGated = None
 
 _HF_QWEN35_MODELING = "transformers.models.qwen3_5.modeling_qwen3_5"
+
+from .split_conv_cache_utils import (
+    _flatten_split_conv_cache_outputs,
+    _get_linear_layer_conv_cache,
+    _is_nested_split_conv_cache,
+    _layers_use_split_conv_cache,
+    _looks_like_flat_split_conv_cache,
+    _regroup_flat_split_conv_cache,
+    _select_linear_attn_conv_cache,
+)
 
 
 def parallel_chunk_inverse_block(
@@ -633,7 +644,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
 
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
 
-        if getattr(self, "split_conv_cache", False):
+        if getattr(self, "split_conv_cache", False) or hasattr(self, "in_proj_q"):
             # === Split conv_cache path (3 separate q/k/v tensors) ===
             query_states = self.in_proj_q(hidden_states)
             key_states = self.in_proj_k(hidden_states)
@@ -900,7 +911,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", True)
         # QTL-341: route depthwise conv1d tail through self.conv1d so hmonnx
         # export emits a clean Conv op. xhquant 2d86b60+ routes any-kernel
@@ -1138,6 +1149,10 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self._verify_output_intermediates = cfg.get(
             "verify_output_intermediates", self._verify_output_intermediates
         )
+        self.split_conv_cache = (
+            cfg.get("split_conv_cache", self.split_conv_cache)
+            or hasattr(self, "in_proj_q")
+        )
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1288,7 +1303,7 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         self.output_post_norm_hidden = cfg.get("output_post_norm_hidden", False)
 
         # Detect split_conv_cache from cfg (propagated to linear attention layers)
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
 
         input_seq_len = cfg.input_sequence_length
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
@@ -1317,6 +1332,21 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         self.layer_types = self.config.layer_types
         self.num_full_attention_layers = sum(1 for t in self.layer_types if t == "full_attention")
         self.num_linear_attention_layers = sum(1 for t in self.layer_types if t == "linear_attention")
+
+        # Dense conversion can enter TextModel tracing before child linear-attn
+        # modules have independently consumed the full wrap cfg. Make the split
+        # cache contract explicit at the TextModel boundary so a flat external
+        # q/k/v signature is never threaded into a merged qkv GatedDeltaNet.
+        if self.split_conv_cache:
+            for idx_layer, decoder_layer in enumerate(self.layers):
+                if self.layer_types[idx_layer] != "linear_attention":
+                    continue
+                linear_attn = getattr(decoder_layer, "linear_attn", None)
+                if linear_attn is None:
+                    continue
+                linear_attn.split_conv_cache = True
+                if hasattr(linear_attn, "_setup") and not hasattr(linear_attn, "in_proj_q"):
+                    linear_attn._setup(cfg)
 
         # ---- M-RoPE interleaved masks ----
         # Get mrope_section from config
@@ -1476,6 +1506,17 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
         collected_hidden_states = []
+        split_conv_cache = self.split_conv_cache
+        if (
+            not split_conv_cache
+            and (
+                _looks_like_flat_split_conv_cache(past_conv_cache)
+                or _layers_use_split_conv_cache(self.layers)
+            )
+        ):
+            split_conv_cache = True
+        if split_conv_cache and _is_nested_split_conv_cache(past_conv_cache):
+            past_conv_cache = _regroup_flat_split_conv_cache(past_conv_cache)
 
         for idx, decoder_layer in enumerate(self.layers):
             layer_type = self.layer_types[idx]
@@ -1490,7 +1531,11 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
                 else:
                     _past_k_cache = None
                     _past_v_cache = None
-                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
+                    _past_conv_cache = _select_linear_attn_conv_cache(
+                        past_conv_cache,
+                        linear_attn_cache_idx,
+                        split_conv_cache,
+                    )
                     _past_recurrent_state = (
                         past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
@@ -1501,7 +1546,11 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
                 _past_k_cache = None
                 _past_v_cache = None
                 if layer_type == "linear_attention":
-                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
+                    _past_conv_cache = _select_linear_attn_conv_cache(
+                        past_conv_cache,
+                        linear_attn_cache_idx,
+                        split_conv_cache,
+                    )
                     _past_recurrent_state = (
                         past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
@@ -1559,6 +1608,7 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         if self.output_post_norm_hidden:
             post_norm_hidden = hidden_states
 
+        conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
         if self.output_hidden_state_indices is not None:
             return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
         elif self.output_post_norm_hidden:

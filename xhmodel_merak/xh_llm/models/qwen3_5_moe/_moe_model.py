@@ -62,6 +62,15 @@ from ..qwen3_5._delta_rule import (
     torch_chunk_gated_delta_rule,
     torch_recurrent_gated_delta_rule,
 )
+from ..qwen3_5.split_conv_cache_utils import (
+    _flatten_split_conv_cache_outputs,
+    _get_linear_layer_conv_cache,
+    _is_nested_split_conv_cache,
+    _layers_use_split_conv_cache,
+    _looks_like_flat_split_conv_cache,
+    _regroup_flat_split_conv_cache,
+    _select_linear_attn_conv_cache,
+)
 
 
 # FusedRMSNormGated from fla package (used when fla is installed)
@@ -149,6 +158,15 @@ def _align_linear_cache_args(
     ):
         return recurrent_state, conv_cache
     return conv_cache, recurrent_state
+
+
+def _split_linear_qkv_tensor(
+    tensor: Tensor,
+    key_dim: int,
+    value_dim: int,
+    dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    return torch.split(tensor, [key_dim, key_dim, value_dim], dim=dim)
 
 
 def _manual_depthwise_conv1d_tail(
@@ -536,14 +554,10 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
 
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Separate projections (Qwen3.5 style)
-        mixed_qkv = self.in_proj_qkv(hidden_states)  # [bs, seq, key_dim*2+value_dim]
         z = self.in_proj_z(hidden_states)  # [bs, seq, value_dim]
         z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
         b = self.in_proj_b(hidden_states)  # [bs, seq, num_v_heads]
         a = self.in_proj_a(hidden_states)  # [bs, seq, num_v_heads]
-
-        mixed_qkv = mixed_qkv.transpose(1, 2)  # [bs, conv_dim, seq]
 
         use_recurrent = self.linear_attention_mode == "recurrent"
         if self.linear_attention_mode == "auto" and current_input_length is not None:
@@ -551,43 +565,131 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             # FX trace path: unresolved symbolic length falls back to chunk mode.
             use_recurrent = (resolved_len == 1) if resolved_len is not None else False
 
-        # Conv1d with cache
-        conv_cache, recurrent_state = _align_linear_cache_args(
-            conv_cache,
-            recurrent_state,
-            self.conv_dim,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-        )
-        assert conv_cache is not None, "conv_cache is required"
-        conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
-        hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
-        conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
-        # QTL-341: prefer nn.Conv1d module so hmonnx emits a single Conv
-        # node. nn.Conv1d here uses padding=K-1, so output length is 2K+L-1;
-        # the slice matching the manual tail is [K : K+L] — NOT [-L:] (the
-        # trailing K-1 outputs read right-side padding zeros for K>1).
-        if self.use_manual_depthwise_conv1d:
-            conv_out = _manual_depthwise_conv1d_tail(
-                hidden_states_new,
-                self.conv1d_manual_weight,
-                getattr(self, "conv1d_manual_bias", None),
-                self.input_sequence_length,
+        if getattr(self, "split_conv_cache", False) or hasattr(self, "in_proj_q"):
+            query_states = self.in_proj_q(hidden_states)
+            key_states = self.in_proj_k(hidden_states)
+            value_states = self.in_proj_v(hidden_states)
+
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
+            if isinstance(conv_cache, (list, tuple)):
+                if len(conv_cache) != 3:
+                    raise RuntimeError(
+                        f"Expected 3 conv caches for linear attention, got {len(conv_cache)}"
+                    )
+                conv_cache_q = _normalize_linear_conv_cache_rank(conv_cache[0])
+                conv_cache_k = _normalize_linear_conv_cache_rank(conv_cache[1])
+                conv_cache_v = _normalize_linear_conv_cache_rank(conv_cache[2])
+            else:
+                conv_cache, recurrent_state = _align_linear_cache_args(
+                    conv_cache,
+                    recurrent_state,
+                    self.conv_dim,
+                    self.num_v_heads,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                )
+                assert conv_cache is not None, "conv_cache is required"
+                conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
+                conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
+                    conv_cache, self.key_dim, self.value_dim, dim=1,
+                )
+
+            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
+                self.conv1d_q.weight.dtype
+            )
+            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
+                self.conv1d_k.weight.dtype
+            )
+            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
+                self.conv1d_v.weight.dtype
+            )
+            conv_cache_out = (
+                self.conv_cache_slice(query_states_new, current_input_length),
+                self.conv_cache_slice(key_states_new, current_input_length),
+                self.conv_cache_slice(value_states_new, current_input_length),
+            )
+
+            if self.use_manual_depthwise_conv1d:
+                query_states = _manual_depthwise_conv1d_tail(
+                    query_states_new,
+                    self.conv1d_q_manual_weight,
+                    getattr(self, "conv1d_q_manual_bias", None),
+                    self.input_sequence_length,
+                )
+                key_states = _manual_depthwise_conv1d_tail(
+                    key_states_new,
+                    self.conv1d_k_manual_weight,
+                    getattr(self, "conv1d_k_manual_bias", None),
+                    self.input_sequence_length,
+                )
+                value_states = _manual_depthwise_conv1d_tail(
+                    value_states_new,
+                    self.conv1d_v_manual_weight,
+                    getattr(self, "conv1d_v_manual_bias", None),
+                    self.input_sequence_length,
+                )
+            else:
+                _k = self.conv_kernel_size
+                _l = self.input_sequence_length
+                query_states = self.conv1d_q(query_states_new)[:, :, _k : _k + _l]
+                key_states = self.conv1d_k(key_states_new)[:, :, _k : _k + _l]
+                value_states = self.conv1d_v(value_states_new)[:, :, _k : _k + _l]
+            query_states = F.silu(query_states).to(query_states.dtype)
+            key_states = F.silu(key_states).to(key_states.dtype)
+            value_states = F.silu(value_states).to(value_states.dtype)
+            mask_qkv = linear_attn_mask.unsqueeze(1)
+            query_states = query_states * mask_qkv
+            key_states = key_states * mask_qkv
+            value_states = value_states * mask_qkv
+
+            query = query_states.transpose(1, 2).reshape(
+                batch_size, seq_len, -1, self.head_k_dim
+            )
+            key = key_states.transpose(1, 2).reshape(
+                batch_size, seq_len, -1, self.head_k_dim
+            )
+            value = value_states.transpose(1, 2).reshape(
+                batch_size, seq_len, -1, self.head_v_dim
             )
         else:
-            _k = self.conv_kernel_size
-            _l = self.input_sequence_length
-            conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
-        mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
-        mask_qkv = linear_attn_mask.unsqueeze(1)
-        mixed_qkv = mixed_qkv * mask_qkv
+            mixed_qkv = self.in_proj_qkv(hidden_states)  # [bs, seq, key_dim*2+value_dim]
+            mixed_qkv = mixed_qkv.transpose(1, 2)  # [bs, conv_dim, seq]
 
-        mixed_qkv = mixed_qkv.transpose(1, 2)
-        query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
-        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+            conv_cache, recurrent_state = _align_linear_cache_args(
+                conv_cache,
+                recurrent_state,
+                self.conv_dim,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+            assert conv_cache is not None, "conv_cache is required"
+            conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
+            hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
+            conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
+            if self.use_manual_depthwise_conv1d:
+                conv_out = _manual_depthwise_conv1d_tail(
+                    hidden_states_new,
+                    self.conv1d_manual_weight,
+                    getattr(self, "conv1d_manual_bias", None),
+                    self.input_sequence_length,
+                )
+            else:
+                _k = self.conv_kernel_size
+                _l = self.input_sequence_length
+                conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
+            mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
+            mask_qkv = linear_attn_mask.unsqueeze(1)
+            mixed_qkv = mixed_qkv * mask_qkv
+
+            mixed_qkv = mixed_qkv.transpose(1, 2)
+            query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+            query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
+            key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
+            value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
         beta = b.sigmoid()
         g = self.A_log_exp * F.softplus(a + self.dt_bias)
@@ -667,6 +769,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.return_cache = cfg.get("return_cache", False)
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
+        self.split_conv_cache = cfg.get("split_conv_cache", True) or hasattr(self, "in_proj_q")
         # QTL-341: route depthwise conv1d tail through self.conv1d module
         # (default) so hmonnx export emits a clean Conv op. Set True to fall
         # back to the legacy _manual_depthwise_conv1d_tail manual unroll.
@@ -684,11 +787,90 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             del self._parameters["A_log"]
             self.register_buffer("A_log", _a_log_data, persistent=True)
 
+        # Keep MoE trace/export semantics aligned with dense Qwen3.5:
+        # split_conv_cache=True means external flat q/k/v cache inputs are
+        # regrouped by TextModel and consumed by separate q/k/v conv paths here.
+        if self.split_conv_cache and not hasattr(self, "in_proj_q"):
+            proj_has_bias = self.in_proj_qkv.bias is not None
+            proj_device = self.in_proj_qkv.weight.device
+            proj_dtype = self.in_proj_qkv.weight.dtype
+            q_weight, k_weight, v_weight = _split_linear_qkv_tensor(
+                self.in_proj_qkv.weight.detach().clone(),
+                self.key_dim,
+                self.value_dim,
+                dim=0,
+            )
+            self.in_proj_q = nn.Linear(
+                self.hidden_size, self.key_dim, bias=proj_has_bias,
+                device=proj_device, dtype=proj_dtype,
+            )
+            self.in_proj_k = nn.Linear(
+                self.hidden_size, self.key_dim, bias=proj_has_bias,
+                device=proj_device, dtype=proj_dtype,
+            )
+            self.in_proj_v = nn.Linear(
+                self.hidden_size, self.value_dim, bias=proj_has_bias,
+                device=proj_device, dtype=proj_dtype,
+            )
+            self.in_proj_q.weight.data.copy_(q_weight)
+            self.in_proj_k.weight.data.copy_(k_weight)
+            self.in_proj_v.weight.data.copy_(v_weight)
+            if proj_has_bias:
+                q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
+                    self.in_proj_qkv.bias.detach().clone(),
+                    self.key_dim, self.value_dim, dim=0,
+                )
+                self.in_proj_q.bias.data.copy_(q_bias)
+                self.in_proj_k.bias.data.copy_(k_bias)
+                self.in_proj_v.bias.data.copy_(v_bias)
+            del self.in_proj_qkv
+
+        if self.split_conv_cache and not hasattr(self, "conv1d_q"):
+            conv_has_bias = self.conv1d.bias is not None
+            conv_device = self.conv1d.weight.device
+            conv_dtype = self.conv1d.weight.dtype
+            q_weight, k_weight, v_weight = _split_linear_qkv_tensor(
+                self.conv1d.weight.detach().clone(),
+                self.key_dim,
+                self.value_dim,
+                dim=0,
+            )
+            self.conv1d_q = nn.Conv1d(
+                self.key_dim, self.key_dim, bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device, dtype=conv_dtype,
+            )
+            self.conv1d_k = nn.Conv1d(
+                self.key_dim, self.key_dim, bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device, dtype=conv_dtype,
+            )
+            self.conv1d_v = nn.Conv1d(
+                self.value_dim, self.value_dim, bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size, groups=self.value_dim,
+                padding=self.conv_kernel_size - 1,
+                device=conv_device, dtype=conv_dtype,
+            )
+            self.conv1d_q.weight.data.copy_(q_weight)
+            self.conv1d_k.weight.data.copy_(k_weight)
+            self.conv1d_v.weight.data.copy_(v_weight)
+            if conv_has_bias:
+                q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
+                    self.conv1d.bias.detach().clone(),
+                    self.key_dim, self.value_dim, dim=0,
+                )
+                self.conv1d_q.bias.data.copy_(q_bias)
+                self.conv1d_k.bias.data.copy_(k_bias)
+                self.conv1d_v.bias.data.copy_(v_bias)
+            del self.conv1d
+
         # Pre-compute head dimensions for TorchFX tracing compatibility
         self.chunk_num_heads = self.num_v_heads
         self.chunk_k_head_dim = self.head_k_dim
         self.chunk_v_head_dim = self.head_v_dim
-        target_dtype = self.in_proj_qkv.weight.dtype
+        target_dtype = self.in_proj_q.weight.dtype if self.split_conv_cache else self.in_proj_qkv.weight.dtype
         self.register_buffer(
             "chunk_scale",
             torch.tensor(
@@ -702,17 +884,50 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         a_log_exp = (-self.A_log.exp()).to(device=self.A_log.device, dtype=self.dt_bias.dtype)
         self.register_buffer("A_log_exp", a_log_exp, persistent=True)
 
-        self.register_buffer(
-            "conv1d_manual_weight",
-            self.conv1d.weight.detach().clone().squeeze(1),
-            persistent=True,
-        )
-        if self.conv1d.bias is not None:
+        if self.split_conv_cache:
             self.register_buffer(
-                "conv1d_manual_bias",
-                self.conv1d.bias.detach().clone(),
+                "conv1d_q_manual_weight",
+                self.conv1d_q.weight.detach().clone().squeeze(1),
                 persistent=True,
             )
+            self.register_buffer(
+                "conv1d_k_manual_weight",
+                self.conv1d_k.weight.detach().clone().squeeze(1),
+                persistent=True,
+            )
+            self.register_buffer(
+                "conv1d_v_manual_weight",
+                self.conv1d_v.weight.detach().clone().squeeze(1),
+                persistent=True,
+            )
+            if self.conv1d_q.bias is not None:
+                self.register_buffer(
+                    "conv1d_q_manual_bias",
+                    self.conv1d_q.bias.detach().clone(),
+                    persistent=True,
+                )
+                self.register_buffer(
+                    "conv1d_k_manual_bias",
+                    self.conv1d_k.bias.detach().clone(),
+                    persistent=True,
+                )
+                self.register_buffer(
+                    "conv1d_v_manual_bias",
+                    self.conv1d_v.bias.detach().clone(),
+                    persistent=True,
+                )
+        else:
+            self.register_buffer(
+                "conv1d_manual_weight",
+                self.conv1d.weight.detach().clone().squeeze(1),
+                persistent=True,
+            )
+            if self.conv1d.bias is not None:
+                self.register_buffer(
+                    "conv1d_manual_bias",
+                    self.conv1d.bias.detach().clone(),
+                    persistent=True,
+                )
 
         # Conv cache slice: extract last conv_kernel_size elements along time dim
         self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])
@@ -770,12 +985,21 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.return_cache = cfg.get("return_cache", self.return_cache)
         self.input_sequence_length = cfg.get("input_sequence_length", self.input_sequence_length)
         self.batch_size = cfg.get("batch_size", self.batch_size)
+        self.split_conv_cache = (
+            cfg.get("split_conv_cache", self.split_conv_cache)
+            or hasattr(self, "in_proj_q")
+        )
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
         num_chunks = (self.input_sequence_length + chunk_size - 1) // chunk_size
         flat_batch_size = self.batch_size * self.num_v_heads * num_chunks
-        target_dtype = self.chunk_scale.dtype if hasattr(self, "chunk_scale") else self.in_proj_qkv.weight.dtype
+        if hasattr(self, "chunk_scale"):
+            target_dtype = self.chunk_scale.dtype
+        elif self.split_conv_cache:
+            target_dtype = self.in_proj_q.weight.dtype
+        else:
+            target_dtype = self.in_proj_qkv.weight.dtype
         eye_matrix = (
             torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
             .unsqueeze(0)
@@ -1013,11 +1237,27 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
         self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
 
         # Layer type tracking
         self.layer_types = self.config.layer_types
         self.num_full_attention_layers = sum(1 for t in self.layer_types if t == "full_attention")
         self.num_linear_attention_layers = sum(1 for t in self.layer_types if t == "linear_attention")
+
+        # MoE conversion can enter TextModel tracing before child linear-attn
+        # modules have independently consumed the full wrap cfg. Make the split
+        # cache contract explicit at the TextModel boundary so a flat external
+        # q/k/v signature is never threaded into a merged qkv GatedDeltaNet.
+        if self.split_conv_cache:
+            for idx_layer, decoder_layer in enumerate(self.layers):
+                if self.layer_types[idx_layer] != "linear_attention":
+                    continue
+                linear_attn = getattr(decoder_layer, "linear_attn", None)
+                if linear_attn is None:
+                    continue
+                linear_attn.split_conv_cache = True
+                if hasattr(linear_attn, "_setup") and not hasattr(linear_attn, "in_proj_q"):
+                    linear_attn._setup(cfg)
 
         # ---- M-RoPE interleaved masks ----
         rope_parameters = self.config.rope_parameters
@@ -1112,6 +1352,17 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         recurrent_state_out_list = []
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
+        split_conv_cache = self.split_conv_cache
+        if (
+            not split_conv_cache
+            and (
+                _looks_like_flat_split_conv_cache(past_conv_cache)
+                or _layers_use_split_conv_cache(self.layers)
+            )
+        ):
+            split_conv_cache = True
+        if split_conv_cache and _is_nested_split_conv_cache(past_conv_cache):
+            past_conv_cache = _regroup_flat_split_conv_cache(past_conv_cache)
 
         for idx_layer, decoder_layer in enumerate(self.layers):
             layer_type = self.layer_types[idx_layer]
@@ -1126,7 +1377,11 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                 else:
                     _past_k_cache = None
                     _past_v_cache = None
-                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
+                    _past_conv_cache = _select_linear_attn_conv_cache(
+                        past_conv_cache,
+                        linear_attn_cache_idx,
+                        split_conv_cache,
+                    )
                     _past_recurrent_state = (
                         past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
@@ -1137,7 +1392,11 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                 # Linear attention layers need conv_cache/recurrent_state even
                 # when use_cache=False (as initial state for the computation)
                 if layer_type == "linear_attention":
-                    _past_conv_cache = past_conv_cache[linear_attn_cache_idx] if past_conv_cache is not None else None
+                    _past_conv_cache = _select_linear_attn_conv_cache(
+                        past_conv_cache,
+                        linear_attn_cache_idx,
+                        split_conv_cache,
+                    )
                     _past_recurrent_state = (
                         past_recurrent_state[linear_attn_cache_idx] if past_recurrent_state is not None else None
                     )
@@ -1187,6 +1446,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
         hidden_states = self.norm(hidden_states)
 
+        conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
         return hidden_states, conv_cache_out_list, recurrent_state_out_list
 
 
