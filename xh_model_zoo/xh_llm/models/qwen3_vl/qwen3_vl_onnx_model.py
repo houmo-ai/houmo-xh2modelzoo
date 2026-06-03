@@ -1719,3 +1719,225 @@ class Qwen3VLONNXModel(GraphHMONNXModelBase):
         if logger is not None:
             logger.info("Output: %s", output)
         return output
+
+    def embed_text(self, text: str, processor, use_fast: bool = False, keep_session: bool = False) -> torch.Tensor:
+        """
+        Extract embedding for a single text.
+
+        Args:
+            text: Input text string
+            processor: Qwen3VLProcessor instance
+            use_fast: Whether to use fast mode
+            keep_session: If True, reuse the prefill ONNX session across calls
+                (skip reload + release). Much faster for batch/eval workloads.
+
+        Returns:
+            Normalized embedding tensor of shape [1, hidden_dim]
+        """
+        # Build input with system prompt
+        conversations = [[
+            {"role": "system", "content": [{"type": "text", "text": "Represent the user's input."}]},
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+        ]]
+        rendered = processor.apply_chat_template(conversations, add_generation_prompt=True, tokenize=False)
+        inputs = processor(text=rendered, images=None, videos=None, padding=True, return_tensors="pt")
+
+        # Set input_sequence_length from prefill config
+        if self.input_sequence_length == 0:
+            self.input_sequence_length = self.prefill_config.input_sequence_length
+
+        # Build data_prefill dict (text-only, no vision)
+        # For text-only, we don't have vision features, so set them to None
+        # But prepare_inputs expects deepstack_image_embeds to be a tuple of 3 tensors or None
+        data_prefill = {
+            "input_ids": inputs["input_ids"],
+            "past_seq_length": 0,
+            "image_grid_thw": None,
+            "video_grid_thw": None,
+            "image_embeds": None,
+            "deepstack_image_embeds": None,  # Set to None instead of tuple
+        }
+
+        # Initialize and run prefill (reuse session if keep_session)
+        if not keep_session or self.prefill_session is None:
+            self.init_prefill()
+            self.to(self.device)
+            self.set_exec_device(self._exec_device)
+            if use_fast:
+                self.prefill_session.initialize()
+                self.prefill_session._session.to_fast_mode()
+
+        # Run prefill - this returns hidden states from the last token
+        hidden_states = self.prefill(data_prefill, save_golden=False)
+
+        # Extract embedding from last valid token
+        attention_mask = inputs["attention_mask"]
+        seq_len = int(attention_mask.sum().item())
+        last_pos = seq_len - 1
+        embedding = hidden_states[:, last_pos, :]
+        embedding = F.normalize(embedding.float(), p=2, dim=-1)
+
+        if not keep_session:
+            self.release_prefill_session()
+
+        return embedding
+
+    def embed_texts(self, texts: List[str], processor, use_fast: bool = False, keep_session: bool = True) -> torch.Tensor:
+        """
+        Extract embeddings for multiple texts.
+
+        Args:
+            texts: List of input text strings
+            processor: Qwen3VLProcessor instance
+            use_fast: Whether to use fast mode
+            keep_session: If True (default), keep the prefill ONNX session loaded
+                across all texts for speed, releasing it once at the end.
+
+        Returns:
+            Normalized embedding tensor of shape [len(texts), hidden_dim]
+        """
+        embeddings = []
+        for text in texts:
+            emb = self.embed_text(text, processor, use_fast, keep_session=keep_session)
+            embeddings.append(emb)
+        if keep_session:
+            self.release_prefill_session()
+        return torch.cat(embeddings, dim=0)
+
+    def embed_image_text(self, image_path: str, text: str = None, processor=None, use_fast: bool = False,
+                         keep_session: bool = False) -> torch.Tensor:
+        """
+        Extract embedding for image (+ optional text) input.
+
+        Args:
+            image_path: Path to input image
+            text: Optional text string (caption/query). If None/empty, image-only embedding.
+            processor: Qwen3VLProcessor instance
+            use_fast: Whether to use fast mode
+            keep_session: If True, reuse the vision + prefill ONNX sessions across
+                calls (skip reload + release). Much faster for batch/eval workloads.
+
+        Returns:
+            Normalized embedding tensor of shape [1, hidden_dim]
+        """
+        # Load and resize image (follows chat() pattern)
+        if self.resize_v1:
+            media_input = self.load_and_process_image(image_path)
+        else:
+            media_input = self.load_and_process_image_v2(image_path)
+
+        # Build messages with system prompt for embedding (multimodal)
+        # Embed the resized PIL image object directly (not the path),
+        # matching create_template() so process_vision_info uses it as-is.
+        user_content = [{"type": "image", "image": media_input}]
+        if text:
+            user_content.append({"type": "text", "text": text})
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": "Represent the user's input."}]},
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+
+        # Use preprocess() with custom template (cus_temp=True passes messages directly)
+        inputs = self.preprocess(messages, media_input, processor, cus_temp=True, media_type="image")
+        inputs = inputs.to(self.device)
+
+        # Set input_sequence_length from prefill config if not set
+        if self.input_sequence_length == 0:
+            self.input_sequence_length = self.prefill_config.input_sequence_length
+
+        # Extract vision features (reuse session if keep_session)
+        if not keep_session or self.image_feature_session is None:
+            self.init_image_feature()
+            self.to(self.device)
+            self.set_exec_device(self._exec_device)
+            if use_fast:
+                self.image_feature_session.initialize()
+                self.image_feature_session._session.to_fast_mode()
+
+        visual_inputs = self.preprocess_visual(inputs)
+        visual_features, deepstack_0, deepstack_1, deepstack_2 = self.extract_image_features(visual_inputs)
+        if not keep_session:
+            self.release_image_feature()
+
+        deepstack_visual_features = (deepstack_0, deepstack_1, deepstack_2)
+
+        # Build data_prefill dict with vision features
+        data_prefill = {
+            "input_ids": inputs["input_ids"],
+            "past_seq_length": 0,
+            "image_grid_thw": inputs.get("image_grid_thw", None),
+            "video_grid_thw": inputs.get("video_grid_thw", None),
+            "image_embeds": visual_features,
+            "deepstack_image_embeds": deepstack_visual_features,
+        }
+
+        # Initialize and run prefill (reuse session if keep_session)
+        if not keep_session or self.prefill_session is None:
+            self.init_prefill()
+            self.to(self.device)
+            self.set_exec_device(self._exec_device)
+            if use_fast:
+                self.prefill_session.initialize()
+                self.prefill_session._session.to_fast_mode()
+
+        # Run prefill
+        hidden_states = self.prefill(data_prefill, save_golden=False)
+
+        # Extract embedding from last valid token
+        attention_mask = inputs["attention_mask"]
+        seq_len = int(attention_mask.sum().item())
+        last_pos = seq_len - 1
+        embedding = hidden_states[:, last_pos, :]
+        embedding = F.normalize(embedding.float(), p=2, dim=-1)
+
+        if not keep_session:
+            self.release_prefill_session()
+
+        return embedding
+
+    def embed_image(self, image_path: str, processor, use_fast: bool = False,
+                    keep_session: bool = False) -> torch.Tensor:
+        """
+        Extract embedding for image-only input (no text).
+
+        Convenience wrapper around embed_image_text() with text=None.
+        Used for image-to-text retrieval where the image is the query.
+
+        Args:
+            image_path: Path to input image
+            processor: Qwen3VLProcessor instance
+            use_fast: Whether to use fast mode
+            keep_session: If True, reuse the vision + prefill ONNX sessions across calls.
+
+        Returns:
+            Normalized embedding tensor of shape [1, hidden_dim]
+        """
+        return self.embed_image_text(image_path, text=None, processor=processor,
+                                     use_fast=use_fast, keep_session=keep_session)
+
+    def embed_images(self, image_paths: List[str], processor, use_fast: bool = False,
+                     keep_session: bool = True) -> torch.Tensor:
+        """
+        Extract embeddings for multiple images (image-only).
+
+        Args:
+            image_paths: List of input image paths
+            processor: Qwen3VLProcessor instance
+            use_fast: Whether to use fast mode
+            keep_session: If True (default), keep the vision + prefill ONNX sessions
+                loaded across all images for speed, releasing them once at the end.
+
+        Returns:
+            Normalized embedding tensor of shape [len(image_paths), hidden_dim]
+        """
+        embeddings = []
+        for img_path in image_paths:
+            emb = self.embed_image(img_path, processor, use_fast, keep_session=keep_session)
+            embeddings.append(emb)
+        if keep_session:
+            self.release_image_feature()
+            self.release_prefill_session()
+        return torch.cat(embeddings, dim=0)
