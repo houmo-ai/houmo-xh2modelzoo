@@ -2439,7 +2439,7 @@ def main(args):
         cfg.model.wrap_cfg.split_conv_cache = True
     if getattr(args, "num_blocks", None) is not None:
         cfg.model.wrap_cfg.max_layers = args.num_blocks
-    cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", True)
+    cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)
     cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
         args, "use_manual_depthwise_conv1d", False
     )

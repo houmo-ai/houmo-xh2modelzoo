@@ -284,6 +284,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.config = cast(XHQwen3_5ModelConfig, self.config)
         self.wrap_cfg["linear_attention_mode"] = "auto"
         self.wrap_cfg["linear_chunk_size"] = self.config.linear_chunk_size
+        self.wrap_cfg["fuse_gdr_ops"] = self.config.fuse_gdr_ops
         self.wrap_cfg["split_conv_cache"] = self.config.split_conv_cache
         self.wrap_cfg["use_manual_depthwise_conv1d"] = self.config.use_manual_depthwise_conv1d
         if self.config.spec_decode_mode == "dflash":

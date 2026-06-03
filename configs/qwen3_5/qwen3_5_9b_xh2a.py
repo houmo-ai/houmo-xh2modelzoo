@@ -70,6 +70,7 @@ model = dict(
         num_logits_to_keep=1,
         linear_attention_mode="auto",
         linear_chunk_size=64,
+        fuse_gdr_ops=False,
         support_long_context_over_fp16_limit=False,
         kv_cache=dict(
             cache_axis=2,

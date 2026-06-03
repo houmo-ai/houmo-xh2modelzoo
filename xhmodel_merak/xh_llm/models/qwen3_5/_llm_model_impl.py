@@ -912,7 +912,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
         self.split_conv_cache = cfg.get("split_conv_cache", True)
-        self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", True)
+        self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d so hmonnx
         # export emits a clean Conv op. xhquant 2d86b60+ routes any-kernel
         # depthwise conv2d (groups==in==out) into the VP triton impl, so the
