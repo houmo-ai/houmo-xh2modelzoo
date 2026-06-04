@@ -34,4 +34,7 @@ class Qwen3NextConvertConfig(LLMConvertConfig):
     alpha_scaling_layers: List[int] = field(default_factory=lambda: [8, 20])
     chunk_inverse_alpha: float = 0.5
     cumsum_matmul_quant_config: Optional[Dict] = None
-    split_conv_cache: bool = False
+    normalize_force_fp32: bool = False
+    split_conv_cache: bool = True
+    use_manual_depthwise_conv1d: bool = False
+    fuse_gdr_ops: bool = False

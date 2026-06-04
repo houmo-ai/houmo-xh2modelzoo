@@ -7,6 +7,185 @@ Qwen3.5 目录当前已经支持两条链路：
 1. 纯 LLM 的 XH2a 量化导出、Golden 生成与 HMONNX 推理
 2. Vision 编码器的 ONNX/HMONNX 导出，以及 Vision HMONNX + LLM HMONNX 的 VL 联合推理
 
+
+## 推荐完整流程（Dense 9B：导出、Golden、Demo、MTP、DFlash）
+
+以下流程覆盖本目录维护的 Qwen3.5 dense XH2a 常规验证路径。若已经有可用 `meta.json`，可以跳过导出，直接从第 3 步开始跑 demo / spec decode 测试。
+
+### 1. 环境与默认兼容参数
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+MODEL=/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only
+DFLASH=weights/Qwen3.5-9B-DFlash
+OUT=work_dirs/qwen3_5_9b_xh2a_$(date +%Y%m%d_%H%M%S)
+```
+
+默认兼容参数为：
+
+- `--split_conv_cache`：默认开启，线性注意力 conv cache 拆成 q/k/v 三路；如需旧格式用 `--no_split_conv_cache`。
+- `--normalize-force-fp32`：默认关闭，即 Normalize 不强制 fp32。
+- `--use_manual_depthwise_conv1d`：默认关闭。
+- `--fuse_gdr_ops`：默认关闭。
+
+### 2. 标准导出 + Golden
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir "$MODEL" \
+  --work_dir "$OUT/standard" \
+  --max_sequence_length 512 \
+  --golden
+```
+
+### 3. 标准 HMONNX demo / benchmark
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_hmonnx_test.py \
+  --config "$OUT/standard/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max-new-tokens 128 \
+  --warmup-runs 0 \
+  --benchmark-runs 1 \
+  --device cuda \
+  --exec-device cuda
+```
+
+如果已经有历史导出目录，也可以直接替换 `--config <existing>/meta.json` 后运行，不需要重新导出。
+
+### 4. MTP 导出 + Golden + 长 token 测试
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir "$MODEL" \
+  --work_dir "$OUT/mtp" \
+  --max_sequence_length 512 \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --golden
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py \
+  --config "$OUT/mtp/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 128 \
+  --warmup_runs 0 \
+  --benchmark_runs 1 \
+  --device cuda \
+  --exec_device cuda
+```
+
+### 5. DFlash 导出 + Golden + 长 token 测试
+
+DFlash draft 模型会读取 checkpoint 内的 `dflash_config.target_layer_ids`，导出时必须保证 target 模型层数覆盖这些 target hidden 层；不要用截断层数验证完整 DFlash。
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir "$MODEL" \
+  --work_dir "$OUT/dflash" \
+  --max_sequence_length 512 \
+  --spec_decode_mode dflash \
+  --num_draft_tokens 4 \
+  --dflash_model_dir "$DFLASH" \
+  --golden
+
+python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py \
+  --config "$OUT/dflash/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 128 \
+  --warmup_runs 0 \
+  --benchmark_runs 1 \
+  --device cuda \
+  --exec_device cuda
+```
+
+### 6. split / merged cache 回归
+
+默认 split 格式输入输出示例：`past_conv_cache_q_0/k_0/v_0`、`conv_cache_out_q_0/k_0/v_0`。
+
+旧 merged 格式回归示例：
+
+```bash
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir "$MODEL" \
+  --work_dir "$OUT/standard_merged" \
+  --max_sequence_length 512 \
+  --no_split_conv_cache \
+  --golden
+```
+
+## QTL-357 实测记录（2026-06-04）
+
+本次 Dense 9B 的 Demo、MTP、DFlash 均为 **本次重新导出的完整 split conv cache 产物**，根目录：
+
+```bash
+BASE=/data01/home/yujy/work/xh2modelzoo/work_dirs/full_goal_20260604_0824
+```
+
+### 本次产物
+
+| 类型 | `meta.json` | 说明 |
+|------|-------------|------|
+| Demo / 标准推理 | `$BASE/qwen35_dense_split_full_reexport_20260604_1135/meta.json` | `spec_decode=None`，`kv=8`，`linear=24`，`max_context_tokens=512` |
+| MTP | `$BASE/qwen35_dense_mtp_split_full_reexport_20260604_1135/meta.json` | `spec_decode.mode=mtp`，`block_size=4`，`verify_length=5`，`draft_head_weight_bits=4` |
+| DFlash | `$BASE/qwen35_dense_dflash_split_full_reexport_20260604_1135/meta.json` | `spec_decode.mode=dflash`，`block_size=2`，`verify_length=3`，`draft_head_weight_bits=4` |
+
+> 注意：DFlash 不能只用 `--draft_only` 复用标准 target。DFlash verify 需要 target decode 支持 `verify_length=3` 的输入；本次最终通过的是完整 `--spec_decode_mode dflash` 重导出的 target + draft 产物。
+
+### 本次命令摘要
+
+```bash
+# 标准完整导出
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --work_dir "$BASE/qwen35_dense_split_full_reexport_20260604_1135" \
+  --dtype fp16 \
+  --max_sequence_length 512 \
+  --split_conv_cache \
+  --golden
+
+# MTP 完整导出
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --work_dir "$BASE/qwen35_dense_mtp_split_full_reexport_20260604_1135" \
+  --dtype fp16 \
+  --max_sequence_length 512 \
+  --split_conv_cache \
+  --spec_decode_mode mtp \
+  --num_draft_tokens 4 \
+  --golden
+
+# DFlash 完整导出
+python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
+  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --work_dir "$BASE/qwen35_dense_dflash_split_full_reexport_20260604_1135" \
+  --dtype fp16 \
+  --max_sequence_length 512 \
+  --split_conv_cache \
+  --spec_decode_mode dflash \
+  --dflash_model_dir weights/Qwen3.5-9B-DFlash \
+  --num_draft_tokens 2 \
+  --golden
+```
+
+### 本次测试结果
+
+Prompt：`你好，请用几句话介绍你自己，并说明你能做什么。`
+
+| 类型 | max tokens | 输出 token | latency(s) | tok/s | Spec 统计 | 接收率 |
+|------|------------|------------|------------|-------|-----------|--------|
+| Demo / 标准推理 | 128 | 68 | 22.5894 | 3.0103 | - | - |
+| MTP | 128 | 68 | 15.0540 | 4.5171 | `rounds=22 total=68 draft=88 accepted=46` | `46/88 = 52.27%` |
+| DFlash | 128 | 77 | 23.4007 | 3.2905 | `rounds=45 total=78 draft=90 accepted=33` | `33/90 = 36.67%` |
+
+日志：
+
+```bash
+$BASE/logs/qwen35_dense_standard_mtp_reexport_long128_20260604.log
+$BASE/logs/qwen35_dense_dflash_split_full_reexport_20260604_1135_full_long128.log
+```
+
 ## 环境依赖
 
 推荐使用 `xhquant` 环境，并在仓库根目录执行：
@@ -75,7 +254,7 @@ python \
 
 ## Split Conv Cache 导出
 
-`--split_conv_cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v），方便下游硬件按不同 shape 分别处理。默认不开启，保持向后兼容。
+Qwen3.5 dense 默认将线性注意力的 conv_cache 拆分为 3 个独立 tensor（q, k, v），方便下游硬件按不同 shape 分别处理；如需回退旧的单 tensor 格式，可显式传 `--no_split_conv_cache`。`--split_conv_cache` 仍可显式声明默认行为。
 
 ```bash
 export PYTHONPATH=./
@@ -93,10 +272,10 @@ python \
 
 | 模式 | 输入名 | 输出名 |
 |------|--------|--------|
-| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
-| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+| legacy merged (`--no_split_conv_cache`) | `past_conv_cache_0` | `conv_cache_out_0` |
+| 默认 split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
 
-Spec decode 模式同样支持 `--split_conv_cache`，MTP 和 DFlash 均兼容。
+Spec decode 模式默认同样使用 split conv cache，MTP 和 DFlash 均兼容。
 
 ## 六模型 8k Spec Decode 导出（命令版，不再使用 batch_export_8k.sh）
 

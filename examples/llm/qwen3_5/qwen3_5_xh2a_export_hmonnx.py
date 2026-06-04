@@ -68,6 +68,32 @@ DTYPE_NAME_MAP = {
 DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
 
 
+def _load_dflash_target_layer_ids(dflash_model_dir: str) -> List[int]:
+    config_path = Path(dflash_model_dir) / "config.json"
+    with config_path.open(encoding="utf-8") as f:
+        cfg = json.load(f)
+    target_layer_ids = cfg.get("dflash_config", {}).get("target_layer_ids")
+    if not target_layer_ids:
+        raise ValueError(f"Failed to read dflash_config.target_layer_ids from {config_path}")
+    return list(target_layer_ids)
+
+
+def _validate_dflash_target_layer_ids(target_layer_ids: List[int], max_layers: Optional[int]) -> None:
+    if not target_layer_ids or max_layers is None:
+        return
+    max_layers = int(max_layers)
+    if max_layers <= 0:
+        return
+    max_target_layer = max(target_layer_ids)
+    if max_target_layer >= max_layers:
+        raise ValueError(
+            "--num_blocks/max_layers does not cover DFlash target_layer_ids: "
+            f"max exported layer index is {max_layers - 1}, "
+            f"but DFlash requires target layer {max_target_layer}. "
+            "Increase --num_blocks or omit it for DFlash export."
+        )
+
+
 def _build_spec_draft_quant_config(head_weight_bits: int) -> ConfigDict:
     if head_weight_bits == 8:
         return ConfigDict(quant_type=DRAFT_BASE_QUANT_TYPE)
@@ -2260,20 +2286,11 @@ def _export_impl(cfg, args):
         dflash_model_dir = getattr(args, "dflash_model_dir", None)
         if dflash_model_dir is None:
             raise ValueError("--dflash_model_dir is required for dflash spec_decode_mode")
-        import json as _json
-
-        dflash_config = _json.load(open(Path(dflash_model_dir) / "config.json"))
-        num_target_layers = dflash_config["num_target_layers"]
-        num_draft_layers = dflash_config["num_hidden_layers"]
-        # Build target_layer_ids using same algorithm as DFlash
-        if num_draft_layers == 1:
-            target_layer_ids = [num_target_layers // 2]
-        else:
-            start, end = 1, num_target_layers - 3
-            span = end - start
-            target_layer_ids = [
-                int(round(start + (i * span) / (num_draft_layers - 1))) for i in range(num_draft_layers)
-            ]
+        target_layer_ids = _load_dflash_target_layer_ids(dflash_model_dir)
+        _validate_dflash_target_layer_ids(
+            target_layer_ids,
+            getattr(cfg.model.wrap_cfg, "max_layers", None),
+        )
         spec_decode_prefill_cfg = {
             "output_hidden_state_indices": target_layer_ids,
             "num_logits_to_keep": 0,
@@ -2435,15 +2452,14 @@ def main(args):
     cfg.dtype = _resolve_compute_dtype_name(args.dtype, args.hf_model_dir)
     args.dtype = cfg.dtype
     cfg.debug = args.debug
-    if getattr(args, "split_conv_cache", False):
-        cfg.model.wrap_cfg.split_conv_cache = True
+    cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)
     if getattr(args, "num_blocks", None) is not None:
         cfg.model.wrap_cfg.max_layers = args.num_blocks
     cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)
     cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
         args, "use_manual_depthwise_conv1d", False
     )
-    normalize_force_fp32 = getattr(args, "normalize_force_fp32", True)
+    normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)
     cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
     if "ops_cfg" not in cfg.model.quant_config:
         cfg.model.quant_config["ops_cfg"] = {}
@@ -2647,12 +2663,20 @@ def parse_arguments():
     )
     parser.add_argument(
         "--split_conv_cache",
+        dest="split_conv_cache",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
-            "Default False keeps the merged single-tensor format for backward compatibility."
+            "Default True preserves the dense Qwen3.5 split-cache export contract."
         ),
+    )
+    parser.add_argument(
+        "--no_split_conv_cache",
+        "--no-split-conv-cache",
+        dest="split_conv_cache",
+        action="store_false",
+        help="Use the legacy merged single-tensor conv_cache format.",
     )
     parser.add_argument(
         "--fuse_gdr_ops",

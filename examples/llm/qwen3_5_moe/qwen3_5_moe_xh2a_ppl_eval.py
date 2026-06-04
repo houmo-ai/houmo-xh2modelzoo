@@ -89,7 +89,13 @@ def main(args):
     meta_path = Path(args.config).resolve()
     logger.info(f"Loading inference engine from: {meta_path}")
 
-    inference_engine = Qwen3_5MoeInference(str(meta_path), fast_mode=args.fast)
+    inference_engine = Qwen3_5MoeInference(
+        str(meta_path),
+        fast_mode=args.fast,
+        device=args.device,
+        execution_device=args.device,
+        resource_tight_mode=args.resource_tight_mode,
+    )
     meta_info = inference_engine.meta_info
     # The ONNX prefill session has a fixed input sequence length; use that as
     # the evaluation window so each call to prefill_only fits in one chunk.
@@ -161,5 +167,18 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--fast", action="store_true")
+    parser.set_defaults(resource_tight_mode=True)
+    parser.add_argument(
+        "--resource-tight-mode",
+        dest="resource_tight_mode",
+        action="store_true",
+        help="Lazily load prefill/decode HMONNX sessions to reduce peak GPU memory (default).",
+    )
+    parser.add_argument(
+        "--disable-resource-tight-mode",
+        dest="resource_tight_mode",
+        action="store_false",
+        help="Eagerly load prefill and decode sessions at startup.",
+    )
     args = parser.parse_args()
     main(args)

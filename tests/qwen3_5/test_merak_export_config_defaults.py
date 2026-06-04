@@ -348,6 +348,8 @@ def test_qwen3_5_moe_text_model_forward_regroups_and_reflattens_split_conv_cache
     model.layers = [layer]
     model.max_layers = -1
     model.num_logits_to_keep = 0
+    model.output_hidden_state_indices = None
+    model.output_post_norm_hidden = False
     model.norm = lambda x: x
 
     hidden, conv_cache_out, recurrent_out = _moe_model._Qwen3_5MoeTextModel.forward(

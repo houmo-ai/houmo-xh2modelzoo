@@ -60,6 +60,26 @@ def _extract_quant_method(config: AutoConfig) -> Optional[str]:
     return None if quant_method is None else str(quant_method).lower()
 
 
+
+
+def _linear_split_conv_dims(linear_attn) -> tuple[int, int, int]:
+    def _module_channels(module_name: str, fallback: int) -> int:
+        module = getattr(linear_attn, module_name, None)
+        if module is not None:
+            if hasattr(module, "in_channels"):
+                return int(module.in_channels)
+            if hasattr(module, "out_features"):
+                return int(module.out_features)
+        return int(fallback)
+
+    qk_fallback = int(linear_attn.head_k_dim) * int(linear_attn.num_v_heads)
+    v_fallback = int(linear_attn.head_v_dim) * int(linear_attn.num_v_heads)
+    return (
+        _module_channels("conv1d_q", qk_fallback),
+        _module_channels("conv1d_k", qk_fallback),
+        _module_channels("conv1d_v", v_fallback),
+    )
+
 def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
     result = self._qwen3_5_moe_original_forward(*args, **kwargs)
     # Handle 3-tuple (logits, conv_caches, recurrent_states) and 4-tuple (+ post_norm_hidden).
@@ -330,6 +350,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 output_post_norm_hidden=output_post_norm_hidden,
                 split_conv_cache=self.config.split_conv_cache,
                 use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d,
+                fuse_gdr_ops=getattr(self.config, "fuse_gdr_ops", False),
                 kv_cache=dict(
                     cache_axis=2,
                 ),
@@ -380,10 +401,11 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                     if hasattr(linear_attn, "conv1d_q")
                     else linear_attn.conv1d.weight.dtype
                 )
+                q_dim, k_dim, v_dim = _linear_split_conv_dims(linear_attn)
                 conv_shapes = [
-                    [self.config.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
-                    [self.config.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
-                    [self.config.batch_size, linear_attn.value_dim, linear_attn.conv_kernel_size],
+                    [self.config.batch_size, q_dim, linear_attn.conv_kernel_size],
+                    [self.config.batch_size, k_dim, linear_attn.conv_kernel_size],
+                    [self.config.batch_size, v_dim, linear_attn.conv_kernel_size],
                 ]
                 for shape in conv_shapes:
                     past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))

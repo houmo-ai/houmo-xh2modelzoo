@@ -14,9 +14,161 @@ export PYTHONPATH=./
 
 > 对 35B-A3B 这类大 MoE，示例脚本默认关闭 `auto_offload`，优先让 prefill / decode 直接常驻 80G GPU；只有显存确实不够时，再显式加 `--enable-auto-offload` 或 `--resource-tight-mode`。
 
+
+## 推荐完整流程（MoE：导出、Golden、Demo、MTP、DFlash）
+
+若已有导出产物，可以跳过导出步骤，直接将下面 demo 命令的 `--config` 指向已有 `meta.json`。
+
+### 1. 环境与默认兼容参数
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0
+MODEL=weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400
+DFLASH=weights/Qwen3.6-35B-A3B-DFlash
+OUT=work_dirs/qwen3_5_moe_xh2a_$(date +%Y%m%d_%H%M%S)
+```
+
+默认兼容参数：`split_conv_cache=True`、`normalize_force_fp32=False`、`use_manual_depthwise_conv1d=False`、`fuse_gdr_ops=False`。MoE demo 建议加 `--resource-tight-mode`，避免 prefill/decode 同时驻留导致显存压力过大。
+
+### 2. 标准导出 + Golden
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL" \
+  --work-dir "$OUT/standard" \
+  --context-length 512 \
+  --input-sequence-length 128 \
+  --split-conv-cache \
+  --golden
+```
+
+### 3. 标准 HMONNX demo / benchmark
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_hmonnx_test.py \
+  --config "$OUT/standard/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max-new-tokens 128 \
+  --warmup-runs 0 \
+  --benchmark-runs 1 \
+  --resource-tight-mode \
+  --device cuda \
+  --exec-device cuda
+```
+
+### 4. MTP 导出 + Golden + 长 token 测试
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL" \
+  --work-dir "$OUT/mtp" \
+  --context-length 512 \
+  --input-sequence-length 128 \
+  --split-conv-cache \
+  --spec-decode-mode mtp \
+  --num-draft-tokens 2 \
+  --golden
+
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_test.py \
+  --config "$OUT/mtp/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 128 \
+  --warmup_runs 0 \
+  --benchmark_runs 1 \
+  --resource_tight_mode \
+  --device cuda \
+  --exec_device cuda
+```
+
+### 5. DFlash 导出 + Golden + 长 token 测试
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
+  --model "$MODEL" \
+  --work-dir "$OUT/dflash" \
+  --context-length 512 \
+  --input-sequence-length 128 \
+  --split-conv-cache \
+  --spec-decode-mode dflash \
+  --num-draft-tokens 2 \
+  --dflash-model-dir "$DFLASH" \
+  --golden
+
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_test.py \
+  --config "$OUT/dflash/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 128 \
+  --warmup_runs 0 \
+  --benchmark_runs 1 \
+  --resource_tight_mode \
+  --device cuda \
+  --exec_device cuda
+```
+
+## QTL-357 实测记录（2026-06-04）
+
+本次 MoE 按任务要求 **未重新导出模型**，直接复测已有 split conv cache 产物；因此下表 MoE 产物不是本次新导出，只是本次实测使用的既有产物。
+
+```bash
+BASE=/data01/home/yujy/work/xh2modelzoo/work_dirs/full_goal_20260604_0824
+OLD=work_dirs/splitconv_verify_20260603_220839
+```
+
+### 本次复测产物
+
+| 类型 | `meta.json` | 说明 |
+|------|-------------|------|
+| Demo / 标准推理 | `$OLD/qwen35_moe_split/meta.json` | `architecture=Qwen3_5MoeForConditionalGeneration`，`kv=10`，`linear=30`，`max_context_tokens=512` |
+| MTP | `$OLD/qwen35_moe_mtp_split/meta.json` | 旧 meta 中 `spec_decode=None`，runtime 从 `draft_onnx/*mtp*` 识别 MTP 并实测生效 |
+| DFlash | `$OLD/qwen35_moe_dflash_split_retry/meta.json` | 旧 meta 中 `spec_decode=None`，runtime 从 `draft_onnx/*dflash*` 识别 DFlash 并实测生效 |
+
+> 说明：MoE HMONNX 首次加载时会在 CPU 侧解析 / 编译 ONNX，期间 `nvidia-smi` 可能显示 GPU 利用率为 0；本次 benchmark 表内 latency 是脚本输出的生成耗时，不包含首次 ONNX parse 的墙钟耗时。
+
+### 本次测试命令摘要
+
+```bash
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_hmonnx_test.py \
+  --config "$OLD/qwen35_moe_split/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max-new-tokens 64 \
+  --warmup-runs 0 \
+  --benchmark-runs 1 \
+  --no-sample
+
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_test.py \
+  --config "$OLD/qwen35_moe_mtp_split/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 64 \
+  --warmup_runs 0 \
+  --benchmark_runs 1
+
+python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_spec_decode_test.py \
+  --config "$OLD/qwen35_moe_dflash_split_retry/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max_new_tokens 64 \
+  --warmup_runs 0 \
+  --benchmark_runs 1
+```
+
+### 本次测试结果
+
+| 类型 | max tokens | 输出 token | latency(s) | tok/s | Spec 统计 | 接收率 |
+|------|------------|------------|------------|-------|-----------|--------|
+| Demo / 标准推理 | 64 | 64 | 45.0978 | 1.4191 | - | - |
+| MTP | 64 | 64 | 12.7042 | 5.0377 | `rounds=23 total=64 draft=46 accepted=41` | `41/46 = 89.13%` |
+| DFlash | 64 | 64 | 27.9811 | 2.2873 | `rounds=49 total=64 draft=98 accepted=14` | `14/98 = 14.29%` |
+
+日志：
+
+```bash
+$BASE/logs/qwen35_moe_standard_mtp_dflash_long64_20260604.log
+```
+
 ## Split Conv Cache 导出
 
-`--split-conv-cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。默认不开启，保持向后兼容。
+`--split-conv-cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。当前默认开启；如需旧 merged 格式可显式传 `--no-split-conv-cache`。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -32,8 +184,8 @@ python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
 
 | 模式 | 输入名 | 输出名 |
 |------|--------|--------|
-| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
-| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+| merged (`--no-split-conv-cache`) | `past_conv_cache_0` | `conv_cache_out_0` |
+| 默认 split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
 
 Spec decode 模式（MTP / DFlash）同样支持 `--split-conv-cache`。
 

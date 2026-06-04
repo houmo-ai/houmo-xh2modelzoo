@@ -59,6 +59,33 @@ def _get_text_config(model):
     return config
 
 
+def _linear_split_conv_dims(linear_attn) -> tuple[int, int, int]:
+    """Return the actual q/k/v conv-cache channel dimensions.
+
+    Some HF-side Qwen3.5 linear-attention modules expose ``key_dim`` as the
+    merged q+k channel width while the split projection/conv modules already
+    use the real per-branch width. ``prepare_linear_cache`` can run before
+    those split modules are materialized, so the fallback must derive the
+    branch width from head dimensions rather than from ``key_dim``.
+    """
+
+    def _module_channels(module_name: str, fallback_attr: str) -> int:
+        module = getattr(linear_attn, module_name, None)
+        if module is not None:
+            if hasattr(module, "in_channels"):
+                return int(module.in_channels)
+            if hasattr(module, "out_features"):
+                return int(module.out_features)
+        return int(fallback_attr)
+
+    qk_fallback = int(linear_attn.head_k_dim) * int(linear_attn.num_v_heads)
+    v_fallback = int(linear_attn.head_v_dim) * int(linear_attn.num_v_heads)
+    q_dim = _module_channels("conv1d_q", qk_fallback)
+    k_dim = _module_channels("conv1d_k", qk_fallback)
+    v_dim = _module_channels("conv1d_v", v_fallback)
+    return q_dim, k_dim, v_dim
+
+
 @MODELS.register_module()
 class XHQwen3_5Model(LLMBaseModel):
     def __init__(
@@ -281,12 +308,11 @@ class XHQwen3_5Model(LLMBaseModel):
                     if hasattr(linear_attn, "conv1d_q")
                     else linear_attn.conv1d.weight.dtype
                 )
-                # q: [batch_size, key_dim, conv_kernel_size]
-                conv_cache_q_shape = [batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size]
-                # k: [batch_size, key_dim, conv_kernel_size]
-                conv_cache_k_shape = [batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size]
-                # v: [batch_size, value_dim, conv_kernel_size]
-                conv_cache_v_shape = [batch_size, linear_attn.value_dim, linear_attn.conv_kernel_size]
+                q_dim, k_dim, v_dim = _linear_split_conv_dims(linear_attn)
+                # q/k/v: [batch_size, branch_dim, conv_kernel_size]
+                conv_cache_q_shape = [batch_size, q_dim, linear_attn.conv_kernel_size]
+                conv_cache_k_shape = [batch_size, k_dim, linear_attn.conv_kernel_size]
+                conv_cache_v_shape = [batch_size, v_dim, linear_attn.conv_kernel_size]
                 self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_q_shape, dtype=cache_dtype)))
                 self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_k_shape, dtype=cache_dtype)))
                 self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_v_shape, dtype=cache_dtype)))

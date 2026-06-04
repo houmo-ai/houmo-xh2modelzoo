@@ -1174,7 +1174,9 @@ class _Qwen3NextGatedDeltaNet(DynamicModule):
         self.return_cache = cfg.get("return_cache", False)
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.normalize_force_fp32 = cfg.get("normalize_force_fp32", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
+        self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d_* modules
         # (default) so hmonnx export emits a clean Conv op. Set True to fall
         # back to the legacy _manual_depthwise_conv1d_tail manual unroll.
@@ -1752,7 +1754,7 @@ class _Qwen3NextModel(DynamicModule):
         self.only_first_block = cfg.get("only_first_block", False)
         self.num_logits_to_keep = cfg.num_logits_to_keep
         assert self.num_logits_to_keep in [0, 1]
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
         
         # Get layer types from config to distinguish full_attention and linear_attention layers
         self.layer_types = self.config.layer_types

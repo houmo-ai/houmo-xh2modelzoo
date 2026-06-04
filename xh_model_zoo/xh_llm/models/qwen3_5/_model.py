@@ -836,11 +836,11 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
         # QTL-336: optional fused GDR ops. Default False to preserve byte-identical
         # behavior with pre-GDR commits when wrap_cfg does not specify the flag.
-        # The production export (qwen3_5_xh2a_export_hmonnx.py) explicitly sets
-        # cfg.model.wrap_cfg.fuse_gdr_ops=True by default.
+        # The production export (qwen3_5_xh2a_export_hmonnx.py) explicitly keeps
+        # cfg.model.wrap_cfg.fuse_gdr_ops=False by default.
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d_* modules
         # (default) so hmonnx export emits a clean Conv op. xhquant 2d86b60+
@@ -1312,7 +1312,7 @@ class _Qwen3_5TextModel(DynamicModule):
         )
 
         # Detect split_conv_cache from cfg (propagated to linear attention layers)
-        self.split_conv_cache = cfg.get("split_conv_cache", False)
+        self.split_conv_cache = cfg.get("split_conv_cache", True)
 
         # ---- M-RoPE interleaved masks ----
         # Get mrope_section from config

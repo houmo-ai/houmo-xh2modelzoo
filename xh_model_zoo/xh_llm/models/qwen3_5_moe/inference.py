@@ -27,9 +27,66 @@ def _build_runtime_linear_attn_mask(
 
 def _resolve_path(base_dir: Path, path_str: str) -> Path:
     path = Path(path_str)
-    if not path.is_absolute():
-        path = (base_dir / path).resolve()
-    return path
+    if path.is_absolute():
+        return path
+
+    base_candidate = (base_dir / path).resolve()
+    if base_candidate.exists():
+        return base_candidate
+
+    cwd_candidate = path.resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+
+    return base_candidate
+
+
+def _meta_value(meta_info: dict, keys: Tuple[str, ...], default: str) -> str:
+    for key in keys:
+        value = meta_info.get(key)
+        if value:
+            return value
+    return default
+
+
+_STRUCTURAL_META_KEYS = (
+    "pad_token_id",
+    "max_context_tokens",
+    "wrap_cfg",
+    "kv_cache",
+    "linear_cache",
+    "model_config",
+)
+
+
+def _load_sidecar_structural_meta(meta_file: Path, meta_info: dict) -> dict:
+    """Fill release golden meta with structural runtime fields from export meta.
+
+    Golden release metadata intentionally points at renamed ONNX files under the
+    release directory.  Older release metadata omitted the runtime-only cache
+    shapes and prefill length, while the work_dir-level ``meta.json`` still has
+    them.  Copy only structural fields so path fields keep resolving inside the
+    release package.
+    """
+
+    candidates = (meta_file.parent / "meta.json", meta_file.parent.parent / "meta.json")
+    merged = dict(meta_info)
+    missing_structural = any(merged.get(key) is None for key in _STRUCTURAL_META_KEYS)
+    if not missing_structural:
+        return merged
+
+    for candidate in candidates:
+        if candidate == meta_file or not candidate.exists():
+            continue
+        try:
+            sidecar = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for key in _STRUCTURAL_META_KEYS:
+            if merged.get(key) is None and key in sidecar:
+                merged[key] = sidecar[key]
+        break
+    return merged
 
 
 def _load_token_embedding(embed_path: Path) -> nn.Module:
@@ -57,6 +114,7 @@ def _load_meta_artifacts(model_config_file: str):
     meta_file = Path(model_config_file).resolve()
     model_dir = meta_file.parent
     meta_info = json.loads(meta_file.read_text(encoding="utf-8"))
+    meta_info = _load_sidecar_structural_meta(meta_file, meta_info)
 
     prefill_onnx = _resolve_path(
         model_dir, meta_info.get("prefill_onnx") or meta_info["prefill_onnx_file"]
@@ -64,8 +122,18 @@ def _load_meta_artifacts(model_config_file: str):
     decode_onnx = _resolve_path(
         model_dir, meta_info.get("decode_onnx") or meta_info["decode_onnx_file"]
     )
-    hf_model_config_dir = _resolve_path(model_dir, meta_info["hf_config"])
-    token_embedding_file = _resolve_path(model_dir, meta_info["token_embedding_file"])
+    hf_model_config_dir = _resolve_path(
+        model_dir,
+        _meta_value(meta_info, ("hf_config", "hf_config_dir", "hf_model"), "hf_config"),
+    )
+    token_embedding_file = _resolve_path(
+        model_dir,
+        _meta_value(
+            meta_info,
+            ("token_embedding_file", "quant_embedding"),
+            "quant_embedding.pt",
+        ),
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(str(hf_model_config_dir))
     token_embedding = _load_token_embedding(token_embedding_file)
@@ -97,6 +165,31 @@ def _load_meta_artifacts(model_config_file: str):
         "pad_token_id": int(pad_token_id),
         "max_context_tokens": max_context_tokens,
     }
+
+
+def _resolve_prefill_input_sequence_length(meta_info: dict, prefill_config, prefill_inputs_info) -> int:
+    if prefill_inputs_info is not None:
+        shape = getattr(prefill_inputs_info, "shape", None)
+        if shape is not None and len(shape) > 1 and shape[1] is not None:
+            return int(shape[1])
+
+    wrap_cfg = meta_info.get("wrap_cfg", {})
+    if isinstance(wrap_cfg, dict) and wrap_cfg.get("input_sequence_length") is not None:
+        return int(wrap_cfg["input_sequence_length"])
+
+    model_config = meta_info.get("model_config", {})
+    if isinstance(model_config, dict):
+        for key in ("input_sequence_length", "prefill_chunk_length"):
+            if model_config.get(key) is not None:
+                return int(model_config[key])
+
+    if isinstance(prefill_config, dict) and prefill_config.get("input_sequence_length") is not None:
+        return int(prefill_config["input_sequence_length"])
+
+    raise ValueError(
+        "Cannot determine prefill input sequence length; meta.json must contain "
+        "wrap_cfg.input_sequence_length when resource_tight_mode defers session loading."
+    )
 
 
 class Qwen3_5MoeInference(Qwen3_5ONNXModel):
@@ -147,7 +240,9 @@ class Qwen3_5MoeInference(Qwen3_5ONNXModel):
         self.set_input_embeddings(artifacts["token_embedding"])
         self.to(torch.device(device))
         self.set_exec_device(torch.device(execution_device))
-        self.prefill_input_sequence_length = int(self._prefill_inputs_info.shape[1])
+        self.prefill_input_sequence_length = _resolve_prefill_input_sequence_length(
+            self.meta_info, self.prefill_config, self._prefill_inputs_info
+        )
         self.input_sequence_length = self.prefill_input_sequence_length
 
         cache_dtype = self.dtype
@@ -465,5 +560,6 @@ __all__ = [
     "_build_runtime_linear_attn_mask",
     "_load_meta_artifacts",
     "_load_token_embedding",
+    "_resolve_prefill_input_sequence_length",
     "_resolve_path",
 ]

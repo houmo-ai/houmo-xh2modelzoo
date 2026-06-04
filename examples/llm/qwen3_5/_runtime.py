@@ -97,8 +97,14 @@ def load_runtime_from_meta(
 
     prefill_onnx = resolve_path(model_dir, meta_info.get("prefill_onnx") or meta_info["prefill_onnx_file"])
     decode_onnx = resolve_path(model_dir, meta_info.get("decode_onnx") or meta_info["decode_onnx_file"])
-    hf_model_config_dir = resolve_path(model_dir, meta_info["hf_config"])
-    token_embedding_file = resolve_path(model_dir, meta_info["token_embedding_file"])
+    hf_config_value = meta_info.get("hf_config") or meta_info.get("hf_config_dir") or "hf_config"
+    token_embedding_value = (
+        meta_info.get("token_embedding_file")
+        or meta_info.get("quant_embedding")
+        or "quant_embedding.pt"
+    )
+    hf_model_config_dir = resolve_path(model_dir, hf_config_value)
+    token_embedding_file = resolve_path(model_dir, token_embedding_value)
 
     max_context_tokens = meta_info.get("max_context_tokens")
     if max_context_tokens is None:

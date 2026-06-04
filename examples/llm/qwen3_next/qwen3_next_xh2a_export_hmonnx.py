@@ -60,6 +60,18 @@ DTYPE_NAME_MAP = {
 }
 
 
+
+
+def _parse_bool_arg(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean value, got {value!r}")
+
 def _flatten_inputs(inputs):
     flat = []
     for arg in inputs:
@@ -897,8 +909,49 @@ def _copy_hf_configs(hf_model_dir: str, work_dir: str, logger) -> Path:
     return hf_config_dir
 
 
+def _cache_tensor_shape(cache) -> Optional[List[int]]:
+    tensor = getattr(cache, "tensor", cache)
+    shape = getattr(tensor, "shape", None)
+    if shape is None:
+        return None
+    return [int(dim) for dim in shape]
+
+
+def _first_linear_conv_cache_shapes(past_conv_caches, split_conv_cache: bool) -> List[List[int]]:
+    if not past_conv_caches:
+        return []
+
+    first_cache = past_conv_caches[0]
+    if split_conv_cache:
+        if isinstance(first_cache, (list, tuple)):
+            candidates = list(first_cache)[:3]
+        else:
+            candidates = list(past_conv_caches)[:3]
+    else:
+        candidates = [first_cache]
+
+    shapes: List[List[int]] = []
+    for cache in candidates:
+        shape = _cache_tensor_shape(cache)
+        if shape is not None:
+            shapes.append(shape)
+    return shapes
+
+
 def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
     quant_type = _detect_export_quant_type(args.hf_model_dir)
+    split_conv_cache = bool(getattr(cfg.model.wrap_cfg, "split_conv_cache", True))
+    linear_cache = dict(
+        recurrent_shape=meta_info.get("recurrent_state_shape", None),
+        num_decoder_layers=meta_info.get("num_linear_attention_layers", None),
+    )
+    if split_conv_cache:
+        linear_cache["conv_shapes"] = meta_info.get("conv_cache_shapes", None)
+    else:
+        linear_cache["conv_shape"] = meta_info.get("conv_cache_shape", None)
+    if meta_info.get("linear_cache_layers", None) is not None:
+        linear_cache["layers"] = meta_info.get("linear_cache_layers")
+
     return dict(
         create_time=meta_info.create_time,
         device=str(cfg.target_device),
@@ -918,15 +971,20 @@ def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
         token_embedding_file=meta_info.token_embedding_file,
         max_context_tokens=cfg.model.wrap_cfg.max_sequence_length,
         pad_token_id=meta_info.get("pad_token_id", None),
+        split_conv_cache=split_conv_cache,
+        wrap_cfg=dict(
+            split_conv_cache=split_conv_cache,
+            normalize_force_fp32=bool(getattr(cfg.model.wrap_cfg, "normalize_force_fp32", False)),
+            use_manual_depthwise_conv1d=bool(getattr(cfg.model.wrap_cfg, "use_manual_depthwise_conv1d", False)),
+            fuse_gdr_ops=bool(getattr(cfg.model.wrap_cfg, "fuse_gdr_ops", False)),
+            max_sequence_length=cfg.model.wrap_cfg.max_sequence_length,
+            num_logits_to_keep=cfg.model.wrap_cfg.num_logits_to_keep,
+        ),
         kv_cache=dict(
             shape=meta_info.get("kv_cache_shape", None),
             num_decoder_layers=meta_info.get("num_full_attention_layers", None),
         ),
-        linear_cache=dict(
-            conv_shape=meta_info.get("conv_cache_shape", None),
-            recurrent_shape=meta_info.get("recurrent_state_shape", None),
-            num_decoder_layers=meta_info.get("num_linear_attention_layers", None),
-        ),
+        linear_cache=linear_cache,
     )
 
 
@@ -939,11 +997,16 @@ def _prepare_export_context(cfg, args, logger):
     cfg.model.hf_model = args.hf_model_dir
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
-    if getattr(args, "split_conv_cache", False):
-        cfg.model.wrap_cfg.split_conv_cache = True
+    cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)
+    cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)
     cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
         args, "use_manual_depthwise_conv1d", False
     )
+    normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)
+    cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
+    if "ops_cfg" not in cfg.model.quant_config:
+        cfg.model.quant_config["ops_cfg"] = {}
+    cfg.model.quant_config["ops_cfg"]["Normalize"] = dict(force_fp32=normalize_force_fp32)
 
     qwen3_next_model: XHQwen3NextModel = MODELS.build(cfg.model)
     tokenizer = qwen3_next_model.get_tokenizer()
@@ -1039,14 +1102,45 @@ def _prepare_export_context(cfg, args, logger):
         and qwen3_next_model.past_conv_caches is not None
         and len(qwen3_next_model.past_conv_caches) > 0
     ):
-        meta_info.conv_cache_shape = list(qwen3_next_model.past_conv_caches[0].shape)
-        meta_info.num_linear_attention_layers = len(qwen3_next_model.past_conv_caches)
+        split_conv_cache = bool(getattr(cfg.model.wrap_cfg, "split_conv_cache", True))
+        conv_cache_shapes = _first_linear_conv_cache_shapes(qwen3_next_model.past_conv_caches, split_conv_cache)
+        if split_conv_cache:
+            meta_info.conv_cache_shapes = conv_cache_shapes
+            meta_info.num_linear_attention_layers = len(qwen3_next_model.past_recurrent_states)
+        else:
+            meta_info.conv_cache_shape = conv_cache_shapes[0] if conv_cache_shapes else None
+            meta_info.num_linear_attention_layers = len(qwen3_next_model.past_conv_caches)
     if (
         hasattr(qwen3_next_model, "past_recurrent_states")
         and qwen3_next_model.past_recurrent_states is not None
         and len(qwen3_next_model.past_recurrent_states) > 0
     ):
-        meta_info.recurrent_state_shape = list(qwen3_next_model.past_recurrent_states[0].shape)
+        meta_info.recurrent_state_shape = _cache_tensor_shape(qwen3_next_model.past_recurrent_states[0])
+        linear_cache_layers = []
+        split_conv_cache = bool(getattr(cfg.model.wrap_cfg, "split_conv_cache", True))
+        num_linear_layers = int(meta_info.get("num_linear_attention_layers", len(qwen3_next_model.past_recurrent_states)))
+        conv_caches_per_layer = 3 if split_conv_cache else 1
+        for layer_idx in range(num_linear_layers):
+            conv_start = layer_idx * conv_caches_per_layer
+            conv_end = conv_start + conv_caches_per_layer
+            conv_shapes = [
+                shape
+                for shape in (
+                    _cache_tensor_shape(cache)
+                    for cache in qwen3_next_model.past_conv_caches[conv_start:conv_end]
+                )
+                if shape is not None
+            ]
+            layer_meta = dict(
+                layer_idx=layer_idx,
+                recurrent_shape=_cache_tensor_shape(qwen3_next_model.past_recurrent_states[layer_idx]),
+            )
+            if split_conv_cache:
+                layer_meta["conv_shapes"] = conv_shapes
+            else:
+                layer_meta["conv_shape"] = conv_shapes[0] if conv_shapes else None
+            linear_cache_layers.append(layer_meta)
+        meta_info.linear_cache_layers = linear_cache_layers
 
     qwen3_next_model.release_exported_model()
     qwen3_next_model.release_quanted_model()
@@ -1109,9 +1203,16 @@ def _prepare_golden_only_context(cfg, args, logger):
     cfg.model.hf_model = tokenizer_source
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
+    cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)
+    cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)
     cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(
         args, "use_manual_depthwise_conv1d", False
     )
+    normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)
+    cfg.model.wrap_cfg.normalize_force_fp32 = normalize_force_fp32
+    if "ops_cfg" not in cfg.model.quant_config:
+        cfg.model.quant_config["ops_cfg"] = {}
+    cfg.model.quant_config["ops_cfg"]["Normalize"] = dict(force_fp32=normalize_force_fp32)
 
     qwen3_next_model: XHQwen3NextModel = MODELS.build(cfg.model)
     tokenizer = qwen3_next_model.get_tokenizer()
@@ -1334,27 +1435,62 @@ def parse_arguments():
     parser.add_argument("--release_modelscope_name", type=str, default=None)
     parser.add_argument("--release_wmix_amix", type=str, default=None)
     parser.add_argument("--release_date", type=str, default=None)
+    parser.set_defaults(
+        split_conv_cache=True,
+        normalize_force_fp32=False,
+        use_manual_depthwise_conv1d=False,
+        fuse_gdr_ops=False,
+    )
     parser.add_argument(
         "--split_conv_cache",
-        action="store_true",
-        default=False,
+        "--split-conv-cache",
+        dest="split_conv_cache",
+        nargs="?",
+        const=True,
+        type=_parse_bool_arg,
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
-            "Default False keeps the merged single-tensor format for backward compatibility."
+            "Default True; pass --no_split_conv_cache for the merged single-tensor format."
         ),
+    )
+    parser.add_argument(
+        "--no_split_conv_cache",
+        "--no-split-conv-cache",
+        dest="split_conv_cache",
+        action="store_false",
+        help="Use the merged single-tensor conv_cache format.",
+    )
+    parser.add_argument(
+        "--normalize-force-fp32",
+        "--normalize_force_fp32",
+        dest="normalize_force_fp32",
+        nargs="?",
+        const=True,
+        type=_parse_bool_arg,
+        help="Force fp32 accumulation in Normalize operator. Default False.",
     )
     parser.add_argument(
         "--use_manual_depthwise_conv1d",
         "--use-manual-depthwise-conv1d",
         dest="use_manual_depthwise_conv1d",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const=True,
+        type=_parse_bool_arg,
         help=(
             "QTL-341: fall back to the slice/mul/add manual depthwise conv1d "
             "unroll (legacy path). Default False routes the conv tail through "
             "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
             "Conv op."
         ),
+    )
+    parser.add_argument(
+        "--fuse_gdr_ops",
+        "--fuse-gdr-ops",
+        dest="fuse_gdr_ops",
+        nargs="?",
+        const=True,
+        type=_parse_bool_arg,
+        help="Use fused GDR operators when supported. Default False.",
     )
     return parser
 

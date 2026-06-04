@@ -434,7 +434,19 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
             raise RuntimeError("DFlash context session is not available.")
         cache_state = self._ensure_dflash_cache_state()
         actual_input_length = int(target_hidden.shape[1])
-        context_seq_len = int(session.get_input("target_hidden").shape[1])
+        target_hidden_info = session.get_input("target_hidden")
+        context_seq_len = int(target_hidden_info.shape[1])
+        expected_hidden_dim = target_hidden_info.shape[-1] if len(target_hidden_info.shape) >= 3 else None
+        if expected_hidden_dim not in (None, -1):
+            expected_hidden_dim = int(expected_hidden_dim)
+            actual_hidden_dim = int(target_hidden.shape[-1])
+            if actual_hidden_dim != expected_hidden_dim:
+                raise RuntimeError(
+                    "DFlash target_hidden shape mismatch before running draft context: "
+                    f"expected hidden dim {expected_hidden_dim}, got {actual_hidden_dim}. "
+                    "If this artifact was exported with --num_blocks/max_layers, ensure it covers all "
+                    "dflash_config.target_layer_ids required by the DFlash checkpoint."
+                )
         target_hidden = _pad_hidden_tensor(target_hidden.to(device=self.device, dtype=self._dtype), context_seq_len)
         batch_size = target_hidden.shape[0]
         current_input_length = torch.full(

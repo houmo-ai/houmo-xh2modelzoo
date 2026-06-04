@@ -43,6 +43,27 @@ from ..base_llm_model import LLMBaseModel
 from ..builder import MODELS
 
 
+
+
+def _linear_split_conv_dims(linear_attn) -> tuple[int, int, int]:
+    def _module_channels(module_name: str, fallback: int) -> int:
+        module = getattr(linear_attn, module_name, None)
+        if module is not None:
+            if hasattr(module, "in_channels"):
+                return int(module.in_channels)
+            if hasattr(module, "out_features"):
+                return int(module.out_features)
+        return int(fallback)
+
+    qk_fallback = int(linear_attn.head_k_dim) * int(linear_attn.num_v_heads)
+    v_fallback = int(linear_attn.head_v_dim) * int(linear_attn.num_v_heads)
+    return (
+        _module_channels("conv1d_q", qk_fallback),
+        _module_channels("conv1d_k", qk_fallback),
+        _module_channels("conv1d_v", v_fallback),
+    )
+
+
 @MODELS.register_module()
 class XHQwen3NextModel(LLMBaseModel):
     def __init__(
@@ -181,7 +202,7 @@ class XHQwen3NextModel(LLMBaseModel):
         batch_size = self.wrap_cfg.batch_size
 
         self.layer_types = hf_model.model.config.layer_types
-        self.split_conv_cache = self.wrap_cfg.get("split_conv_cache", False)
+        self.split_conv_cache = self.wrap_cfg.get("split_conv_cache", True)
         self.full_attention_layer_indices = [
             i for i, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
         ]
@@ -243,10 +264,11 @@ class XHQwen3NextModel(LLMBaseModel):
                     if hasattr(linear_attn, "conv1d_q")
                     else linear_attn.conv1d.weight.dtype
                 )
+                q_dim, k_dim, v_dim = _linear_split_conv_dims(linear_attn)
                 conv_shapes = [
-                    [self.wrap_cfg.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
-                    [self.wrap_cfg.batch_size, linear_attn.key_dim, linear_attn.conv_kernel_size],
-                    [self.wrap_cfg.batch_size, linear_attn.value_dim, linear_attn.conv_kernel_size],
+                    [self.wrap_cfg.batch_size, q_dim, linear_attn.conv_kernel_size],
+                    [self.wrap_cfg.batch_size, k_dim, linear_attn.conv_kernel_size],
+                    [self.wrap_cfg.batch_size, v_dim, linear_attn.conv_kernel_size],
                 ]
                 for shape in conv_shapes:
                     self.past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))

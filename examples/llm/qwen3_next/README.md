@@ -27,9 +27,121 @@ export PYTHONPATH=./
 | Golden 生成（`--golden`） | ✅ 已支持 | prefill + decode |
 | HMONNX 推理 Demo | ✅ 已支持 | 单轮文本 |
 
+
+## 推荐完整流程（4-layer 预检 → 80B 整网导出 → Demo）
+
+Qwen3-Next 当前默认兼容参数为：
+
+- `split_conv_cache=True`：默认 q/k/v 三路 conv cache；需要旧 merged 格式时传 `--no_split_conv_cache`。
+- `normalize_force_fp32=False`：也可显式传 `--normalize-force-fp32=False`。
+- `use_manual_depthwise_conv1d=False`：也可显式传 `--use_manual_depthwise_conv1d=False`。
+- `fuse_gdr_ops=False`：也可显式传 `--fuse_gdr_ops=False`。
+
+### 1. 4-layer 裁剪模型快速预检
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0,1
+OUT=work_dirs/qwen3_next_verify_$(date +%Y%m%d_%H%M%S)
+
+python examples/llm/qwen3_next/qwen3_next_xh2a_export_hmonnx.py \
+  --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse-4layers \
+  --work_dir "$OUT/4layers" \
+  --max_sequence_length 512 \
+  --normalize-force-fp32=False \
+  --use_manual_depthwise_conv1d=False \
+  --fuse_gdr_ops=False \
+  --golden
+
+python examples/llm/qwen3_next/qwen3_next_xh2a_hmonnx_test.py \
+  --config "$OUT/4layers/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max-new-tokens 128 \
+  --warmup-runs 0 \
+  --benchmark-runs 1 \
+  --resource-tight-mode \
+  --device cuda \
+  --exec-device cuda
+```
+
+预检重点：golden 目录中应能看到 split cache 输出，例如 `conv_cache_out_q_0`、`conv_cache_out_k_0`、`conv_cache_out_v_0`。
+
+### 2. 80B A3B 整网导出 + Golden
+
+80B A3B 整网导出会先把 GPTQ 权重反量化到导出图里，显存峰值明显高于运行时 demo。建议优先使用 8 张 80G GPU；如果机器显存不足，可以按实际资源收缩 `CUDA_VISIBLE_DEVICES` 和 `--golden_max_memory`，但双卡 80G 在反量化阶段可能 OOM。
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+OUT=work_dirs/qwen3_next_verify_$(date +%Y%m%d_%H%M%S)
+python examples/llm/qwen3_next/qwen3_next_xh2a_export_hmonnx.py \
+  --hf_model_dir weights/Qwen3-Next-80B-A3B-Instruct-gptqmodel-attn8-moe4-hs-mse \
+  --work_dir "$OUT/80b" \
+  --max_sequence_length 8192 \
+  --normalize-force-fp32=False \
+  --use_manual_depthwise_conv1d=False \
+  --fuse_gdr_ops=False \
+  --golden \
+  --golden_multi_gpu \
+  --golden_max_memory '{"0":"70GiB","1":"70GiB","2":"70GiB","3":"70GiB","4":"70GiB","5":"70GiB", "cpu":"320GiB"}'
+```
+
+### 3. 80B A3B 整网 Demo / Benchmark
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,3,4
+python examples/llm/qwen3_next/qwen3_next_xh2a_hmonnx_test.py \
+  --config "$OUT/80b/meta.json" \
+  --prompt "你好，请用几句话介绍你自己，并说明你能做什么。" \
+  --max-new-tokens 128 \
+  --warmup-runs 0 \
+  --benchmark-runs 1 \
+  --resource-tight-mode \
+  --device cuda \
+  --exec-device cuda
+```
+
+## QTL-357 实测记录（2026-06-04）
+
+本次 Qwen3-Next 80B-A3B 已按默认兼容参数验证：
+
+- `split_conv_cache=True`
+- `normalize_force_fp32=False`
+- `use_manual_depthwise_conv1d=False`
+- `fuse_gdr_ops=False`
+
+```bash
+BASE=/data01/home/yujy/work/xh2modelzoo/work_dirs/full_goal_20260604_0824
+```
+
+### 本次产物
+
+| 类型 | `meta.json` | 说明 |
+|------|-------------|------|
+| 4-layer 预检 | `$BASE/qwen3_next_4layer_split_default_metafix/meta.json` | `architecture=Qwen3NextForCausalLM`，`kv=1`，`linear=3`，`max_context_tokens=512` |
+| 80B 整网 | `$BASE/qwen3_next_80b_split_default_full_metafix_8gpu/meta.json` | `architecture=Qwen3NextForCausalLM`，`kv=12`，`linear=36`，`max_context_tokens=512` |
+
+Golden 目录中已出现 split cache 命名，例如 `past_conv_cache_q_0/k_0/v_0` 与 `conv_cache_out_q_0/k_0/v_0`。
+
+### 本次测试结果
+
+| 类型 | 输出 token | latency(s) | tok/s | 结果说明 |
+|------|------------|------------|-------|----------|
+| 4-layer 预检 Demo | 30 | 31.3795 | 0.9560 | 4-layer 裁剪模型可跑通；输出语义不作为整网质量判断 |
+| 80B 整网 Demo | 32 | 563.6241 | 0.0568 | 输出正常中文自我介绍 |
+
+日志：
+
+```bash
+$BASE/logs/qwen3_next_4layer_split_default_metafix_export_golden.log
+$BASE/logs/qwen3_next_4layer_split_default_metafix_long_demo.log
+$BASE/logs/qwen3_next_80b_split_default_full_metafix_8gpu_export_golden.log
+$BASE/logs/qwen3_next_80b_split_default_full_metafix_8gpu_long_demo.log
+```
+
 ## Split Conv Cache 导出
 
-`--split_conv_cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。默认不开启，保持向后兼容。
+`--split_conv_cache` 将线性注意力的 conv_cache 从单个合并 tensor 拆分为 3 个独立 tensor（q, k, v）。当前默认开启；可显式传 `--no_split_conv_cache` 使用合并 tensor。当前导出与 runtime 需要同时兼容 split/merged 两种输入输出命名。`--normalize-force-fp32=False`、`--use_manual_depthwise_conv1d=False`、`--fuse_gdr_ops=False` 是默认兼容配置。
 
 ```bash
 export PYTHONPATH=./
@@ -47,8 +159,8 @@ python \
 
 | 模式 | 输入名 | 输出名 |
 |------|--------|--------|
-| 默认 | `past_conv_cache_0` | `conv_cache_out_0` |
-| split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
+| merged (`--no_split_conv_cache`) | `past_conv_cache_0` | `conv_cache_out_0` |
+| 默认 split | `past_conv_cache_q_0` / `past_conv_cache_k_0` / `past_conv_cache_v_0` | `conv_cache_out_q_0` / `conv_cache_out_k_0` / `conv_cache_out_v_0` |
 
 ## LLM 导出
 

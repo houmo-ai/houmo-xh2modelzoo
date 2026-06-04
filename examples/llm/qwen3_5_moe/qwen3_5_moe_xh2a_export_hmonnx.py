@@ -899,8 +899,22 @@ def _generate_golden(
         "zip_cmd": f"zip -r -y {release_prefix}.zip {release_prefix}/",
         "prefill_onnx": str(named_prefill_onnx.relative_to(release_dir)) if named_prefill_onnx.exists() else None,
         "decode_onnx": str(named_decode_onnx.relative_to(release_dir)) if named_decode_onnx.exists() else None,
+        "hf_config": "hf_config",
+        "token_embedding_file": "quant_embedding.pt",
+        "quant_embedding": "quant_embedding.pt",
+        "pad_token_id": pad_token_id,
         "spec_decode_mode": spec_decode_mode,
     }
+    work_meta = _load_work_meta(work_dir, logger)
+    for key in (
+        "max_context_tokens",
+        "wrap_cfg",
+        "kv_cache",
+        "linear_cache",
+        "model_config",
+    ):
+        if key in work_meta:
+            golden_meta[key] = work_meta[key]
     for key, dir_path in draft_golden_paths.items():
         golden_meta[f"{key}_golden_dir"] = key
         named_onnx = dir_path / f"{release_prefix}_with_act.onnx"
@@ -1087,6 +1101,7 @@ def main(args):
         split_conv_cache=args.split_conv_cache,
         normalize_force_fp32=getattr(args, "normalize_force_fp32", False),
         use_manual_depthwise_conv1d=getattr(args, "use_manual_depthwise_conv1d", False),
+        fuse_gdr_ops=getattr(args, "fuse_gdr_ops", False),
     )
 
     if args.draft_only:
@@ -1269,16 +1284,23 @@ if __name__ == "__main__":
         choices=[4, 8],
         help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
     )
+    parser.set_defaults(split_conv_cache=True)
     parser.add_argument(
         "--split-conv-cache",
         "--split_conv_cache",
         dest="split_conv_cache",
         action="store_true",
-        default=False,
         help=(
             "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
-            "Default False keeps the merged single-tensor format for backward compatibility."
+            "This is the default export format."
         ),
+    )
+    parser.add_argument(
+        "--no-split-conv-cache",
+        "--no_split_conv_cache",
+        dest="split_conv_cache",
+        action="store_false",
+        help="Use the legacy merged single-tensor conv_cache format.",
     )
     parser.add_argument(
         "--normalize-force-fp32",
@@ -1300,6 +1322,14 @@ if __name__ == "__main__":
             "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
             "Conv op."
         ),
+    )
+    parser.add_argument(
+        "--fuse-gdr-ops",
+        "--fuse_gdr_ops",
+        dest="fuse_gdr_ops",
+        action="store_true",
+        default=False,
+        help="Enable fused GDR ops when supported. Default False.",
     )
     parser.add_argument("--golden", action="store_true", help="Generate HMONNX golden after export")
     parser.add_argument(

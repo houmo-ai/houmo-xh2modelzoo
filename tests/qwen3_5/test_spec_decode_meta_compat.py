@@ -416,3 +416,142 @@ def test_spec_decode_test_script_parses():
 
 def test_spec_decode_bench_script_parses():
     _parse(SPEC_BENCH)
+
+ONNX_RUNTIME_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py"
+MODEL_ZOO_CONVERT_CONFIG = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_convert_config.py"
+MODEL_ZOO_CONVERTER = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_converter.py"
+MODEL_ZOO_WRAP_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/_model.py"
+MODEL_ZOO_LLM_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"
+EXPORT_SCRIPT = REPO_ROOT / "examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py"
+DEMO_RUNTIME = REPO_ROOT / "examples/llm/qwen3_5/_runtime.py"
+
+
+def _load_function_from_source(path: Path, name: str):
+    tree = _parse(path)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(
+                body=[
+                    ast.ImportFrom(
+                        module="typing",
+                        names=[ast.alias(name="Optional"), ast.alias(name="Tuple")],
+                        level=0,
+                    ),
+                    node,
+                ],
+                type_ignores=[],
+            )
+            ast.fix_missing_locations(module)
+            namespace = {}
+            exec(compile(module, filename=str(path), mode="exec"), namespace)
+            return namespace[name]
+    raise AssertionError(f"function {name!r} not found in {path}")
+
+
+def test_parse_conv_cache_name_accepts_split_and_legacy_suffixes():
+    parse_name = _load_function_from_source(ONNX_RUNTIME_MODEL, "_parse_conv_cache_name")
+
+    assert parse_name("past_conv_cache_0") == (None, "0")
+    assert parse_name("past_conv_cache_q_0") == ("q", "0")
+    assert parse_name("past_conv_cache_k_12") == ("k", "12")
+    assert parse_name("past_conv_cache_v_3") == ("v", "3")
+
+
+def test_dense_qwen3_5_model_zoo_defaults_preserve_split_conv_contract():
+    convert_config_src = MODEL_ZOO_CONVERT_CONFIG.read_text()
+    converter_src = MODEL_ZOO_CONVERTER.read_text()
+    wrap_model_src = MODEL_ZOO_WRAP_MODEL.read_text()
+
+    assert "split_conv_cache: bool = True" in convert_config_src
+    assert "normalize_force_fp32: bool = False" in convert_config_src
+    assert "use_manual_depthwise_conv1d: bool = False" in convert_config_src
+    assert "fuse_gdr_ops: bool = False" in convert_config_src
+    assert "force_fp32=self.config.normalize_force_fp32" in converter_src
+    assert "split_conv_cache=self.config.split_conv_cache" in converter_src
+    assert "use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d" in converter_src
+    assert "fuse_gdr_ops=self.config.fuse_gdr_ops" in converter_src
+    assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in wrap_model_src
+    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in wrap_model_src
+    assert '"use_manual_depthwise_conv1d", False' in wrap_model_src
+
+
+def test_dense_qwen3_5_split_cache_dims_prefer_actual_split_modules():
+    dim_resolver = _load_function_from_source(MODEL_ZOO_LLM_MODEL, "_linear_split_conv_dims")
+
+    class Conv:
+        def __init__(self, in_channels: int):
+            self.in_channels = in_channels
+
+    class LinearAttn:
+        key_dim = 4096
+        value_dim = 4096
+        head_k_dim = 64
+        head_v_dim = 128
+        num_v_heads = 32
+        conv1d_q = Conv(2048)
+        conv1d_k = Conv(2048)
+        conv1d_v = Conv(4096)
+
+    assert dim_resolver(LinearAttn()) == (2048, 2048, 4096)
+
+    class PreSplitLinearAttn:
+        key_dim = 4096
+        value_dim = 4096
+        head_k_dim = 64
+        head_v_dim = 128
+        num_v_heads = 32
+
+    assert dim_resolver(PreSplitLinearAttn()) == (2048, 2048, 4096)
+
+
+def test_dense_qwen3_5_merak_and_demo_expose_split_and_merged_modes():
+    merak_impl_src = MERAK_MODEL.with_name("_llm_model_impl.py").read_text()
+    export_script_src = EXPORT_SCRIPT.read_text()
+
+    assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in merak_impl_src
+    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in merak_impl_src
+    assert 'self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)' in merak_impl_src
+    assert 'cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)' in export_script_src
+    assert 'default=True' in export_script_src
+    assert 'dest="split_conv_cache"' in export_script_src
+    assert '"--split_conv_cache"' in export_script_src
+    assert '"--no_split_conv_cache"' in export_script_src
+    assert 'action="store_false"' in export_script_src
+    assert 'cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)' in export_script_src
+    assert 'default=False' in export_script_src
+    assert 'normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)' in export_script_src
+    assert 'cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(' in export_script_src
+
+
+def test_dense_qwen3_5_dflash_uses_checkpoint_target_ids_and_guards_num_blocks():
+    export_script_src = EXPORT_SCRIPT.read_text()
+    runtime_src = (REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_spec_decode_onnx_model.py").read_text()
+
+    assert "def _load_dflash_target_layer_ids" in export_script_src
+    assert 'cfg.get("dflash_config", {}).get("target_layer_ids")' in export_script_src
+    assert "def _validate_dflash_target_layer_ids" in export_script_src
+    assert "--num_blocks/max_layers does not cover DFlash target_layer_ids" in export_script_src
+    assert "_validate_dflash_target_layer_ids(" in export_script_src
+    assert "DFlash target_hidden shape mismatch before running draft context" in runtime_src
+    assert "dflash_config.target_layer_ids" in runtime_src
+
+
+
+
+def test_dense_qwen3_5_demo_runtime_accepts_current_golden_meta_fields():
+    runtime_src = DEMO_RUNTIME.read_text()
+
+    assert 'meta_info.get("hf_config") or meta_info.get("hf_config_dir") or "hf_config"' in runtime_src
+    assert 'meta_info.get("token_embedding_file")' in runtime_src
+    assert 'or meta_info.get("quant_embedding")' in runtime_src
+    assert 'or "quant_embedding.pt"' in runtime_src
+
+def test_spec_decode_export_cfg_keeps_split_conv_mtp_dflash_input_names():
+    src = MERAK_MODEL.read_text()
+
+    assert 'self._decode_input_sequence_length = self.config.num_draft_tokens + 1' in src
+    assert '"verify_output_intermediates": True' in src
+    assert 'for branch in ("q", "k", "v")' in src
+    assert 'f"past_conv_cache_{branch}_{cache_idx}"' in src
+    assert 'f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"' in src
+    assert 'hidden_output_name = (\n                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"\n            )' in src
