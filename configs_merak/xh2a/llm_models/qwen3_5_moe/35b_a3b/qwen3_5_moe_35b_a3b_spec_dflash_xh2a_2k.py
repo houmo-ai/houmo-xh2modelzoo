@@ -1,14 +1,13 @@
 _base_ = [
-    "../_qwen3_5_xh2a_2k.py",
+    "../_qwen3_5_moe_xh2a_2k.py",
 ]
 
-hf_model_dir = "weights/Qwen3.5-9B"
-dflash_model_dir = "weights/Qwen3.5-9B-DFlash"
+hf_model_dir = "weights/Qwen3.6-35B-A3B"
+dflash_model_dir = "weights/Qwen3.6-35B-A3B-DFlash"
 
 model = dict(
-    model_type="Qwen3_5ForConditionalGeneration",
     hf_model=hf_model_dir,
-    model_name="qwen3_5_9b_spec_dflash_test",
+    model_name="qwen3_6_35b_a3b_spec_dflash_test",
     context_max_length=2048,
     prefill_chunk_length=256,
     max_pe_length=32768,
@@ -16,27 +15,24 @@ model = dict(
         max_size_w=448,
         max_size_h=448,
         quant_scheme=dict(
-            quant_type="w8a8h1_sefp",
+            quant_type="w8a8h0_ssfp",
             ops={},
         ),
         enable=True,
     ),
-    # spec decode: DFlash mode
     spec_decode_mode="dflash",
     num_draft_tokens=9,
-    output_hidden_state_indices=[1, 8, 15, 22, 29],
+    output_hidden_state_indices=[1, 10, 19, 28, 37],
     dflash_config=dict(
         hf_model=dflash_model_dir,
         target_model_dir=hf_model_dir,
         mode="context",
-        hidden_size=4096,
+        hidden_size=2048,
         num_attention_heads=32,
-        num_key_value_heads=8,
+        num_key_value_heads=4,
         head_dim=128,
-        num_hidden_layers=5,
-        # DFlash consumes the selected target hidden layers, not all target
-        # decoder layers.  Qwen3.5-9B-DFlash config.json uses five ids:
-        # [1, 8, 15, 22, 29].
+        num_hidden_layers=8,
+        # DFlash consumes selected target hidden layers, not every target layer.
         num_target_layers=5,
         block_size=16,
         batch_size=1,

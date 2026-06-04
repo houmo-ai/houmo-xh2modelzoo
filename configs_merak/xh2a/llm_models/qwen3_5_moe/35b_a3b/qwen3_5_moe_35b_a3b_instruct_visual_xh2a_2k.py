@@ -2,7 +2,7 @@ _base_ = [
     "../../../_base_/xh2a_base.py",
 ]
 
-hf_model_dir = "/data01/nfs_shared/Qwen3.5-35B-A3B"
+hf_model_dir = "weights/Qwen3.6-35B-A3B"
 
 model = dict(
     model_type="Qwen3_5MoeForConditionalGeneration_visual",

@@ -145,7 +145,14 @@ def load_spec_decode_runtime(
         )
 
     spec_mode = spec_decode["mode"]
-    block_size = num_draft_tokens_override or spec_decode.get("block_size", 4)
+    if num_draft_tokens_override:
+        block_size = (
+            num_draft_tokens_override + 1
+            if spec_mode == "dflash"
+            else num_draft_tokens_override
+        )
+    else:
+        block_size = spec_decode.get("block_size", 4)
     hidden_output_name = spec_decode.get(
         "hidden_output_name",
         "target_hidden" if spec_mode == "dflash" else "post_norm_hidden",

@@ -273,9 +273,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         if hasattr(config, "visual_config") and config.visual_config is not None and config.visual_config.enable:
             self.visual = XHQwen3_5VisionModel(config.visual_config)
-            self.visual.config.model_name = (
-                f"{self.config.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
-            )
+            self.visual.config.model_name = f"{self.config.model_name}_visual"
         self.full_attention_layer_indices: list[int] = []
         self.linear_attention_layer_indices: list[int] = []
         self._kvcache_config = KVCacheWithLinearConfig()
@@ -476,10 +474,22 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             self.set_input_sequence_length(spec_seq_len)
 
         decode_quanted_model = super()._to_quanted(decode_fronted_model, state)
+        if spec_decode_mode in ("mtp", "dflash"):
+            self._restore_prefill_wrap_cfg()
         self.set_prefill()
         model = ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
         model.set_activate_model("prefill")
         return model
+
+    def _restore_prefill_wrap_cfg(self):
+        self.wrap_cfg["verify_output_intermediates"] = False
+        self.wrap_cfg["num_logits_to_keep"] = self.config.num_logits_to_keep
+        self.wrap_cfg["input_sequence_length"] = self.config.prefill_chunk_length
+        output_post_norm_hidden = getattr(self.config, "output_post_norm_hidden", False)
+        if output_post_norm_hidden:
+            self.wrap_cfg["output_post_norm_hidden"] = output_post_norm_hidden
+        else:
+            self.wrap_cfg.pop("output_post_norm_hidden", None)
 
     def _to_fronted(self, wrap_model):
         # 将模型转换成前端图，准备进行量化
@@ -515,9 +525,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         decode_frontend_model = super()._to_fronted(decode_wrap_model)
 
         if spec_decode_mode in ("mtp", "dflash"):
-            self.wrap_cfg["verify_output_intermediates"] = False
-            self.wrap_cfg.pop("output_post_norm_hidden", None)
-            self.wrap_cfg.pop("num_logits_to_keep", None)
+            self._restore_prefill_wrap_cfg()
 
         self._wrap_model = prefill_wrap_model
         self.set_prefill()
@@ -796,9 +804,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.config.model_name = exported_info.model_name
         visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
         # 导出visual
-        self.visual.config.model_name = (
-            f"{exported_info.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
-        )
+        self.visual.config.model_name = f"{exported_info.model_name}_visual"
         visual_meta = self.visual.export_hmonnx(visual_output_dir)
         visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
         meta_info = exported_info.meta
@@ -833,7 +839,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             mtp_base_cfg = self.config.mtp_config
 
             mtp_prefill_cfg = copy.deepcopy(mtp_base_cfg)
-            mtp_prefill_cfg.model_name = f"{mtp_base_cfg.model_name}_mtp_draft_prefill"
+            mtp_prefill_cfg.model_name = f"{exported_info.model_name}_mtp_draft_prefill"
             mtp_prefill_cfg.input_sequence_length = self.config.prefill_chunk_length
             mtp_prefill_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp_draft_prefill")
             mtp_prefill_model = XHQwen3_5MTPDraftModel(mtp_prefill_cfg)
@@ -844,7 +850,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             )
 
             mtp_decode_cfg = copy.deepcopy(mtp_base_cfg)
-            mtp_decode_cfg.model_name = f"{mtp_base_cfg.model_name}_mtp_draft_decode"
+            mtp_decode_cfg.model_name = f"{exported_info.model_name}_mtp_draft_decode"
             mtp_decode_cfg.input_sequence_length = 1
             mtp_decode_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp_draft_decode")
             mtp_decode_model = XHQwen3_5MTPDraftModel(mtp_decode_cfg)
@@ -868,7 +874,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
             # context mode
             ctx_cfg = copy.deepcopy(dflash_base_cfg)
-            ctx_cfg.model_name = f"{dflash_base_cfg.model_name}_dflash_draft_context"
+            ctx_cfg.model_name = f"{exported_info.model_name}_dflash_draft_context"
             ctx_cfg.mode = "context"
             ctx_cfg.work_dir = str(Path(exported_info.exported_dir) / "dflash_draft_context")
             ctx_model = XHQwen3_5DFlashDraftModel(ctx_cfg)
@@ -878,7 +884,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
             # context_decode mode uses context inputs over the verify length.
             ctx_dec_cfg = copy.deepcopy(dflash_base_cfg)
-            ctx_dec_cfg.model_name = f"{dflash_base_cfg.model_name}_dflash_draft_context_decode"
+            ctx_dec_cfg.model_name = f"{exported_info.model_name}_dflash_draft_context_decode"
             ctx_dec_cfg.mode = "context"
             ctx_dec_cfg.input_sequence_length = dflash_verify_seq_len
             ctx_dec_cfg.work_dir = str(Path(exported_info.exported_dir) / "dflash_draft_context_decode")
@@ -889,7 +895,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
             # decode mode also uses the verify length for draft-token generation.
             dec_cfg = copy.deepcopy(dflash_base_cfg)
-            dec_cfg.model_name = f"{dflash_base_cfg.model_name}_dflash_draft_decode"
+            dec_cfg.model_name = f"{exported_info.model_name}_dflash_draft_decode"
             dec_cfg.mode = "decode"
             dec_cfg.input_sequence_length = dflash_verify_seq_len
             dec_cfg.work_dir = str(Path(exported_info.exported_dir) / "dflash_draft_decode")
@@ -916,9 +922,13 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             hidden_output_name = (
                 "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
             )
+            spec_block_size = (
+                num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
+            )
             spec_decode_section = {
                 "mode": spec_decode_mode,
-                "block_size": num_draft_tokens,
+                "block_size": spec_block_size,
+                "num_draft_tokens": num_draft_tokens,
                 "hidden_output_name": hidden_output_name,
             }
             if spec_decode_mode == "mtp":

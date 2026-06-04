@@ -28,6 +28,54 @@ def test_qwen3_5_model_forwards_manual_depthwise_flag_to_wrap_cfg():
     assert model.wrap_cfg["use_manual_depthwise_conv1d"] is False
 
 
+def test_qwen3_5_spec_decode_restore_prefill_wrap_cfg():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_5",
+        spec_decode_mode="mtp",
+        output_post_norm_hidden=True,
+        num_logits_to_keep=1,
+        prefill_chunk_length=256,
+    )
+    model = XHQwen3_5Model(cfg)
+    model.wrap_cfg["verify_output_intermediates"] = True
+    model.wrap_cfg["num_logits_to_keep"] = 0
+    model.wrap_cfg["input_sequence_length"] = 5
+    model.wrap_cfg["output_post_norm_hidden"] = True
+
+    model._restore_prefill_wrap_cfg()
+
+    assert model.wrap_cfg["verify_output_intermediates"] is False
+    assert model.wrap_cfg["num_logits_to_keep"] == 1
+    assert model.wrap_cfg["input_sequence_length"] == 256
+    assert model.wrap_cfg["output_post_norm_hidden"] is True
+
+
+def test_qwen3_5_dflash_restore_prefill_wrap_cfg_without_post_norm_hidden():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_5",
+        spec_decode_mode="dflash",
+        num_logits_to_keep=1,
+        output_hidden_state_indices=[1],
+        prefill_chunk_length=256,
+    )
+    model = XHQwen3_5Model(cfg)
+    model.wrap_cfg["verify_output_intermediates"] = True
+    model.wrap_cfg["num_logits_to_keep"] = 0
+    model.wrap_cfg["input_sequence_length"] = 10
+    model.wrap_cfg["output_post_norm_hidden"] = True
+
+    model._restore_prefill_wrap_cfg()
+
+    assert model.wrap_cfg["verify_output_intermediates"] is False
+    assert model.wrap_cfg["num_logits_to_keep"] == 1
+    assert model.wrap_cfg["input_sequence_length"] == 256
+    assert "output_post_norm_hidden" not in model.wrap_cfg
+
+
 def test_qwen3_5_split_conv_cache_impl_imports_torch_nn():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
 
@@ -55,6 +103,21 @@ def test_qwen3_5_split_conv_cache_helpers_round_trip_flat_inputs():
     moe_grouped = _moe_model._regroup_flat_split_conv_cache(flat)
     assert moe_grouped == grouped
     assert _moe_model._flatten_split_conv_cache_outputs(moe_grouped) == flat
+
+
+def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
+        _flatten_split_conv_cache_outputs,
+    )
+
+    composite = [tuple(range(15))]
+    expected = list(range(15))
+
+    assert _llm_model_impl._flatten_split_conv_cache_outputs(composite) == expected
+    assert _flatten_split_conv_cache_outputs(composite) == expected
+    assert _moe_model._flatten_split_conv_cache_outputs(composite) == expected
 
 
 def test_qwen3_5_split_conv_cache_helpers_reject_bad_flat_length():
@@ -363,3 +426,85 @@ def test_quant_weight_directory_does_not_treat_hf_safetensors_dir_as_torch_check
 
     with pytest.raises(FileNotFoundError, match="safetensors/GPTQ HF directories are not supported"):
         XHBaseModel._resolve_quant_weight_archive(str(tmp_path))
+
+
+def test_get_hf_model_loads_float_model_then_external_quant_weight(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.AutoConfig.from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(quantization_config=None),
+    )
+    monkeypatch.setattr(XHBaseModel, "_load_hf_model", classmethod(lambda cls, hf_model_dir, **kwargs: calls.append(("hf", hf_model_dir, kwargs)) or object()))
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_load_quant_weight",
+        classmethod(lambda cls, quant_weight, native_hf_model, strict=True: calls.append(("quant_weight", quant_weight)) or True),
+    )
+
+    XHBaseModel.get_hf_model("weights/Qwen3.5-9B", quant_weight="/tmp/quant_weight.pt", device_map="cpu")
+
+    assert calls[0][0] == "hf"
+    assert calls[0][1] == "weights/Qwen3.5-9B"
+    assert calls[1] == ("quant_weight", "/tmp/quant_weight.pt")
+
+
+def test_get_hf_model_loads_quantized_hf_repo_without_quant_weight(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    quant_cfg = {"quant_method": "gptq"}
+    dummy_model = SimpleNamespace(config=SimpleNamespace(quantization_config=quant_cfg))
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.AutoConfig.from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(quantization_config=quant_cfg),
+    )
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_load_gptqmodel",
+        classmethod(lambda cls, hf_model_dir, **kwargs: calls.append(("gptq", hf_model_dir, kwargs)) or dummy_model),
+    )
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_dequantize_gptqmodel_hf_model",
+        classmethod(lambda cls, native_hf_model: calls.append(("dequant",)) or native_hf_model),
+    )
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_postprocess_gptqmodel_structure",
+        classmethod(lambda cls, native_hf_model, **kwargs: calls.append(("postprocess", kwargs)) or native_hf_model),
+    )
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_load_quant_weight",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("quant_weight loader must not run"))),
+    )
+
+    out = XHBaseModel.get_hf_model(
+        "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only",
+        quant_weight=None,
+        device_map="cpu",
+    )
+
+    assert out is dummy_model
+    assert calls[0][0] == "gptq"
+    assert calls[0][1] == "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only"
+    assert ("dequant",) in calls
+
+
+def test_get_hf_model_rejects_quant_weight_for_quantized_hf_repo(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.AutoConfig.from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(quantization_config={"quant_method": "gptq"}),
+    )
+
+    with pytest.raises(RuntimeError, match="already quantized"):
+        XHBaseModel.get_hf_model(
+            "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only",
+            quant_weight="/tmp/quant_weight.pt",
+        )

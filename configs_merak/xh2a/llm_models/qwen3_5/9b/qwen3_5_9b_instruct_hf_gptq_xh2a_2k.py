@@ -1,15 +1,15 @@
 _base_ = [
-    "./qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py",
+    "./qwen3_5_9b_instruct_xh2a_2k.py",
 ]
 
 # Quantized HF/GPTQModel repository.  For this format the standard loading
 # contract is: set model.hf_model to the quantized directory and keep
 # model.quant_weight unset.
-hf_model_dir = "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400"
+hf_model_dir = "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only"
 
 model = dict(
     hf_model=hf_model_dir,
-    model_name="xh2_Qwen3.6-35B-A3B_w4a8_256_2k",
+    model_name="xh2_Qwen3.5-9B_w4a8_256_2k",
     quant_scheme=dict(
         quant_type="w4a8h1_sefp",
         nodes=dict(

@@ -586,10 +586,20 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         a = self.in_proj_a(hidden_states)  # [bs, seq, num_v_heads]
 
         use_recurrent = self.linear_attention_mode == "recurrent"
+        _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
         if self.linear_attention_mode == "auto" and current_input_length is not None:
             resolved_len = _resolve_python_int_length(current_input_length)
             # FX trace path: unresolved symbolic length falls back to chunk mode.
             use_recurrent = (resolved_len == 1) if resolved_len is not None else False
+
+        resolved_seq_len = _resolve_python_int_length(seq_len)
+        _expand_verify_tokens = (
+            _verify_intermediates
+            and self.input_sequence_length > 1
+            and use_recurrent
+            and resolved_seq_len == 1
+        )
+        attn_seq_len = self.input_sequence_length if _expand_verify_tokens else seq_len
 
         # Conv1d with cache
         conv_cache, recurrent_state = _align_linear_cache_args(
@@ -688,13 +698,13 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             value_out = value_out * mask_qkv
 
             query = query_out.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_k_dim
+                batch_size, attn_seq_len, -1, self.head_k_dim
             )
             key = key_out.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_k_dim
+                batch_size, attn_seq_len, -1, self.head_k_dim
             )
             value = value_out.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_v_dim
+                batch_size, attn_seq_len, -1, self.head_v_dim
             )
         else:
             # --- Original merged conv_cache path ---
@@ -737,9 +747,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             query, key, value = torch.split(
                 mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
             )
-            query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
-            key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-            value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+            query = query.reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
+            key = key.reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
+            value = value.reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
 
         beta = b.sigmoid()
         g = self.A_log_exp * F.softplus(a + self.dt_bias)
@@ -748,6 +758,10 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         value = value * mask_qkv
         beta = beta * mask
         g = g * mask
+        if _expand_verify_tokens:
+            beta = beta.repeat_interleave(self.input_sequence_length, dim=1)
+            g = g.repeat_interleave(self.input_sequence_length, dim=1)
+            mask_qkv = mask_qkv.repeat_interleave(self.input_sequence_length, dim=1)
 
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(
@@ -758,7 +772,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             )
 
         if use_recurrent:
-            if _verify_intermediates and self.input_sequence_length > 1:
+            if self.input_sequence_length > 1:
                 _recurrent_snapshots = []
                 _current_rs = recurrent_state
                 _core_parts = []
@@ -829,8 +843,8 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 cumsum_matmul=self.cumsum_matmul,
             )
 
-        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
-            # Per-step list (one tensor per verify step) — downstream flattens to
+        if self.input_sequence_length > 1 and use_recurrent:
+            # Per-step list (one tensor per recurrent verify step) — downstream flattens to
             # `recurrent_state_out_{layer}_{t}` ONNX outputs.
             recurrent_state_out = tuple(_recurrent_snapshots)
         else:
@@ -839,6 +853,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 if last_recurrent_state is not None
                 else recurrent_state
             )
+
+        if _expand_verify_tokens:
+            z = z.repeat_interleave(self.input_sequence_length, dim=1)
 
         b_sz, s, n, h = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])

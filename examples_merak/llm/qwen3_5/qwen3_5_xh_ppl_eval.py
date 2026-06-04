@@ -121,5 +121,4 @@ if __name__ == "__main__":
     parser.add_argument("--max-samples", type=int, default=4096, help="Max token count to evaluate")
     parser.add_argument("--fast", action="store_true", help="Run HMONNX model in fast mode when supported")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    args = parser.parse_args()
-    main(args)
+    main(parser.parse_args())

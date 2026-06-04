@@ -4,7 +4,7 @@ _base_ = [
 
 model = dict(
     model_type="Qwen3_5MoeForConditionalGeneration",
-    model_name="xh2_Qwen3.5-35B-A3B_w8a8",
+    model_name="xh2_Qwen3.6-35B-A3B_w8a8",
     context_max_length=2048,
     prefill_chunk_length=256,
     use_cache=True,

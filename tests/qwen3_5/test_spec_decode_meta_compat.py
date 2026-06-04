@@ -7,6 +7,7 @@ No GPU / no weights / no network required.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 from pathlib import Path
 
@@ -15,6 +16,7 @@ MERAK_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model
 SPEC_TEST = REPO_ROOT / "examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py"
 SPEC_BENCH = REPO_ROOT / "examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py"
 CONFIG_FILE = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
+LAYOUT_VALIDATOR = REPO_ROOT / "examples_merak/llm/qwen3_5/validate_hm_release_layout.py"
 
 SPEC_DECODE_DIRS = {
     "mtp_draft_prefill",
@@ -29,10 +31,58 @@ LEGACY_SPEC_DECODE_DIRS = {
     "decoder",
     "vision",
 }
+STAGE_SUFFIXES = {
+    "prefill": "prefill",
+    "decode": "decode",
+    "visual": "visual",
+    "mtp_draft_prefill": "mtp_draft_prefill",
+    "mtp_draft_decode": "mtp_draft_decode",
+    "dflash_draft_context": "dflash_draft_context",
+    "dflash_draft_context_decode": "dflash_draft_context_decode",
+    "dflash_draft_decode": "dflash_draft_decode",
+}
 
 
 def _parse(path: Path) -> ast.Module:
     return ast.parse(path.read_text(), filename=str(path))
+
+
+def _load_layout_validator():
+    spec = importlib.util.spec_from_file_location("validate_hm_release_layout", LAYOUT_VALIDATOR)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_external_data_onnx(onnx_path: Path, external_data_name: str) -> None:
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper
+
+    tensor = helper.make_tensor(
+        name="weight",
+        data_type=TensorProto.FLOAT,
+        dims=[1],
+        vals=np.array([1.0], dtype=np.float32).tobytes(),
+        raw=True,
+    )
+    graph = helper.make_graph(
+        nodes=[],
+        name="external_data_test",
+        inputs=[],
+        outputs=[],
+        initializer=[tensor],
+    )
+    model = helper.make_model(graph)
+    onnx.save_model(
+        model,
+        str(onnx_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=external_data_name,
+        size_threshold=0,
+    )
 
 
 def _find_class(tree: ast.Module, name: str) -> ast.ClassDef:
@@ -97,10 +147,16 @@ def _assert_golden_export_layout(export_dir: Path) -> None:
 
 def _assert_hmonnx_stage_layout(stage_dir: Path, release_prefix: str) -> None:
     assert stage_dir.name not in {"decoder", "vision"}
+    assert stage_dir.name in STAGE_SUFFIXES
+    stage_suffix = STAGE_SUFFIXES[stage_dir.name]
+    expected_onnx_name = f"{release_prefix}_{stage_suffix}_with_act.onnx"
+    expected_external_data_name = f"{release_prefix}_{stage_suffix}_external_data"
     onnx_files = sorted(stage_dir.rglob("*.onnx"))
     external_data_files = sorted(path for path in stage_dir.rglob("*external_data") if path.is_file())
     assert onnx_files, f"missing onnx under {stage_dir}"
     assert external_data_files, f"missing external_data under {stage_dir}"
+    assert any(path.name == expected_onnx_name for path in onnx_files)
+    assert any(path.name == expected_external_data_name for path in external_data_files)
     assert all(path.name.startswith(release_prefix) for path in onnx_files + external_data_files)
 
     step_dirs = sorted(path for path in stage_dir.rglob("step_*") if path.is_dir())
@@ -189,7 +245,7 @@ def test_golden_export_layout_validator_accepts_release_spec(tmp_path):
     ):
         stage_dir = export_dir / dirname
         stage_dir.mkdir(parents=True)
-        onnx = stage_dir / f"{release_prefix}_{suffix}.onnx"
+        onnx = stage_dir / f"{release_prefix}_{suffix}_with_act.onnx"
         external_data = stage_dir / f"{release_prefix}_{suffix}_external_data"
         onnx.write_bytes(b"onnx")
         external_data.write_bytes(b"external")
@@ -201,19 +257,19 @@ def test_golden_export_layout_validator_accepts_release_spec(tmp_path):
     meta = {
         "hf_config": "hf_config",
         "quant_embedding": "quant_embedding.pt",
-        "prefill_hmonnx": f"prefill/{release_prefix}_prefill.onnx",
-        "decode_hmonnx": f"decode/{release_prefix}_decode.onnx",
+        "prefill_hmonnx": f"prefill/{release_prefix}_prefill_with_act.onnx",
+        "decode_hmonnx": f"decode/{release_prefix}_decode_with_act.onnx",
         "spec_decode": {
             "mode": "dflash",
             "block_size": 4,
             "hidden_output_name": "target_hidden",
-            "mtp_draft_prefill_onnx": f"mtp_draft_prefill/{release_prefix}_mtp_draft_prefill.onnx",
-            "mtp_draft_decode_onnx": f"mtp_draft_decode/{release_prefix}_mtp_draft_decode.onnx",
-            "dflash_draft_context_onnx": f"dflash_draft_context/{release_prefix}_dflash_draft_context.onnx",
+            "mtp_draft_prefill_onnx": f"mtp_draft_prefill/{release_prefix}_mtp_draft_prefill_with_act.onnx",
+            "mtp_draft_decode_onnx": f"mtp_draft_decode/{release_prefix}_mtp_draft_decode_with_act.onnx",
+            "dflash_draft_context_onnx": f"dflash_draft_context/{release_prefix}_dflash_draft_context_with_act.onnx",
             "dflash_draft_context_decode_onnx": (
-                f"dflash_draft_context_decode/{release_prefix}_dflash_draft_context_decode.onnx"
+                f"dflash_draft_context_decode/{release_prefix}_dflash_draft_context_decode_with_act.onnx"
             ),
-            "dflash_draft_decode_onnx": f"dflash_draft_decode/{release_prefix}_dflash_draft_decode.onnx",
+            "dflash_draft_decode_onnx": f"dflash_draft_decode/{release_prefix}_dflash_draft_decode_with_act.onnx",
         },
     }
     (export_dir / "golden_meta_info.json").write_text(json.dumps(meta))
@@ -232,7 +288,7 @@ def test_golden_export_layout_validator_allows_visual_branch(tmp_path):
     for dirname in ("prefill", "decode", "visual"):
         stage_dir = export_dir / dirname
         stage_dir.mkdir(parents=True)
-        onnx = stage_dir / f"{release_prefix}_{dirname}.onnx"
+        onnx = stage_dir / f"{release_prefix}_{dirname}_with_act.onnx"
         external_data = stage_dir / f"{release_prefix}_{dirname}_external_data"
         onnx.write_bytes(b"onnx")
         external_data.write_bytes(b"external")
@@ -240,13 +296,55 @@ def test_golden_export_layout_validator_allows_visual_branch(tmp_path):
     meta = {
         "hf_config": "hf_config",
         "quant_embedding": "quant_embedding.pt",
-        "prefill_hmonnx": f"prefill/{release_prefix}_prefill.onnx",
-        "decode_hmonnx": f"decode/{release_prefix}_decode.onnx",
-        "visual_config": {"hmonnx": f"visual/{release_prefix}_visual.onnx"},
+        "prefill_hmonnx": f"prefill/{release_prefix}_prefill_with_act.onnx",
+        "decode_hmonnx": f"decode/{release_prefix}_decode_with_act.onnx",
+        "visual_config": {"hmonnx": f"visual/{release_prefix}_visual_with_act.onnx"},
     }
     (export_dir / "golden_meta_info.json").write_text(json.dumps(meta))
 
     _assert_golden_export_layout(export_dir)
+
+
+def test_release_layout_validator_checks_onnx_external_data_location(tmp_path):
+    """Validator catches stale ONNX external_data locations after artifact renames."""
+    validator = _load_layout_validator()
+    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_448x448_20260603"
+    release_prefix = export_dir.name
+    (export_dir / "hf_config").mkdir(parents=True)
+    (export_dir / "hf_config" / "config.json").write_text("{}")
+    (export_dir / "quant_embedding.pt").write_bytes(b"embedding")
+
+    for stage in ("prefill", "decode"):
+        stage_dir = export_dir / stage
+        stage_dir.mkdir(parents=True)
+        external_data_name = f"{release_prefix}_{stage}_external_data"
+        _write_external_data_onnx(stage_dir / f"{release_prefix}_{stage}_with_act.onnx", external_data_name)
+
+    (export_dir / "golden_meta_info.json").write_text(
+        json.dumps(
+            {
+                "hf_config": "hf_config",
+                "quant_embedding": "quant_embedding.pt",
+                "prefill_hmonnx": f"prefill/{release_prefix}_prefill_with_act.onnx",
+                "decode_hmonnx": f"decode/{release_prefix}_decode_with_act.onnx",
+            }
+        )
+    )
+
+    assert validator.validate_release_layout(export_dir) == []
+
+    import onnx
+
+    prefill_onnx = export_dir / "prefill" / f"{release_prefix}_prefill_with_act.onnx"
+    model = onnx.load_model(str(prefill_onnx), load_external_data=False)
+    for tensor in model.graph.initializer:
+        for entry in tensor.external_data:
+            if entry.key == "location":
+                entry.value = "stale_external_data"
+    onnx.save_model(model, str(prefill_onnx))
+
+    failures = validator.validate_release_layout(export_dir)
+    assert any("external_data location mismatch" in failure for failure in failures)
 
 
 def test_get_export_cfg_handles_split_conv_cache():
@@ -271,6 +369,28 @@ def test_get_export_cfg_handles_spec_decode_outputs():
     assert '"post_norm_hidden"' in src
     assert "output_hidden_state_indices" in src
     assert "output_post_norm_hidden" in src
+
+
+def test_visual_export_uses_release_spec_stage_suffix():
+    """Visual branch names must follow <release_prefix>_visual_* under visual/."""
+    src = MERAK_MODEL.read_text()
+    assert 'self.visual.config.model_name = f"{exported_info.model_name}_visual"' in src
+    assert "self.visual.config.max_size_w}x{self.visual.config.max_size_h}" not in src
+
+
+def test_spec_decode_export_uses_release_spec_stage_suffixes():
+    """Draft branches must use the final release prefix, not child config names."""
+    src = MERAK_MODEL.read_text()
+    for suffix in (
+        "mtp_draft_prefill",
+        "mtp_draft_decode",
+        "dflash_draft_context",
+        "dflash_draft_context_decode",
+        "dflash_draft_decode",
+    ):
+        assert f'f"{{exported_info.model_name}}_{suffix}"' in src
+        assert f'f"{{mtp_base_cfg.model_name}}_{suffix}"' not in src
+        assert f'f"{{dflash_base_cfg.model_name}}_{suffix}"' not in src
 
 
 def test_config_has_spec_decode_fields():

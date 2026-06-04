@@ -73,12 +73,24 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         outs = super().forward(*args)
 
         logits, *linear_caches = outs
-        conv_cache_out_list, recurrent_state_out_list = (
-            linear_caches[: len(linear_caches) // 2],
-            linear_caches[len(linear_caches) // 2 :],
-        )
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
+        conv_cache_out_count = (
+            len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
+        )
+        recurrent_state_out_count = len(past_recurrent_states)
+        expected_linear_cache_outputs = conv_cache_out_count + recurrent_state_out_count
+        if len(linear_caches) < expected_linear_cache_outputs:
+            raise RuntimeError(
+                "HMONNX output cache count mismatch: "
+                f"expected at least {expected_linear_cache_outputs} linear cache outputs "
+                f"({conv_cache_out_count} conv + {recurrent_state_out_count} recurrent), "
+                f"got {len(linear_caches)}"
+            )
+        conv_cache_out_list = linear_caches[:conv_cache_out_count]
+        recurrent_state_out_list = linear_caches[
+            conv_cache_out_count : conv_cache_out_count + recurrent_state_out_count
+        ]
         # 更新cache
         if self._kvcache_mixin.split_conv_cache:
             grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)

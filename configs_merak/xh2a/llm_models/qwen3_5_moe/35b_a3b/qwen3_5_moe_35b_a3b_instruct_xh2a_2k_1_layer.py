@@ -2,11 +2,11 @@ _base_ = [
     "../_qwen3_5_moe_xh2a_2k.py",
 ]
 
-hf_model_dir = "/data01/datasets/Qwen3.5-35B-A3B"
+hf_model_dir = "weights/Qwen3.6-35B-A3B"
 
 model = dict(
     hf_model=hf_model_dir,
-    model_name="xh2_Qwen3.5-35B-A3B_w8a8_256_2k_1_layer",
+    model_name="xh2_Qwen3.6-35B-A3B_w8a8_256_2k_1_layer",
     visual_config=dict(
         max_size_w=448,
         max_size_h=448,

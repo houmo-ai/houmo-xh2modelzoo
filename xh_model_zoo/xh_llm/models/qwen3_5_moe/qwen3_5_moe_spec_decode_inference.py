@@ -16,24 +16,48 @@ from .inference import (
 
 
 def _build_spec_decode_config(meta_info: dict, model_dir: Path) -> dict:
-    spec_decode_mode = meta_info.get("spec_decode_mode")
-    if spec_decode_mode not in {"mtp", "dflash"}:
-        raise ValueError("meta.json does not contain a supported spec_decode_mode. Expected one of {'mtp', 'dflash'}.")
+    spec_decode_section = meta_info.get("spec_decode")
+    if not isinstance(spec_decode_section, dict):
+        spec_decode_section = {}
 
-    hidden_output_name = meta_info.get(
-        "spec_decode_hidden_output_name",
-        "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden",
+    spec_decode_mode = meta_info.get("spec_decode_mode") or spec_decode_section.get("mode")
+    if spec_decode_mode not in {"mtp", "dflash"}:
+        raise ValueError("meta.json does not contain a supported spec_decode mode. Expected one of {'mtp', 'dflash'}.")
+
+    hidden_output_name = (
+        meta_info.get("spec_decode_hidden_output_name")
+        or spec_decode_section.get("hidden_output_name")
+        or ("target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden")
     )
-    block_size = int(meta_info.get("spec_decode_block_size", 4))
+    block_size = int(
+        meta_info.get("spec_decode_block_size")
+        or spec_decode_section.get("block_size")
+        or 4
+    )
     draft_cfg = {
         "prefill": None,
         "context": None,
         "decode": None,
     }
-    draft_prefill = meta_info.get("draft_prefill_onnx_file")
-    draft_context = meta_info.get("draft_context_onnx_file")
-    draft_context_decode = meta_info.get("draft_context_decode_onnx_file")
-    draft_decode = meta_info.get("draft_decode_onnx_file")
+
+    def _first_path(*keys: str):
+        for key in keys:
+            value = meta_info.get(key)
+            if value:
+                return value
+            value = spec_decode_section.get(key)
+            if value:
+                return value
+        return None
+
+    draft_prefill = _first_path("draft_prefill_onnx_file", "draft_prefill_onnx", "mtp_draft_prefill_onnx")
+    draft_context = _first_path("draft_context_onnx_file", "draft_context_onnx", "dflash_draft_context_onnx")
+    draft_context_decode = _first_path(
+        "draft_context_decode_onnx_file",
+        "draft_context_decode_onnx",
+        "dflash_draft_context_decode_onnx",
+    )
+    draft_decode = _first_path("draft_decode_onnx_file", "draft_decode_onnx", "mtp_draft_decode_onnx", "dflash_draft_decode_onnx")
     if draft_prefill:
         draft_cfg["prefill"] = {"onnx": str(_resolve_path(model_dir, draft_prefill))}
     if draft_context:
@@ -41,7 +65,7 @@ def _build_spec_decode_config(meta_info: dict, model_dir: Path) -> dict:
     if draft_context_decode:
         draft_cfg["context_decode"] = {"onnx": str(_resolve_path(model_dir, draft_context_decode))}
     if draft_decode is None:
-        raise ValueError(f"draft_decode_onnx_file missing from {model_dir / 'meta.json'}")
+        raise ValueError(f"draft decode ONNX path missing from {model_dir / 'meta.json'}")
     draft_cfg["decode"] = {"onnx": str(_resolve_path(model_dir, draft_decode))}
     return {
         "draft": draft_cfg,
@@ -112,7 +136,11 @@ class Qwen3_5MoeSpecDecodeInference(Qwen3_5SpecDecodeONNXModel):
 def load_moe_inference(meta_json_path: str, **kwargs):
     meta_path = Path(meta_json_path).resolve()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if meta.get("spec_decode_mode") in {"mtp", "dflash"}:
+    spec_decode_section = meta.get("spec_decode")
+    spec_decode_mode = meta.get("spec_decode_mode")
+    if spec_decode_mode in {"mtp", "dflash"} or (
+        isinstance(spec_decode_section, dict) and spec_decode_section.get("mode") in {"mtp", "dflash"}
+    ):
         return Qwen3_5MoeSpecDecodeInference(str(meta_path), **kwargs)
     return Qwen3_5MoeInference(str(meta_path), **kwargs)
 

@@ -3,7 +3,7 @@ from typing import Any
 
 import torch
 
-from xhquant.api import HMONNXGraphGoldenInference as HMONNXGoldenInference
+from xhquant.api import HMONNXGoldenInference
 from xhquant.api import get_xhquant_logger
 from xhquant.xhonnxruntime.hmonnx_graph_inference import HMONNXCUDAGraphInference
 
@@ -21,6 +21,7 @@ class HMONNXGolden(HMONNXGoldenInference):
 
 class HMONNXModel(GoldenMixin, DeviceMixin):
     def __init__(self, hmonnx, enable_cuda_graph: bool = False):
+        self._enable_cuda_graph = enable_cuda_graph
         if self.enable_cuda_graph:
             logger = get_xhquant_logger()
             logger.info(f"enable CUDA Graph for {hmonnx}")
@@ -31,17 +32,14 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
         self._dtype = torch.float16
         self._device = torch.device("cpu")
         self._enable_golden = False
-        self._enable_cuda_graph = enable_cuda_graph
 
     @property
     def is_enable_cuda_graph(self) -> bool:
         return self._enable_cuda_graph
 
-    def enable_cuda_graph(self):
-        if self.enable_auto_offload:
-            raise RuntimeError("Cannot enable CUDA Graph when auto offload is enabled.")
-        if self.enable_golden:
-            raise RuntimeError("Cannot enable CUDA Graph when golden is enabled.")
+    @property
+    def enable_cuda_graph(self) -> bool:
+        return self._enable_cuda_graph
 
     def _set_device(self, device: torch.device):
         if device == self._device:
@@ -109,13 +107,17 @@ class HMONNXBaseModel(GoldenMixin, DeviceMixin):
     def enable_golden(self) -> bool:
         return self._enable_golden
 
+    @property
+    def enable_cuda_graph(self) -> bool:
+        return any(model.enable_cuda_graph for model in self._models.values())
+
     @enable_golden.setter
     def enable_golden(self, enable: bool) -> None:
-        for model in self._models.values():
-            model.enable_golden = enable
         if enable:
             if self.enable_cuda_graph:
                 raise RuntimeError("Cannot get golden status when CUDA Graph is enabled.")
+        for model in self._models.values():
+            model.enable_golden = enable
         self._enable_golden = enable
         self._set_enable_golden(enable)
 
@@ -123,10 +125,10 @@ class HMONNXBaseModel(GoldenMixin, DeviceMixin):
         pass
 
     def enable_auto_offload(self):
-        for model in self._models.values():
-            model.enable_auto_offload = True
         if self.enable_cuda_graph:
             raise RuntimeError("Cannot enable auto offload when CUDA Graph is enabled.")
+        for model in self._models.values():
+            model.enable_auto_offload = True
         self._enable_auto_offload = True
 
     def _set_device(self, device):

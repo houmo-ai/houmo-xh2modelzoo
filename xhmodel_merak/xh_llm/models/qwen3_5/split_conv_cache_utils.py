@@ -76,8 +76,10 @@ def _flatten_split_conv_cache_outputs(cache_list):
         return cache_list
     flat_cache = []
     for cache_tuple in cache_list:
-        if len(cache_tuple) != 3:
-            raise RuntimeError(f"Expected q/k/v conv cache tuple, got {len(cache_tuple)}")
+        if len(cache_tuple) % 3 != 0:
+            raise RuntimeError(
+                f"Expected q/k/v conv cache tuple length to be divisible by 3, got {len(cache_tuple)}"
+            )
         flat_cache.extend(cache_tuple)
     return flat_cache
 
