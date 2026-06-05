@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+import onnx
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeForCausalLM,
@@ -80,20 +81,61 @@ def _linear_split_conv_dims(linear_attn) -> tuple[int, int, int]:
         _module_channels("conv1d_v", v_fallback),
     )
 
+
+def _split_batch_tensor(tensor: torch.Tensor, batch_size: int) -> List[torch.Tensor]:
+    return [tensor[i : i + 1] for i in range(batch_size)]
+
+
+def _patch_hmonnx_standard_add_ops(onnx_file: Path) -> int:
+    """Move stray standard ONNX Add nodes into the XH2a domain.
+
+    HMONNX registers Add as ``XH2a::Add``.  The export path already emits
+    residual Add nodes in that domain, but the gather-index tail can leave one
+    default-domain Add.  Normalize it after export so HMONNX session creation
+    succeeds while preserving external-data tensors.
+    """
+
+    model = onnx.load(str(onnx_file), load_external_data=False)
+    changed = 0
+    for node in model.graph.node:
+        if node.op_type == "Add" and (node.domain or "") == "":
+            node.domain = "ai.houmo.xh2a"
+            changed += 1
+    if changed:
+        onnx.save_model(model, str(onnx_file))
+    return changed
+
+
 def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
     result = self._qwen3_5_moe_original_forward(*args, **kwargs)
+    batch_size = int(getattr(getattr(self, "cfg", None), "get", lambda *_: 1)("batch_size", 1))
+
+    def _append_batch(outputs: List[torch.Tensor], value):
+        if isinstance(value, (list, tuple)):
+            outputs.extend(value)
+            return
+        if batch_size > 1:
+            # During FX/export, values are Proxy-like objects rather than
+            # torch.Tensor instances.  Split by the fixed exported batch size
+            # unconditionally so graph outputs remain single-batch.
+            outputs.extend(value[batch_idx : batch_idx + 1] for batch_idx in range(batch_size))
+        else:
+            outputs.append(value)
+
     # Handle 3-tuple (logits, conv_caches, recurrent_states) and 4-tuple (+ post_norm_hidden).
     if len(result) == 4:
         logits, conv_cache_out_list, recurrent_state_out_list, post_norm_hidden = result
-        outputs: List[torch.Tensor] = [logits]
+        outputs: List[torch.Tensor] = []
+        _append_batch(outputs, logits)
         if conv_cache_out_list is not None:
             outputs.extend(list(conv_cache_out_list))
         if recurrent_state_out_list is not None:
             outputs.extend(list(recurrent_state_out_list))
-        outputs.append(post_norm_hidden)
+        _append_batch(outputs, post_norm_hidden)
     else:
         logits, conv_cache_out_list, recurrent_state_out_list = result
-        outputs: List[torch.Tensor] = [logits]
+        outputs: List[torch.Tensor] = []
+        _append_batch(outputs, logits)
         if conv_cache_out_list is not None:
             outputs.extend(list(conv_cache_out_list))
         if recurrent_state_out_list is not None:
@@ -377,18 +419,31 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         ]
 
         head_dim = text_config.head_dim
-        kv_cache_shape = [
-            self.config.batch_size,
-            text_config.num_key_value_heads,
-            context_length,
-            head_dim,
-        ]
-        past_key_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
-        ]
-        past_value_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
-        ]
+        batch_size = int(self.config.batch_size)
+        if batch_size > 1:
+            # Continuous-batch export contract: every HMONNX graph input is
+            # single-batch.  Full-attention KV cache inputs therefore become a
+            # flat per-layer/per-batch list of [1, Hkv, ctx, D] tensors.
+            kv_cache_shape = [1, text_config.num_key_value_heads, context_length, head_dim]
+            past_key_caches = []
+            past_value_caches = []
+            for _ in full_attention_layer_indices:
+                for _batch_idx in range(batch_size):
+                    past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+                    past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+        else:
+            kv_cache_shape = [
+                batch_size,
+                text_config.num_key_value_heads,
+                context_length,
+                head_dim,
+            ]
+            past_key_caches = [
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
+            ]
+            past_value_caches = [
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)) for _ in full_attention_layer_indices
+            ]
 
         past_conv_caches = []
         past_recurrent_states = []
@@ -403,41 +458,68 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 )
                 q_dim, k_dim, v_dim = _linear_split_conv_dims(linear_attn)
                 conv_shapes = [
-                    [self.config.batch_size, q_dim, linear_attn.conv_kernel_size],
-                    [self.config.batch_size, k_dim, linear_attn.conv_kernel_size],
-                    [self.config.batch_size, v_dim, linear_attn.conv_kernel_size],
+                    [1 if batch_size > 1 else batch_size, q_dim, linear_attn.conv_kernel_size],
+                    [1 if batch_size > 1 else batch_size, k_dim, linear_attn.conv_kernel_size],
+                    [1 if batch_size > 1 else batch_size, v_dim, linear_attn.conv_kernel_size],
                 ]
-                for shape in conv_shapes:
-                    past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+                if batch_size > 1:
+                    expanded_conv_shapes = []
+                    for shape in conv_shapes:
+                        for _batch_idx in range(batch_size):
+                            past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+                            expanded_conv_shapes.append(list(shape))
+                else:
+                    expanded_conv_shapes = conv_shapes
+                    for shape in conv_shapes:
+                        past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
             else:
                 cache_dtype = linear_attn.conv1d.weight.dtype
                 conv_shape = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.conv_dim,
                     linear_attn.conv_kernel_size,
                 ]
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
+                if batch_size > 1:
+                    expanded_conv_shapes = []
+                    for _batch_idx in range(batch_size):
+                        past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
+                        expanded_conv_shapes.append(list(conv_shape))
+                else:
+                    expanded_conv_shapes = [conv_shape]
+                    past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
             recurrent_shape = [
-                self.config.batch_size,
+                1 if batch_size > 1 else batch_size,
                 linear_attn.num_v_heads,
                 linear_attn.head_k_dim,
                 linear_attn.head_v_dim,
             ]
-            past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+            if batch_size > 1:
+                recurrent_shapes = []
+                for _batch_idx in range(batch_size):
+                    past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                    recurrent_shapes.append(list(recurrent_shape))
+            else:
+                recurrent_shapes = [recurrent_shape]
+                past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
             if self.config.split_conv_cache:
                 linear_cache_meta.append(
                     dict(
                         layer_idx=layer_idx,
-                        conv_shapes=conv_shapes,
+                        conv_shapes=expanded_conv_shapes,
+                        recurrent_shapes=recurrent_shapes,
                         recurrent_shape=recurrent_shape,
+                        per_batch=batch_size > 1,
                     )
                 )
             else:
                 linear_cache_meta.append(
                     dict(
                         layer_idx=layer_idx,
+                        conv_shapes=expanded_conv_shapes,
                         conv_shape=conv_shape,
+                        recurrent_shapes=recurrent_shapes,
                         recurrent_shape=recurrent_shape,
+                        per_batch=batch_size > 1,
                     )
                 )
 
@@ -591,51 +673,122 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         hight_position_ids = position_ids
         width_position_ids = position_ids
 
+        batch_size = int(self.config.batch_size)
+        if batch_size > 1:
+            # All exported graph inputs are single-batch.  The wrapper receives
+            # lists, concatenates them inside the graph, and splits batched
+            # outputs back to one tensor per batch item.
+            graph_inputs_embeds = _split_batch_tensor(inputs_embeds, batch_size)
+            graph_time_position_ids = _split_batch_tensor(time_position_ids, batch_size)
+            graph_hight_position_ids = _split_batch_tensor(hight_position_ids, batch_size)
+            graph_width_position_ids = _split_batch_tensor(width_position_ids, batch_size)
+            graph_past_seq_length = _split_batch_tensor(past_seq_length_t, batch_size)
+            graph_current_input_length = _split_batch_tensor(current_input_length_t, batch_size)
+            graph_linear_attn_mask = _split_batch_tensor(linear_attn_mask_t, batch_size)
+        else:
+            graph_inputs_embeds = inputs_embeds
+            graph_time_position_ids = time_position_ids
+            graph_hight_position_ids = hight_position_ids
+            graph_width_position_ids = width_position_ids
+            graph_past_seq_length = past_seq_length_t
+            graph_current_input_length = current_input_length_t
+            graph_linear_attn_mask = linear_attn_mask_t
+
         inputs = (
-            inputs_embeds,
-            time_position_ids,
-            hight_position_ids,
-            width_position_ids,
-            past_seq_length_t,
-            current_input_length_t,
-            linear_attn_mask_t,
+            graph_inputs_embeds,
+            graph_time_position_ids,
+            graph_hight_position_ids,
+            graph_width_position_ids,
+            graph_past_seq_length,
+            graph_current_input_length,
+            graph_linear_attn_mask,
             past_key_caches,
             past_value_caches,
             past_conv_caches,
             past_recurrent_states,
         )
 
-        input_names = [
-            "inputs_embeds",
-            "time_position_ids",
-            "hight_position_ids",
-            "width_position_ids",
-            "past_seq_length",
-            "current_input_length",
-            "linear_attn_mask",
-        ]
+        if batch_size > 1:
+            input_names = []
+            for base_name in (
+                "inputs_embeds",
+                "time_position_ids",
+                "hight_position_ids",
+                "width_position_ids",
+                "past_seq_length",
+                "current_input_length",
+                "linear_attn_mask",
+            ):
+                for batch_idx in range(batch_size):
+                    input_names.append(f"{base_name}_batch_{batch_idx}")
+        else:
+            input_names = [
+                "inputs_embeds",
+                "time_position_ids",
+                "hight_position_ids",
+                "width_position_ids",
+                "past_seq_length",
+                "current_input_length",
+                "linear_attn_mask",
+            ]
         for layer_idx in range(len(full_attention_layer_indices)):
-            input_names.append(f"past_key_cache_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_key_cache_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(len(full_attention_layer_indices)):
-            input_names.append(f"past_value_cache_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_value_cache_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_value_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
             if self.config.split_conv_cache:
                 for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                    input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            input_names.append(f"past_conv_cache_{branch}_{layer_idx}_batch_{batch_idx}")
+                    else:
+                        input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
             else:
-                input_names.append(f"past_conv_cache_{layer_idx}")
+                if batch_size > 1:
+                    for batch_idx in range(batch_size):
+                        input_names.append(f"past_conv_cache_{layer_idx}_batch_{batch_idx}")
+                else:
+                    input_names.append(f"past_conv_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            input_names.append(f"past_recurrent_state_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_recurrent_state_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_recurrent_state_{layer_idx}")
 
-        output_names_base = ["logits"]
+        output_names_base = (
+            [f"logits_batch_{batch_idx}" for batch_idx in range(batch_size)]
+            if batch_size > 1
+            else ["logits"]
+        )
         for layer_idx in range(len(linear_attention_layer_indices)):
             if self.config.split_conv_cache:
                 for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                    output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}_batch_{batch_idx}")
+                    else:
+                        output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}")
             else:
-                output_names_base.append(f"conv_cache_out_{layer_idx}")
+                if batch_size > 1:
+                    for batch_idx in range(batch_size):
+                        output_names_base.append(f"conv_cache_out_{layer_idx}_batch_{batch_idx}")
+                else:
+                    output_names_base.append(f"conv_cache_out_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names_base.append(f"recurrent_state_out_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    output_names_base.append(f"recurrent_state_out_{layer_idx}_batch_{batch_idx}")
+            else:
+                output_names_base.append(f"recurrent_state_out_{layer_idx}")
 
         # Spec decode: post_norm_hidden appended last so existing cache-update
         # indexing in Qwen3_5MoeInference._forward() is unaffected.
@@ -660,23 +813,53 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         # ``qwen3_5_llm_model.py:284-316``): ``conv_cache_out_{l}_{t}`` and
         # ``recurrent_state_out_{l}_{t}`` for ``t in 0..verify_length-1``.
         if spec_decode_mode:
-            decode_output_names = ["logits"]
+            decode_output_names = (
+                [f"logits_batch_{batch_idx}" for batch_idx in range(batch_size)]
+                if batch_size > 1
+                else ["logits"]
+            )
             for layer_idx in range(len(linear_attention_layer_indices)):
                 if self.config.split_conv_cache:
                     for branch in _LINEAR_CONV_CACHE_BRANCHES:
                         for step_idx in range(verify_length):
-                            decode_output_names.append(f"conv_cache_out_{branch}_{layer_idx}_{step_idx}")
+                            if batch_size > 1:
+                                for batch_idx in range(batch_size):
+                                    decode_output_names.append(
+                                        f"conv_cache_out_{branch}_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                                    )
+                            else:
+                                decode_output_names.append(f"conv_cache_out_{branch}_{layer_idx}_{step_idx}")
                 else:
                     for step_idx in range(verify_length):
-                        decode_output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
+                        if batch_size > 1:
+                            for batch_idx in range(batch_size):
+                                decode_output_names.append(
+                                    f"conv_cache_out_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                                )
+                        else:
+                            decode_output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
             for layer_idx in range(len(linear_attention_layer_indices)):
                 for step_idx in range(verify_length):
-                    decode_output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            decode_output_names.append(
+                                f"recurrent_state_out_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                            )
+                    else:
+                        decode_output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
         else:
             decode_output_names = list(output_names_base)
         if extra_hidden_output_name is not None:
-            prefill_output_names.append(extra_hidden_output_name)
-            decode_output_names.append(extra_hidden_output_name)
+            if batch_size > 1:
+                extra_hidden_output_names = [
+                    f"{extra_hidden_output_name}_batch_{batch_idx}"
+                    for batch_idx in range(batch_size)
+                ]
+                prefill_output_names.extend(extra_hidden_output_names)
+                decode_output_names.extend(extra_hidden_output_names)
+            else:
+                prefill_output_names.append(extra_hidden_output_name)
+                decode_output_names.append(extra_hidden_output_name)
 
         # ── PREFILL quantisation & export ────────────────────────────────────
         # convert_fx_model_to_quanted_model modifies wraped_model in-place
@@ -713,6 +896,9 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             BaseConverter.xh1_hmonnx_compatible(input_names),
             prefill_output_names,
         )
+        patched_adds = _patch_hmonnx_standard_add_ops(prefill_onnx_file)
+        if patched_adds:
+            logger.info(f"Patched {patched_adds} standard Add node(s) to XH2a domain in {prefill_onnx_file}")
         logger.info(f"Export Prefill model to {prefill_onnx_file}")
         del quanted_prefill_model, wraped_model_prefill
 
@@ -740,14 +926,28 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         wraped_model.apply(_apply_update_cfg)
 
         decode_position_ids = torch.zeros(self.config.batch_size, decode_seq_len, dtype=torch.long)
+        decode_current_input_length_t = torch.full_like(current_input_length_t, decode_seq_len)
+        decode_linear_attn_mask_t = torch.ones(batch_size, decode_seq_len, dtype=inputs_embeds.dtype)
+        if batch_size > 1:
+            decode_graph_inputs_embeds = _split_batch_tensor(inputs_embeds[:, :decode_seq_len, :], batch_size)
+            decode_graph_position_ids = _split_batch_tensor(decode_position_ids, batch_size)
+            decode_graph_past_seq_length = _split_batch_tensor(past_seq_length_t, batch_size)
+            decode_graph_current_input_length = _split_batch_tensor(decode_current_input_length_t, batch_size)
+            decode_graph_linear_attn_mask = _split_batch_tensor(decode_linear_attn_mask_t, batch_size)
+        else:
+            decode_graph_inputs_embeds = inputs_embeds[:, :decode_seq_len, :]
+            decode_graph_position_ids = decode_position_ids
+            decode_graph_past_seq_length = past_seq_length_t
+            decode_graph_current_input_length = decode_current_input_length_t
+            decode_graph_linear_attn_mask = decode_linear_attn_mask_t
         decode_inputs = (
-            inputs_embeds[:, :decode_seq_len, :],
-            decode_position_ids,
-            decode_position_ids,
-            decode_position_ids,
-            past_seq_length_t,
-            torch.full_like(current_input_length_t, decode_seq_len),
-            torch.ones(self.config.batch_size, decode_seq_len, dtype=inputs_embeds.dtype),
+            decode_graph_inputs_embeds,
+            decode_graph_position_ids,
+            decode_graph_position_ids,
+            decode_graph_position_ids,
+            decode_graph_past_seq_length,
+            decode_graph_current_input_length,
+            decode_graph_linear_attn_mask,
             past_key_caches,
             past_value_caches,
             past_conv_caches,
@@ -772,6 +972,9 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             BaseConverter.xh1_hmonnx_compatible(input_names),
             decode_output_names,
         )
+        patched_adds = _patch_hmonnx_standard_add_ops(decode_onnx_file)
+        if patched_adds:
+            logger.info(f"Patched {patched_adds} standard Add node(s) to XH2a domain in {decode_onnx_file}")
         logger.info(f"Export decode model to {decode_onnx_file}")
 
         # ── MTP draft model export ────────────────────────────────────────────

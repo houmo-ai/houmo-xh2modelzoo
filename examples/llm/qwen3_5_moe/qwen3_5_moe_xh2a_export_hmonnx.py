@@ -33,6 +33,7 @@
 
 import argparse
 import json
+import logging
 import os
 import os.path as osp
 import re
@@ -53,6 +54,13 @@ from xh_model_zoo.xh_llm.models.qwen3_5_moe.qwen3_5_moe_converter import Qwen3_5
 from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init  # isort:skip
 from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
 from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
+
+# The large continue-batch graphs generate thousands of benign Slice-collapse
+# info messages from onnxscript.  Keep export logs focused on actionable stages
+# and tracebacks.
+logging.getLogger("onnxscript.rewriter.rules.common._collapse_slices").setLevel(logging.WARNING)
+logging.getLogger("onnxscript.optimizer._constant_folding").setLevel(logging.WARNING)
+logging.getLogger("onnx_ir.passes.common.initializer_deduplication").setLevel(logging.WARNING)
 
 
 def _get_default_device() -> torch.device:
@@ -426,9 +434,43 @@ def _resolve_input_name(session, candidates, fallback=None) -> str:
     for name in candidates:
         if name in input_names:
             return name
+        batch0 = f"{name}_batch_0"
+        if batch0 in input_names:
+            return batch0
     if fallback is not None:
         return fallback(session)
     raise ValueError(f"None of {candidates} found in inputs: {input_names}")
+
+
+def _batch_suffix(name: str, base: str) -> Optional[int]:
+    prefix = f"{base}_batch_"
+    if name.startswith(prefix):
+        return int(name[len(prefix):])
+    return None
+
+
+def _feed_batched_tensor(feed: Dict[str, torch.Tensor], name: str, base: str, tensor: torch.Tensor) -> bool:
+    if name == base:
+        feed[name] = tensor
+        return True
+    batch_idx = _batch_suffix(name, base)
+    if batch_idx is not None:
+        feed[name] = tensor[batch_idx : batch_idx + 1]
+        return True
+    return False
+
+
+def _extract_logits_from_output_map(output_map: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+    if "logits" in output_map:
+        return output_map["logits"]
+    logits_items = []
+    idx = 0
+    while f"logits_batch_{idx}" in output_map:
+        logits_items.append(output_map[f"logits_batch_{idx}"])
+        idx += 1
+    if logits_items:
+        return torch.cat(logits_items, dim=0)
+    return None
 
 
 def _infer_inputs_embeds_name(session) -> str:
@@ -647,6 +689,18 @@ def _generate_golden(
         pad_token_id = 0
 
     valid_len = input_ids_full.shape[1]
+    work_meta = _load_work_meta(work_dir, logger)
+    export_batch = int(work_meta.get("wrap_cfg", {}).get("batch_size", getattr(args, "batch_size", 1)))
+    if input_ids_full.shape[0] == export_batch:
+        input_ids_batch = input_ids_full.contiguous()
+    elif input_ids_full.shape[0] == 1:
+        input_ids_batch = input_ids_full.expand(export_batch, -1).contiguous()
+    else:
+        raise ValueError(
+            f"Cannot build golden inputs for export_batch={export_batch} "
+            f"from prompt batch={input_ids_full.shape[0]}"
+        )
+    logger.info(f"Golden export batch: {export_batch}")
 
     hf_model_path = osp.normpath(osp.abspath(args.model))
     release_prefix = _build_release_prefix_moe(args, hf_model_path)
@@ -696,10 +750,12 @@ def _generate_golden(
     prefill_current_seq_info = prefill_session.get_input(prefill_current_seq_name)
 
     prefill_inputs_embeds = _build_inputs_embeds(
-        token_embedding, input_ids_full, prefill_inputs_info.shape[1], pad_token_id, device, prefill_inputs_info.dtype
+        token_embedding, input_ids_batch, prefill_inputs_info.shape[1], pad_token_id, device, prefill_inputs_info.dtype
     )
     prefill_linear_attn_mask = _build_linear_attn_mask(valid_len, prefill_mask_info, device)
-    prefill_batch = prefill_inputs_info.shape[0]
+    if export_batch > 1:
+        prefill_linear_attn_mask = prefill_linear_attn_mask.expand(export_batch, -1).contiguous()
+    prefill_batch = export_batch if prefill_inputs_name.endswith("_batch_0") else prefill_inputs_info.shape[0]
     prefill_past_seq_length = torch.tensor([0] * prefill_batch, dtype=prefill_past_seq_info.dtype, device=device)
     prefill_current_input_length = torch.tensor(
         [valid_len] * prefill_batch, dtype=prefill_current_seq_info.dtype, device=device
@@ -709,18 +765,26 @@ def _generate_golden(
     prefill_cache_inputs = _alloc_cache_inputs(prefill_session, device)
     prefill_input_feed: Dict[str, torch.Tensor] = {}
     for name in prefill_session.get_input_names():
-        if name == prefill_inputs_name:
-            prefill_input_feed[name] = prefill_inputs_embeds
-        elif name == prefill_past_seq_name:
-            prefill_input_feed[name] = prefill_past_seq_length
-        elif name == prefill_current_seq_name:
-            prefill_input_feed[name] = prefill_current_input_length
-        elif name == prefill_mask_name:
-            prefill_input_feed[name] = prefill_linear_attn_mask
-        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+        if _feed_batched_tensor(prefill_input_feed, name, "inputs_embeds", prefill_inputs_embeds):
+            pass
+        elif _feed_batched_tensor(prefill_input_feed, name, "past_seq_length", prefill_past_seq_length):
+            pass
+        elif _feed_batched_tensor(prefill_input_feed, name, "current_input_length", prefill_current_input_length):
+            pass
+        elif _feed_batched_tensor(prefill_input_feed, name, "linear_attn_mask", prefill_linear_attn_mask):
+            pass
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or any(
+            _batch_suffix(name, base) is not None for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
+        ):
             info = prefill_session.get_input(name)
-            pos = torch.arange(0, prefill_seq_len, device=device, dtype=info.dtype).reshape(info.shape)
-            prefill_input_feed[name] = pos
+            pos_batch = torch.arange(0, prefill_seq_len, device=device, dtype=info.dtype).view(1, -1).expand(export_batch, -1)
+            for base in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+                batch_idx = _batch_suffix(name, base)
+                if batch_idx is not None:
+                    prefill_input_feed[name] = pos_batch[batch_idx : batch_idx + 1]
+                    break
+            else:
+                prefill_input_feed[name] = pos_batch.reshape(info.shape)
         elif name in prefill_cache_inputs:
             prefill_input_feed[name] = prefill_cache_inputs[name]
         else:
@@ -731,14 +795,14 @@ def _generate_golden(
             prefill_input_feed[name] = t
 
     _, prefill_output_map = _run_hmonnx_with_golden(prefill_session, prefill_input_feed)
-    prefill_logits = prefill_output_map.get("logits")
+    prefill_logits = _extract_logits_from_output_map(prefill_output_map)
     if prefill_logits is not None:
         if args.num_logits_to_keep == 0:
             prefill_logits = prefill_logits[:, valid_len - 1 : valid_len, :]
         next_token_id = prefill_logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        logger.info(f"Prefill golden next token id: {next_token_id.item()}")
+        logger.info(f"Prefill golden next token ids: {next_token_id.reshape(-1).tolist()}")
     else:
-        next_token_id = torch.tensor([[0]], dtype=torch.int64)
+        next_token_id = torch.zeros((export_batch, 1), dtype=torch.int64, device=device)
 
     del prefill_session
     if torch.cuda.is_available():
@@ -765,39 +829,59 @@ def _generate_golden(
         token_embedding, next_token_id, decode_inputs_info.shape[1], pad_token_id, device, decode_inputs_info.dtype
     )
     decode_linear_attn_mask = _build_linear_attn_mask(1, decode_mask_info, device)
-    decode_batch = decode_inputs_info.shape[0]
+    if export_batch > 1:
+        decode_linear_attn_mask = decode_linear_attn_mask.expand(export_batch, -1).contiguous()
+    decode_batch = export_batch if decode_inputs_name.endswith("_batch_0") else decode_inputs_info.shape[0]
     decode_past_seq_length = torch.tensor([valid_len] * decode_batch, dtype=decode_past_seq_info.dtype, device=device)
     decode_current_input_length = torch.tensor([1] * decode_batch, dtype=decode_current_seq_info.dtype, device=device)
 
     decode_input_feed: Dict[str, torch.Tensor] = {}
     for name in decode_session.get_input_names():
-        if name == decode_inputs_name:
-            decode_input_feed[name] = decode_inputs_embeds
-        elif name == decode_past_seq_name:
-            decode_input_feed[name] = decode_past_seq_length
-        elif name == decode_current_seq_name:
-            decode_input_feed[name] = decode_current_input_length
-        elif name == decode_mask_name:
-            decode_input_feed[name] = decode_linear_attn_mask
-        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+        if _feed_batched_tensor(decode_input_feed, name, "inputs_embeds", decode_inputs_embeds):
+            pass
+        elif _feed_batched_tensor(decode_input_feed, name, "past_seq_length", decode_past_seq_length):
+            pass
+        elif _feed_batched_tensor(decode_input_feed, name, "current_input_length", decode_current_input_length):
+            pass
+        elif _feed_batched_tensor(decode_input_feed, name, "linear_attn_mask", decode_linear_attn_mask):
+            pass
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or any(
+            _batch_suffix(name, base) is not None for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
+        ):
             info = decode_session.get_input(name)
             n_decode_tokens = decode_inputs_info.shape[1]
-            decode_pos = torch.arange(valid_len, valid_len + n_decode_tokens, device=device, dtype=info.dtype).reshape(
-                info.shape
-            )
-            decode_input_feed[name] = decode_pos
+            decode_pos_batch = torch.arange(valid_len, valid_len + n_decode_tokens, device=device, dtype=info.dtype).view(1, -1).expand(export_batch, -1)
+            for base in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+                batch_idx = _batch_suffix(name, base)
+                if batch_idx is not None:
+                    decode_input_feed[name] = decode_pos_batch[batch_idx : batch_idx + 1]
+                    break
+            else:
+                decode_input_feed[name] = decode_pos_batch.reshape(info.shape)
         elif name.startswith("past_conv_cache_"):
             suffix = name[len("past_conv_cache_"):]
-            out_key = f"conv_cache_out_{suffix}"
-            if out_key in prefill_output_map:
+            out_keys = [f"conv_cache_out_{suffix}"]
+            if "_batch_" in suffix:
+                base, batch = suffix.rsplit("_batch_", 1)
+                out_keys.append(f"conv_cache_out_{base}_0_batch_{batch}")
+            else:
+                out_keys.append(f"conv_cache_out_{suffix}_0")
+            out_key = next((key for key in out_keys if key in prefill_output_map), None)
+            if out_key is not None:
                 decode_input_feed[name] = _ensure_cache_tensor(prefill_output_map[out_key])
             else:
                 info = decode_session.get_input(name)
                 decode_input_feed[name] = _ensure_cache_tensor(torch.zeros(info.shape, dtype=info.dtype, device=device))
         elif name.startswith("past_recurrent_state_"):
-            idx = name.split("_")[-1]
-            out_key = f"recurrent_state_out_{idx}"
-            if out_key in prefill_output_map:
+            suffix = name[len("past_recurrent_state_"):]
+            out_keys = [f"recurrent_state_out_{suffix}"]
+            if "_batch_" in suffix:
+                base, batch = suffix.rsplit("_batch_", 1)
+                out_keys.append(f"recurrent_state_out_{base}_0_batch_{batch}")
+            else:
+                out_keys.append(f"recurrent_state_out_{suffix}_0")
+            out_key = next((key for key in out_keys if key in prefill_output_map), None)
+            if out_key is not None:
                 decode_input_feed[name] = _ensure_cache_tensor(prefill_output_map[out_key])
             else:
                 info = decode_session.get_input(name)
@@ -813,9 +897,10 @@ def _generate_golden(
                 decode_input_feed[name] = t
 
     _, decode_output_map = _run_hmonnx_with_golden(decode_session, decode_input_feed)
-    if isinstance(decode_output_map, dict) and "logits" in decode_output_map:
+    decode_logits = _extract_logits_from_output_map(decode_output_map) if isinstance(decode_output_map, dict) else None
+    if decode_logits is not None:
         import numpy as np
-        np.save(str(decode_dir / "logits.npy"), decode_output_map["logits"].detach().cpu().numpy())
+        np.save(str(decode_dir / "logits.npy"), decode_logits.detach().cpu().numpy())
 
     del decode_session
     if torch.cuda.is_available():
@@ -905,7 +990,6 @@ def _generate_golden(
         "pad_token_id": pad_token_id,
         "spec_decode_mode": spec_decode_mode,
     }
-    work_meta = _load_work_meta(work_dir, logger)
     for key in (
         "max_context_tokens",
         "wrap_cfg",
