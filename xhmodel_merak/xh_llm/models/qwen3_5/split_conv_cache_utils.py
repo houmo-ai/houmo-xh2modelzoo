@@ -84,6 +84,21 @@ def _flatten_split_conv_cache_outputs(cache_list):
     return flat_cache
 
 
+def _flatten_merged_conv_cache_outputs(cache_list):
+    if cache_list is None or not isinstance(cache_list, (list, tuple)):
+        return cache_list
+
+    flat_cache = []
+    changed = False
+    for cache in cache_list:
+        if isinstance(cache, (list, tuple)):
+            flat_cache.extend(cache)
+            changed = True
+        else:
+            flat_cache.append(cache)
+    return flat_cache if changed else cache_list
+
+
 def _get_linear_layer_conv_cache(cache_list, layer_idx: int, split_conv_cache: bool):
     if cache_list is None:
         return None

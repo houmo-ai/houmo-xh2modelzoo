@@ -62,7 +62,9 @@ from ..qwen3_5._delta_rule import (
     torch_chunk_gated_delta_rule,
     torch_recurrent_gated_delta_rule,
 )
+from ..qwen3_5._gdr_ops import GDRBlockTriInverse, GDRChunkScan, GDRRecurrentScan
 from ..qwen3_5.split_conv_cache_utils import (
+    _flatten_merged_conv_cache_outputs,
     _flatten_split_conv_cache_outputs,
     _get_linear_layer_conv_cache,
     _is_nested_split_conv_cache,
@@ -759,6 +761,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                         batch_size=self.batch_size,
                         scale=self.chunk_scale,
                         sequence_length=1,
+                        recurrent_scan_op=self.recurrent_scan_op,
                     )
                     _core_parts.append(_out_t)
                     _recurrent_snapshots.append(_current_rs)
@@ -781,6 +784,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                     batch_size=self.batch_size,
                     scale=self.chunk_scale,
                     sequence_length=1,
+                    recurrent_scan_op=self.recurrent_scan_op,
                 )
         else:
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
@@ -807,6 +811,8 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 scale=self.chunk_scale,
                 chunk_row_masks=self.chunk_row_masks,
                 cumsum_matmul=self.cumsum_matmul,
+                block_tri_inverse_op=self.block_tri_inverse_op,
+                chunk_scan_op=self.chunk_scan_op,
             )
 
         if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
@@ -838,6 +844,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
         self.split_conv_cache = cfg.get("split_conv_cache", True) or hasattr(self, "in_proj_q")
+        self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d module
         # (default) so hmonnx export emits a clean Conv op. Set True to fall
         # back to the legacy _manual_depthwise_conv1d_tail manual unroll.
@@ -1042,6 +1049,25 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
+        # GDR fused ops (conditional on fuse_gdr_ops flag).  MoE linear-attention
+        # uses the same GatedDeltaNet recurrence/chunk math as dense Qwen3.5, so
+        # the fused op contract is identical: Dense and MoE both pass the op
+        # modules into the shared _delta_rule kernels when enabled.
+        if self.fuse_gdr_ops:
+            self.block_tri_inverse_op = GDRBlockTriInverse(chunk_size=chunk_size, block_size=block_size)
+            self.chunk_scan_op = GDRChunkScan(
+                num_chunks=num_chunks,
+                num_heads=self.num_v_heads,
+                k_head_dim=self.head_k_dim,
+                v_head_dim=self.head_v_dim,
+                chunk_size=chunk_size,
+            )
+            self.recurrent_scan_op = GDRRecurrentScan(sequence_length=1, output_all_states=False)
+        else:
+            self.block_tri_inverse_op = None
+            self.chunk_scan_op = None
+            self.recurrent_scan_op = None
+
         return self
 
     def _update_cfg(self, cfg: Optional[Dict] = None):
@@ -1090,6 +1116,11 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             .contiguous()
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
+
+        # Keep fused chunk-scan metadata aligned with prefill/decode sequence
+        # changes, matching the dense Qwen3.5 path.
+        if self.fuse_gdr_ops and self.block_tri_inverse_op is not None:
+            self.chunk_scan_op.num_chunks = num_chunks
 
         self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])
 
@@ -1540,7 +1571,10 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         hidden_states = self.norm(hidden_states)
         post_norm_out = hidden_states
 
-        conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
+        if split_conv_cache:
+            conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
+        else:
+            conv_cache_out_list = _flatten_merged_conv_cache_outputs(conv_cache_out_list)
         if self.output_hidden_state_indices is not None:
             return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
         if self.output_post_norm_hidden:

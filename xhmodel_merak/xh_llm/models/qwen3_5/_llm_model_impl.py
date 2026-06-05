@@ -77,6 +77,7 @@ except ImportError:
 _HF_QWEN35_MODELING = "transformers.models.qwen3_5.modeling_qwen3_5"
 
 from .split_conv_cache_utils import (
+    _flatten_merged_conv_cache_outputs,
     _flatten_split_conv_cache_outputs,
     _get_linear_layer_conv_cache,
     _is_nested_split_conv_cache,
@@ -1608,7 +1609,10 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         if self.output_post_norm_hidden:
             post_norm_hidden = hidden_states
 
-        conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
+        if split_conv_cache:
+            conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
+        else:
+            conv_cache_out_list = _flatten_merged_conv_cache_outputs(conv_cache_out_list)
         if self.output_hidden_state_indices is not None:
             return hidden_states, conv_cache_out_list, recurrent_state_out_list, target_hidden
         elif self.output_post_norm_hidden:

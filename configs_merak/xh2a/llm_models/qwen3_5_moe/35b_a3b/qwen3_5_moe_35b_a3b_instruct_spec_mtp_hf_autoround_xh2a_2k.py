@@ -1,12 +1,12 @@
 _base_ = [
-    "./qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py",
+    "./qwen3_5_moe_35b_a3b_instruct_hf_autoround_xh2a_2k.py",
 ]
 
 model = dict(
     model_name="qwen3_6_35b_a3b_spec_mtp_test",
     max_pe_length=32768,
     spec_decode_mode="mtp",
-    num_draft_tokens=4,
+    num_draft_tokens=1,
     output_post_norm_hidden=True,
     mtp_config=dict(
         hidden_size=2048,

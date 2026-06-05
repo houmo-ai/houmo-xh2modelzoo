@@ -344,19 +344,9 @@ def torch_recurrent_gated_delta_rule(
     )
 
     if recurrent_scan_op is not None:
-        core_attn_steps = []
-        for i in range(query.shape[2]):
-            result = recurrent_scan_op(
-                query[:, :, i : i + 1],
-                key[:, :, i : i + 1],
-                value[:, :, i : i + 1],
-                g[:, :, i : i + 1],
-                beta[:, :, i : i + 1],
-                last_recurrent_state,
-            )
-            core_attn_steps.append(result[0])
-            last_recurrent_state = result[1]
-        core_attn_out = torch.cat(core_attn_steps, dim=2)
+        result = recurrent_scan_op(query, key, value, g, beta, last_recurrent_state)
+        core_attn_out = result[0]
+        last_recurrent_state = result[1]
     else:
         core_attn_steps = []
         for i in range(sequence_length):

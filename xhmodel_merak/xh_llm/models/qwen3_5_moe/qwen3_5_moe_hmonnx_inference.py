@@ -48,6 +48,26 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         self.visual._set_dtype(dtype)
         return self
 
+    def _get_spec_decode_verify_steps(self) -> int:
+        spec_decode = getattr(self.meta_info, "spec_decode", None)
+        if spec_decode is None:
+            return 1
+        if isinstance(spec_decode, dict):
+            mode = spec_decode.get("mode")
+            num_draft_tokens = spec_decode.get("num_draft_tokens")
+        else:
+            mode = getattr(spec_decode, "mode", None)
+            num_draft_tokens = getattr(spec_decode, "num_draft_tokens", None)
+
+        if mode in {"mtp", "dflash"} and num_draft_tokens is not None:
+            return int(num_draft_tokens) + 1
+        return 1
+
+    def get_input_sequence_length(self) -> int:
+        if getattr(self, "_llm_prefill", True):
+            return self.meta_info.model_config.prefill_chunk_length
+        return self._get_spec_decode_verify_steps()
+
     def get_tf_processor(self):
         processor = XHQwen3_5Processor.from_pretrained(self.hf_model_dir)
         meta_info = self.meta_info.model_config
@@ -75,22 +95,54 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         logits, *linear_caches = outs
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
-        conv_cache_out_count = (
+        verify_steps = (
+            1
+            if getattr(self, "_llm_prefill", True)
+            else self._get_spec_decode_verify_steps()
+        )
+        conv_cache_out_per_step = (
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
-        recurrent_state_out_count = len(past_recurrent_states)
+        recurrent_state_out_per_step = len(past_recurrent_states)
+        conv_cache_out_count = conv_cache_out_per_step * verify_steps
+        recurrent_state_out_count = recurrent_state_out_per_step * verify_steps
         expected_linear_cache_outputs = conv_cache_out_count + recurrent_state_out_count
         if len(linear_caches) < expected_linear_cache_outputs:
             raise RuntimeError(
                 "HMONNX output cache count mismatch: "
                 f"expected at least {expected_linear_cache_outputs} linear cache outputs "
-                f"({conv_cache_out_count} conv + {recurrent_state_out_count} recurrent), "
-                f"got {len(linear_caches)}"
+                f"({conv_cache_out_count} conv + {recurrent_state_out_count} recurrent "
+                f"across {verify_steps} step(s)), got {len(linear_caches)}"
             )
-        conv_cache_out_list = linear_caches[:conv_cache_out_count]
-        recurrent_state_out_list = linear_caches[
+        raw_conv_cache_out_list = linear_caches[:conv_cache_out_count]
+        raw_recurrent_state_out_list = linear_caches[
             conv_cache_out_count : conv_cache_out_count + recurrent_state_out_count
         ]
+
+        # Spec-decode target verification exports cache outputs for every verified token.
+        # The runtime cache must advance to the final verified token only.
+        if verify_steps > 1:
+            conv_cache_out_list = []
+            if self._kvcache_mixin.split_conv_cache:
+                for layer_idx in range(len(past_conv_caches)):
+                    layer_offset = layer_idx * 3 * verify_steps
+                    q_out = raw_conv_cache_out_list[layer_offset + verify_steps - 1]
+                    k_out = raw_conv_cache_out_list[layer_offset + 2 * verify_steps - 1]
+                    v_out = raw_conv_cache_out_list[layer_offset + 3 * verify_steps - 1]
+                    conv_cache_out_list.extend([q_out, k_out, v_out])
+            else:
+                for layer_idx in range(len(past_conv_caches)):
+                    conv_cache_out_list.append(
+                        raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1]
+                    )
+            recurrent_state_out_list = [
+                raw_recurrent_state_out_list[layer_idx * verify_steps + verify_steps - 1]
+                for layer_idx in range(len(past_recurrent_states))
+            ]
+        else:
+            conv_cache_out_list = raw_conv_cache_out_list
+            recurrent_state_out_list = raw_recurrent_state_out_list
+
         # 更新cache
         if self._kvcache_mixin.split_conv_cache:
             grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)

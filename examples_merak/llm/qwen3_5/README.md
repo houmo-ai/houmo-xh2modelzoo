@@ -28,6 +28,10 @@ conda activate xhquant_55
 CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
   --config configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_xh2a_2k.py \
   --force
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
+  --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_spec_mtp_xh2a_2k.py \
+  --force
 ```
 
 更换模型时只替换 `--config`。输出默认在 `work_dirs/<config_stem>/`；如需指定输出目录，只能使用运行参数 `--work-dir`，不要通过命令行覆盖模型配置。
@@ -44,6 +48,75 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
 - `--golden` 会在 demo 推理时保存 golden 输出。
 - dense 与 MoE 都使用同一个 demo 入口；如果 meta 支持视觉分支且图片存在，则走图文输入，否则回退到纯文本输入。
 - PPL 烟测使用 `examples_merak/llm/qwen3_5/qwen3_5_xh_ppl_eval.py`。
+
+## Spec decode / GDR fuse 验证矩阵
+
+Merak 导出验证固定以下基础开关：
+
+- `normalize_force_fp32=False`（即旧口径里的 `force_norm_fp32=False`）
+- `use_manual_depthwise_conv1d=False`
+- 视觉验证必须使用真实图片输入，不能跳过 `visual/` 分支。
+
+当前需要覆盖的参数组合：
+
+| 组合名 | `fuse_gdr_ops` | `split_conv_cache` | 说明 |
+|---|---:|---:|---|
+| `fuse0_split1` | `False` | `True` | 默认非 GDR fuse + split conv cache |
+| `fuse0_split0` | `False` | `False` | merged conv cache 导出路径 |
+| `fuse1_split1` | `True` | `True` | GDR fused op 导出路径 |
+
+> `fuse1` 表示 `fuse_gdr_ops=True`；`split1` 表示 `split_conv_cache=True`。
+
+`num_draft_tokens` 可以在 Merak config 的 `model` 顶层配置，例如：
+
+```python
+model = dict(
+    spec_decode_mode="mtp",      # 或 "dflash"
+    num_draft_tokens=4,          # MTP 当前默认配置
+    mtp_config=dict(...),
+)
+
+model = dict(
+    spec_decode_mode="dflash",
+    num_draft_tokens=9,          # DFlash 当前默认配置
+    dflash_config=dict(...),
+)
+```
+
+只需要写在 `model` 顶层，不需要在 `mtp_config` / `dflash_config` 里重复写；导出主流程读取的是 `self.config.num_draft_tokens`。修改后需要重新导出，因为 target decode / verify ONNX 的输入长度会随之变化：
+
+- MTP：`spec_decode.block_size = num_draft_tokens`
+- DFlash：verify 长度和 `spec_decode.block_size = num_draft_tokens + 1`
+- 导出的 `golden_meta_info.json` 会记录 `spec_decode.num_draft_tokens`，HMONNX runtime 再从 meta 中读取该值。
+
+最近一次完整验证覆盖 3 类模型 × 3 种模式 × 3 组参数，共 27 个 canonical case：
+
+| 模型 / 模式 | `fuse0_split1` | `fuse0_split0` | `fuse1_split1` |
+|---|---:|---:|---:|
+| Qwen3.5 9B Base | passed | passed | passed |
+| Qwen3.5 9B MTP | passed | passed | passed |
+| Qwen3.5 9B DFlash | passed | passed | passed |
+| Qwen3.6 27B Base | passed | passed | passed |
+| Qwen3.6 27B MTP | passed | passed | passed |
+| Qwen3.6 27B DFlash | passed | passed | passed |
+| Qwen3.6 35B-A3B MoE Base | passed | passed | passed |
+| Qwen3.6 35B-A3B MoE MTP | passed | passed | passed |
+| Qwen3.6 35B-A3B MoE DFlash | passed | passed | passed |
+
+验证内容：
+
+- Base：export、release layout、visual meta、真实图片 generate、PPL。
+- MTP / DFlash：export、release layout、visual meta、真实图片 generate。
+- DFlash 还需确认 `dflash_draft_context/`、`dflash_draft_context_decode/`、`dflash_draft_decode/` 三类 draft HMONNX 均已导出并写入 `golden_meta_info.json` 的 `spec_decode` section。
+
+注意事项：
+
+- `--golden` demo 为了保存 golden artifact，会把生成长度压到很短；它只能证明 HMONNX 推理链路可执行，不适合判断回答语义质量。
+- MTP / DFlash 的接收率不由 `qwen3_5_xh_hmonnx_generate.py` 默认输出；需要使用 `examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py` 读取导出后的 `golden_meta_info.json` 单独评估。
+- 代表性 9B `fuse1_split1` 文本 spec decode smoke：
+  - MTP：`accepted=10 / draft_tokens=36`，接收率约 `27.78%`，`avg_accepted_per_round=1.11`。
+  - DFlash：`accepted=5 / draft_tokens=117`，接收率约 `4.27%`，`avg_accepted_per_round=0.38`。
+  - 二者均能生成正常中文句子。
 
 ## Golden 规范
 

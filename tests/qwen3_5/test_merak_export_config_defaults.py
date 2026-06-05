@@ -120,6 +120,19 @@ def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
     assert _moe_model._flatten_split_conv_cache_outputs(composite) == expected
 
 
+def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv_requirement():
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _flatten_merged_conv_cache_outputs,
+        _flatten_split_conv_cache_outputs,
+    )
+
+    merged_spec_outputs = [tuple(range(5)), tuple(range(5, 10))]
+
+    assert _flatten_merged_conv_cache_outputs(merged_spec_outputs) == list(range(10))
+    with pytest.raises(RuntimeError, match="divisible by 3"):
+        _flatten_split_conv_cache_outputs(merged_spec_outputs)
+
+
 def test_qwen3_5_split_conv_cache_helpers_reject_bad_flat_length():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
@@ -262,6 +275,67 @@ def test_qwen3_5_dense_text_model_setup_splits_child_linear_attn_modules():
     assert 'not hasattr(linear_attn, "in_proj_q")' in source
     assert "linear_attn._setup(cfg)" in source
 
+def test_qwen3_5_hmonnx_decode_input_sequence_length_honors_spec_decode():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
+        XHQwen3_5_HMONNXModel,
+    )
+
+    model = XHQwen3_5_HMONNXModel.__new__(XHQwen3_5_HMONNXModel)
+    model.meta_info = SimpleNamespace(
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+        spec_decode={"mode": "mtp", "num_draft_tokens": 4},
+    )
+
+    model._llm_prefill = True
+    assert model.get_input_sequence_length() == 256
+
+    model._llm_prefill = False
+    assert model.get_input_sequence_length() == 5
+
+    model.meta_info.spec_decode = SimpleNamespace(mode="dflash", num_draft_tokens=9)
+    assert model.get_input_sequence_length() == 10
+
+    model.meta_info.spec_decode = None
+    assert model.get_input_sequence_length() == 1
+
+
+def test_qwen3_5_moe_hmonnx_decode_input_sequence_length_honors_spec_decode():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_hmonnx_inference import (
+        XHQwen3_5MoeHMONNXModel,
+    )
+
+    model = XHQwen3_5MoeHMONNXModel.__new__(XHQwen3_5MoeHMONNXModel)
+    model.meta_info = SimpleNamespace(
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+        spec_decode={"mode": "mtp", "num_draft_tokens": 4},
+    )
+
+    model._llm_prefill = True
+    assert model.get_input_sequence_length() == 256
+
+    model._llm_prefill = False
+    assert model.get_input_sequence_length() == 5
+
+    model.meta_info.spec_decode = SimpleNamespace(mode="dflash", num_draft_tokens=9)
+    assert model.get_input_sequence_length() == 10
+
+    model.meta_info.spec_decode = None
+    assert model.get_input_sequence_length() == 1
+
+
+def test_text_llm_hf_compatible_decode_uses_model_declared_input_length():
+    from xhmodel_merak.xh_llm import text_llm_hf_compatible
+
+    source = inspect.getsource(text_llm_hf_compatible.TextLLMHFCompatible._sample_forward)
+
+    assert "set_input_sequence_length(1)" not in source
+    assert "self._llm_model.get_input_sequence_length()" in source
+
+
 def test_qwen3_5_moe_text_model_regroups_flat_split_conv_cache_before_layer_indexing():
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
@@ -270,6 +344,19 @@ def test_qwen3_5_moe_text_model_regroups_flat_split_conv_cache_before_layer_inde
 
     assert "_regroup_flat_split_conv_cache" in names
     assert "_flatten_split_conv_cache_outputs" in names
+
+
+def test_qwen3_5_text_models_use_merged_flatten_path_when_split_conv_cache_is_disabled():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+
+    dense_source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel.forward)
+    moe_source = inspect.getsource(_moe_model._Qwen3_5MoeTextModel.forward)
+
+    assert "if split_conv_cache:" in dense_source
+    assert "_flatten_merged_conv_cache_outputs(conv_cache_out_list)" in dense_source
+    assert "if split_conv_cache:" in moe_source
+    assert "_flatten_merged_conv_cache_outputs(conv_cache_out_list)" in moe_source
 
 
 def test_qwen3_5_hmonnx_forward_splits_qkv_conv_outputs_from_recurrent_tail(monkeypatch):
@@ -314,6 +401,186 @@ def test_qwen3_5_hmonnx_forward_splits_qkv_conv_outputs_from_recurrent_tail(monk
     ):
         assert torch.equal(past_state, recurrent_out)
 
+
+
+def test_qwen3_5_hmonnx_forward_uses_final_spec_decode_split_cache_step(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
+        XHQwen3_5_HMONNXModel,
+    )
+
+    q0, q1 = torch.full((1,), 1.0), torch.full((1,), 2.0)
+    k0, k1 = torch.full((1,), 3.0), torch.full((1,), 4.0)
+    v0, v1 = torch.full((1,), 5.0), torch.full((1,), 6.0)
+    r0, r1 = torch.full((1,), 7.0), torch.full((1,), 8.0)
+
+    def fake_forward(self, *args):
+        # verify_steps=2 split-cache export order: q steps, k steps, v steps, then recurrent steps.
+        return torch.tensor([42.0]), q0, q1, k0, k1, v0, v1, r0, r1, torch.tensor([99.0])
+
+    monkeypatch.setattr(VisonLLMHMONNXModel, "forward", fake_forward)
+
+    class DummyKVCacheMixin:
+        split_conv_cache = True
+
+        def __init__(self):
+            self.past_conv_caches = [(torch.zeros(1), torch.zeros(1), torch.zeros(1))]
+            self.past_recurrent_states = [torch.zeros(1)]
+
+    model = XHQwen3_5_HMONNXModel.__new__(XHQwen3_5_HMONNXModel)
+    model._kvcache_mixin = DummyKVCacheMixin()
+    model._llm_prefill = False
+    model.meta_info = SimpleNamespace(
+        spec_decode={"mode": "mtp", "num_draft_tokens": 1},
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+    )
+
+    logits, conv_cache_out_list, recurrent_state_out_list = model.forward(torch.tensor([1]))
+
+    assert logits.tolist() == [42.0]
+    assert conv_cache_out_list == [q1, k1, v1]
+    assert recurrent_state_out_list == [r1]
+    past_q, past_k, past_v = model._kvcache_mixin.past_conv_caches[0]
+    assert torch.equal(past_q, q1)
+    assert torch.equal(past_k, k1)
+    assert torch.equal(past_v, v1)
+    assert torch.equal(model._kvcache_mixin.past_recurrent_states[0], r1)
+
+
+def test_qwen3_5_hmonnx_forward_uses_final_spec_decode_merged_cache_step(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
+        XHQwen3_5_HMONNXModel,
+    )
+
+    c0, c1 = torch.full((1,), 1.0), torch.full((1,), 2.0)
+    r0, r1 = torch.full((1,), 3.0), torch.full((1,), 4.0)
+
+    def fake_forward(self, *args):
+        return torch.tensor([42.0]), c0, c1, r0, r1
+
+    monkeypatch.setattr(VisonLLMHMONNXModel, "forward", fake_forward)
+
+    class DummyKVCacheMixin:
+        split_conv_cache = False
+
+        def __init__(self):
+            self.past_conv_caches = [torch.zeros(1)]
+            self.past_recurrent_states = [torch.zeros(1)]
+
+    model = XHQwen3_5_HMONNXModel.__new__(XHQwen3_5_HMONNXModel)
+    model._kvcache_mixin = DummyKVCacheMixin()
+    model._llm_prefill = False
+    model.meta_info = SimpleNamespace(
+        spec_decode={"mode": "dflash", "num_draft_tokens": 1},
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+    )
+
+    logits, conv_cache_out_list, recurrent_state_out_list = model.forward(torch.tensor([1]))
+
+    assert logits.tolist() == [42.0]
+    assert conv_cache_out_list == [c1]
+    assert recurrent_state_out_list == [r1]
+    assert torch.equal(model._kvcache_mixin.past_conv_caches[0], c1)
+    assert torch.equal(model._kvcache_mixin.past_recurrent_states[0], r1)
+
+
+def test_qwen3_5_moe_hmonnx_forward_uses_final_spec_decode_split_cache_step(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_hmonnx_inference import (
+        XHQwen3_5MoeHMONNXModel,
+    )
+
+    q0, q1 = torch.full((1,), 1.0), torch.full((1,), 2.0)
+    k0, k1 = torch.full((1,), 3.0), torch.full((1,), 4.0)
+    v0, v1 = torch.full((1,), 5.0), torch.full((1,), 6.0)
+    r0, r1 = torch.full((1,), 7.0), torch.full((1,), 8.0)
+
+    def fake_forward(self, *args):
+        # verify_steps=2 split-cache export order: q steps, k steps, v steps, then recurrent steps.
+        return torch.tensor([42.0]), q0, q1, k0, k1, v0, v1, r0, r1, torch.tensor([99.0])
+
+    monkeypatch.setattr(VisonLLMHMONNXModel, "forward", fake_forward)
+
+    class DummyKVCacheMixin:
+        split_conv_cache = True
+
+        def __init__(self):
+            self.past_conv_caches = [(torch.zeros(1), torch.zeros(1), torch.zeros(1))]
+            self.past_recurrent_states = [torch.zeros(1)]
+
+    model = XHQwen3_5MoeHMONNXModel.__new__(XHQwen3_5MoeHMONNXModel)
+    model._kvcache_mixin = DummyKVCacheMixin()
+    model._llm_prefill = False
+    model.meta_info = SimpleNamespace(
+        spec_decode={"mode": "mtp", "num_draft_tokens": 1},
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+    )
+
+    logits, conv_cache_out_list, recurrent_state_out_list = model.forward(torch.tensor([1]))
+
+    assert logits.tolist() == [42.0]
+    assert conv_cache_out_list == [q1, k1, v1]
+    assert recurrent_state_out_list == [r1]
+    past_q, past_k, past_v = model._kvcache_mixin.past_conv_caches[0]
+    assert torch.equal(past_q, q1)
+    assert torch.equal(past_k, k1)
+    assert torch.equal(past_v, v1)
+    assert torch.equal(model._kvcache_mixin.past_recurrent_states[0], r1)
+
+
+def test_qwen3_5_moe_hmonnx_forward_uses_final_spec_decode_merged_cache_step(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_hmonnx_inference import (
+        XHQwen3_5MoeHMONNXModel,
+    )
+
+    c0, c1 = torch.full((1,), 1.0), torch.full((1,), 2.0)
+    r0, r1 = torch.full((1,), 3.0), torch.full((1,), 4.0)
+
+    def fake_forward(self, *args):
+        return torch.tensor([42.0]), c0, c1, r0, r1
+
+    monkeypatch.setattr(VisonLLMHMONNXModel, "forward", fake_forward)
+
+    class DummyKVCacheMixin:
+        split_conv_cache = False
+
+        def __init__(self):
+            self.past_conv_caches = [torch.zeros(1)]
+            self.past_recurrent_states = [torch.zeros(1)]
+
+    model = XHQwen3_5MoeHMONNXModel.__new__(XHQwen3_5MoeHMONNXModel)
+    model._kvcache_mixin = DummyKVCacheMixin()
+    model._llm_prefill = False
+    model.meta_info = SimpleNamespace(
+        spec_decode={"mode": "dflash", "num_draft_tokens": 1},
+        model_config=SimpleNamespace(prefill_chunk_length=256),
+    )
+
+    logits, conv_cache_out_list, recurrent_state_out_list = model.forward(torch.tensor([1]))
+
+    assert logits.tolist() == [42.0]
+    assert conv_cache_out_list == [c1]
+    assert recurrent_state_out_list == [r1]
+    assert torch.equal(model._kvcache_mixin.past_conv_caches[0], c1)
+    assert torch.equal(model._kvcache_mixin.past_recurrent_states[0], r1)
 
 
 def test_qwen3_5_moe_text_model_forward_regroups_and_reflattens_split_conv_cache():
@@ -392,6 +659,81 @@ def test_qwen3_5_moe_gated_delta_net_sets_up_split_qkv_cache_path():
     assert "self.conv1d_q = nn.Conv1d" in source
     assert "del self.in_proj_qkv" in source
     assert "del self.conv1d" in source
+
+
+def test_qwen3_5_fused_recurrent_scan_avoids_proxy_shape_loop():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _delta_rule
+
+    source = inspect.getsource(_delta_rule.torch_recurrent_gated_delta_rule)
+    fused_branch = source.split("if recurrent_scan_op is not None:", 1)[1].split("else:", 1)[0]
+
+    assert "range(query.shape[2])" not in fused_branch
+    assert "recurrent_scan_op(query, key, value, g, beta, last_recurrent_state)" in fused_branch
+
+
+def test_qwen3_5_moe_gated_delta_net_wires_fused_gdr_ops():
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+
+    source = inspect.getsource(_moe_model._Qwen3_5MoeGatedDeltaNet)
+
+    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in source
+    assert "self.block_tri_inverse_op = GDRBlockTriInverse" in source
+    assert "self.chunk_scan_op = GDRChunkScan" in source
+    assert "self.recurrent_scan_op = GDRRecurrentScan" in source
+    assert "block_tri_inverse_op=self.block_tri_inverse_op" in source
+    assert "chunk_scan_op=self.chunk_scan_op" in source
+    assert "recurrent_scan_op=self.recurrent_scan_op" in source
+    assert "self.chunk_scan_op.num_chunks = num_chunks" in source
+
+
+def test_qwen3_5_moe_gated_delta_net_setup_creates_fused_gdr_ops():
+    import torch
+    import torch.nn as nn
+
+    from xhquant.api import ConfigDict
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+
+    module = _moe_model._Qwen3_5MoeGatedDeltaNet.__new__(
+        _moe_model._Qwen3_5MoeGatedDeltaNet
+    )
+    nn.Module.__init__(module)
+    module.hidden_size = 8
+    module.key_dim = 4
+    module.value_dim = 4
+    module.conv_dim = 12
+    module.conv_kernel_size = 4
+    module.num_v_heads = 2
+    module.num_k_heads = 2
+    module.head_k_dim = 2
+    module.head_v_dim = 2
+    module.in_proj_qkv = nn.Linear(8, 12, bias=False)
+    module.conv1d = nn.Conv1d(12, 12, kernel_size=4, groups=12, padding=3, bias=False)
+    module.dt_bias = nn.Parameter(torch.zeros(2))
+    module.A_log = nn.Parameter(torch.zeros(2))
+
+    cfg = ConfigDict(
+        dict(
+            use_cache=True,
+            linear_attention_mode="chunk",
+            linear_chunk_size=8,
+            input_sequence_length=16,
+            batch_size=1,
+            split_conv_cache=True,
+            fuse_gdr_ops=True,
+            use_manual_depthwise_conv1d=False,
+        )
+    )
+
+    module._setup(cfg)
+
+    assert module.fuse_gdr_ops is True
+    assert module.block_tri_inverse_op is not None
+    assert module.chunk_scan_op is not None
+    assert module.recurrent_scan_op is not None
+    assert module.chunk_scan_op.num_chunks == 2
+
+    module._update_cfg(ConfigDict({**cfg, "input_sequence_length": 24}))
+    assert module.chunk_scan_op.num_chunks == 3
 
 
 def test_quant_weight_directory_resolves_single_candidate(tmp_path):

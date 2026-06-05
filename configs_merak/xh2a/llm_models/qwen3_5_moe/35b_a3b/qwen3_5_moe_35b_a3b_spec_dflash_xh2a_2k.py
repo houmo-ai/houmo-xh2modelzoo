@@ -1,25 +1,13 @@
 _base_ = [
-    "../_qwen3_5_moe_xh2a_2k.py",
+    "./qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py",
 ]
 
 hf_model_dir = "weights/Qwen3.6-35B-A3B"
 dflash_model_dir = "weights/Qwen3.6-35B-A3B-DFlash"
 
 model = dict(
-    hf_model=hf_model_dir,
     model_name="qwen3_6_35b_a3b_spec_dflash_test",
-    context_max_length=2048,
-    prefill_chunk_length=256,
     max_pe_length=32768,
-    visual_config=dict(
-        max_size_w=448,
-        max_size_h=448,
-        quant_scheme=dict(
-            quant_type="w8a8h0_ssfp",
-            ops={},
-        ),
-        enable=True,
-    ),
     spec_decode_mode="dflash",
     num_draft_tokens=9,
     output_hidden_state_indices=[1, 10, 19, 28, 37],
@@ -40,5 +28,4 @@ model = dict(
         max_sequence_length=2048,
         max_pe_length=32768,
     ),
-    only_first_block=False,
 )

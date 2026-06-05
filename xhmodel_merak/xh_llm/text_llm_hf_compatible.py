@@ -276,7 +276,9 @@ class TextLLMHFCompatible(DynamicModule):  # noqa: N801
                 self._llm_model.set_input_sequence_length(seq_length)
         else:
             self._llm_model.set_decode()
-            self._llm_model.set_input_sequence_length(1)
+            self._llm_model.set_input_sequence_length(
+                self._llm_model.get_input_sequence_length()
+            )
 
         out = self._xh_orig_forward(
             input_ids=input_ids,
