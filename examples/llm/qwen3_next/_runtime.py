@@ -96,6 +96,10 @@ def load_runtime_from_meta(
     prefill_auto_offload_max_memory=None,
     decode_auto_offload_max_memory=None,
     resource_tight_mode: bool = False,
+    enable_cuda_graph: bool = False,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
+    cuda_graph_clone_outputs: bool = True,
 ) -> Tuple[Qwen3NextONNXModel, AutoTokenizer, dict]:
     meta_file = Path(meta_path).resolve()
     model_dir = meta_file.parent
@@ -103,8 +107,17 @@ def load_runtime_from_meta(
 
     prefill_onnx = resolve_path(model_dir, meta_info.get("prefill_onnx") or meta_info["prefill_onnx_file"])
     decode_onnx = resolve_path(model_dir, meta_info.get("decode_onnx") or meta_info["decode_onnx_file"])
-    hf_config_value = meta_info.get("hf_config") or meta_info.get("hf_config_dir") or meta_info.get("hf_model") or "hf_config"
-    token_embedding_value = meta_info.get("token_embedding_file") or meta_info.get("quant_embedding") or "quant_embedding.pt"
+    hf_config_value = (
+        meta_info.get("hf_config")
+        or meta_info.get("hf_config_dir")
+        or meta_info.get("hf_model")
+        or "hf_config"
+    )
+    token_embedding_value = (
+        meta_info.get("token_embedding_file")
+        or meta_info.get("quant_embedding")
+        or "quant_embedding.pt"
+    )
     hf_model_config_dir = resolve_path(model_dir, hf_config_value)
     token_embedding_file = resolve_path(model_dir, token_embedding_value)
 
@@ -135,6 +148,10 @@ def load_runtime_from_meta(
         decode_auto_offload_max_memory=decode_auto_offload_max_memory,
         resource_tight_mode=resource_tight_mode,
         pad_token_id=pad_token_id,
+        enable_cuda_graph=enable_cuda_graph,
+        cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
+        cuda_graph_clone_outputs=cuda_graph_clone_outputs,
     )
     runtime.set_input_embeddings(token_embedding)
     runtime.to(torch.device(device))

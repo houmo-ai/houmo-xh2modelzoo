@@ -26,6 +26,7 @@ export PYTHONPATH=./
 | 多阶段验证（`--valid`） | ✅ 已支持 | GPU 推理验证 |
 | Golden 生成（`--golden`） | ✅ 已支持 | prefill + decode |
 | HMONNX 推理 Demo | ✅ 已支持 | 单轮文本 |
+| CEVAL/MMLU 精度评测 | ✅ 已支持 | FP vs HMONNX |
 
 
 ## 推荐完整流程（4-layer 预检 → 80B 整网导出 → Demo）
@@ -100,6 +101,111 @@ python examples/llm/qwen3_next/qwen3_next_xh2a_hmonnx_test.py \
   --device cuda \
   --exec-device cuda
 ```
+
+## CEVAL / MMLU 精度评测
+
+`qwen3_next_accuracy_eval.py` 统一支持 FP HuggingFace 模型和导出后的 HMONNX `meta.json`。默认 `--limit=1`
+用于 smoke；全量 CEVAL/MMLU 使用 `--limit -1`。评测输出会写入：
+
+- `summary.json`：完整汇总，包含逐题样例。
+- `{ceval,mmlu,ppl}_summary.json`：单任务结果。
+- `report.md`：简要 Markdown 报告。
+
+### FP CEVAL full
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+OUT=work_dirs/qwen3_next_accuracy_eval/fp_ceval_full_$(date +%Y%m%d_%H%M%S)
+
+python examples/llm/qwen3_next/qwen3_next_accuracy_eval.py \
+  --backend fp \
+  --model weights/Qwen3-Next-80B-A3B-Instruct \
+  --dtype bf16 \
+  --device-map auto \
+  --tasks ceval \
+  --limit -1 \
+  --output-dir "$OUT"
+```
+
+### HMONNX CEVAL full（4 卡 + CUDA Graph）
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+META=work_dirs/qwen3_next_verify_20260604_165508/80b/meta.json
+OUT=work_dirs/qwen3_next_accuracy_eval/hmonnx_cuda_graph_4gpu_ceval_full_$(date +%Y%m%d_%H%M%S)
+
+python examples/llm/qwen3_next/qwen3_next_accuracy_eval.py \
+  --backend hmonnx \
+  --config "$META" \
+  --dtype bf16 \
+  --device cpu \
+  --exec-device cuda \
+  --enable-cuda-graph \
+  --hmonnx-max-memory-gb 24 \
+  --tasks ceval \
+  --limit -1 \
+  --choice-batch-size 1 \
+  --output-dir "$OUT"
+```
+
+### HMONNX MMLU full（4 卡 + CUDA Graph）
+
+```bash
+conda activate xhquant
+export PYTHONPATH=./
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+META=work_dirs/qwen3_next_verify_20260604_165508/80b/meta.json
+OUT=work_dirs/qwen3_next_accuracy_eval/hmonnx_cuda_graph_4gpu_mmlu_full_$(date +%Y%m%d_%H%M%S)
+
+python examples/llm/qwen3_next/qwen3_next_accuracy_eval.py \
+  --backend hmonnx \
+  --config "$META" \
+  --dtype bf16 \
+  --device cpu \
+  --exec-device cuda \
+  --enable-cuda-graph \
+  --hmonnx-max-memory-gb 24 \
+  --tasks mmlu \
+  --mmlu-subjects all \
+  --limit -1 \
+  --choice-batch-size 1 \
+  --output-dir "$OUT"
+```
+
+> `--hmonnx-max-memory-gb` 是每张可见 GPU 的 auto-offload 显存预算。80B A3B 在 4×80G
+> 上实测使用 24GiB 预算可将 prefill/decode 分布到 `cuda:0,1,2,3`，避免只落到单卡。
+
+### QTL-365 CEVAL 实测记录（2026-06-05）
+
+| Backend | 配置 | Accuracy | Correct / Count | Elapsed |
+|---------|------|----------|-----------------|---------|
+| FP bf16 | `weights/Qwen3-Next-80B-A3B-Instruct` | 0.8367346939 | 164 / 196 | 465.29s |
+| HMONNX CUDA Graph | `work_dirs/qwen3_next_verify_20260604_165508/80b/meta.json` | 0.8367346939 | 164 / 196 | 1124.82s |
+
+结论：CEVAL 总分和分科目 accuracy 与 FP 对齐；逐题预测有 4 题变化，其中 2 题 FP 错→量化对、2 题 FP 对→量化错，最终正确题数抵消。
+
+CEVAL 对比报告已同步到：
+
+- 本地 Markdown：`work_dirs/qwen3_next_accuracy_eval/ceval_fp_vs_quant_20260605.md`
+- 飞书文档：`https://houmo.feishu.cn/docx/XwI8dDJ0IoPtGVxTvDmczH2Zn8b`
+
+### QTL-365 MMLU 实测记录（2026-06-05）
+
+| Backend | 配置 | Accuracy | Correct / Count | Elapsed |
+|---------|------|----------|-----------------|---------|
+| FP bf16 | `weights/Qwen3-Next-80B-A3B-Instruct` | 0.8414043584 | 11815 / 14042 | 2611.29s |
+| HMONNX CUDA Graph | `work_dirs/qwen3_next_verify_20260604_165508/80b/meta.json` | 0.8389118359 | 11780 / 14042 | 33064.83s |
+
+结论：MMLU 量化相对 FP accuracy 下降 -0.0024925224，正确题数减少 35 题。逐题预测变化 373 题，其中正确性变化 293 题。
+
+MMLU 对比报告已同步到：
+
+- 本地 Markdown：`work_dirs/qwen3_next_accuracy_eval/mmlu_fp_vs_quant_20260605.md`
+- 飞书文档：`https://houmo.feishu.cn/docx/XwI8dDJ0IoPtGVxTvDmczH2Zn8b`
 
 ## QTL-357 实测记录（2026-06-04）
 

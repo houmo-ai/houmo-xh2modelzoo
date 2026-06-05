@@ -19,6 +19,10 @@ def main(args):
         prefill_auto_offload_max_memory=parse_auto_offload_max_memory(args.prefill_auto_offload_max_memory),
         decode_auto_offload_max_memory=parse_auto_offload_max_memory(args.decode_auto_offload_max_memory),
         resource_tight_mode=args.resource_tight_mode,
+        enable_cuda_graph=not args.disable_cuda_graph,
+        cuda_graph_warmup_runs=args.cuda_graph_warmup_runs,
+        cuda_graph_graph_warmup_runs=args.cuda_graph_graph_warmup_runs,
+        cuda_graph_clone_outputs=not args.no_cuda_graph_clone_outputs,
     )
 
     for _ in range(args.warmup_runs):
@@ -62,6 +66,7 @@ def main(args):
 
     print(f"model_name: {meta_info.get('model_name')}")
     print(f"quant_scheme: {meta_info.get('quant_scheme')}")
+    print(f"cuda_graph_enabled: {not args.disable_cuda_graph}")
     print(f"prompt: {args.prompt}")
     print(f"output: {output_text}")
     print(f"benchmark_runs: {args.benchmark_runs}")
@@ -100,5 +105,13 @@ if __name__ == "__main__":
     parser.add_argument("--prefill-auto-offload-max-memory", type=str, default=None)
     parser.add_argument("--decode-auto-offload-max-memory", type=str, default=None)
     parser.add_argument("--resource-tight-mode", action="store_true")
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help="Disable HMONNX CUDA graph capture for prefill/decode sessions",
+    )
+    parser.add_argument("--cuda-graph-warmup-runs", type=int, default=3)
+    parser.add_argument("--cuda-graph-graph-warmup-runs", type=int, default=6)
+    parser.add_argument("--no-cuda-graph-clone-outputs", action="store_true")
     args = parser.parse_args()
     main(args)

@@ -4,8 +4,12 @@ import torch
 import torch.nn as nn
 from transformers import TextStreamer
 
-from xhquant.xhonnxruntime import AutoOffloadGraphModel, HMONNXGrapInference
 from xhquant.core import CacheTensor
+from xhquant.xhonnxruntime import (
+    AutoOffloadGraphModel,
+    HMONNXCUDAGraphInference,
+    HMONNXGrapInference,
+)
 
 from ..builder import MODELS
 from ..device_dtype_mixin import DeviceDtypeMixin
@@ -208,6 +212,10 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
         ] = None,
         resource_tight_mode: bool = False,
         pad_token_id: int = 0,
+        enable_cuda_graph: bool = False,
+        cuda_graph_warmup_runs: int = 3,
+        cuda_graph_graph_warmup_runs: int = 6,
+        cuda_graph_clone_outputs: bool = True,
     ):
         super().__init__()
         self._device = torch.device("cpu")
@@ -223,6 +231,10 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
         self.decode_auto_offload_max_memory = decode_auto_offload_max_memory
         self.resource_tight_mode = resource_tight_mode
         self.pad_token_id = pad_token_id
+        self.enable_cuda_graph = enable_cuda_graph
+        self.cuda_graph_warmup_runs = cuda_graph_warmup_runs
+        self.cuda_graph_graph_warmup_runs = cuda_graph_graph_warmup_runs
+        self.cuda_graph_clone_outputs = cuda_graph_clone_outputs
 
         self.token_embedding: Optional[nn.Module] = None
         self.prefill_session: Optional[HMONNXGrapInference] = None
@@ -292,6 +304,10 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
             return
         if not torch.cuda.is_available():
             return
+        if hasattr(session, "configure_auto_offload"):
+            session.configure_auto_offload(max_memory=max_memory)
+            session.enable_auto_offload = True
+            return
         if session.graph_module is None:
             return
         if AutoOffloadGraphModel.is_auto_offload_model(session.graph_module):
@@ -308,9 +324,20 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
                 "Please increase GPU budgets or provide more GPU devices in max_memory."
             ) from e
 
+    def _create_hmonnx_session(self, onnx_path: str) -> HMONNXGrapInference:
+        if not self.enable_cuda_graph:
+            return HMONNXGrapInference(onnx_path)
+        return HMONNXCUDAGraphInference(
+            onnx_path,
+            enable_cuda_graph=True,
+            warmup_runs=self.cuda_graph_warmup_runs,
+            graph_warmup_runs=self.cuda_graph_graph_warmup_runs,
+            clone_outputs=self.cuda_graph_clone_outputs,
+        )
+
     def _create_prefill_session(self):
         onnx_path = self.prefill_config["onnx"] if isinstance(self.prefill_config, dict) else self.prefill_config.onnx
-        self.prefill_session = HMONNXGrapInference(onnx_path)
+        self.prefill_session = self._create_hmonnx_session(onnx_path)
         if not self.auto_offload:
             self.prefill_session.to(self.device)
         self.prefill_session.exec_device = self.exec_device
@@ -353,7 +380,7 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
 
     def _create_decode_session(self):
         onnx_path = self.decode_config["onnx"] if isinstance(self.decode_config, dict) else self.decode_config.onnx
-        self.decode_session = HMONNXGrapInference(onnx_path)
+        self.decode_session = self._create_hmonnx_session(onnx_path)
         if not self.auto_offload:
             self.decode_session.to(self.device)
         self.decode_session.exec_device = self.exec_device
@@ -441,7 +468,7 @@ class Qwen3NextONNXModel(DeviceDtypeMixin):
         if not isinstance(outputs, (tuple, list)):
             outputs = (outputs,)
         output_names = session.get_output_names()
-        output_map = {name: out for name, out in zip(output_names, outputs)}
+        output_map = {name: out for name, out in zip(output_names, outputs, strict=False)}
         return tuple(outputs), output_map
 
     def _extract_logits(self, output_map: Dict[str, torch.Tensor]) -> torch.Tensor:
