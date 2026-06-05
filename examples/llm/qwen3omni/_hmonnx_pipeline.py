@@ -408,13 +408,21 @@ try:
     from qwen_omni_utils import process_mm_info
 except ImportError:
 
+    def _load_audio_path(audio):
+        if not isinstance(audio, str):
+            return audio
+        audio_array, _ = sf.read(audio, dtype="float32")
+        if audio_array.ndim > 1:
+            audio_array = audio_array.mean(axis=1)
+        return audio_array
+
     def process_mm_info(conversation, use_audio_in_video=False):
         audios, images, videos = [], [], []
         for turn in conversation:
             for item in turn.get("content", []):
                 item_type = item.get("type")
                 if item_type == "audio":
-                    audios.append(item.get("audio"))
+                    audios.append(_load_audio_path(item.get("audio")))
                 elif item_type == "image":
                     images.append(item.get("image"))
                 elif item_type == "video":
@@ -953,23 +961,88 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
         raise RuntimeError(
             "talker meta missing thinker hidden size (talker_thinker_hidden_size / talker_projection_in_features)"
         )
-    capture_path = Path(talker_meta["_root_dir"]) / "talker_model_inputs.pth"
-    captured_prefill_entry = None
-    if capture_path.exists():
-        try:
-            captured = torch.load(capture_path, map_location="cpu", weights_only=False)
-            if captured:
-                candidate = captured[0]
-                if all(
-                    isinstance(candidate.get(key), torch.Tensor)
-                    for key in ("inputs_embeds", "hidden_state", "role_mask", "bypass_embeds", "bypass_mask")
-                ):
-                    captured_prefill_entry = candidate
-                    if logger is not None:
-                        logger.info("talker takeover will use captured hidden_state/bypass guidance for prefill")
-        except Exception as exc:
-            if logger is not None:
-                logger.warning(f"failed to load talker captured guidance from {capture_path}: {exc}")
+    guidance_state = {"segments": []}
+    original_get_user_parts = native_model._get_talker_user_parts
+    original_get_assistant_parts = native_model._get_talker_assistant_parts
+
+    def user_parts_hook(self, im_start_index, segment_end_index, multimodal_mask, thinker_hidden, thinker_embed):
+        user_talker_part = original_get_user_parts(
+            im_start_index,
+            segment_end_index,
+            multimodal_mask,
+            thinker_hidden,
+            thinker_embed,
+        )
+        user_mm_mask = multimodal_mask[:, im_start_index:segment_end_index]
+        user_source = thinker_embed[:, im_start_index:segment_end_index].clone()
+        if user_mm_mask.any():
+            user_source[user_mm_mask] = thinker_hidden[:, im_start_index:segment_end_index][user_mm_mask]
+        guidance_state["segments"].append(
+            {
+                "hidden_state": user_source.detach(),
+                "role_mask": (~user_mm_mask).unsqueeze(-1).to(user_talker_part.dtype).detach(),
+                "bypass_embeds": torch.zeros_like(user_talker_part).detach(),
+                "bypass_mask": torch.zeros(
+                    *user_talker_part.shape[:2], 1, dtype=user_talker_part.dtype, device=user_talker_part.device
+                ).detach(),
+            }
+        )
+        return user_talker_part
+
+    def assistant_parts_hook(
+        self,
+        im_start_index,
+        segment_end_index,
+        speaker_id,
+        thinker_embed,
+        tts_pad_embed,
+        tts_bos_embed,
+        tts_eos_embed,
+    ):
+        input_embeds, input_ids, trailing_text_hidden = original_get_assistant_parts(
+            im_start_index,
+            segment_end_index,
+            speaker_id,
+            thinker_embed,
+            tts_pad_embed,
+            tts_bos_embed,
+            tts_eos_embed,
+        )
+        assistant_source = torch.zeros(
+            input_embeds.shape[0],
+            input_embeds.shape[1],
+            thinker_embed.shape[-1],
+            dtype=thinker_embed.dtype,
+            device=thinker_embed.device,
+        )
+        assistant_role_mask = torch.ones(
+            input_embeds.shape[0], input_embeds.shape[1], 1, dtype=input_embeds.dtype, device=input_embeds.device
+        )
+        assistant_bypass_embeds = input_embeds.clone()
+        assistant_bypass_mask = torch.ones(
+            input_embeds.shape[0], input_embeds.shape[1], 1, dtype=input_embeds.dtype, device=input_embeds.device
+        )
+
+        projected_prefix = min(3, max(segment_end_index - im_start_index, 0))
+        if projected_prefix > 0:
+            assistant_source[:, :projected_prefix, :] = thinker_embed[
+                :, im_start_index : im_start_index + projected_prefix, :
+            ]
+            assistant_bypass_embeds[:, :projected_prefix, :] = 0
+            assistant_bypass_mask[:, :projected_prefix, :] = 0
+
+        guidance_state["segments"].append(
+            {
+                "hidden_state": assistant_source.detach(),
+                "role_mask": assistant_role_mask.detach(),
+                "bypass_embeds": assistant_bypass_embeds.detach(),
+                "bypass_mask": assistant_bypass_mask.detach(),
+            }
+        )
+        return input_embeds, input_ids, trailing_text_hidden
+
+    native_model._get_talker_user_parts = types.MethodType(user_parts_hook, native_model)
+    native_model._get_talker_assistant_parts = types.MethodType(assistant_parts_hook, native_model)
 
     def _pad_prefill_tensor(tensor: torch.Tensor, target_seq_len: int, fill_value: float = 0.0) -> torch.Tensor:
         tensor = tensor.detach().cpu().to(torch.float16)
@@ -980,24 +1053,34 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
         pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype)
         return torch.cat([tensor, pad], dim=1)
 
-    def _build_captured_prefill_guidance(shadow_inputs_embeds: torch.Tensor, shadow_seq_len: int):
-        if captured_prefill_entry is None:
+    def _build_dynamic_prefill_guidance(actual_seq_len: int, target_seq_len: int):
+        segments = guidance_state["segments"]
+        if not segments:
             return None
-        captured_inputs_embeds = captured_prefill_entry["inputs_embeds"]
-        if int(captured_inputs_embeds.shape[1]) != int(shadow_inputs_embeds.shape[1]):
+        hidden_state = torch.cat([segment["hidden_state"] for segment in segments], dim=1)
+        role_mask = torch.cat([segment["role_mask"] for segment in segments], dim=1)
+        bypass_embeds = torch.cat([segment["bypass_embeds"] for segment in segments], dim=1)
+        bypass_mask = torch.cat([segment["bypass_mask"] for segment in segments], dim=1)
+        if int(hidden_state.shape[1]) != int(actual_seq_len):
             return None
-        hidden_state = _pad_prefill_tensor(captured_prefill_entry["hidden_state"], shadow_seq_len)
-        role_mask = _pad_prefill_tensor(captured_prefill_entry["role_mask"], shadow_seq_len)
-        bypass_embeds = _pad_prefill_tensor(captured_prefill_entry["bypass_embeds"], shadow_seq_len)
-        bypass_mask = _pad_prefill_tensor(captured_prefill_entry["bypass_mask"], shadow_seq_len)
+        hidden_state = _pad_prefill_tensor(hidden_state, target_seq_len)
+        role_mask = _pad_prefill_tensor(role_mask, target_seq_len)
+        bypass_embeds = _pad_prefill_tensor(bypass_embeds, target_seq_len)
+        bypass_mask = _pad_prefill_tensor(bypass_mask, target_seq_len)
         return hidden_state, role_mask, bypass_embeds, bypass_mask
 
-    def _call_fused(session, shadow_inputs_embeds, shadow_seq_len):
+    def _call_fused(session, shadow_inputs_embeds, shadow_seq_len, actual_seq_len, require_dynamic_guidance: bool):
         batch = int(shadow_inputs_embeds.shape[0])
-        guidance = _build_captured_prefill_guidance(shadow_inputs_embeds, shadow_seq_len)
+        guidance = _build_dynamic_prefill_guidance(actual_seq_len, shadow_seq_len)
         if guidance is not None:
             source, role_mask, bypass_embeds, bypass_mask = guidance
         else:
+            if require_dynamic_guidance:
+                guidance_state["segments"].clear()
+                raise RuntimeError(
+                    "talker HMONNX takeover failed to build dynamic projection guidance for prefill; "
+                    "refusing to fall back to Python-side projection."
+                )
             # Decode or unmatched prefill falls back to bypass path: feed the
             # pre-projected embeds the HF side produced via python projection.
             source = torch.zeros(batch, shadow_seq_len, thinker_hs, dtype=torch.float16)
@@ -1048,11 +1131,19 @@ def _patch_talker_shadow(native_model, talker_meta: Dict[str, Any], logger):
                 residual_codes = None
 
             logits, hidden_states = _extract_hmonnx_logits_and_hidden_states(
-                _call_fused(session, shadow_inputs_embeds, shadow_seq_len),
+                _call_fused(
+                    session,
+                    shadow_inputs_embeds,
+                    shadow_seq_len,
+                    seq_len,
+                    require_dynamic_guidance=seq_len > 1,
+                ),
                 inputs_embeds.device,
                 seq_len,
                 hidden_dtype=inputs_embeds.dtype,
             )
+            if seq_len > 1:
+                guidance_state["segments"].clear()
             state["past_seq_length"] += seq_len
 
             return Qwen3OmniMoeTalkerOutputWithPast(
@@ -1243,7 +1334,7 @@ def run_dialogue_validation(
         text=text,
         audio=audios,
         images=images,
-        videos=videos,
+        videos=videos or None,
         return_tensors="pt",
         padding=True,
         seconds_per_chunk=2.0,
@@ -1431,7 +1522,7 @@ def run_text_hmonnx_chain_forward(
             text=text,
             audio=audios,
             images=images,
-            videos=videos,
+            videos=videos or None,
             return_tensors="pt",
             padding=True,
             seconds_per_chunk=2.0,

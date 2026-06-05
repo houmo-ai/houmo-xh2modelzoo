@@ -312,10 +312,16 @@ class _Qwen3OmniMoeTalkerForConditionalGeneration(_Qwen3OmniTalkerDynamicModule)
         # Fused projection heads — always run, arithmetic select.
         hidden_proj_out = self.hidden_projection(source)
         text_proj_out = self.text_projection(source)
-        one_minus_role = 1.0 - role_mask
+
+        # Build ``1 - mask`` without scalar-left Sub.  Some HMONNX export/runtime
+        # paths lower ``1.0 - mask`` as ``mask - 1.0`` for scalar-left Sub, which
+        # silently flips the sign of projected tokens when ``bypass_mask=0``.
+        # The multiply/add form exports as Mul+Add and still preserves the
+        # bit-exact 0/1 mask selection used by decode bypass.
+        one_minus_role = role_mask * -1.0 + 1.0
         projected = hidden_proj_out * one_minus_role + text_proj_out * role_mask
 
-        one_minus_bypass = 1.0 - bypass_mask
+        one_minus_bypass = bypass_mask * -1.0 + 1.0
         inputs_embeds = projected * one_minus_bypass + bypass_embeds * bypass_mask
 
         outputs = self.model(

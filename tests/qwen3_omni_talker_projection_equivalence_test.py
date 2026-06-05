@@ -65,16 +65,16 @@ def _hf_user_parts(im_start, end, multimodal_mask, thinker_hidden, thinker_embed
 @torch.no_grad()
 def _wrap_projection_mix(source, role_mask, bypass_embeds, bypass_mask,
                           hidden_proj, text_proj):
-    """Exact copy of the wrap formula at ``_talker_model.py:312-319``.
+    """Exact copy of the wrap formula in ``_talker_model.py``.
 
     The companion ``test_wrap_formula_matches_source`` test guards against
     drift between this helper and the wrap source.
     """
     hidden_proj_out = hidden_proj(source)
     text_proj_out = text_proj(source)
-    one_minus_role = 1.0 - role_mask
+    one_minus_role = role_mask * -1.0 + 1.0
     projected = hidden_proj_out * one_minus_role + text_proj_out * role_mask
-    one_minus_bypass = 1.0 - bypass_mask
+    one_minus_bypass = bypass_mask * -1.0 + 1.0
     inputs_embeds = projected * one_minus_bypass + bypass_embeds * bypass_mask
     return inputs_embeds
 
@@ -275,9 +275,9 @@ def test_wrap_formula_matches_source():
     expected_lines = [
         "hidden_proj_out = self.hidden_projection(source)",
         "text_proj_out = self.text_projection(source)",
-        "one_minus_role = 1.0 - role_mask",
+        "one_minus_role = role_mask * -1.0 + 1.0",
         "projected = hidden_proj_out * one_minus_role + text_proj_out * role_mask",
-        "one_minus_bypass = 1.0 - bypass_mask",
+        "one_minus_bypass = bypass_mask * -1.0 + 1.0",
         "inputs_embeds = projected * one_minus_bypass + bypass_embeds * bypass_mask",
     ]
     missing = [line for line in expected_lines if line not in src]

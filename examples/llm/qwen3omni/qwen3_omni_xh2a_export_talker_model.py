@@ -24,6 +24,7 @@ from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 
+import soundfile as sf
 import torch
 
 
@@ -81,13 +82,21 @@ try:
     from qwen_omni_utils import process_mm_info
 except ImportError:
 
+    def _load_audio_path(audio):
+        if not isinstance(audio, str):
+            return audio
+        audio_array, _ = sf.read(audio, dtype="float32")
+        if audio_array.ndim > 1:
+            audio_array = audio_array.mean(axis=1)
+        return audio_array
+
     def process_mm_info(conversation, use_audio_in_video=False):
         audios, images, videos = [], [], []
         for turn in conversation:
             for item in turn.get("content", []):
                 tp = item.get("type")
                 if tp == "audio":
-                    audios.append(item.get("audio"))
+                    audios.append(_load_audio_path(item.get("audio")))
                 elif tp == "image":
                     images.append(item.get("image"))
                 elif tp == "video":
@@ -296,7 +305,7 @@ def _capture_talker_inputs(native_model, processor, device, dtype, work_dir, log
         text=text,
         audio=audios,
         images=images,
-        videos=videos,
+        videos=videos or None,
         return_tensors="pt",
         padding=True,
         seconds_per_chunk=2.0,
@@ -579,6 +588,33 @@ def main(args):
     )
     quant_config = ConfigDict(create_quant_config(quant_scheme))
 
+    # Workaround: create_quant_config() overwrites nodes_cfg with raw strings
+    # (xhquant bug — line 140 in quant_type.py replaces properly-built dicts
+    # with quant_schema.nodes, then from_schema().update_existing drops them).
+    # Re-inject properly parsed per-node configs for projection layers.
+    from xhquant.api.quant_type import parse_quant_format
+    for _node_name, _node_quant_type in quant_scheme.nodes.items():
+        _fmt = parse_quant_format(_node_quant_type)
+        quant_config["nodes_cfg"][_node_name] = ConfigDict(dict(
+            w_cfg=dict(
+                quantizer=dict(
+                    qspec=dict(
+                        fp_mode=_fmt.fp_mode,
+                        hidden_bit=_fmt.hidden_bit,
+                        man_bit=_fmt.weight_bit,
+                    ),
+                ),
+            ),
+            i_cfg=dict(
+                quantizer=dict(
+                    qspec=dict(
+                        hidden_bit=True,
+                        man_bit=_fmt.act_bit,
+                    ),
+                ),
+            ),
+        ))
+
     prefix = f"{model_name}-{target_device}-talker-{quant_type}"
     work_dir = Path(args.work_dir) / prefix
     golden_root = Path(args.golden_root)
@@ -611,6 +647,13 @@ def main(args):
         logger.info("Talker HMONNX artifacts already exist, skipping export")
         with open(meta_file) as f:
             meta_info = json.load(f)
+        if meta_info.get("quant_type") != quant_type or meta_info.get("projection_quant_type") != projection_quant_type:
+            logger.info(
+                "Talker artifacts use a different quant config "
+                f"(quant_type={meta_info.get('quant_type')}, "
+                f"projection_quant_type={meta_info.get('projection_quant_type')}), rebuilding"
+            )
+            artifacts_exist = False
         takeover_ready = meta_info.get("artifact_contract_version", 1) >= 4 and meta_info.get("output_names") == [
             "logits",
             "hidden_states",
@@ -802,6 +845,8 @@ def main(args):
             "artifact_contract_version": 4,
             "module": "talker_model",
             "model_name": model_name,
+            "quant_type": quant_type,
+            "projection_quant_type": projection_quant_type,
             "talker_prefill_onnx": str(prefill_file.relative_to(work_dir)),
             "talker_decode_onnx": str(decode_file.relative_to(work_dir)),
             "output_names": output_names,
@@ -927,9 +972,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--projection-quant-type",
         type=str,
-        default="w16a16h0_sefp",
+        default="w8a8h1_sefp",
         help="quantization type for hidden_projection and text_projection layers; "
-        "use w16a16_sefp or w16a16h0_sefp for higher precision",
+        "w8a8h1_sefp matches standalone projection precision (cos≈0.999938); w16 variants have insufficient precision for fused inference",
     )
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--valid", action="store_true", default=True, help="validate exported HMONNX")
