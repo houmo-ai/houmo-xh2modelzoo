@@ -563,6 +563,32 @@ class XHGemma4Model(VisionLLMModel):
         if getattr(text_config, "hidden_size_per_layer_input", 0):
             self.per_layer_input_builder = Gemma4PerLayerInputBuilder.from_language_model(language_model)
 
+    @classmethod
+    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        # Gemma4 dense checkpoints exported by auto-round are stored as
+        # ``quant_method == "gptq"`` in their HF config.  Routing such a model
+        # through ``BaseLLMModel.get_hf_model`` -> ``GPTQModel.load`` triggers
+        # ``Gemma4ForConditionalGenerationGPTQ`` which assumes a MoE layout
+        # (``num_experts`` not None) and crashes on dense.  Mirror the legacy
+        # gemma4 module by loading the GPTQ weights through plain transformers
+        # and running our in-tree GPTQ dequant converter.
+        kwargs.setdefault("dtype", torch.bfloat16)
+        kwargs.setdefault("device_map", "cpu")
+        kwargs.setdefault("trust_remote_code", True)
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        quantization_config = getattr(config, "quantization_config", None)
+        quant_method = getattr(quantization_config, "quant_method", None)
+        if isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method", quant_method)
+        if str(quant_method).lower() == "gptq":
+            assert quant_weight is None or len(quant_weight) == 0, (
+                "Model is already quantized, quant_weight should be None or empty when loading quantized model."
+            )
+            native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
+            native_hf_model = cls._dequantize_gptq_hf_model(native_hf_model)
+            return native_hf_model
+        return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
+
     def init_wrap_model(self, hf_model: Any) -> Any:
         from ._llm_model_impl import register_wrap_modules
 

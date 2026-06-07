@@ -70,10 +70,15 @@ class XHGemma4Processor(Gemma4Processor):
 
         prepared = dict(kwargs)
         images = prepared["images"]
-        if isinstance(images, (list, tuple)):
-            prepared["images"] = [self._resize_image_for_export_contract(image) for image in images]
-        else:
-            prepared["images"] = self._resize_image_for_export_contract(images)
+
+        def _resize_recursive(item: Any) -> Any:
+            if isinstance(item, Image.Image):
+                return self._resize_image_for_export_contract(item)
+            if isinstance(item, (list, tuple)):
+                return type(item)(_resize_recursive(subitem) for subitem in item)
+            return item
+
+        prepared["images"] = _resize_recursive(images)
         return prepared
 
     def __call__(self, *args, **kwargs):

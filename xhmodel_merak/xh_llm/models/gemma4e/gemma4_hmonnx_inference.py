@@ -455,19 +455,44 @@ class XHGemma4_HMONNXModel(VisonLLMHMONNXModel):
 
     def get_tf_processor(self):
         processor = XHGemma4Processor.from_pretrained(self.hf_model_dir)
-        model_config = self.meta_info.model_config
-        if getattr(model_config, "visual_config", None) is not None:
+        vis_meta = getattr(self.meta_info, "visual_config", None)
+        if vis_meta is not None:
+            # Read visual export metadata from the top-level VisualModelMeta
+            # (meta_info.visual_config), NOT from model_config.visual_config.
+            # The latter is the export-time config and may not contain
+            # max_size_w / max_size_h / export_mode.
+            # Also guard against addict.Dict which returns {} for missing keys.
+            max_size_w = getattr(vis_meta, "image_size_w", None)
+            max_size_h = getattr(vis_meta, "image_size_h", None)
+            if not isinstance(max_size_w, int):
+                max_size_w = 224
+            if not isinstance(max_size_h, int):
+                max_size_h = 224
+            patch_size = getattr(vis_meta, "patch_size", 16)
+            if not isinstance(patch_size, int):
+                patch_size = 16
+            image_seq_length = getattr(vis_meta, "image_seq_length", None)
+            if not isinstance(image_seq_length, int):
+                image_seq_length = getattr(vis_meta, "num_image_tokens", 256)
+            if not isinstance(image_seq_length, int):
+                image_seq_length = 256
+            # Infer export_mode from pooling_kernel_size stored in model_config
+            model_vis_cfg = getattr(self.meta_info.model_config, "visual_config", None)
+            pooling_ks = getattr(model_vis_cfg, "pooling_kernel_size", 3) if model_vis_cfg is not None else 3
+            if not isinstance(pooling_ks, int):
+                pooling_ks = 3
+            export_mode = "compact" if pooling_ks == 1 else "full"
             processor = configure_gemma4_visual_processor(
                 processor,
-                export_mode=getattr(model_config.visual_config, "export_mode", "full"),
-                max_size_w=model_config.visual_config.max_size_w,
-                max_size_h=model_config.visual_config.max_size_h,
-                patch_size=model_config.visual_config.patch_size,
-                image_seq_length=model_config.visual_config.image_seq_length,
+                export_mode=export_mode,
+                max_size_w=max_size_w,
+                max_size_h=max_size_h,
+                patch_size=patch_size,
+                image_seq_length=image_seq_length,
             )
-        if getattr(model_config, "audio_config", None) is not None:
-            processor.config.sampling_rate = model_config.audio_config.sampling_rate
-            input_feature_length = int(getattr(model_config.audio_config, "input_feature_length", 0) or 0)
+        if getattr(self.meta_info, "audio_config", None) is not None:
+            processor.config.sampling_rate = self.meta_info.audio_config.sampling_rate
+            input_feature_length = int(getattr(self.meta_info.audio_config, "input_feature_length", 0) or 0)
             if input_feature_length > 0:
                 processor.config.audio_feature_length = input_feature_length
         return processor

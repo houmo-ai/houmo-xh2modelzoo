@@ -11,6 +11,7 @@ from xhquant.api import ConfigDict, get_xhquant_logger
 from ...hmonnx.text_llm_hmonnx_model import TextLLMHMONNXModel
 from ...kv_cache_mixin import KVCacheMixin
 from ..gemma4.data_preprocess import Gemma4DataPreprocess
+from ..gemma4.gemma4_processor import XHGemma4Processor
 
 
 class Gemma4MoeKVCacheMixinHMONNX(KVCacheMixin):
@@ -97,6 +98,9 @@ class XHGemma4MoeWithMaskHMONNXModel(TextLLMHMONNXModel):
         self.embed_tokens.load_state_dict(state_dict)
         logger = get_xhquant_logger()
         logger.info(f"Loaded baked token embedding from {token_embedding_path}")
+
+    def get_tf_processor(self):
+        return XHGemma4Processor.from_pretrained(self.hf_model_dir)
 
     def forward(self, *args):
         args = [arg.to(torch.int32) if getattr(arg, "dtype", None) == torch.int64 else arg for arg in args]

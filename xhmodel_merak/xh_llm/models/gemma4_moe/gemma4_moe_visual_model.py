@@ -138,13 +138,16 @@ class XHGemma4MoeVisualProcessor:
         processor_config_path = Path(hf_model_dir) / "processor_config.json"
         patch_size = DEFAULT_PATCH_SIZE
         max_soft_tokens = DEFAULT_MAX_SOFT_TOKENS
+        pooling_kernel_size = _resolve_pooling_kernel_size(upsample_token)
         if processor_config_path.exists():
             with open(processor_config_path) as f:
                 processor_config = json.load(f)
             image_config = processor_config.get("image_processor", {})
             patch_size = int(image_config.get("patch_size", patch_size))
             max_soft_tokens = int(image_config.get("max_soft_tokens", max_soft_tokens))
-        pooling_kernel_size = _resolve_pooling_kernel_size(upsample_token)
+            # Prefer the value from processor_config.json; only fall back to
+            # the upsample-token-derived value when the config omits it.
+            pooling_kernel_size = int(image_config.get("pooling_kernel_size", pooling_kernel_size))
         image_seq_length = max_soft_tokens if upsample_token else DEFAULT_IMAGE_SIZE[0] // 28 * DEFAULT_IMAGE_SIZE[1] // 28
         return cls(
             patch_size=patch_size,
