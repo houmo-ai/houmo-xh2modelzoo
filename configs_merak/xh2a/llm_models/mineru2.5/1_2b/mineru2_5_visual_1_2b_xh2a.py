@@ -27,5 +27,4 @@ model = dict(
     max_size_w=1036,
     max_size_h=1036,
     patch_size=14,
-    temporal_patch_size=2,
 )

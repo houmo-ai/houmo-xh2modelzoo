@@ -1,7 +1,6 @@
 import argparse
 import copy
 import math
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,10 +11,6 @@ from mineru_vl_utils.mineru_client import DEFAULT_SAMPLING_PARAMS
 from qwen_vl_utils.vision_process import SPATIAL_MERGE_SIZE, smart_resize
 from transformers import AutoConfig
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-
-REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from xhmodel_merak.xh_llm import (
     AutoLLMConfig,

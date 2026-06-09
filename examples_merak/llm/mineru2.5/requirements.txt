@@ -1,0 +1,2 @@
+transformers==4.57.6
+mineru_vl_utils==1.0.3

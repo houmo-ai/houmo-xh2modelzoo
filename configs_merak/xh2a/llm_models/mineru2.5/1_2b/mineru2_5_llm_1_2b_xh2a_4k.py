@@ -37,7 +37,6 @@ model = dict(
         max_size_w=1036,
         max_size_h=1036,
         patch_size=14,
-        temporal_patch_size=2,
         quant_scheme=dict(
             quant_type="w16a16h0_sefp",
             # 建议使用16-bit激活值matmul，否则attention会有严重的精度问题

@@ -1,14 +1,9 @@
 import argparse
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 from transformers import TextStreamer
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
 from xhquant.api import get_xhquant_logger, xhquant_init

@@ -174,7 +174,8 @@ def build_qwen2_vl_hf_compatible_model(hf_model: Qwen2VLForConditionalGeneration
 
 @register_llm_model("Qwen2VLForConditionalGeneration")
 class XHQwen2VLModel(VisionLLMModel):
-    transformers_min_version = "4.57.0"
+    transformers_min_version = "4.57.6"
+    transformers_max_version = "4.57.6"
     HF_MODEL_CLS = Qwen2VLForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
     HMONNXINFERENCE_CLS = XHQwen2VLHMONNXModel

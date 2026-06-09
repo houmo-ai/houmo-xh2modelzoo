@@ -1,14 +1,9 @@
 import argparse
 import os.path as osp
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel, format_model_name, support_llm_model_types
 from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init

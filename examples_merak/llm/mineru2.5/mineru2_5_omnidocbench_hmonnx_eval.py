@@ -21,10 +21,6 @@ from tqdm import tqdm
 
 Image.MAX_IMAGE_PIXELS = None
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_HMONNX_DIR = (
     "work_dirs/mineru2_5_llm_1_2b_xh2a_4k/"

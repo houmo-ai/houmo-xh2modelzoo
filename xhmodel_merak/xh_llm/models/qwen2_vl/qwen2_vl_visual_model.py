@@ -40,7 +40,8 @@ def build_qwen2_vl_visual_hf_compatible_model(
 
 @register_llm_model("Qwen2VLForConditionalGeneration_visual", master=False)
 class XHQwen2VLVisualModel(BaseVisionModel):
-    transformers_min_version = "4.57.0"
+    transformers_min_version = "4.57.6"
+    transformers_max_version = "4.57.6"
     HF_MODEL_CLS = Qwen2VLForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
     BUILD_HF_COMPATIBLE_FUNC = build_qwen2_vl_visual_hf_compatible_model

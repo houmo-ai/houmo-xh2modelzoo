@@ -12,7 +12,7 @@
 
 ```bash
 cd /data01/home/chuyuan.wei/code/xh2modelzoo
-conda run -n xh2modelzoo python ...
+python ...
 ```
 
 ## 脚本说明
@@ -95,7 +95,7 @@ PIL crop
 运行：
 
 ```bash
-conda run -n xh2modelzoo python \
+python \
   examples_merak/llm/mineru2.5/debug_scripts/mineru2_5_native_generate.py
 ```
 
@@ -118,7 +118,7 @@ MinerUClient(...).two_step_extract(...)
 运行：
 
 ```bash
-conda run -n xh2modelzoo python \
+python \
   examples_merak/llm/mineru2.5/debug_scripts/mineru2_5_xh_generate.py \
   --config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py \
   --visual-buckets-config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py \
@@ -148,7 +148,7 @@ conda run -n xh2modelzoo python \
 导出共享 LLM HMONNX 和所有静态 visual bucket：
 
 ```bash
-conda run -n xh2modelzoo python \
+python \
   examples_merak/llm/mineru2.5/mineru2_5_xh_export_hmonnx.py \
   --config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py \
   --visual-buckets-config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py \
@@ -198,7 +198,7 @@ visual_buckets/<HxW>/*.onnx
 ```bash
 EXPORT_DIR=work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
 
-conda run -n xh2modelzoo python \
+python \
   examples_merak/llm/mineru2.5/mineru2_5_xh_hmonnx_generate.py \
   --config ${EXPORT_DIR}/golden_meta_info.json \
   --visual-buckets-manifest ${EXPORT_DIR}/mineru_visual_buckets.json \
@@ -239,7 +239,7 @@ work_dirs/mineru2_5_omnidocbench_data/OmniDocBench.json
 下载标注文件：
 
 ```bash
-conda run -n xh2modelzoo huggingface-cli download \
+huggingface-cli download \
   opendatalab/OmniDocBench \
   OmniDocBench.json \
   --repo-type dataset \
@@ -308,7 +308,7 @@ work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manif
 评估原始 HF dynamic ViT：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+CUDA_VISIBLE_DEVICES=0 python \
   examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
   --sample-manifest work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json \
   --sample-size 10 \
@@ -320,7 +320,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
 评估原始 HF 模型 + static ViT 模拟：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+CUDA_VISIBLE_DEVICES=0 python \
   examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
   --sample-manifest work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json \
   --sample-size 10 \
@@ -339,7 +339,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
 ```bash
 EXPORT_DIR=work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
 
-CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+CUDA_VISIBLE_DEVICES=0 python \
   examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hmonnx_eval.py \
   --config ${EXPORT_DIR}/golden_meta_info.json \
   --visual-buckets-manifest ${EXPORT_DIR}/mineru_visual_buckets.json \

@@ -31,10 +31,6 @@ from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
 
 Image.MAX_IMAGE_PIXELS = None
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 
 DEFAULT_CONTENT_CATEGORIES = [
     "title",
