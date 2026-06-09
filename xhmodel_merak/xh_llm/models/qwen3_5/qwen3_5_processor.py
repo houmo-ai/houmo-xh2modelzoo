@@ -14,7 +14,14 @@ class Qwen3_5VLProcessorConfig(BaseConfig):  # noqa: N801
 
 
 class XHQwen3_5Processor(Qwen3_5Processor):  # noqa: N801
-    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        video_processor=None,
+        chat_template=None,
+        **kwargs,
+    ):
         super().__init__(
             image_processor=image_processor,
             tokenizer=tokenizer,
@@ -26,7 +33,10 @@ class XHQwen3_5Processor(Qwen3_5Processor):  # noqa: N801
 
     def apply_chat_template(self, messages: list[dict[str, str]], enable_thinking: bool = False):
         text = super().apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
 
         for message in messages:
@@ -41,7 +51,10 @@ class XHQwen3_5Processor(Qwen3_5Processor):  # noqa: N801
                         ele["resized_height"] = self.config.max_size_h
                         ele["resized_width"] = self.config.max_size_w
 
-        image_inputs, video_inputs = process_vision_info(messages, image_patch_size=self.config.patch_size)
+        image_inputs, video_inputs = process_vision_info(
+            messages,
+            image_patch_size=self.config.patch_size,
+        )
         self.image_processor.max_pixels = max(
             self.config.max_size_w * self.config.max_size_h + 1, self.image_processor.max_pixels
         )
@@ -53,6 +66,7 @@ class XHQwen3_5Processor(Qwen3_5Processor):  # noqa: N801
             padding=True,
             return_tensors="pt",
         )
-        model_inputs["pixel_values"] = [model_inputs["hm_pixel_values"][0].half()]
-        model_inputs.pop("hm_pixel_values")
+        if "hm_pixel_values" in model_inputs:
+            model_inputs["pixel_values"] = [model_inputs["hm_pixel_values"][0].half()]
+            model_inputs.pop("hm_pixel_values")
         return model_inputs

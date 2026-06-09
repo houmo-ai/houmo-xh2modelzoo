@@ -22,6 +22,11 @@ class CacheList(list[T]):
     def to_list(self) -> list[T]:
         return list(self)
 
+    def to(self, *args, **kwargs):
+        for index in range(len(self)):
+            self[index] = self[index].to(*args, **kwargs)
+        return self
+
 
 class LLMModelState(CaseInsensitiveEnum):
     NONE = "none"

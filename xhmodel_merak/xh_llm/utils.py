@@ -21,10 +21,22 @@
 
 
 from dataclasses import dataclass
+from itertools import chain
 
 import torch
+import torch.nn as nn
 
 from xhquant.utils.registry import DynamicModule
+
+
+def get_module_device(module: nn.Module, default: str | torch.device = "cpu") -> torch.device:
+    tensor = next(
+        chain(module.parameters(recurse=True), module.buffers(recurse=True)),
+        None,
+    )
+    if tensor is None:
+        return torch.device(default)
+    return tensor.device
 
 
 def unfold_args(args):
@@ -73,7 +85,14 @@ def format_model_name(cfg):
     model_cfg = cfg["model"]
 
     # cfg_name = f"{model_name}_{prefill_chunk_length}_{args.context_length // 1024}k-{quant_type}"
-    chip_arch = cfg["chip_arch"].lower()
+    if "model" in cfg:
+        chip_arch = cfg["model"].get("chip_arch", None)
+    if chip_arch is None:
+        chip_arch = cfg.get("chip_arch", None)
+    if chip_arch is None:
+        raise NotImplementedError(f"chip_arch not in {cfg}")
+    chip_arch = chip_arch.lower()
+
     fileds = []
     if chip_arch.startswith("xh2"):
         fileds.append("xh2")

@@ -19,13 +19,30 @@ class LLMExportCommand:
             "--config",
             type=str,
             default="",
-            help="model config file, for development and debugging, use configs in examples_merak/llm/qwen3_legacy/configs.",
+            help=(
+                "model config file, for development and debugging, "
+                "use configs in examples_merak/llm/qwen3_legacy/configs."
+            ),
         )
-        parser.add_argument("--force", action="store_true", help="Whether to force export even if the model is exist.")
-        parser.add_argument("--chip-arch", type=str, default="XH2a", help="chip architecture, default is XH2a")
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Whether to force export even if the model is exist.",
+        )
+        parser.add_argument(
+            "--chip-arch",
+            type=str,
+            default="XH2a",
+            help="chip architecture, default is XH2a",
+        )
         parser.add_argument("--model", type=str, default="")
         parser.add_argument("--context-length", type=int, default=2048, help="max sequence length")
-        parser.add_argument("--prefill-chunk-length", type=int, default=256, help="prefill chunk length")
+        parser.add_argument(
+            "--prefill-chunk-length",
+            type=int,
+            default=256,
+            help="prefill chunk length",
+        )
         parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8")
         parser.add_argument(
             "--quant-weight",
@@ -62,6 +79,7 @@ class LLMExportCommand:
                 chip_arch=target_device,
                 model=dict(
                     model_type="Qwen3ForCausalLM_legacy",
+                    chip_arch=target_device,
                     hf_model=hf_model_path,
                     model_name=model_name,
                     context_max_length=context_length,
@@ -96,7 +114,7 @@ class LLMExportCommand:
             else:
                 from loguru import logger
 
-                logger.info(f"Exported model already exists at {work_dir}, use --force to overwrite. ")
+                logger.info(f"Exported model already exists at {work_dir}, use --force to overwrite.")
 
                 return -1
         work_dir.mkdir(parents=True, exist_ok=True)

@@ -8,9 +8,9 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -345,7 +345,7 @@ class _Qwen3_5TextRMSNorm(_Qwen3_5TextRMSNormBase):  # noqa: N801
 
     def _setup(self, cfg: Optional[Dict] = None):
         hidden_size = self.weight.shape[0]
-        self.norm = RMSNorm(hidden_size, self.eps)
+        self.norm = RMSNorm(hidden_size, self.eps).to(self.weight.dtype).to(self.weight.device)
         with torch.no_grad():
             self.norm.weight.copy_(self.weight + 1.0)
         return self
@@ -380,7 +380,7 @@ class _Qwen3_5RMSNormGated(_Qwen3_5RMSNormGatedBase):  # noqa: N801
     def _setup(self, cfg: Optional[Dict] = None):
         hidden_size = self.weight.shape[0]
         eps = getattr(self, "variance_epsilon", getattr(self, "eps", 1e-6))
-        self.norm = RMSNorm(hidden_size, eps)
+        self.norm = RMSNorm(hidden_size, eps).to(self.weight.dtype).to(self.weight.device)
         with torch.no_grad():
             # NOTE: Qwen3_5RMSNormGated / FusedRMSNormGated use 1-centered
             # weights (init ones), NOT 0-centered like Qwen3_5RMSNorm.
@@ -657,9 +657,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
 
             if isinstance(conv_cache, (list, tuple)):
                 if len(conv_cache) != 3:
-                    raise RuntimeError(
-                        f"Expected 3 conv caches for linear attention, got {len(conv_cache)}"
-                    )
+                    raise RuntimeError(f"Expected 3 conv caches for linear attention, got {len(conv_cache)}")
                 conv_cache_q = _normalize_linear_conv_cache_rank(conv_cache[0])
                 conv_cache_k = _normalize_linear_conv_cache_rank(conv_cache[1])
                 conv_cache_v = _normalize_linear_conv_cache_rank(conv_cache[2])
@@ -675,29 +673,21 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
                 assert conv_cache is not None, "conv_cache is required"
                 conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
                 conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
-                    conv_cache, self.key_dim, self.value_dim, dim=1,
+                    conv_cache,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=1,
                 )
-            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
-                self.conv1d_q.weight.dtype
-            )
-            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
-                self.conv1d_k.weight.dtype
-            )
-            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
-                self.conv1d_v.weight.dtype
-            )
+            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(self.conv1d_q.weight.dtype)
+            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(self.conv1d_k.weight.dtype)
+            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(self.conv1d_v.weight.dtype)
 
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
-                conv_cache_out = tuple(
-                    query_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
-                ) + tuple(
-                    key_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
-                ) + tuple(
-                    value_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
+                conv_cache_out = (
+                    tuple(query_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
+                    + tuple(key_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
+                    + tuple(value_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
                 )
             else:
                 conv_cache_out = (
@@ -739,15 +729,9 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             key_states = key_states * mask_qkv
             value_states = value_states * mask_qkv
 
-            query = query_states.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_k_dim
-            )
-            key = key_states.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_k_dim
-            )
-            value = value_states.transpose(1, 2).reshape(
-                batch_size, seq_len, -1, self.head_v_dim
-            )
+            query = query_states.transpose(1, 2).reshape(batch_size, seq_len, -1, self.head_k_dim)
+            key = key_states.transpose(1, 2).reshape(batch_size, seq_len, -1, self.head_k_dim)
+            value = value_states.transpose(1, 2).reshape(batch_size, seq_len, -1, self.head_v_dim)
         else:
             # === Merged conv_cache path (single tensor, default) ===
             mixed_qkv = self.in_proj_qkv(hidden_states)  # [bs, seq, key_dim*2+value_dim]
@@ -768,8 +752,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
                 conv_cache_out = tuple(
-                    hidden_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
+                    hidden_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length)
                 )
             else:
                 conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
@@ -790,9 +773,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             mixed_qkv = mixed_qkv * mask_qkv
 
             mixed_qkv = mixed_qkv.transpose(1, 2)
-            query, key, value = torch.split(
-                mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
-            )
+            query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
             key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
             value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
@@ -888,9 +869,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
             recurrent_state_out = tuple(_recurrent_snapshots)
         else:
-            recurrent_state_out = (
-                last_recurrent_state if last_recurrent_state is not None else recurrent_state
-            )
+            recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
 
         b_sz, s, n, h = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
@@ -943,16 +922,25 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
                 dim=0,
             )
             self.in_proj_q = nn.Linear(
-                self.hidden_size, self.key_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_k = nn.Linear(
-                self.hidden_size, self.key_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_v = nn.Linear(
-                self.hidden_size, self.value_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.value_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_q.weight.data.copy_(q_weight)
             self.in_proj_k.weight.data.copy_(k_weight)
@@ -960,7 +948,9 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             if proj_has_bias:
                 q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
                     self.in_proj_qkv.bias.detach().clone(),
-                    self.key_dim, self.value_dim, dim=0,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
                 )
                 self.in_proj_q.bias.data.copy_(q_bias)
                 self.in_proj_k.bias.data.copy_(k_bias)
@@ -974,25 +964,39 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             conv_dtype = self.conv1d.weight.dtype
             q_weight, k_weight, v_weight = _split_linear_qkv_tensor(
                 self.conv1d.weight.detach().clone(),
-                self.key_dim, self.value_dim, dim=0,
+                self.key_dim,
+                self.value_dim,
+                dim=0,
             )
             self.conv1d_q = nn.Conv1d(
-                self.key_dim, self.key_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_k = nn.Conv1d(
-                self.key_dim, self.key_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_v = nn.Conv1d(
-                self.value_dim, self.value_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.value_dim,
+                self.value_dim,
+                self.value_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.value_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_q.weight.data.copy_(q_weight)
             self.conv1d_k.weight.data.copy_(k_weight)
@@ -1000,7 +1004,9 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             if conv_has_bias:
                 q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
                     self.conv1d.bias.detach().clone(),
-                    self.key_dim, self.value_dim, dim=0,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
                 )
                 self.conv1d_q.bias.data.copy_(q_bias)
                 self.conv1d_k.bias.data.copy_(k_bias)
@@ -1147,13 +1153,8 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.return_cache = cfg.get("return_cache", self.return_cache)
         self.input_sequence_length = cfg.get("input_sequence_length", self.input_sequence_length)
         self.batch_size = cfg.get("batch_size", self.batch_size)
-        self._verify_output_intermediates = cfg.get(
-            "verify_output_intermediates", self._verify_output_intermediates
-        )
-        self.split_conv_cache = (
-            cfg.get("split_conv_cache", self.split_conv_cache)
-            or hasattr(self, "in_proj_q")
-        )
+        self._verify_output_intermediates = cfg.get("verify_output_intermediates", self._verify_output_intermediates)
+        self.split_conv_cache = cfg.get("split_conv_cache", self.split_conv_cache) or hasattr(self, "in_proj_q")
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1508,12 +1509,8 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         linear_attn_cache_idx = 0
         collected_hidden_states = []
         split_conv_cache = self.split_conv_cache
-        if (
-            not split_conv_cache
-            and (
-                _looks_like_flat_split_conv_cache(past_conv_cache)
-                or _layers_use_split_conv_cache(self.layers)
-            )
+        if not split_conv_cache and (
+            _looks_like_flat_split_conv_cache(past_conv_cache) or _layers_use_split_conv_cache(self.layers)
         ):
             split_conv_cache = True
         if split_conv_cache and _is_nested_split_conv_cache(past_conv_cache):
@@ -1694,9 +1691,8 @@ class _Qwen3_5ForConditionalGeneration(_Qwen3_5ForConditionalGenerationBase):  #
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = (
-            cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_post_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get(
+            "output_post_norm_hidden", False
         )
 
     def forward(
@@ -1750,9 +1746,8 @@ class _Qwen3_5ForCausalLM(_Qwen3_5ForCausalLMBase):  # noqa: N801
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = (
-            cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_post_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get(
+            "output_post_norm_hidden", False
         )
 
     def forward(

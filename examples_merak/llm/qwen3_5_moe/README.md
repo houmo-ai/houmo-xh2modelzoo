@@ -73,8 +73,3 @@ python examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_ppl_eval.py \
   --config work_dirs/<cfg_name>/<export_dir>/golden_meta_info.json \
   --max-samples 4096
 ```
-
-## 122B模型导出问题分析：
-
-对于122B的模型， 每个Linear的weight是fp16，quant_weight是int8，所以它的参数量应该是360Gb这个量级，wrap只是对nn.Module的**class**进行替换，本质上不会增加内存占用，wrap阶段会对Moe模块做一些内存复制的转移操作，这里可能会导致内存占用增大，但应该只是临时的内存占用。
-需要注意量化阶段有哪些地方导致了内存持续增长的？

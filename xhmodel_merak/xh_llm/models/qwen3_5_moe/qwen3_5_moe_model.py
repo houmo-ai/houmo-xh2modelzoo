@@ -85,7 +85,7 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
                 if pv.dim() == 4:
                     pv = pv.unsqueeze(0)
                 for j in range(pv.shape[0]):
-                    image_embeds_j = self._llm_model.visual.forward(pv[j:j+1])
+                    image_embeds_j = self._llm_model.visual.forward(pv[j : j + 1])
                     image_embeds.append(image_embeds_j)
 
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
@@ -156,9 +156,7 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
             steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
             pad_len = steps * net_input_seq_len - seq_length
             if pad_len > 0:
-                padding_embeds = self.get_input_embeddings()(
-                    torch.zeros((1, pad_len), dtype=torch.long, device=device)
-                )
+                padding_embeds = self.get_input_embeddings()(torch.zeros((1, pad_len), dtype=torch.long, device=device))
                 inputs_embeds = torch.cat([inputs_embeds, padding_embeds], dim=1)
                 last_pos = position_ids[:, :, -1:].expand(-1, -1, pad_len)
                 position_ids = torch.cat([position_ids, last_pos], dim=2)
@@ -180,10 +178,16 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
                 sub_height_pos = position_ids[1, 0, start:end].to(torch.int64)
                 sub_width_pos = position_ids[2, 0, start:end].to(torch.int64)
 
-                linear_mask = torch.cat([
-                    torch.ones(sub_current_len, device=device),
-                    torch.zeros(net_input_seq_len - sub_current_len, device=device),
-                ]).unsqueeze(0).to(dtype=torch.float16)
+                linear_mask = (
+                    torch.cat(
+                        [
+                            torch.ones(sub_current_len, device=device),
+                            torch.zeros(net_input_seq_len - sub_current_len, device=device),
+                        ]
+                    )
+                    .unsqueeze(0)
+                    .to(dtype=torch.float16)
+                )
 
                 chunk_logits, _, _ = self._llm_model.forward(
                     sub_embeds,

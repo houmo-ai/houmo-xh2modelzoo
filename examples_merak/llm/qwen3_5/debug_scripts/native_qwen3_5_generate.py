@@ -4,68 +4,47 @@ from pathlib import Path
 import torch
 from loguru import logger
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer, TextStreamer
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+from transformers import (
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    AutoTokenizer,
+    TextStreamer,
+)
 
 
 def main(args):
     prompt = args.prompt
     if Path(prompt).is_file():
         prompt = Path(prompt).read_text()
-    if not Path(args.image_path).exists():
-        raise FileNotFoundError(f"Image file does not exist: {args.image_path}")
-    image = Image.open(args.image_path).convert("RGB")
-    if image is None or image.size == 0:
-        raise FileNotFoundError(f"Failed to load image: {args.image_path}")
+    image = None
+    if args.image_path is not None and len(args.image_path) > 0:
+        image = Image.open(args.image_path).convert("RGB")
 
     hf_model_dir = args.model_dir
     processor = AutoProcessor.from_pretrained(hf_model_dir, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(hf_model_dir, trust_remote_code=True)
-    model = Qwen3_5ForConditionalGeneration.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         hf_model_dir,
         dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     ).eval()
-
+    message = {
+        "role": "user",
+        "content": [],
+    }
+    if image is not None:
+        message["content"].append(
+            {
+                "type": "image",
+                "image": image,
+            },
+        )
+    message["content"].append(
+        {"type": "text", "text": prompt},
+    )
     messages = [
-        #     {
-        #         "role": "user",
-        #         "content": [
-        #             {
-        #                 "type": "image_url",
-        #                 "image_url": {
-        #                     "url": "https://qianwen-res.oss-accelerate.aliyuncs.com/Qwen3.5/demo/CI_Demo/mathv-1327.jpg"
-        #                 },
-        #             },
-        #             {
-        #                 "type": "text",
-        #                 "text": "The centres of the four illustrated circles are in the corners of the square. The two big circles touch each other and also the two little circles. With which factor do you have to multiply the radii of the little circles to obtain the radius of the big circles?\nChoices:\n(A) $\\frac{2}{9}$\n(B) $\\sqrt{5}$\n(C) $0.8 \\cdot \\pi$\n(D) 2.5\n(E) $1+\\sqrt{2}$",
-        #             },
-        #         ],
-        #     },
-        # {
-        #     "role": "user",
-        #     "content": [
-        #         {
-        #             "type": "image_url",
-        #             "image_url": {
-        #                 "url": "https://qianwen-res.oss-accelerate.aliyuncs.com/Qwen3.5/demo/RealWorld/RealWorld-04.png"
-        #             },
-        #         },
-        #         {"type": "text", "text": "Where is this?"},
-        #     ],
-        # },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "image": image,
-                },
-                {"type": "text", "text": prompt},
-            ],
-        },
+        message,
     ]
     inputs = processor.apply_chat_template(
         messages,
@@ -89,7 +68,11 @@ def main(args):
     generated_ids_trimmed = [
         out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
     ]
-    output_text = tokenizer.decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    output_text = tokenizer.decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
     logger.info(f"{'-' * 20} Output {'-' * 20}")
     logger.info(f"{output_text[0]}")
 
@@ -97,8 +80,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Test Qwen3.5 model")
     parser.add_argument("--model-dir", type=str, default="./data/models/Qwen3.5-9B")
-    parser.add_argument("--image-path", type=str, default="./data/images/RealWorld-04.png")
-    parser.add_argument("--prompt", type=str, default="Describe this image.")
+    parser.add_argument("--image-path", type=str)
+    parser.add_argument("--prompt", type=str, default="你是谁？")
 
     args = parser.parse_args()
     main(args)

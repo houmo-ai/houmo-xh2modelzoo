@@ -1,20 +1,27 @@
 """Regression tests for Qwen3.5 Merak export config defaults."""
+
 from __future__ import annotations
 
-import inspect
 import importlib.util
+import inspect
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
+import torch
+import torch.nn as nn
 
+from xhmodel_merak.xh_llm import AutoLLMConfig
 from xhmodel_merak.xh_llm.base_model import XHBaseModel
-from xhmodel_merak.xh_llm.types import KVCacheWithLinearConfig
 from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
     XHQwen3_5_DFlashConfig,
     XHQwen3_5_MTPConfig,
     XHQwen3_5ModelConfig,
     build_spec_draft_quant_scheme,
 )
+from xhmodel_merak.xh_llm.types import CacheList, KVCacheWithLinearConfig
+from xhquant.api import Config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,11 +80,11 @@ def test_merak_export_reranks_target_and_mtp_hf_model(monkeypatch):
     )
     calls = []
 
-    def fake_prepare(*, original_model_dir, K, reranked_repo_dir, force_rerank):
+    def fake_prepare(*, original_model_dir, k, reranked_repo_dir, force_rerank):
         calls.append(
             dict(
                 original_model_dir=original_model_dir,
-                K=K,
+                k=k,
                 reranked_repo_dir=reranked_repo_dir,
                 force_rerank=force_rerank,
             )
@@ -91,7 +98,7 @@ def test_merak_export_reranks_target_and_mtp_hf_model(monkeypatch):
     assert calls == [
         dict(
             original_model_dir="weights/qwen",
-            K=81920,
+            k=81920,
             reranked_repo_dir="weights/qwen-reranked-K81920",
             force_rerank=False,
         )
@@ -226,11 +233,11 @@ def test_qwen3_5_split_conv_cache_impl_imports_torch_nn():
 
 def test_qwen3_5_split_conv_cache_helpers_round_trip_flat_inputs():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _flatten_split_conv_cache_outputs,
         _regroup_flat_split_conv_cache,
     )
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
     flat = list(range(6))
 
@@ -249,10 +256,10 @@ def test_qwen3_5_split_conv_cache_helpers_round_trip_flat_inputs():
 
 def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _flatten_split_conv_cache_outputs,
     )
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
     composite = [tuple(range(15))]
     expected = list(range(15))
@@ -277,10 +284,10 @@ def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv
 
 def test_qwen3_5_split_conv_cache_helpers_reject_bad_flat_length():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _regroup_flat_split_conv_cache,
     )
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
     with pytest.raises(RuntimeError, match="divisible by 3"):
         _llm_model_impl._regroup_flat_split_conv_cache([0, 1])
@@ -292,13 +299,13 @@ def test_qwen3_5_split_conv_cache_helpers_reject_bad_flat_length():
 
 def test_qwen3_5_split_conv_cache_helpers_do_not_bool_test_proxy_like_inputs():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _regroup_flat_split_conv_cache,
     )
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
         _regroup_flat_split_conv_cache as regroup_runtime_cache,
     )
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
     class ProxyLike:
         def __bool__(self):
@@ -309,7 +316,6 @@ def test_qwen3_5_split_conv_cache_helpers_do_not_bool_test_proxy_like_inputs():
     assert _regroup_flat_split_conv_cache(proxy_like) is proxy_like
     assert regroup_runtime_cache(proxy_like) is proxy_like
     assert _moe_model._regroup_flat_split_conv_cache(proxy_like) is proxy_like
-
 
 
 def test_qwen3_5_split_conv_cache_layer_indexing_uses_qkv_triples():
@@ -324,6 +330,7 @@ def test_qwen3_5_split_conv_cache_layer_indexing_uses_qkv_triples():
     assert _llm_model_impl._get_linear_layer_conv_cache(["merged0", "merged1"], 1, False) == "merged1"
     assert _moe_model._get_linear_layer_conv_cache(flat, 1, True) == ("q1", "k1", "v1")
     assert _moe_model._get_linear_layer_conv_cache(nested, 1, True) == ("q1", "k1", "v1")
+
 
 def test_qwen3_5_hmonnx_split_conv_cache_mixin_uses_flat_export_signature():
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
@@ -387,9 +394,7 @@ def test_qwen3_5_sync_rebuilds_legacy_merged_conv_caches_for_split_mode():
     linear_cfg.num_layers = 1
     model._kvcache_mixin._linear_key_dim = 4
     model._kvcache_mixin._linear_value_dim = 6
-    model._kvcache_mixin.past_conv_caches.append(
-        CacheTensor(torch.zeros(1, 14, 4, dtype=torch.float16))
-    )
+    model._kvcache_mixin.past_conv_caches.append(CacheTensor(torch.zeros(1, 14, 4, dtype=torch.float16)))
 
     model._sync_split_conv_cache_state()
 
@@ -405,17 +410,64 @@ def test_qwen3_5_sync_rebuilds_legacy_merged_conv_caches_for_split_mode():
     ]
 
 
+def test_qwen3_5_past_conv_caches_property_resyncs_split_state_when_mixin_is_stale():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    model = XHQwen3_5Model(XHQwen3_5ModelConfig(model_name="qwen3_5"))
+    model._kvcache_mixin.split_conv_cache = False
+    model._kvcache_mixin.past_conv_caches = [(torch.zeros(1), torch.zeros(1), torch.zeros(1))]
+
+    caches = model.past_conv_caches
+
+    assert model._kvcache_mixin.split_conv_cache is True
+    assert len(caches) == 3
+
+
+def test_qwen3_5_get_data_preprocessor_resyncs_split_cache_state(monkeypatch):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    model = XHQwen3_5Model(XHQwen3_5ModelConfig(model_name="qwen3_5"))
+    model._kvcache_mixin.split_conv_cache = False
+    model._data_processor = None
+    model._device = "cpu"
+    model._dtype = torch.float16
+
+    calls = []
+    original_sync = model._sync_split_conv_cache_state
+
+    def wrapped_sync():
+        calls.append("sync")
+        return original_sync()
+
+    monkeypatch.setattr(model, "_sync_split_conv_cache_state", wrapped_sync)
+
+    class DummyProcessor:
+        rope_deltas = None
+
+        def to(self, device, dtype):
+            self.device = device
+            self.dtype = dtype
+            return self
+
+    monkeypatch.setattr(model, "_get_data_preprocessor", lambda: DummyProcessor())
+
+    model.get_data_preprocessor()
+
+    assert calls == ["sync"]
+    assert model._kvcache_mixin.split_conv_cache is True
+
 
 def test_qwen3_5_dense_text_model_setup_splits_child_linear_attn_modules():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
 
     source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel._setup)
 
-    assert 'if self.split_conv_cache:' in source
+    assert "if self.split_conv_cache:" in source
     assert 'self.layer_types[idx_layer] != "linear_attention"' in source
     assert "linear_attn.split_conv_cache = True" in source
     assert 'not hasattr(linear_attn, "in_proj_q")' in source
     assert "linear_attn._setup(cfg)" in source
+
 
 def test_qwen3_5_hmonnx_decode_input_sequence_length_honors_spec_decode():
     from types import SimpleNamespace
@@ -521,9 +573,7 @@ def test_qwen3_5_hmonnx_forward_splits_qkv_conv_outputs_from_recurrent_tail(monk
         split_conv_cache = True
 
         def __init__(self):
-            self.past_conv_caches = [
-                (torch.zeros(1), torch.zeros(1), torch.zeros(1)) for _ in range(3)
-            ]
+            self.past_conv_caches = [(torch.zeros(1), torch.zeros(1), torch.zeros(1)) for _ in range(3)]
             self.past_recurrent_states = [torch.zeros(1) for _ in range(3)]
 
     model = XHQwen3_5_HMONNXModel.__new__(XHQwen3_5_HMONNXModel)
@@ -538,11 +588,8 @@ def test_qwen3_5_hmonnx_forward_splits_qkv_conv_outputs_from_recurrent_tail(monk
         assert torch.equal(past_q, conv_outputs[layer_idx * 3])
         assert torch.equal(past_k, conv_outputs[layer_idx * 3 + 1])
         assert torch.equal(past_v, conv_outputs[layer_idx * 3 + 2])
-    for past_state, recurrent_out in zip(
-        model._kvcache_mixin.past_recurrent_states, recurrent_outputs, strict=True
-    ):
+    for past_state, recurrent_out in zip(model._kvcache_mixin.past_recurrent_states, recurrent_outputs, strict=True):
         assert torch.equal(past_state, recurrent_out)
-
 
 
 def test_qwen3_5_hmonnx_forward_uses_final_spec_decode_split_cache_step(monkeypatch):
@@ -779,16 +826,69 @@ def test_qwen3_5_moe_text_model_forward_regroups_and_reflattens_split_conv_cache
     assert recurrent_out == ["state0"]
     assert layer.seen_conv_cache == ("q0", "k0", "v0")
 
+
 def test_qwen3_5_moe_text_model_setup_splits_child_linear_attn_modules():
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
     source = inspect.getsource(_moe_model._Qwen3_5MoeTextModel._setup)
 
-    assert 'if self.split_conv_cache:' in source
+    assert "if self.split_conv_cache:" in source
     assert 'self.layer_types[idx_layer] != "linear_attention"' in source
     assert "linear_attn.split_conv_cache = True" in source
     assert 'not hasattr(linear_attn, "in_proj_q")' in source
     assert "linear_attn._setup(cfg)" in source
+
+
+def test_qwen3_5_wraped_post_reenforces_split_conv_cache_wrap_cfg():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    source = inspect.getsource(XHQwen3_5Model._wraped_post)
+
+    assert "_enforce_split_conv_cache_wrap_cfg(llm_model, self.wrap_cfg)" in source
+
+
+def test_qwen3_5_moe_wraped_post_reenforces_split_conv_cache_wrap_cfg():
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import XHQwen3_5MoeModel
+
+    source = inspect.getsource(XHQwen3_5MoeModel._wraped_post)
+
+    assert "_enforce_split_conv_cache_wrap_cfg(language_model, self.wrap_cfg)" in source
+
+
+def test_qwen3_5_moe_122b_gptq_config_loads_expected_fields():
+    config_path = (
+        REPO_ROOT
+        / "configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b"
+        / "qwen3_5_moe_122b_a10b_instruct_hf_gptq_xh2a_w4a8_2k.py"
+    )
+
+    cfg = Config.fromfile(str(config_path))
+
+    assert cfg.model.model_name == "xh2_Qwen3.5-122B-A10B-GPTQ_w4a8_256_2k"
+    assert cfg.model.hf_model.endswith("Qwen3.5-122B-A10B-gptq-attn8-expert4-expertDown5-shared8-base4-64g_060920")
+    assert cfg.model.chip_arch == "XH2a"
+    assert cfg.model.quant_scheme.quant_type == "w4a8h0_ssfp"
+    assert cfg.model.quant_scheme.nodes.lm_head.quant_type == "w8a8h1_sefp"
+
+
+def test_qwen3_5_moe_122b_spec_mtp_gptq_config_loads_expected_fields(monkeypatch):
+    config_path = (
+        REPO_ROOT
+        / "configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b"
+        / "qwen3_5_moe_122b_a10b_instruct_spec_mtp_hf_gptq_xh2a_2k.py"
+    )
+
+    cfg = Config.fromfile(str(config_path))
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
+
+    assert model_cfg.model_name == "xh2_Qwen3.5-122B-A10B_spec_mtp_w4a8_256_2k"
+    assert model_cfg.chip_arch == "XH2a"
+    assert model_cfg.spec_decode_mode == "mtp"
+    assert model_cfg.quant_scheme.quant_type == "w4a8h0_ssfp"
+    assert model_cfg.mtp_config.hidden_size == 2048
+    assert model_cfg.mtp_config.input_sequence_length == 1
+    assert model_cfg.mtp_config.use_cache is True
 
 
 def test_qwen3_5_moe_gated_delta_net_sets_up_split_qkv_cache_path():
@@ -832,12 +932,10 @@ def test_qwen3_5_moe_gated_delta_net_setup_creates_fused_gdr_ops():
     import torch
     import torch.nn as nn
 
-    from xhquant.api import ConfigDict
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhquant.api import ConfigDict
 
-    module = _moe_model._Qwen3_5MoeGatedDeltaNet.__new__(
-        _moe_model._Qwen3_5MoeGatedDeltaNet
-    )
+    module = _moe_model._Qwen3_5MoeGatedDeltaNet.__new__(_moe_model._Qwen3_5MoeGatedDeltaNet)
     nn.Module.__init__(module)
     module.hidden_size = 8
     module.key_dim = 4
@@ -923,11 +1021,17 @@ def test_get_hf_model_loads_float_model_then_external_quant_weight(monkeypatch):
         "xhmodel_merak.xh_llm.base_model.AutoConfig.from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(quantization_config=None),
     )
-    monkeypatch.setattr(XHBaseModel, "_load_hf_model", classmethod(lambda cls, hf_model_dir, **kwargs: calls.append(("hf", hf_model_dir, kwargs)) or object()))
+    monkeypatch.setattr(
+        XHBaseModel,
+        "_load_hf_model",
+        classmethod(lambda cls, hf_model_dir, **kwargs: calls.append(("hf", hf_model_dir, kwargs)) or object()),
+    )
     monkeypatch.setattr(
         XHBaseModel,
         "_load_quant_weight",
-        classmethod(lambda cls, quant_weight, native_hf_model, strict=True: calls.append(("quant_weight", quant_weight)) or True),
+        classmethod(
+            lambda cls, quant_weight, native_hf_model, strict=True: calls.append(("quant_weight", quant_weight)) or True
+        ),
     )
 
     XHBaseModel.get_hf_model("weights/Qwen3.5-9B", quant_weight="/tmp/quant_weight.pt", device_map="cpu")
@@ -994,3 +1098,270 @@ def test_get_hf_model_rejects_quant_weight_for_quantized_hf_repo(monkeypatch):
             "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only",
             quant_weight="/tmp/quant_weight.pt",
         )
+
+
+def test_get_native_model_uses_cpu_device_map_when_auto_offload_disabled(monkeypatch):
+    class DummyHFModel:
+        pass
+
+    class DummyModel(XHBaseModel):
+        HF_MODEL_CLS = DummyHFModel
+
+    model = DummyModel.__new__(DummyModel)
+    model.config = type("Config", (), {"quant_weight": None, "enable_auto_offload": False})()
+    model.hf_model_dir = "weights/Qwen3.5-9B"
+
+    captured = {}
+
+    monkeypatch.setattr(
+        DummyModel,
+        "get_hf_model",
+        classmethod(lambda cls, hf_model_dir, quant_weight=None, **kwargs: captured.update(kwargs) or DummyHFModel()),
+    )
+
+    out = model.get_native_model()
+
+    assert isinstance(out, DummyHFModel)
+    assert captured["device_map"] == "cpu"
+
+
+def test_get_native_model_uses_auto_device_map_when_auto_offload_enabled(monkeypatch):
+    class DummyHFModel:
+        pass
+
+    class DummyModel(XHBaseModel):
+        HF_MODEL_CLS = DummyHFModel
+
+    model = DummyModel.__new__(DummyModel)
+    model.config = type("Config", (), {"quant_weight": "/tmp/quant_weight.pt", "enable_auto_offload": True})()
+    model.hf_model_dir = "weights/Qwen3.5-9B"
+
+    captured = {}
+
+    def fake_get_hf_model(cls, hf_model_dir, quant_weight=None, **kwargs):
+        captured["hf_model_dir"] = hf_model_dir
+        captured["quant_weight"] = quant_weight
+        captured.update(kwargs)
+        return DummyHFModel()
+
+    monkeypatch.setattr(DummyModel, "get_hf_model", classmethod(fake_get_hf_model))
+
+    out = model.get_native_model()
+
+    assert isinstance(out, DummyHFModel)
+    assert captured["hf_model_dir"] == "weights/Qwen3.5-9B"
+    assert captured["quant_weight"] == "/tmp/quant_weight.pt"
+    assert captured["device_map"] == "auto"
+
+
+def test_cache_list_to_supports_dtype_only_conversion():
+    cache_list = CacheList([torch.ones((1, 2), dtype=torch.float32)])
+
+    returned = cache_list.to(torch.float16)
+
+    assert returned is cache_list
+    assert cache_list[0].dtype == torch.float16
+
+
+def test_cache_list_to_supports_combined_device_and_dtype_conversion():
+    cache_list = CacheList([torch.ones((1, 2), dtype=torch.float32)])
+
+    cache_list.to(device="cpu", dtype=torch.float16)
+
+    assert cache_list[0].device.type == "cpu"
+    assert cache_list[0].dtype == torch.float16
+
+
+def test_cache_list_to_supports_keyword_dtype_conversion():
+    cache_list = CacheList([torch.ones((1, 2), dtype=torch.float32)])
+
+    cache_list.to(dtype=torch.bfloat16)
+
+    assert cache_list[0].dtype == torch.bfloat16
+
+
+def test_dequantize_gptqmodel_hf_model_moves_modules_to_cpu_and_back(monkeypatch):
+    class FakePackableQuantLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+            self.move_calls = []
+            self.fake_device = torch.device("cuda", 0)
+
+        def to(self, *args, **kwargs):
+            device = kwargs.get("device")
+            if device is None and args:
+                device = args[0]
+            if device is not None:
+                self.move_calls.append(torch.device(device))
+            return self
+
+    fake_gptqmodel_module = ModuleType("gptqmodel")
+    fake_qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    fake_qlinear_module.PackableQuantLinear = FakePackableQuantLinear
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_gptqmodel_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", fake_qlinear_module)
+    monkeypatch.setattr("transformers.utils.is_gptqmodel_available", lambda: True)
+
+    converted = []
+
+    def fake_converter(module):
+        converted.append(module)
+
+    monkeypatch.setattr("xhmodel_merak.xh_llm.base_model.gptqmodel_torch_qlinear_converter", fake_converter)
+
+    module = FakePackableQuantLinear()
+    model = nn.Sequential(module)
+
+    original_parameters = FakePackableQuantLinear.parameters
+    original_buffers = FakePackableQuantLinear.buffers
+
+    def fake_parameters(self, recurse=True):
+        if self is module:
+            return iter((torch.empty(1, device=module.fake_device),))
+        return original_parameters(self, recurse=recurse)
+
+    def fake_buffers(self, recurse=True):
+        if self is module:
+            return iter(())
+        return original_buffers(self, recurse=recurse)
+
+    monkeypatch.setattr(FakePackableQuantLinear, "parameters", fake_parameters)
+    monkeypatch.setattr(FakePackableQuantLinear, "buffers", fake_buffers)
+
+    out = XHBaseModel._dequantize_gptqmodel_hf_model(model)
+
+    assert out is model
+    assert converted == [module]
+    assert module.move_calls == [torch.device("cpu"), torch.device("cuda", 0)]
+
+
+def test_dequantize_gptqmodel_hf_model_keeps_cpu_modules_on_cpu(monkeypatch):
+    class FakePackableQuantLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+            self.move_calls = []
+
+        def to(self, *args, **kwargs):
+            device = kwargs.get("device")
+            if device is None and args:
+                device = args[0]
+            if device is not None:
+                self.move_calls.append(torch.device(device))
+            return self
+
+    fake_gptqmodel_module = ModuleType("gptqmodel")
+    fake_qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    fake_qlinear_module.PackableQuantLinear = FakePackableQuantLinear
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_gptqmodel_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", fake_qlinear_module)
+    monkeypatch.setattr("transformers.utils.is_gptqmodel_available", lambda: True)
+
+    converted = []
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.gptqmodel_torch_qlinear_converter",
+        lambda module: converted.append(module),
+    )
+
+    module = FakePackableQuantLinear()
+    model = nn.Sequential(module)
+
+    out = XHBaseModel._dequantize_gptqmodel_hf_model(model)
+
+    assert out is model
+    assert converted == [module]
+    assert module.move_calls == []
+
+
+def test_dequantize_gptqmodel_hf_model_supports_empty_modules(monkeypatch):
+    class FakePackableQuantLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.move_calls = []
+
+        def to(self, *args, **kwargs):
+            device = kwargs.get("device")
+            if device is None and args:
+                device = args[0]
+            if device is not None:
+                self.move_calls.append(torch.device(device))
+            return self
+
+    fake_gptqmodel_module = ModuleType("gptqmodel")
+    fake_qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    fake_qlinear_module.PackableQuantLinear = FakePackableQuantLinear
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_gptqmodel_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", fake_qlinear_module)
+    monkeypatch.setattr("transformers.utils.is_gptqmodel_available", lambda: True)
+
+    converted = []
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.gptqmodel_torch_qlinear_converter",
+        lambda module: converted.append(module),
+    )
+
+    module = FakePackableQuantLinear()
+    model = nn.Sequential(module)
+
+    monkeypatch.setattr(FakePackableQuantLinear, "parameters", lambda self, recurse=True: iter(()))
+    monkeypatch.setattr(FakePackableQuantLinear, "buffers", lambda self, recurse=True: iter(()))
+
+    out = XHBaseModel._dequantize_gptqmodel_hf_model(model)
+
+    assert out is model
+    assert converted == [module]
+    assert module.move_calls == []
+
+
+def test_dequantize_gptqmodel_hf_model_processes_multiple_modules(monkeypatch):
+    class FakePackableQuantLinear(nn.Module):
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+            self.weight = nn.Parameter(torch.ones(1))
+
+    fake_gptqmodel_module = ModuleType("gptqmodel")
+    fake_qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    fake_qlinear_module.PackableQuantLinear = FakePackableQuantLinear
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_gptqmodel_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", fake_qlinear_module)
+    monkeypatch.setattr("transformers.utils.is_gptqmodel_available", lambda: True)
+
+    converted = []
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.base_model.gptqmodel_torch_qlinear_converter",
+        lambda module: converted.append(module.name),
+    )
+
+    model = nn.Sequential(FakePackableQuantLinear("first"), FakePackableQuantLinear("second"))
+
+    XHBaseModel._dequantize_gptqmodel_hf_model(model)
+
+    assert converted == ["first", "second"]
+
+
+def test_dequantize_gptqmodel_hf_model_rejects_multi_device_modules(monkeypatch):
+    class FakePackableQuantLinear(nn.Module):
+        pass
+
+    fake_gptqmodel_module = ModuleType("gptqmodel")
+    fake_qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    fake_qlinear_module.PackableQuantLinear = FakePackableQuantLinear
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_gptqmodel_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", fake_qlinear_module)
+    monkeypatch.setattr("transformers.utils.is_gptqmodel_available", lambda: True)
+    monkeypatch.setattr("xhmodel_merak.xh_llm.base_model.gptqmodel_torch_qlinear_converter", lambda module: None)
+
+    module = FakePackableQuantLinear()
+    model = nn.Sequential(module)
+
+    monkeypatch.setattr(
+        FakePackableQuantLinear,
+        "parameters",
+        lambda self, recurse=True: iter((torch.empty(1, device="cpu"), torch.empty(1, device="meta"))),
+    )
+    monkeypatch.setattr(FakePackableQuantLinear, "buffers", lambda self, recurse=True: iter(()))
+
+    with pytest.raises(NotImplementedError, match="single device"):
+        XHBaseModel._dequantize_gptqmodel_hf_model(model)

@@ -315,7 +315,7 @@ def _pack_defused_expert_linear_to_moeblock(moeblock: MoeBlock, experts, linear_
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeRMSNorm: "Qwen3_5MoeRMSNorm"})
-class _Qwen3_5MoeRMSNorm(DynamicModule):
+class _Qwen3_5MoeRMSNorm(DynamicModule):  # noqa: N801
     """Wrap Qwen3_5MoeRMSNorm.
 
     Qwen3.5-MoE uses ``(1 + weight)`` style normalization (weight init = 0).
@@ -327,7 +327,7 @@ class _Qwen3_5MoeRMSNorm(DynamicModule):
 
     def _setup(self, cfg: Optional[Dict] = None):
         hidden_size = self.weight.shape[0]
-        self.norm = RMSNorm(hidden_size, self.eps)
+        self.norm = RMSNorm(hidden_size, self.eps).to(self.weight.dtype).to(self.weight.device)
         with torch.no_grad():
             self.norm.weight.copy_(self.weight + 1.0)
         return self
@@ -339,7 +339,7 @@ if FusedRMSNormGated is not None:
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(_rms_norm_gated_registry)
-class _Qwen3_5MoeRMSNormGated(DynamicModule):
+class _Qwen3_5MoeRMSNormGated(DynamicModule):  # noqa: N801
     """Wrap Qwen3_5MoeRMSNormGated / FusedRMSNormGated used inside GatedDeltaNet.
 
     Original forward: ``silu(gate) * x -> norm -> scale(weight+1)``.
@@ -353,7 +353,7 @@ class _Qwen3_5MoeRMSNormGated(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         hidden_size = self.weight.shape[0]
         eps = getattr(self, "variance_epsilon", getattr(self, "eps", 1e-6))
-        self.norm = RMSNorm(hidden_size, eps)
+        self.norm = RMSNorm(hidden_size, eps).to(self.weight.dtype).to(self.weight.device)
         with torch.no_grad():
             # NOTE: Qwen3_5RMSNormGated / FusedRMSNormGated use 1-centered
             # weights (init ones), NOT 0-centered like Qwen3_5RMSNorm.
@@ -368,7 +368,7 @@ class _Qwen3_5MoeRMSNormGated(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeTextRotaryEmbedding: "Qwen3_5MoeTextRotaryEmbedding"})
-class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
+class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
     """Pre-compute cos/sin cache for M-RoPE.
 
     Unlike the HF model which applies interleaved mrope at forward time,
@@ -391,6 +391,41 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
         else:
             max_pe_length = 4096
         self._setup_cos_sin_cache(seq_len=max_pe_length)
+
+        # ---- M-RoPE interleaved masks ----
+        partial_rotary_factor = getattr(self.config, "partial_rotary_factor", 0.25)
+        head_dim = self.config.head_dim
+        rotary_dim = int(head_dim * partial_rotary_factor)
+        half_dim = rotary_dim // 2
+
+        rope_parameters = self.config.rope_parameters
+        if isinstance(rope_parameters, dict):
+            mrope_section = rope_parameters.get("mrope_section", [11, 11, 10])
+        else:
+            mrope_section = getattr(rope_parameters, "mrope_section", [11, 11, 10])
+
+        h_ids = torch.arange(1, mrope_section[1] * 3, 3)
+        w_ids = torch.arange(2, mrope_section[2] * 3, 3)
+
+        time_mask = torch.ones(half_dim)
+        time_mask[h_ids] = 0
+        time_mask[w_ids] = 0
+        time_mask = torch.cat([time_mask, time_mask], 0)
+        time_mask.unsqueeze_(0).unsqueeze_(0)
+        self.register_buffer("time_mask", time_mask.half(), persistent=False)
+
+        hight_mask = torch.zeros(half_dim)
+        hight_mask[h_ids] = 1
+        hight_mask = torch.cat([hight_mask, hight_mask], 0)
+        hight_mask.unsqueeze_(0).unsqueeze_(0)
+        self.register_buffer("hight_mask", hight_mask.half(), persistent=False)
+
+        width_mask = torch.zeros(half_dim)
+        width_mask[w_ids] = 1
+        width_mask = torch.cat([width_mask, width_mask], 0)
+        width_mask.unsqueeze_(0).unsqueeze_(0)
+        self.register_buffer("width_mask", width_mask.half(), persistent=False)
+
         if hasattr(self, "setup_after_callback"):
             self.setup_after_callback()
 
@@ -423,6 +458,25 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
 
         return cos.to(dtype=self.inv_freq.dtype), sin.to(dtype=self.inv_freq.dtype)
 
+    def forward(self, time_position_ids: Tensor, hight_position_ids: Tensor, width_position_ids: Tensor):
+        cos = self.cos_cached
+        sin = self.sin_cached
+
+        time_cos = cos[time_position_ids] * self.time_mask
+        time_sin = sin[time_position_ids] * self.time_mask
+        hight_cos = cos[hight_position_ids] * self.hight_mask
+        hight_sin = sin[hight_position_ids] * self.hight_mask
+        width_cos = cos[width_position_ids] * self.width_mask
+        width_sin = sin[width_position_ids] * self.width_mask
+
+        combined_cos = time_cos + hight_cos + width_cos
+        combined_sin = time_sin + hight_sin + width_sin
+
+        rotary_dim = combined_cos.shape[-1]
+        combined_cos = combined_cos.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
+        combined_sin = combined_sin.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
+        return combined_cos, combined_sin
+
 
 # ============================================================================
 # Full Attention (with gating + partial rotary)
@@ -430,7 +484,7 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeAttention: "Qwen3_5MoeAttention"})
-class _Qwen3_5MoeAttention(DynamicModule):
+class _Qwen3_5MoeAttention(DynamicModule):  # noqa: N801
     """Qwen3.5-MoE full attention with gating mechanism.
 
     q_proj outputs ``query + gate`` (2x heads), attention result is
@@ -564,7 +618,7 @@ class _Qwen3_5MoeAttention(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeGatedDeltaNet: "Qwen3_5MoeGatedDeltaNet"})
-class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
+class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
     """Qwen3.5-MoE GatedDeltaNet linear attention wrapper.
 
     Uses **separate** projections (in_proj_qkv, in_proj_z, in_proj_b, in_proj_a).
@@ -597,10 +651,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
 
         resolved_seq_len = _resolve_python_int_length(seq_len)
         _expand_verify_tokens = (
-            _verify_intermediates
-            and self.input_sequence_length > 1
-            and use_recurrent
-            and resolved_seq_len == 1
+            _verify_intermediates and self.input_sequence_length > 1 and use_recurrent and resolved_seq_len == 1
         )
         attn_seq_len = self.input_sequence_length if _expand_verify_tokens else seq_len
 
@@ -615,9 +666,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
 
             if isinstance(conv_cache, (list, tuple)):
                 if len(conv_cache) != 3:
-                    raise RuntimeError(
-                        f"Expected 3 conv caches for linear attention, got {len(conv_cache)}"
-                    )
+                    raise RuntimeError(f"Expected 3 conv caches for linear attention, got {len(conv_cache)}")
                 conv_cache_q = _normalize_linear_conv_cache_rank(conv_cache[0])
                 conv_cache_k = _normalize_linear_conv_cache_rank(conv_cache[1])
                 conv_cache_v = _normalize_linear_conv_cache_rank(conv_cache[2])
@@ -633,29 +682,21 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 assert conv_cache is not None, "conv_cache is required"
                 conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
                 conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
-                    conv_cache, self.key_dim, self.value_dim, dim=1,
+                    conv_cache,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=1,
                 )
 
-            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
-                self.conv1d_q.weight.dtype
-            )
-            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
-                self.conv1d_k.weight.dtype
-            )
-            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
-                self.conv1d_v.weight.dtype
-            )
+            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(self.conv1d_q.weight.dtype)
+            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(self.conv1d_k.weight.dtype)
+            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(self.conv1d_v.weight.dtype)
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
-                conv_cache_out = tuple(
-                    query_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
-                ) + tuple(
-                    key_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
-                ) + tuple(
-                    value_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
+                conv_cache_out = (
+                    tuple(query_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
+                    + tuple(key_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
+                    + tuple(value_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length))
                 )
             else:
                 conv_cache_out = (
@@ -697,15 +738,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             key_states = key_states * mask_qkv
             value_states = value_states * mask_qkv
 
-            query = query_states.transpose(1, 2).reshape(
-                batch_size, attn_seq_len, -1, self.head_k_dim
-            )
-            key = key_states.transpose(1, 2).reshape(
-                batch_size, attn_seq_len, -1, self.head_k_dim
-            )
-            value = value_states.transpose(1, 2).reshape(
-                batch_size, attn_seq_len, -1, self.head_v_dim
-            )
+            query = query_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
+            key = key_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
+            value = value_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
         else:
             mixed_qkv = self.in_proj_qkv(hidden_states)  # [bs, seq, key_dim*2+value_dim]
             mixed_qkv = mixed_qkv.transpose(1, 2)  # [bs, conv_dim, seq]
@@ -724,8 +759,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
                 conv_cache_out = tuple(
-                    hidden_states_new[..., 1 + t : 1 + t + _kernel]
-                    for t in range(self.input_sequence_length)
+                    hidden_states_new[..., 1 + t : 1 + t + _kernel] for t in range(self.input_sequence_length)
                 )
             else:
                 conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
@@ -901,16 +935,25 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 dim=0,
             )
             self.in_proj_q = nn.Linear(
-                self.hidden_size, self.key_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_k = nn.Linear(
-                self.hidden_size, self.key_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.key_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_v = nn.Linear(
-                self.hidden_size, self.value_dim, bias=proj_has_bias,
-                device=proj_device, dtype=proj_dtype,
+                self.hidden_size,
+                self.value_dim,
+                bias=proj_has_bias,
+                device=proj_device,
+                dtype=proj_dtype,
             )
             self.in_proj_q.weight.data.copy_(q_weight)
             self.in_proj_k.weight.data.copy_(k_weight)
@@ -918,7 +961,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             if proj_has_bias:
                 q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
                     self.in_proj_qkv.bias.detach().clone(),
-                    self.key_dim, self.value_dim, dim=0,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
                 )
                 self.in_proj_q.bias.data.copy_(q_bias)
                 self.in_proj_k.bias.data.copy_(k_bias)
@@ -936,22 +981,34 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 dim=0,
             )
             self.conv1d_q = nn.Conv1d(
-                self.key_dim, self.key_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_k = nn.Conv1d(
-                self.key_dim, self.key_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.key_dim,
+                self.key_dim,
+                self.key_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.key_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_v = nn.Conv1d(
-                self.value_dim, self.value_dim, bias=conv_has_bias,
-                kernel_size=self.conv_kernel_size, groups=self.value_dim,
+                self.value_dim,
+                self.value_dim,
+                bias=conv_has_bias,
+                kernel_size=self.conv_kernel_size,
+                groups=self.value_dim,
                 padding=self.conv_kernel_size - 1,
-                device=conv_device, dtype=conv_dtype,
+                device=conv_device,
+                dtype=conv_dtype,
             )
             self.conv1d_q.weight.data.copy_(q_weight)
             self.conv1d_k.weight.data.copy_(k_weight)
@@ -959,7 +1016,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             if conv_has_bias:
                 q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
                     self.conv1d.bias.detach().clone(),
-                    self.key_dim, self.value_dim, dim=0,
+                    self.key_dim,
+                    self.value_dim,
+                    dim=0,
                 )
                 self.conv1d_q.bias.data.copy_(q_bias)
                 self.conv1d_k.bias.data.copy_(k_bias)
@@ -1108,10 +1167,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
         )
         self.input_sequence_length = cfg.get("input_sequence_length", self.input_sequence_length)
         self.batch_size = cfg.get("batch_size", self.batch_size)
-        self.split_conv_cache = (
-            cfg.get("split_conv_cache", self.split_conv_cache)
-            or hasattr(self, "in_proj_q")
-        )
+        self.split_conv_cache = cfg.get("split_conv_cache", self.split_conv_cache) or hasattr(self, "in_proj_q")
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1156,7 +1212,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeSparseMoeBlock: "Qwen3_5MoeSparseMoeBlock"})
-class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
+class _Qwen3_5MoeSparseMoeBlock(DynamicModule):  # noqa: N801
     """Wrap Qwen3.5-MoE SparseMoeBlock.
 
     The HF Qwen3_5MoeExperts uses packed weight tensors:
@@ -1167,25 +1223,25 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
     Also handles shared_expert + shared_expert_gate.
     """
 
-    def forward(self, hidden_states):
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
+    # def forward(self, hidden_states):
+    #     batch_size, sequence_length, hidden_dim = hidden_states.shape
+    #     hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
 
-        # Router: softmax + topk done inside MoeBlock
-        router_logits = self.gate(hidden_states_reshaped)
-        routing_weights = F.softmax(router_logits, dim=-1)
-        # MoeBlock expects 3D: [batch, seq, num_experts]
-        routing_weights = routing_weights.view(batch_size, sequence_length, -1)
+    #     # Router: softmax + topk done inside MoeBlock
+    #     router_logits = self.gate(hidden_states_reshaped)
+    #     routing_weights = F.softmax(router_logits, dim=-1)
+    #     # MoeBlock expects 3D: [batch, seq, num_experts]
+    #     routing_weights = routing_weights.view(batch_size, sequence_length, -1)
 
-        # MoE block forward
-        moe_out = self.moeblock(hidden_states, routing_weights)
+    #     # MoE block forward
+    #     moe_out = self.moeblock(hidden_states, routing_weights)
 
-        # Shared expert
-        shared_out = self.shared_expert(hidden_states_reshaped)
-        shared_out = torch.sigmoid(self.shared_expert_gate(hidden_states_reshaped)) * shared_out
-        shared_out = shared_out.reshape(batch_size, sequence_length, hidden_dim)
+    #     # Shared expert
+    #     shared_out = self.shared_expert(hidden_states_reshaped)
+    #     shared_out = torch.sigmoid(self.shared_expert_gate(hidden_states_reshaped)) * shared_out
+    #     shared_out = shared_out.reshape(batch_size, sequence_length, hidden_dim)
 
-        return moe_out + shared_out
+    #     return moe_out + shared_out
 
     def forward(self, hidden_states):
         router_logits = self.gate(hidden_states)
@@ -1285,7 +1341,7 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeDecoderLayer: "Qwen3_5MoeDecoderLayer"})
-class _Qwen3_5MoeDecoderLayer(DynamicModule):
+class _Qwen3_5MoeDecoderLayer(DynamicModule):  # noqa: N801
     """Dispatches between linear_attention and full_attention layers."""
 
     def forward(
@@ -1346,7 +1402,7 @@ class _Qwen3_5MoeDecoderLayer(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeTextModel: "Qwen3_5MoeTextModel"})
-class _Qwen3_5MoeTextModel(DynamicModule):
+class _Qwen3_5MoeTextModel(DynamicModule):  # noqa: N801
     """Qwen3.5-MoE TextModel with M-RoPE interleaved position encoding."""
 
     def _setup(self, cfg):
@@ -1407,40 +1463,6 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                 if hasattr(linear_attn, "_setup") and not hasattr(linear_attn, "in_proj_q"):
                     linear_attn._setup(cfg)
 
-        # ---- M-RoPE interleaved masks ----
-        rope_parameters = self.config.rope_parameters
-        if isinstance(rope_parameters, dict):
-            mrope_section = rope_parameters.get("mrope_section", [11, 11, 10])
-        else:
-            mrope_section = getattr(rope_parameters, "mrope_section", [11, 11, 10])
-
-        partial_rotary_factor = getattr(self.config, "partial_rotary_factor", 0.25)
-        head_dim = self.config.head_dim
-        rotary_dim = int(head_dim * partial_rotary_factor)
-        half_dim = rotary_dim // 2
-
-        h_ids = torch.arange(1, mrope_section[1] * 3, 3)
-        w_ids = torch.arange(2, mrope_section[2] * 3, 3)
-
-        time_mask = torch.ones(half_dim)
-        time_mask[h_ids] = 0
-        time_mask[w_ids] = 0
-        time_mask = torch.cat([time_mask, time_mask], 0)
-        time_mask.unsqueeze_(0).unsqueeze_(0)
-        self.rotary_emb.register_buffer("time_mask", time_mask.half(), persistent=False)
-
-        hight_mask = torch.zeros(half_dim)
-        hight_mask[h_ids] = 1
-        hight_mask = torch.cat([hight_mask, hight_mask], 0)
-        hight_mask.unsqueeze_(0).unsqueeze_(0)
-        self.rotary_emb.register_buffer("hight_mask", hight_mask.half(), persistent=False)
-
-        width_mask = torch.zeros(half_dim)
-        width_mask[w_ids] = 1
-        width_mask = torch.cat([width_mask, width_mask], 0)
-        width_mask.unsqueeze_(0).unsqueeze_(0)
-        self.rotary_emb.register_buffer("width_mask", width_mask.half(), persistent=False)
-
         # Mark specific linear_attention layers for alpha scaling
         alpha_scaling_layers = cfg.get("alpha_scaling_layers", [8, 20])
         chunk_inverse_alpha = cfg.get("chunk_inverse_alpha", 0.5)
@@ -1475,25 +1497,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         past_conv_cache: Optional[List[Tensor]] = None,
         past_recurrent_state: Optional[List[Tensor]] = None,
     ):
-        # ---- M-RoPE: combine T/H/W position embeddings with masks ----
-        cos = self.rotary_emb.cos_cached
-        sin = self.rotary_emb.sin_cached
-
-        time_cos = cos[time_position_ids] * self.rotary_emb.time_mask
-        time_sin = sin[time_position_ids] * self.rotary_emb.time_mask
-        hight_cos = cos[hight_position_ids] * self.rotary_emb.hight_mask
-        hight_sin = sin[hight_position_ids] * self.rotary_emb.hight_mask
-        width_cos = cos[width_position_ids] * self.rotary_emb.width_mask
-        width_sin = sin[width_position_ids] * self.rotary_emb.width_mask
-
-        combined_cos = time_cos + hight_cos + width_cos
-        combined_sin = time_sin + hight_sin + width_sin
-
-        rotary_dim = combined_cos.shape[-1]
-        combined_cos = combined_cos.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
-        combined_sin = combined_sin.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
-        position_embeddings = (combined_cos, combined_sin)
-
+        position_embeddings = self.rotary_emb(time_position_ids, hight_position_ids, width_position_ids)
         hidden_states = input_embeds
 
         conv_cache_out_list = []
@@ -1502,12 +1506,8 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
         split_conv_cache = self.split_conv_cache
-        if (
-            not split_conv_cache
-            and (
-                _looks_like_flat_split_conv_cache(past_conv_cache)
-                or _layers_use_split_conv_cache(self.layers)
-            )
+        if not split_conv_cache and (
+            _looks_like_flat_split_conv_cache(past_conv_cache) or _layers_use_split_conv_cache(self.layers)
         ):
             split_conv_cache = True
         if split_conv_cache and _is_nested_split_conv_cache(past_conv_cache):
@@ -1587,10 +1587,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                     past_recurrent_state=_past_recurrent_state,
                 )
 
-            if (
-                self.output_hidden_state_indices is not None
-                and idx_layer in self._output_hidden_set
-            ):
+            if self.output_hidden_state_indices is not None and idx_layer in self._output_hidden_set:
                 collected_hidden_states.append(hidden_states)
 
             if self.max_layers > 0 and idx_layer + 1 >= self.max_layers:
@@ -1629,7 +1626,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeForCausalLM: "Qwen3_5MoeForCausalLM"})
-class _Qwen3_5MoeForCausalLM(DynamicModule):
+class _Qwen3_5MoeForCausalLM(DynamicModule):  # noqa: N801
     """Top-level wrapper for Qwen3.5-MoE CausalLM.
 
     Qwen3_5MoeForCausalLM.model is Qwen3_5MoeTextModel directly.
@@ -1637,9 +1634,8 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = (
-            cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_post_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get(
+            "output_post_norm_hidden", False
         )
 
     def forward(
@@ -1696,14 +1692,13 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeForConditionalGeneration: "Qwen3_5MoeForConditionalGeneration"})
-class _Qwen3_5MoeForConditionalGeneration(DynamicModule):
+class _Qwen3_5MoeForConditionalGeneration(DynamicModule):  # noqa: N801
     """Top-level wrapper for Qwen3.5-MoE VL (ConditionalGeneration)."""
 
     def _setup(self, cfg):
         self.cfg = cfg
-        self._has_extra_hidden_output = (
-            cfg.get("output_hidden_state_indices") is not None
-            or cfg.get("output_post_norm_hidden", False)
+        self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get(
+            "output_post_norm_hidden", False
         )
         # if hasattr(self, "visual"):
         #     del self.visual

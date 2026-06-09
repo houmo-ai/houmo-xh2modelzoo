@@ -2,6 +2,7 @@ import ctypes
 import gc
 import weakref
 from importlib.metadata import PackageNotFoundError, version
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -653,6 +654,8 @@ class XHBaseModel(DeviceMixin):
         if "device_map" in load_kwargs and "device" not in load_kwargs:
             load_kwargs["device"] = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+        logger = get_xhquant_logger()
+        logger.info(f"GPTQModel load: {load_kwargs}")
         try:
             q_model = GPTQModel.load(hf_model_dir, **load_kwargs)
         except TypeError:
@@ -682,9 +685,24 @@ class XHBaseModel(DeviceMixin):
         logger = get_xhquant_logger()
         logger.info(f"Start Dequantizing GPTQModel")
 
+        dequant_modules = []
         for name, module in native_hf_model.named_modules():  # type: ignore
             if isinstance(module, PackableQuantLinear):
-                converter(module)
+                dequant_modules.append((name, module))
+
+        for name, module in tqdm(dequant_modules, desc="Dequantizing GPTQModel"):
+            devices = list(
+                {tensor.device for tensor in chain(module.parameters(recurse=True), module.buffers(recurse=True))}
+            )
+            if len(devices) > 1:
+                raise NotImplementedError(f"expected module {name} on a single device but got {devices}")
+
+            original_device = devices[0] if devices else torch.device("cpu")
+            if original_device.type != "cpu":
+                module.to("cpu")
+            converter(module)
+            if original_device.type != "cpu":
+                module.to(original_device)
 
         logger.info(f"Dequantizing GPTQModel Finished")
         return native_hf_model

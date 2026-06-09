@@ -6,24 +6,28 @@ import torch
 from PIL import Image
 from transformers import TextStreamer
 
-from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel, LLMInferenceContextManager, LLMModelState
+from xhmodel_merak.xh_llm import (
+    AutoLLMConfig,
+    AutoLLMModel,
+    LLMInferenceContextManager,
+    LLMModelState,
+)
 from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
 from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
 
 if TYPE_CHECKING:
     from xhmodel_merak.xh_llm.models.qwen3_5 import XHQwen3_5Model, XHQwen3_5ModelConfig
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import XHQwen3_5MoeModel, XHQwen3_5MoeModelConfig
 
 
 def main(args):
     prompt = args.prompt
     if Path(prompt).is_file():
         prompt = Path(prompt).read_text()
-    if not Path(args.image_path).exists():
-        raise FileNotFoundError(f"Image file does not exist: {args.image_path}")
-    image = Image.open(args.image_path).convert("RGB")
-    if image is None or image.size == 0:
-        raise FileNotFoundError(f"Failed to load image: {args.image_path}")
+    image = None
+    if args.image_path is not None and len(args.image_path) > 0:
+        image = Image.open(args.image_path).convert("RGB")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg_name = Path(args.config).stem
     if args.debug:
@@ -41,9 +45,10 @@ def main(args):
     logger.info(f"Config:\n{cfg.pretty_text}")
     cfg.dump(work_dir / Path(args.config).name)
 
-    model_cfg: XHQwen3_5ModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
-    assert type(model_cfg).__name__ == "XHQwen3_5ModelConfig", (
-        f"Expected model config type XHQwen3_5ModelConfig, but got {type(model_cfg).__name__}"
+    model_cfg: XHQwen3_5ModelConfig | XHQwen3_5MoeModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
+    assert type(model_cfg).__name__ in ["XHQwen3_5ModelConfig", "XHQwen3_5MoeModelConfig"], (
+        "Expected model config type XHQwen3_5ModelConfig or "
+        f"XHQwen3_5MoeModelConfig, but got {type(model_cfg).__name__}"
     )
     model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
 
@@ -53,54 +58,35 @@ def main(args):
         model_cfg.use_cache = True
 
     xh_model: XHQwen3_5Model = AutoLLMModel.from_pretrained(config=model_cfg)
-    assert type(xh_model).__name__ == "XHQwen3_5Model", (
-        f"Expected model type XHQwen3_5Model, but got {type(xh_model).__name__}"
+    assert type(xh_model).__name__ in ["XHQwen3_5Model", "XHQwen3_5MoeModel"], (
+        f"Expected model type XHQwen3_5Model or XHQwen3_5MoeModel, but got {type(xh_model).__name__}"
     )
     xh_model.set_state(LLMModelState.from_string(args.eval_type))
 
+    message = {
+        "role": "user",
+        "content": [],
+    }
+    if image is not None:
+        message["content"].append(
+            {
+                "type": "image",
+                "image": image,
+            },
+        )
+    message["content"].append(
+        {"type": "text", "text": prompt},
+    )
     messages = [
-        #     {
-        #         "role": "user",
-        #         "content": [
-        #             {
-        #                 "type": "image_url",
-        #                 "image_url": {
-        #                     "url": "https://qianwen-res.oss-accelerate.aliyuncs.com/Qwen3.5/demo/CI_Demo/mathv-1327.jpg"
-        #                 },
-        #             },
-        #             {
-        #                 "type": "text",
-        #                 "text": "The centres of the four illustrated circles are in the corners of the square. The two big circles touch each other and also the two little circles. With which factor do you have to multiply the radii of the little circles to obtain the radius of the big circles?\nChoices:\n(A) $\\frac{2}{9}$\n(B) $\\sqrt{5}$\n(C) $0.8 \\cdot \\pi$\n(D) 2.5\n(E) $1+\\sqrt{2}$",
-        #             },
-        #         ],
-        #     },
-        # {
-        #     "role": "user",
-        #     "content": [
-        #         {
-        #             "type": "image_url",
-        #             "image_url": {
-        #                 "url": "https://qianwen-res.oss-accelerate.aliyuncs.com/Qwen3.5/demo/RealWorld/RealWorld-04.png"
-        #             },
-        #         },
-        #         {"type": "text", "text": "Where is this?"},
-        #     ],
-        # },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "image": image,
-                },
-                {"type": "text", "text": prompt},
-            ],
-        },
+        message,
     ]
 
     processor = xh_model.get_tf_processor()
     tokenizer = processor.tokenizer
-    model_inputs = processor.apply_chat_template(messages, enable_thinking=args.think).to(device=device)
+    model_inputs = processor.apply_chat_template(
+        messages,
+        enable_thinking=args.think,
+    ).to(device=device)
     streamer = TextStreamer(tokenizer=tokenizer)
 
     contexts = [
@@ -128,13 +114,20 @@ if __name__ == "__main__":
         type=str,
         default="configs_merak/xh2a/llm_models/qwen3_5/4b/qwen3_5_4b_instruct_xh2a_2k.py",
     )
-    parser.add_argument("--eval-type", type=str, default="fronted", choices=LLMModelState.get_all_values())
-    parser.add_argument("--image-path", type=str, default="./data/images/RealWorld-04.png")
-    parser.add_argument("--prompt", type=str, default="Describe this image.")
+    parser.add_argument(
+        "--eval-type",
+        type=str,
+        default="wrap",
+        choices=LLMModelState.get_all_values(),
+    )
+    parser.add_argument("--image-path", type=str)
+    parser.add_argument("--prompt", type=str, default="你是谁？")
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--debug", action="store_true", help="run in debug mode")
     parser.add_argument(
-        "--auto-offload", action="store_true", help="Whether to enable auto offload, only for debug and development"
+        "--auto-offload",
+        action="store_true",
+        help="Whether to enable auto offload, only for debug and development",
     )
     parser.add_argument(
         "--enable-prefill-chunk",

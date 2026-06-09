@@ -26,7 +26,6 @@ import gc
 import json
 from datetime import datetime
 from pathlib import Path
-from re import I
 from typing import Any, Optional, Union, cast
 
 import torch
@@ -48,7 +47,14 @@ from xhquant.utils.registry import _DMRegistryCls
 from ...builder import register_llm_model
 from ...kv_cache_mixin import KVCacheWithLinearMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
-from ...types import ExportData, KVCacheWithLinearConfig, LLMModelState, ModelSwitcher, VLLMModelMeta
+from ...types import (
+    CacheList,
+    ExportData,
+    KVCacheWithLinearConfig,
+    LLMModelState,
+    ModelSwitcher,
+    VLLMModelMeta,
+)
 from ...utils import get_cpu_memory_mb
 from ...vision_llm_model import VisionLLMModel
 from .data_preprocess import Qwen3_5_DataPreprocess
@@ -114,7 +120,7 @@ class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
                     device=self._device,
                 )
             )
-            self.past_conv_caches.append((conv_cache_q, conv_cache_k, conv_cache_v))
+            self.past_conv_caches.append(CacheList([conv_cache_q, conv_cache_k, conv_cache_v]))
             recurrent_cache_shape = [
                 batch_size,
                 linear_cfg.num_v_heads,
@@ -406,7 +412,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
     @property
     def past_conv_caches(self):
-        self._sync_split_conv_cache_state()
+        # self._sync_split_conv_cache_state()
         if self._kvcache_mixin.split_conv_cache:
             return _flatten_split_conv_cache_outputs(self._kvcache_mixin.past_conv_caches)
         return self._kvcache_mixin.past_conv_caches
@@ -416,7 +422,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         return self._kvcache_mixin.past_recurrent_states
 
     def get_data_preprocessor(self) -> BaseLLMInputProcessor:
-        self._sync_split_conv_cache_state()
+        # self._sync_split_conv_cache_state()
         # The base class caches data processors, but Qwen3.5 export scopes
         # recreate KV/linear caches repeatedly (prefill/decode/frontend/export).
         # Recreate the lightweight processor so it captures the current cache
@@ -501,7 +507,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     def _to_quanted(self, frontend_model, state):
         prefill_fronted_model = frontend_model.prefill
         self.set_prefill()
-        prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state, infer_shape=False)
+        prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state, infer_shape=True)
 
         decode_fronted_model = frontend_model.decode
         self.set_decode()
@@ -743,7 +749,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         return self
 
     def _get_data_preprocessor(self) -> BaseLLMInputProcessor:
-        self._sync_split_conv_cache_state()
+        # self._sync_split_conv_cache_state()
         data_preprocess = Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=self.wrap_cfg.input_sequence_length,
@@ -1016,20 +1022,14 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         meta_info.max_context_tokens = self.config.context_max_length
         if spec_decode_mode in ("mtp", "dflash"):
             num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
-            draft_cfg = (
-                self.config.mtp_config if spec_decode_mode == "mtp" else self.config.dflash_config
-            )
+            draft_cfg = self.config.mtp_config if spec_decode_mode == "mtp" else self.config.dflash_config
             draft_head_weight_bits = getattr(
                 draft_cfg,
                 "draft_head_weight_bits",
                 getattr(self.config, "spec_draft_head_weight_bits", 4),
             )
-            hidden_output_name = (
-                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
-            )
-            spec_block_size = (
-                num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
-            )
+            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+            spec_block_size = num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
             spec_decode_section = {
                 "mode": spec_decode_mode,
                 "block_size": spec_block_size,
