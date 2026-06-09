@@ -98,7 +98,7 @@ class XHBaseModel(DeviceMixin):
 
     def __setattr__(self, name: str, value: Any) -> None:
         old_value = getattr(self, name, None)
-        if isinstance(old_value, XHBaseModel):
+        if isinstance(old_value, XHBaseModel) or isinstance(value, XHBaseModel):
             self._models[name] = value
         return super().__setattr__(name, value)
 
@@ -583,10 +583,7 @@ class XHBaseModel(DeviceMixin):
                 return str(candidate)
 
         candidates = sorted(
-            path
-            for pattern in ("*.pt", "*.pth", "*.bin")
-            for path in archive_path.glob(pattern)
-            if path.is_file()
+            path for pattern in ("*.pt", "*.pth", "*.bin") for path in archive_path.glob(pattern) if path.is_file()
         )
         if len(candidates) == 1:
             return str(candidates[0])
