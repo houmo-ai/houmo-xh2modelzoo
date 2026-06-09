@@ -84,8 +84,6 @@ try:
 except ImportError:
     FusedRMSNormGated = None
 
-_HF_QWEN35_MODELING = "transformers.models.qwen3_5.modeling_qwen3_5"
-
 
 def _neumann_8x8(block: torch.Tensor, eye_8: torch.Tensor) -> torch.Tensor:
     p = block
@@ -95,6 +93,9 @@ def _neumann_8x8(block: torch.Tensor, eye_8: torch.Tensor) -> torch.Tensor:
     p = (p.unsqueeze(-1) * p.unsqueeze(-3)).sum(-2)
     r = (r.unsqueeze(-1) * (eye_8 + p).unsqueeze(-3)).sum(-2)
     return r
+
+
+_HF_QWEN35_MODELING = "transformers.models.qwen3_5.modeling_qwen3_5"
 
 
 def parallel_chunk_inverse_block(
@@ -876,8 +877,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
             )
 
         suppress_recurrent_state_outputs = (
-            getattr(self, "suppress_recurrent_state_outputs", False)
-            and not use_recurrent
+            getattr(self, "suppress_recurrent_state_outputs", False) and not use_recurrent
         )
         if suppress_recurrent_state_outputs:
             recurrent_state_out = None

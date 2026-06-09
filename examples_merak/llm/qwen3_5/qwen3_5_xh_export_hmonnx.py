@@ -50,9 +50,7 @@ def _remove_existing_work_dir(work_dir: Path, *, user_supplied: bool) -> None:
         if not _is_relative_to(resolved_work_dir, safe_default_root):
             raise ValueError(f"Default work_dir resolved outside work_dirs: {resolved_work_dir}")
     elif not _looks_like_export_work_dir(work_dir):
-        raise ValueError(
-            f"Refusing to delete user-supplied work_dir without export markers: {resolved_work_dir}"
-        )
+        raise ValueError(f"Refusing to delete user-supplied work_dir without export markers: {resolved_work_dir}")
 
     shutil.rmtree(resolved_work_dir)
 

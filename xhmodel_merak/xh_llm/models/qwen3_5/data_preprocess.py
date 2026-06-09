@@ -24,7 +24,9 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from ...kv_cache_mixin import CacheList
 from ...llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
+from .split_conv_cache_utils import _flatten_split_conv_cache_outputs
 
 
 class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
@@ -331,7 +333,11 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         time_position_ids = position_ids[0, 0].to(torch.int64)
         height_position_ids = position_ids[1, 0].to(torch.int64)
         width_position_ids = position_ids[2, 0].to(torch.int64)
-
+        if not isinstance(self.past_conv_caches, CacheList):
+            raise ValueError(f"past_conv_caches expected CacheList, but got {type(self.past_conv_caches)}")
+        if not isinstance(self.past_recurrent_states, CacheList):
+            raise ValueError(f"past_recurrent_states expected CacheList, but got {type(self.past_recurrent_states)}")
+        past_conv_caches = _flatten_split_conv_cache_outputs(self.past_conv_caches)
         return (
             inputs_embeds.to(self._device),
             time_position_ids,
@@ -342,6 +348,6 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
             linear_attn_mask.to(device),
             self.past_key_caches,
             self.past_value_caches,
-            self.past_conv_caches,
+            past_conv_caches,
             self.past_recurrent_states,
         )

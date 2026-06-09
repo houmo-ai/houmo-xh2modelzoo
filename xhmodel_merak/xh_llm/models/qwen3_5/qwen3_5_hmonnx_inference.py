@@ -52,15 +52,33 @@ class Qwen3_5HMONNXKVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
         batch_size = linear_cfg.batch_size
         kernel_size = linear_cfg.conv_kernel_size
         for _i in range(linear_cfg.num_layers):
-            conv_cache_q = CacheTensor(torch.zeros(
-                batch_size, key_dim, kernel_size, dtype=cache_dtype, device=self._device,
-            ))
-            conv_cache_k = CacheTensor(torch.zeros(
-                batch_size, key_dim, kernel_size, dtype=cache_dtype, device=self._device,
-            ))
-            conv_cache_v = CacheTensor(torch.zeros(
-                batch_size, value_dim, kernel_size, dtype=cache_dtype, device=self._device,
-            ))
+            conv_cache_q = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    key_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
+            conv_cache_k = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    key_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
+            conv_cache_v = CacheTensor(
+                torch.zeros(
+                    batch_size,
+                    value_dim,
+                    kernel_size,
+                    dtype=cache_dtype,
+                    device=self._device,
+                )
+            )
             self.past_conv_caches.append((conv_cache_q, conv_cache_k, conv_cache_v))
 
             recurrent_cache_shape = [
@@ -85,15 +103,16 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
     def __init__(self, meta_info: LLMModelMeta, **kwargs):
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
-        self.visual = VisualHMONNXModel(self.visual_meta.hmonnx)
-        self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
-        self._kvcache_mixin.split_conv_cache = bool(
-            getattr(meta_info.model_config, "split_conv_cache", False)
+        enable_golden = kwargs.get("enable_golden", False)
+        self.visual = VisualHMONNXModel(
+            self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
         )
+        self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
+        self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
 
     @property
     def past_conv_caches(self):
-        return _flatten_split_conv_cache_outputs(self._kvcache_mixin.past_conv_caches)
+        return self._kvcache_mixin.past_conv_caches
 
     @property
     def past_recurrent_states(self):
@@ -159,11 +178,7 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         logits, *linear_caches = outs
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
-        verify_steps = (
-            1
-            if getattr(self, "_llm_prefill", True)
-            else self._get_spec_decode_verify_steps()
-        )
+        verify_steps = 1 if getattr(self, "_llm_prefill", True) else self._get_spec_decode_verify_steps()
         conv_cache_out_per_step = (
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
@@ -200,9 +215,7 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
                     conv_cache_out_list.extend([q_out, k_out, v_out])
             else:
                 for layer_idx in range(len(past_conv_caches)):
-                    conv_cache_out_list.append(
-                        raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1]
-                    )
+                    conv_cache_out_list.append(raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1])
             recurrent_state_out_list = [
                 raw_recurrent_state_out_list[layer_idx * verify_steps + verify_steps - 1]
                 for layer_idx in range(len(past_recurrent_states))
@@ -214,9 +227,7 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         # 更新cache
         if self._kvcache_mixin.split_conv_cache:
             grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)
-            for (pq, pk, pv), (oq, ok, ov) in zip(
-                past_conv_caches, grouped_conv_cache_out_list, strict=True
-            ):
+            for (pq, pk, pv), (oq, ok, ov) in zip(past_conv_caches, grouped_conv_cache_out_list, strict=True):
                 pq[:] = oq[:]
                 pk[:] = ok[:]
                 pv[:] = ov[:]

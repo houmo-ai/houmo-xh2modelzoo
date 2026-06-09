@@ -5,15 +5,9 @@ from xhmodel_merak.xh_llm.utils import unfold_args
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
-from ..qwen3_5.qwen3_5_hmonnx_inference import (
-    Qwen3_5HMONNXKVCacheMixin,
-    _model_config_prefill_recurrent_state_uses_cache,
-)
+from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
-from ..qwen3_5.split_conv_cache_utils import (
-    _flatten_split_conv_cache_outputs,
-    _regroup_flat_split_conv_cache,
-)
+from ..qwen3_5.split_conv_cache_utils import _regroup_flat_split_conv_cache
 from .data_preprocess import Qwen3_5_DataPreprocess
 
 
@@ -27,15 +21,16 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
     def __init__(self, meta_info: LLMModelMeta, **kwargs):
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
-        self.visual = VisualHMONNXModel(self.visual_meta.hmonnx)
-        self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
-        self._kvcache_mixin.split_conv_cache = bool(
-            getattr(meta_info.model_config, "split_conv_cache", False)
+        enable_golden = kwargs.get("enable_golden", False)
+        self.visual = VisualHMONNXModel(
+            self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
         )
+        self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
+        self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
 
     @property
     def past_conv_caches(self):
-        return _flatten_split_conv_cache_outputs(self._kvcache_mixin.past_conv_caches)
+        return self._kvcache_mixin.past_conv_caches
 
     @property
     def past_recurrent_states(self):
@@ -101,11 +96,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         logits, *linear_caches = outs
         past_conv_caches = self._kvcache_mixin.past_conv_caches
         past_recurrent_states = self._kvcache_mixin.past_recurrent_states
-        verify_steps = (
-            1
-            if getattr(self, "_llm_prefill", True)
-            else self._get_spec_decode_verify_steps()
-        )
+        verify_steps = 1 if getattr(self, "_llm_prefill", True) else self._get_spec_decode_verify_steps()
         conv_cache_out_per_step = (
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
@@ -142,9 +133,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
                     conv_cache_out_list.extend([q_out, k_out, v_out])
             else:
                 for layer_idx in range(len(past_conv_caches)):
-                    conv_cache_out_list.append(
-                        raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1]
-                    )
+                    conv_cache_out_list.append(raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1])
             recurrent_state_out_list = [
                 raw_recurrent_state_out_list[layer_idx * verify_steps + verify_steps - 1]
                 for layer_idx in range(len(past_recurrent_states))
@@ -156,9 +145,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         # 更新cache
         if self._kvcache_mixin.split_conv_cache:
             grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)
-            for (pq, pk, pv), (oq, ok, ov) in zip(
-                past_conv_caches, grouped_conv_cache_out_list, strict=True
-            ):
+            for (pq, pk, pv), (oq, ok, ov) in zip(past_conv_caches, grouped_conv_cache_out_list, strict=True):
                 pq[:] = oq[:]
                 pk[:] = ok[:]
                 pv[:] = ov[:]

@@ -64,7 +64,6 @@ from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForCon
 from .modeling_qwen3_5_patch import qwen3_5_patch
 from .qwen3_5_hmonnx_inference import XHQwen3_5_HMONNXModel
 from .split_conv_cache_utils import (
-    _flatten_split_conv_cache_outputs,
     _is_grouped_split_conv_cache,
     _regroup_flat_split_conv_cache,
 )
@@ -436,9 +435,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
     @property
     def past_conv_caches(self):
-        # self._sync_split_conv_cache_state()
-        if self._kvcache_mixin.split_conv_cache:
-            return _flatten_split_conv_cache_outputs(self._kvcache_mixin.past_conv_caches)
+        self._sync_split_conv_cache_state()
         return self._kvcache_mixin.past_conv_caches
 
     @property

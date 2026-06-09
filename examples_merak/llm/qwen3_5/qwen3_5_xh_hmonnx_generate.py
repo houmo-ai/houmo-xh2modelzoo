@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+import torch
+
+from xhquant.utils import TimeProfiler
+from xhquant.utils.memory_tracker import MemoryTracker
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -30,6 +36,40 @@ def _resolve_export_dir(config: str) -> Path:
     return path.parent
 
 
+def _parse_device_arg(device_arg: str) -> str | list[int]:
+    if device_arg is None:
+        if torch.cuda.is_available():
+            return list(range(torch.cuda.device_count()))
+        else:
+            return ["cpu"]
+
+    tokens = [token.strip().lower() for token in (device_arg or "").split(",") if token.strip()]
+    if not tokens:
+        raise ValueError("--device must be 'cpu' or a comma-separated list of GPU ids, e.g. '0' or '0,1'.")
+
+    if len(tokens) == 1 and tokens[0] == "cpu":
+        return [
+            "cpu",
+        ]
+
+    if "cpu" in tokens:
+        raise ValueError("--device cannot mix 'cpu' with GPU ids.")
+
+    gpu_ids: list[int] = []
+    seen: set[int] = set()
+    for token in tokens:
+        if token.startswith("cuda:"):
+            token = token.split(":", 1)[1].strip()
+        if not token.isdigit():
+            raise ValueError(f"Unsupported device token: {token}")
+        gpu_id = int(token)
+        if gpu_id in seen:
+            continue
+        seen.add(gpu_id)
+        gpu_ids.append(gpu_id)
+    return gpu_ids
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to exported golden_meta_info.json or meta file")
@@ -53,23 +93,43 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Whether to enable auto offload, only for debug and development",
     )
+    parser.add_argument("--cuda-graph", action="store_true", help="Enable CUDA Graph execution when supported.")
+    parser.add_argument("--use-v2", action="store_true", help="Use HMONNXInferenceV2 instead of the legacy runtime.")
+
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Execution device: 'cpu', one GPU id such as '0', or multiple GPU ids such as '0,1'.",
+    )
     return parser
 
 
 def main(args: argparse.Namespace) -> None:
-    result = hmonnx_generate(
-        meta_file=args.config,
-        prompt=args.prompt,
-        image_path=args.image_path,
-        max_new_tokens=args.max_new_tokens,
-        do_sample=args.do_sample,
-        think=args.think,
-        fast=args.fast,
-        debug=args.debug,
-        golden=args.golden,
-        min_output_tokens=args.min_output_tokens,
-        auto_offload=args.auto_offload,
-    )
+    devices = _parse_device_arg(args.device)
+    gpu_ids = [device for device in devices if device != "cpu"]
+
+    from loguru import logger
+
+    with (
+        MemoryTracker(device=gpu_ids, name="hmonnx generate", logger=logger),
+        TimeProfiler("hmonnx generate", logger=logger),
+    ):
+        result = hmonnx_generate(
+            meta_file=args.config,
+            prompt=args.prompt,
+            image_path=args.image_path,
+            max_new_tokens=args.max_new_tokens,
+            do_sample=args.do_sample,
+            think=args.think,
+            fast=args.fast,
+            debug=args.debug,
+            golden=args.golden,
+            min_output_tokens=args.min_output_tokens,
+            auto_offload=args.auto_offload,
+            cuda_graph=args.cuda_graph,
+            device_map=devices,
+        )
     print_quick_test_result(result)
 
     if args.golden and ensure_step_artifact_links is not None:
@@ -82,4 +142,8 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    main(build_parser().parse_args())
+    args = build_parser().parse_args()
+    if args.use_v2:
+        os.environ["ENABLE_HMINFERENCE_V2"] = "1"
+
+    main(args)

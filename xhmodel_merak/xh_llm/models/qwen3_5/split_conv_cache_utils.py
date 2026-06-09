@@ -4,24 +4,19 @@ The Merak split conv-cache contract keeps one logical cache tuple per linear
 attention layer internally, but preserves the flat HMONNX runtime/export
 signature: ``q0, k0, v0, q1, k1, v1, ...``.
 """
+
 from __future__ import annotations
 
 from typing import Optional
 
 
 def _is_nested_split_conv_cache(cache_list) -> bool:
-    return (
-        isinstance(cache_list, (list, tuple))
-        and len(cache_list) > 0
-        and isinstance(cache_list[0], (list, tuple))
-    )
+    return isinstance(cache_list, (list, tuple)) and len(cache_list) > 0 and isinstance(cache_list[0], (list, tuple))
 
 
 def _is_flat_split_conv_cache(cache_list) -> bool:
     return (
-        isinstance(cache_list, (list, tuple))
-        and len(cache_list) > 0
-        and not isinstance(cache_list[0], (list, tuple))
+        isinstance(cache_list, (list, tuple)) and len(cache_list) > 0 and not isinstance(cache_list[0], (list, tuple))
     )
 
 
@@ -68,18 +63,12 @@ def _layers_use_split_conv_cache(layers) -> bool:
 
 
 def _flatten_split_conv_cache_outputs(cache_list):
-    if (
-        cache_list is None
-        or not isinstance(cache_list, (list, tuple))
-        or not _is_nested_split_conv_cache(cache_list)
-    ):
+    if cache_list is None or not isinstance(cache_list, (list, tuple)) or not _is_nested_split_conv_cache(cache_list):
         return cache_list
     flat_cache = []
     for cache_tuple in cache_list:
         if len(cache_tuple) % 3 != 0:
-            raise RuntimeError(
-                f"Expected q/k/v conv cache tuple length to be divisible by 3, got {len(cache_tuple)}"
-            )
+            raise RuntimeError(f"Expected q/k/v conv cache tuple length to be divisible by 3, got {len(cache_tuple)}")
         flat_cache.extend(cache_tuple)
     return flat_cache
 

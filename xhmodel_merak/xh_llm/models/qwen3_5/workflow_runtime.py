@@ -5,6 +5,7 @@ This module provides the small runtime layer that examples and validation
 scripts use after export: find the HMONNX meta file, run a quick chat, and
 summarize MTP/DFlash speculative-decoding acceptance metrics.
 """
+
 from __future__ import annotations
 
 import json
@@ -113,6 +114,8 @@ def hmonnx_generate(
     golden: bool = False,
     min_output_tokens: int = 0,
     auto_offload: bool = False,
+    cuda_graph: bool = False,
+    device_map: None,
 ) -> HMONNXQuickTestResult:
     """Run a lightweight HMONNX generate smoke test for full or visual exports."""
     import torch
@@ -125,7 +128,13 @@ def hmonnx_generate(
     resolved_meta = str(meta_file)
     xhquant_init(None, debug)
     logger = get_xhquant_logger()
-    hmonnx_model = AutoLLMHONNXModel.from_pretrained(resolved_meta)
+    hmonnx_model = AutoLLMHONNXModel.from_pretrained(
+        resolved_meta,
+        enable_golden=golden,
+        enable_cuda_graph=cuda_graph,
+        enable_auto_offload=auto_offload,
+        device_map=device_map,
+    )
     logger.info(f"Resolved HMONNX model type: {type(hmonnx_model).__name__}")
 
     if auto_offload and hasattr(hmonnx_model, "enable_auto_offload"):
@@ -133,11 +142,7 @@ def hmonnx_generate(
 
     runtime_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     loaded_prompt = _load_prompt(prompt)
-    use_multimodal = (
-        bool(image_path)
-        and Path(str(image_path)).exists()
-        and hasattr(hmonnx_model, "get_tf_processor")
-    )
+    use_multimodal = bool(image_path) and Path(str(image_path)).exists() and hasattr(hmonnx_model, "get_tf_processor")
     if use_multimodal:
         tokenizer, model_inputs = _build_multimodal_inputs(
             hmonnx_model,

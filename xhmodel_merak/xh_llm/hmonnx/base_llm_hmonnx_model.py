@@ -6,6 +6,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
 from xhquant.api import get_xhquant_logger
+from xhquant.xhonnxruntime.llm_hmonnx_loader import LLMHMONNXLoader
 
 from ..base_llm_model import BaseLLMModel, XHLLMModelProcessor
 from ..kv_cache_mixin import KVCacheMixin
@@ -17,7 +18,9 @@ from .hmonnx_model import HMONNXBaseModel, HMONNXModel
 class BaseLLMHMONNXModel(HMONNXBaseModel):
     LLM_MODEL_CLS: type[BaseLLMModel] = BaseLLMModel
 
-    def __init__(self, meta: LLMModelMeta, enable_cuda_graph=False, **kwargs):
+    def __init__(
+        self, meta: LLMModelMeta, enable_cuda_graph=False, enable_auto_offload=False, enable_golden=False, **kwargs
+    ):
         super().__init__(**kwargs)
         self.meta_info = meta
         self.hf_model_dir = meta.hf_config
@@ -29,13 +32,30 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             meta.kv_cache if isinstance(meta.kv_cache, KVCacheConfig) else KVCacheConfig(**meta.kv_cache)
         )
         self.use_cache = self.kvcache_config.num_layers > 0
-        self.prefill_model = HMONNXModel(meta.prefill_hmonnx, enable_cuda_graph)
-        self.prefill_model.to("cuda:0")
-        self.decode_model = HMONNXModel(meta.decode_hmonnx, enable_cuda_graph)
-        decode_device = "cuda:0"
-        if torch.cuda.device_count() > 1:
-            decode_device = "cuda:1"
-        self.decode_model.to(decode_device)
+        prefill_graph = None
+        decode_graph = None
+        if True:
+            llm_loader = LLMHMONNXLoader(meta.prefill_hmonnx, meta.decode_hmonnx)
+            prefill_graph = llm_loader.prefill_graph
+            decode_graph = llm_loader.decode_graph
+
+        self.prefill_model = HMONNXModel(
+            meta.prefill_hmonnx,
+            onnx_graph=prefill_graph,
+            enable_cuda_graph=enable_cuda_graph,
+            enable_auto_offload=enable_auto_offload,
+            enable_golden=enable_golden,
+            device_map=self._valid_devices,
+        )
+
+        self.decode_model = HMONNXModel(
+            meta.decode_hmonnx,
+            onnx_graph=decode_graph,
+            enable_golden=enable_golden,
+            enable_cuda_graph=enable_cuda_graph,
+            enable_auto_offload=enable_auto_offload,
+            device_map=self._valid_devices,
+        )
 
         self._data_processor = None
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)

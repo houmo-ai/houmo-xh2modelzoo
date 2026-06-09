@@ -21,7 +21,7 @@ class LLMExportCommand:
             default="",
             help=(
                 "model config file, for development and debugging, "
-                "use configs in examples_merak/llm/qwen3/configs."
+                "use configs in examples_merak/llm/qwen3_legacy/configs."
             ),
         )
         parser.add_argument(
