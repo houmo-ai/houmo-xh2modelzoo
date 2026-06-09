@@ -1,0 +1,30 @@
+# Qwen3-30B-A3B 评测配置
+config_id: qwen3_30b_a3b
+display_name: Qwen3-30B-A3B
+model_family: qwen3_moe
+architecture: Qwen3MoeForCausalLM
+hf_model_dir: /data01/datasets/Qwen3-30B-A3B
+transformers_version: "4.57.0"
+
+recommended_datasets:
+  - ceval
+  - cmmlu
+  - mmlu_pro
+  - mmlu
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - gpqa
+  - bbh
+
+backends:
+  float:
+    type: float
+    model_class: Qwen3MoeForCausalLM
+    use_processor: false
+    chat_template: tokenizer
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto

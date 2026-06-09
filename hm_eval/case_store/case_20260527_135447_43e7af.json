@@ -1,0 +1,15 @@
+{
+  "case_id": "case_20260527_135447_43e7af",
+  "model_path": "/data01/datasets/Qwen3.5-35B-A3B",
+  "backend_type": "float",
+  "gpu_id": "3,7",
+  "prompt_text": "请总结这个PDF文档的主要内容，用2句话概括。",
+  "input_files": [
+    "/data01/home/chenzx/project/xh2modelzoo/pdf_case/黄帝.pdf"
+  ],
+  "response": "[推理失败] OutOfMemoryError: CUDA out of memory. Tried to allocate 76.00 MiB. GPU 1 has a total capacity of 79.25 GiB of which 9.38 MiB is free. Process 1584916 has 15.97 GiB memory in use. Including non-PyTorch memory, this process has 63.26 GiB memory in use. Of the allocated memory 62.75 GiB is allocated by PyTorch, and 15.35 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+  "elapsed_seconds": 21.59,
+  "created_at": "2026-05-27T13:55:09.429501",
+  "metadata": {},
+  "label": ""
+}

@@ -416,6 +416,51 @@ def _repair_dangling_clone_edges(onnx_file: str | Path, logger) -> bool:
     return True
 
 
+def _add_mtp_external_hmfp_input_attr(onnx_file: str | Path, logger) -> bool:
+    """Add external_hmfp_input attr to MTP decode model's KV cache inputs.
+
+    The MTP decode (assistant draft) model takes KV cache from the main model
+    as external inputs.  Marking these inputs lets the compiler recognise them
+    as hmfp-carrying tensors even when --llm-opt / --flash-attention does not
+    convert them automatically.
+
+    ``shared_value_cache_sliding`` is set to ``false`` so that the v_sliding
+    path remains in fp16.
+    """
+    import onnx
+
+    EXTERNAL_HMFP_INPUTS = {
+        "shared_key_cache_sliding": "true",
+        "shared_value_cache_sliding": "false",
+        "shared_key_cache_full": "true",
+        "shared_value_cache_full": "true",
+    }
+
+    onnx_file = Path(onnx_file)
+    model = onnx.load_model(str(onnx_file), load_external_data=False)
+
+    modified = False
+    for value_info in model.graph.input:
+        if value_info.name in EXTERNAL_HMFP_INPUTS:
+            attr_value = EXTERNAL_HMFP_INPUTS[value_info.name]
+            logger.info(
+                f"Adding external_hmfp_input={attr_value} attr to input '{value_info.name}' in {onnx_file.name}"
+            )
+            meta = onnx.StringStringEntryProto()
+            meta.key = "external_hmfp_input"
+            meta.value = attr_value
+            value_info.metadata_props.append(meta)
+            modified = True
+
+    if modified:
+        onnx.save_model(model, str(onnx_file))
+        logger.info(f"Added external_hmfp_input attr to draft ONNX: {onnx_file.name}")
+    else:
+        logger.warning(f"No KV cache inputs found in {onnx_file.name} to add external_hmfp_input attr")
+
+    return modified
+
+
 def _repair_target_hmonnx_files(export_dir: Path, logger) -> None:
     base_meta_path = export_dir / "golden_meta_info.json"
     if not base_meta_path.exists():
@@ -546,6 +591,7 @@ def _export_assistant_draft(cfg, export_dir: Path, logger) -> str:
     assistant_model.release_quanted_model()
     assistant_model.release_frontend_model()
     assistant_model.release_wraped_model()
+    _add_mtp_external_hmfp_input_attr(onnx_file, logger)
     logger.info(f"Assistant draft ONNX exported to {onnx_file}")
     return onnx_file
 

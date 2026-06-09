@@ -1,0 +1,42 @@
+# Gemma-4-26B-A4B-it 评测配置
+config_id: gemma4_26b_a4b_it
+display_name: Gemma-4-26B-A4B-it
+model_family: gemma4_moe
+architecture: Gemma4ForConditionalGeneration
+hf_model_dir: /data01/datasets/gemma-4-26B-A4B-it
+processor_class: AutoProcessor
+transformers_version: "5.5.0"
+
+recommended_datasets:
+  - cmmmu
+  - mmmu
+  - mmlu_pro
+  - mmlu
+  - gpqa
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - hellaswag
+  - bbh
+  - truthfulqa
+
+backends:
+  float:
+    type: float
+    model_class: Gemma4ForConditionalGeneration
+    use_processor: true
+    chat_template: processor
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto
+
+  hmonnx:
+    type: hmonnx
+    onnx_model_type: llm_with_mask
+    export_script: examples_merak/llm/gemma4_moe/gemma4_moe_with_mask_xh_export_hmonnx.py
+    export_configs:
+      - configs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_with_mask_26b_a4b_it_xh2a_w8a8_256_2k.py
+      - configs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_with_mask_26b_a4b_it_xh2a_w4a8_256_2k.py
+    extra_args: {}

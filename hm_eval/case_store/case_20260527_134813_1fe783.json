@@ -1,0 +1,13 @@
+{
+  "case_id": "case_20260527_134813_1fe783",
+  "model_path": "/data01/datasets/Qwen3.5-35B-A3B",
+  "backend_type": "float",
+  "gpu_id": "7",
+  "prompt_text": "你好，请用一句话介绍你自己。",
+  "input_files": [],
+  "response": "我是",
+  "elapsed_seconds": 25.92,
+  "created_at": "2026-05-27T13:48:39.187457",
+  "metadata": {},
+  "label": ""
+}

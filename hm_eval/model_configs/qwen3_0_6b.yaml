@@ -1,0 +1,29 @@
+# Qwen3-0.6B 评测配置
+config_id: qwen3_0_6b
+display_name: Qwen3-0.6B
+model_family: qwen3
+architecture: Qwen3ForCausalLM
+hf_model_dir: /data01/datasets/Qwen3-0.6B
+transformers_version: "4.57.0"
+
+recommended_datasets:
+  - ceval
+  - cmmlu
+  - mmlu_pro
+  - mmlu
+  - gsm8k
+  - math_500
+  - ifeval
+  - arc
+  - gpqa
+  - bbh
+
+backends:
+  float:
+    type: float
+    model_class: Qwen3ForCausalLM
+    use_processor: false
+    chat_template: tokenizer
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto

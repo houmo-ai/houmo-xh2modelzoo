@@ -1,0 +1,15 @@
+{
+  "case_id": "case_20260527_134545_309202",
+  "model_path": "/data01/datasets/Qwen3.5-35B-A3B",
+  "backend_type": "float",
+  "gpu_id": "6,7",
+  "prompt_text": "请听这段音频，告诉我说了什么内容。",
+  "input_files": [
+    "/data01/home/chenzx/project/xh2modelzoo/0.wav"
+  ],
+  "response": "[推理失败] TemplateError: Unexpected item type in content.",
+  "elapsed_seconds": 21.97,
+  "created_at": "2026-05-27T13:46:07.923262",
+  "metadata": {},
+  "label": ""
+}

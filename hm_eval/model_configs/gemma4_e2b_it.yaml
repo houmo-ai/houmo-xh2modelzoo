@@ -1,0 +1,40 @@
+# Gemma-4-E2B-it 评测配置
+config_id: gemma4_e2b_it
+display_name: Gemma-4-E2B-it
+model_family: gemma4_e
+architecture: Gemma4ForConditionalGeneration
+hf_model_dir: /data01/datasets/gemma-4-E2B-it
+processor_class: AutoProcessor
+transformers_version: "5.5.0"
+
+recommended_datasets:
+  - cmmmu
+  - mmmu
+  - mmlu_pro
+  - mmlu
+  - gpqa
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - hellaswag
+  - bbh
+  - truthfulqa
+
+backends:
+  float:
+    type: float
+    model_class: Gemma4ForConditionalGeneration
+    use_processor: true
+    chat_template: processor
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto
+
+  hmonnx:
+    type: hmonnx
+    onnx_model_type: llm_with_mask
+    export_script: examples_merak/llm/gemma4_e/gemma4_e_xh_export_hmonnx.py
+    export_meta_info: /data01/home/chenzx/project/xh2modelzoo/work_dirs/gemma4_e2b_it/hmquant_xh2_gemma-4-e2b-it_w8a8_256_2k_20260515/golden_meta_info.json
+    extra_args: {}

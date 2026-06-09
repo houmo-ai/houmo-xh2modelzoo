@@ -1,0 +1,41 @@
+# Qwen3.5-35B-A3B (MoE) 评测配置
+config_id: qwen3_5_35b_a3b
+display_name: Qwen3.5-35B-A3B
+model_family: qwen3_5_moe
+architecture: Qwen3_5MoeForConditionalGeneration
+hf_model_dir: /data01/datasets/Qwen3.5-35B-A3B
+processor_class: AutoProcessor
+transformers_version: "5.5.0"
+
+recommended_datasets:
+  - cmmmu
+  - ceval
+  - cmmlu
+  - mmlu_pro
+  - mmlu
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - gpqa
+  - bbh
+
+backends:
+  float:
+    type: float
+    model_class: Qwen3_5MoeForConditionalGeneration
+    use_processor: true
+    chat_template: processor
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto
+
+  hmonnx:
+    type: hmonnx
+    onnx_model_type: qwen3_next
+    export_script: examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_export_hmonnx.py
+    export_configs:
+      - configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py
+      - configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_hf_autoround_xh2a_2k.py
+    extra_args: {}

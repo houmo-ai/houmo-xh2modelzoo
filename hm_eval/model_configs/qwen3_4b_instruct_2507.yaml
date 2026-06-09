@@ -1,0 +1,30 @@
+# Qwen3-4B-Instruct-2507 评测配置
+config_id: qwen3_4b_instruct_2507
+display_name: Qwen3-4B-Instruct-2507
+model_family: qwen3
+architecture: Qwen3ForCausalLM
+hf_model_dir: /data01/datasets/Qwen3-4B-Instruct-2507
+transformers_version: "4.57.0"
+
+recommended_datasets:
+  - ceval
+  - cmmlu
+  - mmlu_pro
+  - mmlu
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - gpqa
+  - bbh
+
+backends:
+  float:
+    type: float
+    model_class: Qwen3ForCausalLM
+    use_processor: false
+    chat_template: tokenizer
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto
