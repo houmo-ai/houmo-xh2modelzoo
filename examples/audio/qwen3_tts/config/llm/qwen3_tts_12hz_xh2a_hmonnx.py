@@ -1,5 +1,10 @@
+# Parametrized HMONNX full-pipeline config (replaces the base/customvoice/voicedesign trio).
+# Kept pure (non-lazy). The work_dirs product paths below are cv placeholders;
+# at runtime the demo/eval scripts read --variant and call
+# apply_variant_hmonnx(cfg, variant) to override them with paths from
+# config.llm._components.WORKNAME (which reproduces the 1.7B naming asymmetry).
 _base_ = [
-    "./qwen3_tts_12hz_0_6B_customvoice_xh2a.py",
+    "./qwen3_tts_12hz_model_xh2a.py",
 ]
 
 model = dict(

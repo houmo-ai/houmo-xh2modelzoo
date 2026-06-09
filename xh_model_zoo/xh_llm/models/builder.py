@@ -29,6 +29,8 @@ from xhquant.utils.registry import Registry
 from xhquant.utils.registry.dynamic_module import DynamicModule, _DMRegistryCls
 
 XHLLM_TRACEABLE_MODULES = _DMRegistryCls("XHTrace")
+LLM_COMPATIBLE_MODULES = _DMRegistryCls("XHCompatible")
+XHLLM_TRACEABLE_MODULES_TORCH_COMPILE = _DMRegistryCls("XHTrace_Torch_Compile")
 MODELS = Registry("xh_llm_models")
 
 

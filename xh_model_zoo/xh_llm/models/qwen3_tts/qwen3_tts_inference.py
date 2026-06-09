@@ -613,3 +613,9 @@ class Qwen3TTSHMONNXInference:
             text=text, language=language, speaker=speaker, **kwargs
         )
         return wavs, sr
+
+    def generate_voice_clone(self, text: str, language: str, ref_audio: str, ref_text: str, **kwargs):
+        wavs, sr = self.native_model.generate_voice_clone(
+            text=text, language=language, ref_audio=ref_audio, ref_text=ref_text, **kwargs
+        )
+        return wavs, sr

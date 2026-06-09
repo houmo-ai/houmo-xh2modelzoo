@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Qwen3-TTS accuracy test script
+Qwen3-TTS voice-clone accuracy test script
 
 Supports Native PyTorch and HMONNX inference modes.
-Generates audio over the CV3-Eval zero_shot/zh dataset for accuracy evaluation.
+Runs voice-clone over the CV3-Eval zero_shot/zh dataset using reference audio.
 
 Native mode uses the original Qwen3TTSModel (bf16 + sdpa) to avoid fp16 numeric issues.
 HMONNX mode uses the quantized model for stable, efficient inference.
 
 Usage:
     # native mode, first 20 samples
-    PYTHONPATH=/path/to/xh2modelzoo python qwen3_tts_eval.py \
+    PYTHONPATH=/path/to/xh2modelzoo python qwen3_tts_eval_voice_clone.py \
         --mode native --gpus 0,1,2,3 --max-samples 20
 
     # hmonnx mode, all 500 samples
-    PYTHONPATH=/path/to/xh2modelzoo python qwen3_tts_eval.py \
+    PYTHONPATH=/path/to/xh2modelzoo python qwen3_tts_eval_voice_clone.py \
         --mode hmonnx --gpus 0,1,2,3,4,5,6,7
 """
 
@@ -23,7 +23,6 @@ import os
 import sys
 import logging
 import argparse
-import random
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -54,90 +53,104 @@ try:
 except RuntimeError:
     pass
 
-# predefined speaker list
-SPEAKERS = [
-    "serena",
-    "vivian",
-    "uncle_fu",
-    "ryan",
-    "aiden",
-    "ono_anna",
-    "sohee",
-    "eric",
-    "dylan"
-]
 
-
-def load_text_data(data_path: str, max_samples: int = None) -> Dict[str, str]:
+def load_voice_clone_data(data_path: str, max_samples: int = None) -> List[Dict[str, str]]:
     """
-    Load the CV3-Eval text file
+    Load CV3-Eval voice-clone data
 
     Args:
         data_path: CV3-Eval dataset path
         max_samples: max number of samples, None for all
 
     Returns:
-        dict {uttid: text}
+        list of {uttid, text, ref_text, ref_audio}
     """
     text_file = os.path.join(data_path, "text")
-    if not os.path.exists(text_file):
-        raise FileNotFoundError(f"Text file not found: {text_file}")
+    prompt_text_file = os.path.join(data_path, "prompt_text")
+    prompt_wav_file = os.path.join(data_path, "prompt_wav.scp")
 
+    # check files exist
+    for f in [text_file, prompt_text_file, prompt_wav_file]:
+        if not os.path.exists(f):
+            raise FileNotFoundError(f"Required file not found: {f}")
+
+    # load target text
     text_dict = {}
     with open(text_file, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split(maxsplit=1)
             if len(parts) != 2:
-                logging.warning(f"Invalid line format: {line.strip()}")
+                logging.warning(f"Invalid text line: {line.strip()}")
                 continue
             utt, text = parts
             text_dict[utt] = text
 
-            if max_samples and len(text_dict) >= max_samples:
-                break
+    # load reference text
+    prompt_text_dict = {}
+    with open(prompt_text_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                logging.warning(f"Invalid prompt_text line: {line.strip()}")
+                continue
+            utt, ref_text = parts
+            prompt_text_dict[utt] = ref_text
 
-    logging.info(f"Loaded {len(text_dict)} samples from {text_file}")
-    return text_dict
+    # load reference audio paths
+    prompt_wav_dict = {}
+    with open(prompt_wav_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                logging.warning(f"Invalid prompt_wav line: {line.strip()}")
+                continue
+            utt, ref_wav_path = parts
+            # convert relative path to absolute
+            if not os.path.isabs(ref_wav_path):
+                # paths in prompt_wav.scp are relative to the CV3-Eval root
+                cv3_eval_root = Path(data_path).parent.parent.parent
+                ref_wav_path = os.path.join(cv3_eval_root, ref_wav_path)
+            prompt_wav_dict[utt] = ref_wav_path
 
+    # assemble samples
+    data_list = []
+    for utt in text_dict.keys():
+        if utt not in prompt_text_dict:
+            logging.warning(f"Missing prompt_text for {utt}, skipping")
+            continue
+        if utt not in prompt_wav_dict:
+            logging.warning(f"Missing prompt_wav for {utt}, skipping")
+            continue
 
-def select_speaker(utt: str, mode: str, fixed_speaker: str) -> str:
-    """
-    Pick a speaker according to the mode
+        ref_audio_path = prompt_wav_dict[utt]
+        if not os.path.exists(ref_audio_path):
+            logging.warning(f"Reference audio not found: {ref_audio_path}, skipping {utt}")
+            continue
 
-    Args:
-        utt: uttid (e.g. "uttid_1")
-        mode: "fixed", "random", "round-robin"
-        fixed_speaker: speaker used in fixed mode
+        data_list.append({
+            "uttid": utt,
+            "text": text_dict[utt],
+            "ref_text": prompt_text_dict[utt],
+            "ref_audio": ref_audio_path
+        })
 
-    Returns:
-        speaker name
-    """
-    if mode == "fixed":
-        return fixed_speaker
-    elif mode == "random":
-        return random.choice(SPEAKERS)
-    elif mode == "round-robin":
-        # extract the number from e.g. uttid_1
-        try:
-            uttid_index = int(utt.split('_')[1])
-        except (IndexError, ValueError):
-            logging.warning(f"Cannot parse uttid '{utt}' for round-robin, using index 0")
-            uttid_index = 1
-        return SPEAKERS[(uttid_index - 1) % len(SPEAKERS)]
-    else:
-        raise ValueError(f"Unknown speaker mode: {mode}")
+        if max_samples and len(data_list) >= max_samples:
+            break
+
+    logging.info(f"Loaded {len(data_list)} valid voice clone samples from {data_path}")
+    return data_list
 
 
 def worker_native(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
-                  text_dict: Dict[str, str], output_dir: str):
+                  data_list: List[Dict[str, str]], output_dir: str):
     """
-    Native PyTorch inference worker
+    Native PyTorch inference worker (voice clone)
 
     Args:
         rank: worker index
         gpus_to_use: list of GPU ids
         args: command-line args
-        text_dict: dict {uttid: text}
+        data_list: list of voice-clone samples
         output_dir: output directory
     """
     gpu_id = gpus_to_use[rank]
@@ -164,27 +177,28 @@ def worker_native(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
     os.makedirs(output_dir, exist_ok=True)
 
     # process this rank shard
-    utts = list(text_dict.keys())
-    for idx in tqdm(range(rank, len(utts), len(gpus_to_use)),
-                    desc=f"GPU {gpu_id} Native"):
-        utt = utts[idx]
-        text = text_dict[utt]
+    for idx in tqdm(range(rank, len(data_list), len(gpus_to_use)),
+                    desc=f"GPU {gpu_id} Native Voice Clone"):
+        sample = data_list[idx]
+        uttid = sample["uttid"]
+        text = sample["text"]
+        ref_text = sample["ref_text"]
+        ref_audio = sample["ref_audio"]
 
         # skip if output already exists
-        wav_path_out = os.path.join(output_dir, f"{utt}.wav")
+        wav_path_out = os.path.join(output_dir, f"{uttid}.wav")
         if os.path.exists(wav_path_out):
             logging.debug(f"{wav_path_out} already exists, skipping")
             continue
 
-        # pick speaker
-        speaker = select_speaker(utt, args.speaker_mode, args.speaker)
-
-        # generate audio
+        # generate audio (voice clone)
         try:
-            wavs, sr = model.generate_custom_voice(
+            wavs, sr = model.generate_voice_clone(
                 text=text,
                 language="Chinese",
-                speaker=speaker,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                x_vector_only_mode=args.xvec_only,
                 max_new_tokens=2048,
                 do_sample=True,
                 top_k=50,
@@ -206,11 +220,11 @@ def worker_native(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)  # add channel dim
             torchaudio.save(wav_path_out, wav, sr)
-            logging.info(f"✓ generated {utt} (speaker={speaker})")
+            logging.info(f"✓ generated {uttid}")
 
         except Exception as e:
             import traceback
-            logging.error(f"✗ failed to generate {utt}: {str(e)}")
+            logging.error(f"✗ failed to generate {uttid}: {str(e)}")
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             continue
 
@@ -221,15 +235,15 @@ def worker_native(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
 
 
 def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
-                  text_dict: Dict[str, str], output_dir: str):
+                  data_list: List[Dict[str, str]], output_dir: str):
     """
-    HMONNX inference worker
+    HMONNX inference worker (voice clone)
 
     Args:
         rank: worker index
         gpus_to_use: list of GPU ids
         args: command-line args
-        text_dict: dict {uttid: text}
+        data_list: list of voice-clone samples
         output_dir: output directory
     """
     gpu_id = gpus_to_use[rank]
@@ -263,27 +277,28 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
     logging.info(f"Worker {rank} (GPU {gpu_id}): Model loaded")
 
     # process this rank shard
-    utts = list(text_dict.keys())
-    for idx in tqdm(range(rank, len(utts), len(gpus_to_use)),
-                    desc=f"GPU {gpu_id} HMONNX"):
-        utt = utts[idx]
-        text = text_dict[utt]
+    for idx in tqdm(range(rank, len(data_list), len(gpus_to_use)),
+                    desc=f"GPU {gpu_id} HMONNX Voice Clone"):
+        sample = data_list[idx]
+        uttid = sample["uttid"]
+        text = sample["text"]
+        ref_text = sample["ref_text"]
+        ref_audio = sample["ref_audio"]
 
         # skip if output already exists
-        wav_path_out = os.path.join(output_dir, f"{utt}.wav")
+        wav_path_out = os.path.join(output_dir, f"{uttid}.wav")
         if os.path.exists(wav_path_out):
             logging.debug(f"{wav_path_out} already exists, skipping")
             continue
 
-        # pick speaker
-        speaker = select_speaker(utt, args.speaker_mode, args.speaker)
-
-        # generate audio
+        # generate audio (voice clone)
         try:
-            wavs, sr = model.generate_custom_voice(
+            wavs, sr = model.generate_voice_clone(
                 text=text,
                 language="Chinese",
-                speaker=speaker,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                x_vector_only_mode=args.xvec_only,
                 max_new_tokens=2048,
                 do_sample=True,
                 top_k=50,
@@ -305,11 +320,11 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)  # add channel dim
             torchaudio.save(wav_path_out, wav, sr)
-            logging.info(f"✓ generated {utt} (speaker={speaker})")
+            logging.info(f"✓ generated {uttid}")
 
         except Exception as e:
             import traceback
-            logging.error(f"✗ failed to generate {utt}: {str(e)}")
+            logging.error(f"✗ failed to generate {uttid}: {str(e)}")
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             continue
 
@@ -322,8 +337,12 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
 def main(args: argparse.Namespace):
     """Main."""
     # load data
-    logging.info(f"Loading data from {args.data_path}")
-    text_dict = load_text_data(args.data_path, args.max_samples)
+    logging.info(f"Loading voice clone data from {args.data_path}")
+    data_list = load_voice_clone_data(args.data_path, args.max_samples)
+
+    if not data_list:
+        logging.error("No valid samples loaded. Exiting.")
+        sys.exit(1)
 
     # parse GPU list
     try:
@@ -348,9 +367,9 @@ def main(args: argparse.Namespace):
 
     # determine output dir
     if args.mode == "native":
-        output_dir = os.path.join(args.exp_dir, "native_fp16")
+        output_dir = os.path.join(args.exp_dir, "native_voice_clone")
     elif args.mode == "hmonnx":
-        output_dir = os.path.join(args.exp_dir, "hmonnx")
+        output_dir = os.path.join(args.exp_dir, "hmonnx_voice_clone")
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
@@ -359,15 +378,15 @@ def main(args: argparse.Namespace):
 
     # native mode runs sequentially (avoids CUDA sampling errors from multiprocessing)
     if args.mode == "native":
-        logging.info(f"Running native mode sequentially on {world_size} GPU(s)...")
+        logging.info(f"Running native voice clone mode sequentially on {world_size} GPU(s)...")
         for rank in range(world_size):
-            worker_native(rank, gpus_to_use, args, text_dict, output_dir)
+            worker_native(rank, gpus_to_use, args, data_list, output_dir)
     else:
         # hmonnx mode uses multiprocessing
-        logging.info(f"Starting {world_size} workers in hmonnx mode...")
+        logging.info(f"Starting {world_size} workers in hmonnx voice clone mode...")
         spawn(
             worker_hmonnx,
-            args=(gpus_to_use, args, text_dict, output_dir),
+            args=(gpus_to_use, args, data_list, output_dir),
             nprocs=world_size,
             join=True
         )
@@ -378,7 +397,7 @@ def main(args: argparse.Namespace):
 def parse_arguments():
     """Parse command-line args."""
     parser = argparse.ArgumentParser(
-        description="Qwen3-TTS accuracy test script",
+        description="Qwen3-TTS voice-clone accuracy test script",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -415,31 +434,22 @@ def parse_arguments():
     parser.add_argument(
         "--exp-dir",
         type=str,
-        default="qwen3tts_eval_zh",
+        default="qwen3tts_eval_zh_voice_clone",
         help="output root directory"
     )
 
-    # speaker args
+    # voice-clone args
     parser.add_argument(
-        "--speaker",
-        type=str,
-        default="vivian",
-        choices=SPEAKERS,
-        help="fixed speaker name (only used when --speaker-mode fixed)"
-    )
-    parser.add_argument(
-        "--speaker-mode",
-        type=str,
-        default="fixed",
-        choices=["fixed", "random", "round-robin"],
-        help="speaker selection strategy"
+        "--xvec-only",
+        action="store_true",
+        help="x-vector only mode (ignore fine-grained features of the reference audio)"
     )
 
     # model paths
     parser.add_argument(
         "--hf-model",
         type=str,
-        default="./data/models/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        default="./data/models/Qwen3-TTS-12Hz-0.6B-Base",
         help="HuggingFace model path for native mode"
     )
     parser.add_argument(
