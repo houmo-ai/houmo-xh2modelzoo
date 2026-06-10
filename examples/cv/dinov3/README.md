@@ -1,156 +1,198 @@
-# DINOv3 Quantization Example
+# DINOv3 LT-DETR XH2a Quantization
 
-Export and quantize [DINOv3](https://github.com/facebookresearch/dinov3) models (ViT and ConvNeXt) to HMONNX format for XH2a deployment.
+本目录保留 DINOv3/LT-DETR 检测模型的当前主线流程：
 
-DINOv3 is Meta AI's self-supervised vision foundation model with two architecture families:
-- **ViT (Vision Transformer)** — with RoPE positional embeddings and register tokens
-- **ConvNeXt** — efficient CNN-based alternative distilled from ViT-7B
+1. 从 LightlyTrain 模型导出 ONNX。
+2. 用 `xhquant` 混合精度搜索得到 **77 个 weighted/TE W16 节点**。
+3. 导出 HMONNX。
+4. 用 COCO sample200 评估 mixed77 baseline，以及 mixed77 + 3 个 bbox refinement sigmoid FP fallback。
 
-## Supported Models
+中间 ablation、range probe、softmax/sigmoid 定位、QuaRot 等实验结果已经归档到 `examples/cv/dinov3/debug/`。
+旧版 backbone-only 导出、普通量化、range probe、QuaRot 导出等非主线脚本已归档到
+`examples/cv/dinov3/debug/legacy_scripts/`。
 
-### ViT Backbones
-| Model | Params | HuggingFace ID |
-|-------|--------|----------------|
-| ViT-S/16 distilled | 21M | `facebook/dinov3-vits16-pretrain-lvd1689m` |
-| ViT-S+/16 distilled | 29M | `facebook/dinov3-vits16plus-pretrain-lvd1689m` |
-| ViT-B/16 distilled | 86M | `facebook/dinov3-vitb16-pretrain-lvd1689m` |
-| ViT-L/16 distilled | 300M | `facebook/dinov3-vitl16-pretrain-lvd1689m` |
-| ViT-H+/16 distilled | 840M | `facebook/dinov3-vith16plus-pretrain-lvd1689m` |
-| ViT-7B/16 | 6.7B | `facebook/dinov3-vit7b16-pretrain-lvd1689m` |
-
-### ConvNeXt Backbones
-| Model | Params | HuggingFace ID |
-|-------|--------|----------------|
-| ConvNeXt Tiny | 29M | `facebook/dinov3-convnext-tiny-pretrain-lvd1689m` |
-| ConvNeXt Small | 50M | `facebook/dinov3-convnext-small-pretrain-lvd1689m` |
-| ConvNeXt Base | 89M | `facebook/dinov3-convnext-base-pretrain-lvd1689m` |
-| ConvNeXt Large | 198M | `facebook/dinov3-convnext-large-pretrain-lvd1689m` |
-
-## Pipeline
-
-```
-Download ──► PyTorch Model ──► ONNX ──► HMONNX ──► Accuracy Test
-(download_models.py) (export_onnx.py) (quantize.py) (test_accuracy.py)
-```
-
-## Prerequisites
-
-Install dependencies in the `xh2` conda environment:
-```bash
-conda activate xh2
-pip install timm transformers onnx onnxruntime onnxsim datasets peft
-```
-
-## Usage
-
-### 1. Download Models
-
-**Method 1: Via timm (recommended, no authentication needed)**
+## 路径与环境
 
 ```bash
-# Download small models (ViT-S/16 + ConvNeXt-Tiny)
-python examples/cv/dinov3/download_models.py --method timm --all-small
-
-# Download a specific model
-python examples/cv/dinov3/download_models.py --method timm --model vits16
-python examples/cv/dinov3/download_models.py --method timm --model convnext-tiny
+PYTHON=/data01/home/xuzk/anaconda3/envs/xh2/bin/python
+NOPROXY="env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy"
+COCO_IMG=/data01/datasets/coco2017/val2017
+COCO_ANN=/data01/datasets/coco2017/annotations/instances_val2017.json
 ```
 
-**Method 2: Via HuggingFace Hub (requires authentication)**
+默认文件：
 
-DINOv3 models are **gated** on HuggingFace — you must first accept the license at the model page and login.
-```bash
-huggingface-cli login
-python examples/cv/dinov3/download_models.py --method hf --model facebook/dinov3-vits16-pretrain-lvd1689m
-```
+- ONNX：`examples/cv/dinov3/onnx/dinov3-vitt16-ltdetr-coco_is640.onnx`
+- 搜索主目录：`examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2`
+- 77 W16 配置：`examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/mixed_precision_weighted_w16.json`
+- HMONNX：`examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/hmonnx/dinov3-vitt16-ltdetr-coco_is640_mix_search_w8a8h1_sefp_XH2a.onnx`
 
-### 2. Export PyTorch to ONNX
+## 脚本职责
 
-```bash
-# ViT-S/16 (local path)
-python examples/cv/dinov3/export_onnx.py \
-    --model-type vit \
-    --model-name /data01/datasets/dinov3-vits16-pretrain-lvd1689m
+- `examples/cv/dinov3/1.lightly_ltdetr_export_onnx.py`：只负责加载 LightlyTrain 模型并导出默认 ONNX。
+- `examples/cv/dinov3/dinov3_common.py`：共享工具库，包含 ONNX IO、COCO 采样、量化配置、HMONNX runner 和 COCO 输出转换。
+- `examples/cv/dinov3/2.mix_search_xh2_export_hmonnx.py`：一键执行 PTQ、混合精度搜索、写出 `mixed_precision_weighted_w16.json`、导出 HMONNX。
+- `examples/cv/dinov3/mix_search_tool.py`：混合精度搜索工具库，继承 `xhquant.mix_precision.MixPrecisionSearch`，只搜索 6 类 weighted/TE 候选。
+- `examples/cv/dinov3/3.hmonnx_eval_coco.py`：COCO mAP 评估，支持 `torch` / `onnx` / `frontend` / `quantgraph` / `hmonnx`。
 
-# ConvNeXt Tiny
-python examples/cv/dinov3/export_onnx.py \
-    --model-type convnext \
-    --model-name /data01/datasets/dinov3-convnext-tiny-pretrain-lvd1689m
-
-# ViT-L/16 with custom image size
-python examples/cv/dinov3/export_onnx.py \
-    --model-type vit \
-    --model-name facebook/dinov3-vitl16-pretrain-lvd1689m \
-    --image-size 518
-```
-
-### 3. Quantize to HMONNX
+## Step 1：导出 ONNX
 
 ```bash
-# ViT-S/16 → w8a8_sefp HMONNX
-python examples/cv/dinov3/quantize.py \
-    --onnx examples/cv/dinov3/onnx/dinov3-vits16-pretrain-lvd1689m_is224.onnx
-
-# ConvNeXt Tiny → w8a8_sefp HMONNX
-python examples/cv/dinov3/quantize.py \
-    --onnx examples/cv/dinov3/onnx/dinov3-convnext-tiny-pretrain-lvd1689m_is224.onnx
+$NOPROXY $PYTHON examples/cv/dinov3/1.lightly_ltdetr_export_onnx.py
 ```
 
-### 4. Test Accuracy
+无参数运行默认等价于 `export-onnx`，默认导出到 `examples/cv/dinov3/onnx/dinov3-vitt16-ltdetr-coco_is640.onnx`，使用 `precision=fp32`、`batch_size=1`、`opset=17`，并把 LightlyTrain 缓存放到 `examples/cv/dinov3/models` 和 `examples/cv/dinov3/data_cache`。
+
+## Step 2：搜索 77 个 weighted/TE W16 节点并导出 HMONNX
+
+当前保留的主线是 top40 weighted 搜索结果，对应 77 个 weighted/TE W16 节点。重新跑脚本会输出 canonical 配置：
+
+- `search_result.pt`
+- `search_summary.json`
+- `mixed_precision_weighted_w16.json`
+- `hmonnx/*.onnx`
 
 ```bash
-# Numerical accuracy test (compare HMONNX vs PyTorch float on random inputs)
-python examples/cv/dinov3/test_accuracy.py \
-    --model-name /data01/datasets/dinov3-vits16-pretrain-lvd1689m \
-    --model-type vit \
-    --hmonnx work_dirs/dinov3-vits16-pretrain-lvd1689m_is224/hmonnx/dinov3-vits16-pretrain-lvd1689m_is224_w8a8_sefp_XH2a.onnx
-
-# With ImageNet validation set (k-NN accuracy)
-python examples/cv/dinov3/test_accuracy.py \
-    --model-name /data01/datasets/dinov3-vits16-pretrain-lvd1689m \
-    --model-type vit \
-    --hmonnx work_dirs/.../xxx_w8a8_sefp_XH2a.onnx \
-    --imagenet-val /path/to/imagenet/val \
-    --num-samples 1000
+$NOPROXY CUDA_VISIBLE_DEVICES=2 $PYTHON examples/cv/dinov3/2.mix_search_xh2_export_hmonnx.py
 ```
 
-## Model I/O
+无参数运行默认使用 `examples/cv/dinov3/onnx/dinov3-vitt16-ltdetr-coco_is640.onnx`，COCO 路径为 `/data01/datasets/coco2017/val2017` 和 `/data01/datasets/coco2017/annotations/instances_val2017.json`，输出到 `examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2`，搜索参数为 `sample_size=8`、`sample_seed=4200`、`mix_policy=topk`、`mix_topk=0.4`、`mix_weight_bits=8,16`、`mix_act_bits=8,16`、`mix_label_weight=0.25`。
 
-- **Input**: `pixel_values` — RGB image tensor `(B, 3, H, W)`, values in [0, 1]
-- **Outputs**:
-  - `pooler_output` — CLS/pooled token `(B, hidden_size)`
-  - `last_hidden_state` — All patch tokens `(B, N+1, hidden_size)` where N = num_patches
+确认节点数：
 
-## Verified Numerical Accuracy (w8a8_sefp quantization)
-
-### Numerical Accuracy (100 random samples)
-
-| Model | Pooler CosSim | Hidden CosSim | Pooler MSE |
-|-------|---------------|---------------|------------|
-| ViT-S/16 | 0.9919 | 0.9935 | 0.0044 |
-| ConvNeXt-Tiny | 0.9972 | 0.9946 | 0.0191 |
-
-### CIFAR-10 k-NN Classification Accuracy (500 samples)
-
-Tested on CIFAR-10 test set with k-NN classifier using CLS embeddings:
-
-| Model | k=1 Acc | k=5 Acc | k=20 Acc | Embed CosSim |
-|-------|---------|---------|----------|--------------|
-| ViT-S/16 Float | 100.00% | 93.80% | 90.40% | — |
-| ViT-S/16 HMONNX | 100.00% | 94.20% | 91.40% | 0.9929 |
-
-**Note**: The original DINOv3 checkpoints from HuggingFace have a `model.` prefix in safetensors keys that is incompatible with transformers' expected key format. Run `download_models.py` which automatically remaps keys, or manually fix with:
-```python
-from safetensors import safe_open
-from safetensors.torch import save_file
-# Remap keys by removing 'model.' prefix
+```bash
+$PYTHON - <<'PY'
+import json
+p = "examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/mixed_precision_weighted_w16.json"
+print(len(json.load(open(p))["nodes"]))
+PY
 ```
 
-## Official Accuracy Reference (DINOv3 ViT Family)
+期望输出：`77`。
 
-| Model | IN-ReaL | IN-R | Obj.Net | ADE20k |
-|-------|---------|------|---------|--------|
-| ViT-S/16 | 87.0 | 60.4 | 50.9 | 47.0 |
-| ViT-B/16 | 89.3 | 76.7 | 64.1 | 51.8 |
-| ViT-L/16 | 90.2 | 88.1 | 74.8 | 54.9 |
-| ViT-7B/16 | 90.4 | 91.1 | 91.1 | 55.9 |
+## Step 3：评估 mixed77 baseline
+
+该评估使用 `mixed_precision_weighted_w16.json`，只把搜索出的 77 个 weighted/TE 节点设置为 W16/A16/O16，其余节点保持默认 `w8a8h1_sefp`。
+
+```bash
+$NOPROXY CUDA_VISIBLE_DEVICES=2 \
+  $PYTHON examples/cv/dinov3/3.hmonnx_eval_coco.py \
+    --backend quantgraph \
+    --quantgraph-mode aligned \
+    --quant-type w8a8h1_sefp \
+    --mixed-precision-config examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/mixed_precision_weighted_w16.json \
+    --onnx examples/cv/dinov3/onnx/dinov3-vitt16-ltdetr-coco_is640.onnx \
+    --images-dir $COCO_IMG \
+    --annotations $COCO_ANN \
+    --sample-size 200 \
+    --sample-seed 4200 \
+    --log-every 20 \
+    --out-dir examples/cv/dinov3/coco_eval/mixed_top40v2_weighted_w16_baseline_sample200_seed4200
+```
+
+当前保留结果：
+
+- 指标：`examples/cv/dinov3/coco_eval/mixed_top40v2_weighted_w16_baseline_sample200_seed4200/quantgraph_metrics.json`
+- AP50:95：`0.514826564163`
+
+## Step 4：评估 mixed77 + 3 个 bbox sigmoid FP fallback
+
+定位结果显示当前 `xhquant` 的 `QSigmoid` 仍走 LUT，A16/O16 不能消除这 3 个 bbox refinement sigmoid 的误差。`3.hmonnx_eval_coco.py` 现在提供命名 preset，不需要手写正则：
+
+```bash
+--quantgraph-torch-sigmoid-preset decoder-bbox-refine-top3
+```
+
+该 preset 等价于：
+
+```text
+^(_decoder_decoder_sigmoid_2|_decoder_decoder_sigmoid_3|_decoder_decoder_sigmoid_4)$
+```
+
+评估命令：
+
+```bash
+$NOPROXY CUDA_VISIBLE_DEVICES=2 \
+  $PYTHON examples/cv/dinov3/3.hmonnx_eval_coco.py \
+    --backend quantgraph \
+    --quantgraph-mode aligned \
+    --quant-type w8a8h1_sefp \
+    --mixed-precision-config examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/mixed_precision_weighted_w16.json \
+    --onnx examples/cv/dinov3/onnx/dinov3-vitt16-ltdetr-coco_is640.onnx \
+    --images-dir $COCO_IMG \
+    --annotations $COCO_ANN \
+    --sample-size 200 \
+    --sample-seed 4200 \
+    --log-every 20 \
+    --quantgraph-torch-sigmoid-preset decoder-bbox-refine-top3 \
+    --out-dir examples/cv/dinov3/coco_eval/mixed_top40v2_weighted_w16_sigmoid234_fp_sample200_seed4200
+```
+
+当前保留结果：
+
+- 指标：`examples/cv/dinov3/coco_eval/mixed_top40v2_weighted_w16_sigmoid234_fp_sample200_seed4200/quantgraph_metrics.json`
+- AP50:95：`0.527019770753`
+- 对比 torch AMP fp16 sample200 AP50:95：`0.530563686826`
+- 差距：约 `0.00354 AP`
+
+只保留 `_decoder_decoder_sigmoid_3/_4` 的对照结果：
+
+- 指标：`examples/cv/dinov3/coco_eval/mixed_top40v2_weighted_w16_sigmoid34_fp16_sample200_seed4200/quantgraph_metrics.json`
+- AP50:95：`0.524847211330`
+- AP75：`0.562635193261`
+- 比 2/3/4 三个节点少约 `0.00217 AP`
+
+## Step 5：评估 HMONNX
+
+HMONNX 运行评估：
+
+```bash
+$NOPROXY CUDA_VISIBLE_DEVICES=2 $PYTHON examples/cv/dinov3/3.hmonnx_eval_coco.py
+```
+
+无参数运行默认使用 `backend=hmonnx`，HMONNX 路径为 `examples/cv/dinov3/mixed_precision_search/auto_search_sample8_top40_v2/hmonnx/dinov3-vitt16-ltdetr-coco_is640_mix_search_w8a8h1_sefp_XH2a.onnx`，COCO 路径为 `/data01/datasets/coco2017/val2017` 和 `/data01/datasets/coco2017/annotations/instances_val2017.json`，评估 `sample_size=200`、`sample_seed=4200`、`log_every=20`，输出到 `examples/cv/dinov3/coco_eval/hmonnx_mix77_sample200_seed4200`。
+
+当前目录中仍保留了一个 HMONNX W16A16 full-val baseline：
+
+- `examples/cv/dinov3/coco_eval/hmonnx_w16_full/hmonnx_metrics.json`
+
+注意：`quantgraph` 的 `decoder-bbox-refine-top3` preset 是评估期 monkey patch，用来验证 `QSigmoid` LUT 误差来源；它不会自动改变 HMONNX 导出的 sigmoid 实现。要让 HMONNX 真正复现该效果，需要在导出/运行时增加 FP sigmoid 或高精度 sigmoid op 支持。
+
+## 当前保留目录
+
+```text
+examples/cv/dinov3/
+├── README.md
+├── 1.lightly_ltdetr_export_onnx.py
+├── 2.mix_search_xh2_export_hmonnx.py
+├── 3.hmonnx_eval_coco.py
+├── dinov3_common.py
+├── mix_search_tool.py
+├── coco_eval/
+│   ├── hmonnx_w16_full/
+│   ├── mixed_top40v2_weighted_w16_baseline_sample200_seed4200/
+│   ├── mixed_top40v2_weighted_w16_sigmoid34_fp_sample200_seed4200/
+│   ├── mixed_top40v2_weighted_w16_sigmoid34_fp16_sample200_seed4200/
+│   └── mixed_top40v2_weighted_w16_sigmoid234_fp_sample200_seed4200/
+├── debug/
+│   ├── coco_eval/
+│   ├── legacy_scripts/
+│   ├── mixed_precision_search/
+│   └── onnx/
+├── mixed_precision_search/
+│   └── auto_search_sample8_top40_v2/
+│       ├── hmonnx/
+│       ├── mix_search_config.json
+│       ├── mixed_precision_weighted_w16.json
+│       ├── search_result.pt
+│       └── search_summary.json
+└── onnx/
+    └── dinov3-vitt16-ltdetr-coco_is640.onnx
+```
+
+## 关键结论
+
+- 混合精度搜索主线只保留 6 类 weighted/TE 候选，不再搜索 activation-only 节点。
+- 当前 77 weighted/TE W16 配置的 QuantGraph AP50:95 为 `0.514826564163`。
+- 加上 3 个 bbox refinement sigmoid 的 FP fallback 后 AP50:95 为 `0.527019770753`。
+- `xhquant` 现有 sigmoid 是 LUT 路径；A16/O16 只改变输入/输出量化边界，不能替代 FP sigmoid 函数本身。
