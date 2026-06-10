@@ -33,7 +33,18 @@ def _replace_rmsnorm(module: nn.Module) -> int:
     for name, child in list(module.named_children()):
         if isinstance(child, Gemma4RMSNorm):
             if not getattr(child, "with_scale", True):
-                replaced += _replace_rmsnorm(child)
+                # with_scale=False means no weight param; hidden_size must be
+                # inferred from the parent module (e.g. Gemma4MultimodalEmbedder
+                # stores it as multimodal_hidden_size).
+                hidden_size = getattr(module, "multimodal_hidden_size", None)
+                if hidden_size is None:
+                    # Cannot determine hidden_size; leave untouched for the
+                    # _Gemma4RMSNorm wrapper to handle during wrap_llm_model.
+                    replaced += _replace_rmsnorm(child)
+                    continue
+                fused = xhnn.RMSNorm(hidden_size, eps=child.eps)
+                setattr(module, name, fused)
+                replaced += 1
                 continue
             hidden_size = child.weight.shape[0]
             device = child.weight.device

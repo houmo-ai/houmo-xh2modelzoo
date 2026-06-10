@@ -72,7 +72,13 @@ class _Gemma4RMSNorm(DynamicModule):
             hidden_size = self.dim
             device = None
         else:
-            hidden_size = getattr(cfg, "hidden_size", 1) if cfg is not None else 1
+            if cfg is not None:
+                # cfg is a BaseAttrDict (addict.Dict) whose __getattr__
+                # never raises AttributeError for missing keys; use
+                # dict-style .get() instead of getattr().
+                hidden_size = cfg.get("hidden_size", 1)
+            else:
+                hidden_size = 1
             device = None
         self.norm = RMSNorm(hidden_size, self.eps)
         if device is not None:
@@ -240,7 +246,6 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         per_layer_input: torch.Tensor = None,
         position_embeddings: torch.Tensor = None,
         attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         past_k_cache: Optional[Tensor] = None,
@@ -248,7 +253,7 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         shared_kv: Optional[dict[int, tuple[torch.Tensor, torch.Tensor]]] = None,
         **kwargs,
     ) -> torch.Tensor:
-        del position_ids, kwargs
+        del kwargs
 
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -317,7 +322,45 @@ class _Gemma4TextModel(DynamicModule):
         self.llm_gather._update_cfg = types.MethodType(_update_gather_cfg, self.llm_gather)
         if hasattr(self.rotary_emb, "set_target_dtype"):
             self.rotary_emb.set_target_dtype(self.embed_tokens.weight.dtype)
+        self._setup_rope_cache(cfg)
         return self
+
+    def _setup_rope_cache(self, cfg=None):
+        # Pre-compute cos/sin per layer_type and register as buffers with shape
+        # (1, max_seq_len, 1, head_dim) so a DynamicSlice on dim=1 can pick the
+        # current chunk indexed by past_seq_length. This removes the need for an
+        # explicit position_ids graph input (parity with gemma4_moe).
+        max_seq_len = int(
+            _cfg_get(
+                cfg,
+                "context_max_length",
+                getattr(self.rotary_emb, "max_seq_len_cached", getattr(self.rotary_emb, "original_max_seq_len", 2048)),
+            )
+        )
+        target_dtype = self.embed_tokens.weight.dtype
+        for layer_type in set(self.config.layer_types):
+            inv_freq = getattr(self.rotary_emb, f"{layer_type}_inv_freq", None)
+            attention_scaling = getattr(self.rotary_emb, f"{layer_type}_attention_scaling", None)
+            if inv_freq is None or attention_scaling is None:
+                continue
+            cos, sin = _compute_gemma4_rotary_cache(inv_freq, attention_scaling, max_seq_len)
+            # (max_seq_len, head_dim) -> (1, max_seq_len, 1, head_dim)
+            cos_buf = cos.unsqueeze(0).unsqueeze(2).to(dtype=target_dtype).contiguous()
+            sin_buf = sin.unsqueeze(0).unsqueeze(2).to(dtype=target_dtype).contiguous()
+            self.register_buffer(f"_{layer_type}_cos_cache", cos_buf, persistent=False)
+            self.register_buffer(f"_{layer_type}_sin_cache", sin_buf, persistent=False)
+            cos_slice = xhnn.DynamicSlice([self.input_sequence_length], [1], [1])
+            sin_slice = xhnn.DynamicSlice([self.input_sequence_length], [1], [1])
+
+            def _slice_update_cfg(slice_self, new_cfg=None):
+                slice_self.valid_length = [
+                    int(_cfg_get(new_cfg, "input_sequence_length", self.input_sequence_length))
+                ]
+
+            cos_slice._update_cfg = types.MethodType(_slice_update_cfg, cos_slice)
+            sin_slice._update_cfg = types.MethodType(_slice_update_cfg, sin_slice)
+            setattr(self, f"_{layer_type}_cos_slice", cos_slice)
+            setattr(self, f"_{layer_type}_sin_slice", sin_slice)
 
     def _get_per_layer_inputs(self, input_ids: Tensor) -> Tensor:
         batch_size = input_ids.shape[0]
@@ -351,7 +394,6 @@ class _Gemma4TextModel(DynamicModule):
         input_ids: Optional[Tensor] = None,
         inputs_embeds: Optional[Tensor] = None,
         per_layer_inputs: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         local_attention_mask: Optional[Tensor] = None,
@@ -359,8 +401,10 @@ class _Gemma4TextModel(DynamicModule):
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
     ):
-        if inputs_embeds is None or position_ids is None:
-            raise ValueError("Gemma4 text graph requires inputs_embeds and position_ids.")
+        if inputs_embeds is None:
+            raise ValueError("Gemma4 text graph requires inputs_embeds.")
+        if past_seq_length is None:
+            raise ValueError("Gemma4 text graph requires past_seq_length.")
         if self.hidden_size_per_layer_input:
             if per_layer_inputs is None:
                 if input_ids is None:
@@ -370,8 +414,16 @@ class _Gemma4TextModel(DynamicModule):
         else:
             per_layer_inputs = None
 
-        full_position_embeddings = self.rotary_emb(inputs_embeds, position_ids, "full_attention")
-        sliding_position_embeddings = self.rotary_emb(inputs_embeds, position_ids, "sliding_attention")
+        position_embeddings_by_type: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for layer_type in set(self.config.layer_types):
+            cos_cache = getattr(self, f"_{layer_type}_cos_cache")
+            sin_cache = getattr(self, f"_{layer_type}_sin_cache")
+            cos_slice = getattr(self, f"_{layer_type}_cos_slice")
+            sin_slice = getattr(self, f"_{layer_type}_sin_slice")
+            position_embeddings_by_type[layer_type] = (
+                cos_slice(cos_cache, past_seq_length),
+                sin_slice(sin_cache, past_seq_length),
+            )
 
         hidden_states = inputs_embeds
         shared_kv: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -386,9 +438,7 @@ class _Gemma4TextModel(DynamicModule):
                 cache_idx += 1
 
             layer_type = self.config.layer_types[layer_idx]
-            layer_position_embeddings = (
-                full_position_embeddings if layer_type == "full_attention" else sliding_position_embeddings
-            )
+            layer_position_embeddings = position_embeddings_by_type[layer_type]
             layer_attention_mask = global_attention_mask if layer_type == "full_attention" else local_attention_mask
             layer_per_input = per_layer_inputs[:, layer_idx, :, :] if per_layer_inputs is not None else None
 

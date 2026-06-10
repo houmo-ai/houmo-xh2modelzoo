@@ -305,9 +305,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             per_layer_inputs = self.per_layer_input_builder(llm_input_ids.to(torch.long), inputs_embeds)
 
         past_seq_length = int(data.get("past_seq_length", 0))
-        position_ids = (
-            torch.arange(self.input_sequence_length, device=self._device, dtype=torch.int32).unsqueeze(0) + past_seq_length
-        )
         mm_token_type_ids = data.get("mm_token_type_ids")
         if mm_token_type_ids is None:
             mm_token_type_ids = torch.zeros((1, current_input_length), dtype=torch.long, device=self._device)
@@ -330,7 +327,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
 
         output = [
             inputs_embeds.to(self._device),
-            position_ids,
             torch.tensor([past_seq_length], dtype=torch.int32, device=self._device),
             torch.tensor([current_input_length], dtype=torch.int32, device=self._device),
             self.past_key_caches,
@@ -343,8 +339,8 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                 mm_token_type_ids=mm_token_type_ids[0],
                 device=self._device,
             )
-            output.insert(4, local_attention_mask)
-            output.insert(5, global_attention_mask)
+            output.insert(3, local_attention_mask)
+            output.insert(4, global_attention_mask)
         if per_layer_inputs is not None:
             output.insert(0, per_layer_inputs.to(self._device, inputs_embeds.dtype))
         return tuple(output)

@@ -78,6 +78,30 @@ class XHGemma4VisionModel(BaseVisionModel):
     def _use_compact_export(self) -> bool:
         return self.export_mode == "compact"
 
+    @classmethod
+    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        kwargs.setdefault("dtype", torch.bfloat16)
+        kwargs.setdefault("device_map", "cpu")
+        kwargs.setdefault("trust_remote_code", True)
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        quantization_config = getattr(config, "quantization_config", None)
+        quant_method = getattr(quantization_config, "quant_method", None)
+        if isinstance(quantization_config, dict):
+            quant_method = quantization_config.get("quant_method", quant_method)
+        if str(quant_method).lower() == "gptq":
+            assert quant_weight is None or len(quant_weight) == 0, (
+                "Model is already quantized, quant_weight should be None or empty when loading quantized model."
+            )
+            native_hf_model = cls._load_hf_model(hf_model_dir, **kwargs)
+            # Visual export only consumes vision_tower/embed_vision. Dense Gemma4
+            # AutoRound/GPTQ checkpoints quantize the text stack, while visual
+            # weights remain regular tensors and should be quantized by this
+            # visual submodel's own quant_scheme.
+            if hasattr(native_hf_model.config, "quantization_config"):
+                native_hf_model.config.quantization_config = None
+            return native_hf_model
+        return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
+
     def _get_export_inputs(self) -> dict[str, torch.Tensor]:
         messages = [
             {
@@ -113,7 +137,7 @@ class XHGemma4VisionModel(BaseVisionModel):
             hf_model.model.embed_vision,
             **adapter_kwargs,
         )
-        _replace_rmsnorm(compact_visual.vision_tower)
+        _replace_rmsnorm(compact_visual)
         for layer in compact_visual.vision_tower.encoder.layers:
             _make_vision_attn_traceable(layer.self_attn)
         return super().init_wrap_model(compact_visual)
@@ -127,7 +151,7 @@ class XHGemma4VisionModel(BaseVisionModel):
             hf_model.model.embed_vision,
             **adapter_kwargs,
         )
-        _replace_rmsnorm(full_visual.vision_tower)
+        _replace_rmsnorm(full_visual)
         for layer in full_visual.vision_tower.encoder.layers:
             _make_vision_attn_traceable(layer.self_attn)
         return super().init_wrap_model(full_visual)

@@ -55,7 +55,6 @@ def test_gemma4_preprocess_injects_multimodal_features():
     (
         per_layer_inputs,
         inputs_embeds,
-        position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
@@ -66,7 +65,6 @@ def test_gemma4_preprocess_injects_multimodal_features():
 
     assert per_layer_inputs.shape == (1, 1, 6, 4)
     assert inputs_embeds.shape == (1, 6, 4)
-    assert position_ids.shape == (1, 6)
     assert past_seq_length.item() == 2
     assert current_input_length.item() == 4
     assert local_attention_mask.shape == (1, 1, 6, 8)
@@ -82,9 +80,7 @@ def test_gemma4_preprocess_injects_multimodal_features():
     assert torch.allclose(per_layer_inputs[0, 0, 1], image_embed[0])
     assert torch.allclose(per_layer_inputs[0, 0, 3], audio_embed[0])
 
-    assert torch.equal(position_ids[0, :4], torch.tensor([2, 3, 4, 5], dtype=position_ids.dtype))
-
-    assert len(outputs) == 9
+    assert len(outputs) == 8
 
 
 def test_gemma4_preprocess_output_contract_includes_attention_masks_by_default():
@@ -118,7 +114,6 @@ def test_gemma4_preprocess_output_contract_includes_attention_masks_by_default()
     (
         per_layer_inputs,
         inputs_embeds,
-        position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
@@ -134,12 +129,11 @@ def test_gemma4_preprocess_output_contract_includes_attention_masks_by_default()
 
     assert per_layer_inputs.shape == (1, 6, 4)
     assert inputs_embeds.shape == (1, 6, 4)
-    assert position_ids.shape == (1, 6)
     assert past_seq_length.item() == 0
     assert current_input_length.item() == 4
     assert local_attention_mask.shape == (1, 1, 6, 16)
     assert global_attention_mask.shape == (1, 1, 6, 32)
-    assert len(preprocess({"input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long), "past_seq_length": 0})) == 9
+    assert len(preprocess({"input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long), "past_seq_length": 0})) == 8
 
 
 def test_gemma4_preprocess_can_emit_legacy_attention_masks():
@@ -173,9 +167,9 @@ def test_gemma4_preprocess_can_emit_legacy_attention_masks():
 
     outputs = preprocess({"input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long), "past_seq_length": 0})
 
-    assert len(outputs) == 9
-    local_attention_mask = outputs[5]
-    global_attention_mask = outputs[6]
+    assert len(outputs) == 8
+    local_attention_mask = outputs[4]
+    global_attention_mask = outputs[5]
     assert local_attention_mask.shape == (1, 1, 6, 16)
     assert global_attention_mask.shape == (1, 1, 6, 32)
 
@@ -216,8 +210,8 @@ def test_gemma4_preprocess_keeps_vision_attention_causal():
         }
     )
 
-    local_attention_mask = outputs[5]
-    global_attention_mask = outputs[6]
+    local_attention_mask = outputs[4]
+    global_attention_mask = outputs[5]
 
     assert global_attention_mask[0, 0, 1, 2] < 0
     assert local_attention_mask[0, 0, 1, 2] < 0
@@ -253,7 +247,6 @@ def test_gemma4_preprocess_preserves_sequence_metadata_without_attention_masks()
     preprocess = Gemma4DataPreprocess(config)
 
     (
-        _,
         _,
         _,
         past_seq_length,

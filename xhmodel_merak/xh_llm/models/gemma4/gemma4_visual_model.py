@@ -50,6 +50,10 @@ def _replace_rmsnorm(module: nn.Module) -> None:
 
 def _infer_rmsnorm_dim(parent: nn.Module, name: str, norm: Gemma4RMSNorm) -> int:
     """Infer the hidden_size of a with_scale=False RMSNorm from context."""
+    if hasattr(parent, "multimodal_hidden_size"):
+        return parent.multimodal_hidden_size
+    if name == "embedding_pre_projection_norm" and hasattr(parent, "embedding_projection"):
+        return parent.embedding_projection.in_features
     # v_norm in attention has head_dim size
     if hasattr(parent, "head_dim"):
         return parent.head_dim

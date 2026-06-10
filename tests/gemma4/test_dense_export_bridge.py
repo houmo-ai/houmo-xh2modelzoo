@@ -1,6 +1,7 @@
 """HMSW-3948: tests for gemma4 dense/PLE export bridge split + data_preprocess tolerance."""
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -43,9 +44,11 @@ def test_dense_bridge_forward_signature_excludes_per_layer_inputs():
 
     params = inspect.signature(_Gemma4TextExportBridgeDense.forward).parameters
     assert "per_layer_inputs" not in params
+    assert "position_ids" not in params, (
+        "dense bridge should no longer accept position_ids; rope is computed via past_seq_length slicing"
+    )
     for name in (
         "inputs_embeds",
-        "position_ids",
         "past_seq_length",
         "current_input_length",
         "local_attention_mask",
@@ -75,6 +78,101 @@ def test_llm_model_impl_handles_v_proj_none_for_attention_k_eq_v():
     assert "if self.v_proj is not None" in src
     # value_states should default to key_states when v_proj is None
     assert "else key_states" in src
+
+
+def test_prepare_submodel_for_hmonnx_export_quantizes_before_fixed():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+
+    class DummyQuantedModel:
+        def __init__(self):
+            self.fixed_called = False
+
+        def fixed(self):
+            self.fixed_called = True
+
+    class DummySubModel:
+        def __init__(self):
+            self.config = SimpleNamespace(enable=True)
+            self.quanted_model = None
+            self.to_quanted_aligned_called = False
+
+        def to_quanted_aligned(self):
+            self.to_quanted_aligned_called = True
+            self.quanted_model = DummyQuantedModel()
+
+    sub_model = DummySubModel()
+
+    assert XHGemma4Model._prepare_submodel_for_hmonnx_export(sub_model)
+    assert sub_model.to_quanted_aligned_called
+    assert sub_model.quanted_model.fixed_called
+
+
+def test_prepare_submodel_for_hmonnx_export_does_not_silently_skip_configured_submodel():
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+
+    sub_model = SimpleNamespace(config=SimpleNamespace(enable=False), quanted_model=None)
+
+    with pytest.raises(RuntimeError, match="visual export is configured but disabled"):
+        XHGemma4Model._prepare_submodel_for_hmonnx_export(sub_model, "visual")
+
+
+def test_gemma4_31b_config_keeps_visual_submodel_exportable():
+    model_dir = Path("/data01/datasets/gemma-4-31b-it")
+    if not model_dir.exists():
+        pytest.skip(f"Gemma4 31B official model config is not available: {model_dir}")
+
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_llm_model import XHGemma4Model
+    from xhmodel_merak.xh_llm.models.gemma4e.xh_gemma4_config import XHGemma4ModelConfig
+
+    model = XHGemma4Model(
+        XHGemma4ModelConfig(
+            model_name="xh2_gemma4_31b_it_w4a8_autoround_256_4k",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=str(model_dir),
+            context_max_length=4096,
+            prefill_chunk_length=256,
+            visual_config={
+                "image_seq_length": 280,
+                "patch_size": 16,
+                "pooling_kernel_size": 3,
+                "quant_scheme": {"quant_type": "w4a8h1_ssfp", "ops": {}},
+            },
+        )
+    )
+
+    assert model.visual is not None
+    assert model.visual.config.hf_model == str(model_dir)
+    assert model.visual.config.image_seq_length == 280
+    assert model.visual.config.pooling_kernel_size == 3
+
+
+def test_gemma4_visual_get_hf_model_bypasses_gptqmodel_for_dense_gptq_config(monkeypatch):
+    from xhmodel_merak.xh_llm.models.gemma4e import gemma4_vision_model as vision_mod
+    from xhmodel_merak.xh_llm.models.gemma4e.gemma4_vision_model import XHGemma4VisionModel
+
+    loaded_model = SimpleNamespace(config=SimpleNamespace(quantization_config=object()))
+    calls = []
+
+    monkeypatch.setattr(
+        vision_mod.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(quantization_config=SimpleNamespace(quant_method="gptq")),
+    )
+
+    def _fake_load(cls, hf_model_dir, **kwargs):
+        calls.append(("load", hf_model_dir, kwargs))
+        return loaded_model
+
+    monkeypatch.setattr(XHGemma4VisionModel, "_load_hf_model", classmethod(_fake_load))
+
+    out = XHGemma4VisionModel.get_hf_model("/fake/gemma4-dense-gptq")
+
+    assert out is loaded_model
+    assert loaded_model.config.quantization_config is None
+    assert calls[0][0] == "load"
+    assert calls[0][1] == "/fake/gemma4-dense-gptq"
+    assert calls[0][2]["device_map"] == "cpu"
+    assert calls[0][2]["trust_remote_code"] is True
 
 
 if __name__ == "__main__":

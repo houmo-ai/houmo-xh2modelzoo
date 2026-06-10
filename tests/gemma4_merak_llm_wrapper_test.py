@@ -93,14 +93,13 @@ def test_gemma4_llm_wrap_and_preprocess_smoke():
 
     assert logits.shape == (1, 1, 128)
     assert model.kvcache_config.num_layers == 3
-    assert model.get_export_cfg()["input_names"][:5] == [
+    assert model.get_export_cfg()["input_names"][:4] == [
         "per_layer_inputs",
         "inputs_embeds",
-        "position_ids",
         "past_seq_length",
         "current_input_length",
     ]
-    assert model.get_export_cfg()["input_names"][5:7] == [
+    assert model.get_export_cfg()["input_names"][4:6] == [
         "local_attention_mask",
         "global_attention_mask",
     ]

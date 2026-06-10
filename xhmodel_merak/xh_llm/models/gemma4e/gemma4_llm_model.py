@@ -58,7 +58,6 @@ class _Gemma4TextExportBridgeBase(nn.Module):
     def _run(
         self,
         inputs_embeds,
-        position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
@@ -70,7 +69,6 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         hidden_states = self.language_model(
             inputs_embeds=inputs_embeds,
             per_layer_inputs=per_layer_inputs,
-            position_ids=position_ids,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             local_attention_mask=local_attention_mask,
@@ -94,7 +92,6 @@ class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
         self,
         per_layer_inputs,
         inputs_embeds,
-        position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
@@ -103,7 +100,7 @@ class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
         past_value_cache=None,
     ):
         return self._run(
-            inputs_embeds, position_ids, past_seq_length, current_input_length,
+            inputs_embeds, past_seq_length, current_input_length,
             local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
             per_layer_inputs,
         )
@@ -115,7 +112,6 @@ class _Gemma4TextExportBridgeDense(_Gemma4TextExportBridgeBase):
     def forward(
         self,
         inputs_embeds,
-        position_ids,
         past_seq_length,
         current_input_length,
         local_attention_mask,
@@ -124,7 +120,7 @@ class _Gemma4TextExportBridgeDense(_Gemma4TextExportBridgeBase):
         past_value_cache=None,
     ):
         return self._run(
-            inputs_embeds, position_ids, past_seq_length, current_input_length,
+            inputs_embeds, past_seq_length, current_input_length,
             local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
             None,
         )
@@ -664,7 +660,6 @@ class XHGemma4Model(VisionLLMModel):
             input_names.append("per_layer_inputs")
         input_names += [
             "inputs_embeds",
-            "position_ids",
             "past_seq_length",
             "current_input_length",
             "local_attention_mask",
@@ -682,6 +677,21 @@ class XHGemma4Model(VisionLLMModel):
         meta_info.layer_kv_shapes = self._kvcache_mixin.layer_kv_shapes
         return meta_info
 
+    @staticmethod
+    def _prepare_submodel_for_hmonnx_export(sub_model: Any | None, name: str = "submodel") -> bool:
+        if sub_model is None:
+            return False
+        if sub_model.quanted_model is None:
+            if not getattr(sub_model.config, "enable", True):
+                raise RuntimeError(
+                    f"Gemma4 {name} export is configured but disabled; remove the config or enable it."
+                )
+            sub_model.to_quanted_aligned()
+        if sub_model.quanted_model is None:
+            raise RuntimeError(f"Gemma4 {name} export did not produce a quanted model.")
+        sub_model.quanted_model.fixed()
+        return True
+
     @log_function_call()
     def export_hmonnx(self, output_dir: str) -> Gemma4ModelMeta:
         logger = get_xhquant_logger()
@@ -689,15 +699,13 @@ class XHGemma4Model(VisionLLMModel):
         if self._state != LLMModelState.QUANTED_ALIGNED:
             self.to_quanted_aligned()
         self._quanted_model.fixed()
-        if self.visual is not None:
-            self.visual.quanted_model.fixed()
-        if self.audio is not None:
-            self.audio.quanted_model.fixed()
+        export_visual = self._prepare_submodel_for_hmonnx_export(self.visual, "visual")
+        export_audio = self._prepare_submodel_for_hmonnx_export(self.audio, "audio")
 
         exported_info = self.get_export_info(output_dir)
         meta_info = cast(Gemma4ModelMeta, exported_info.meta)
 
-        if self.visual is not None:
+        if export_visual:
             visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
             self.visual.config.model_name = f"{exported_info.model_name}_visual"
             visual_meta = self.visual.export_hmonnx(visual_output_dir)
@@ -706,7 +714,7 @@ class XHGemma4Model(VisionLLMModel):
                 visual_meta.onnx = str(Path(visual_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
             meta_info.visual_config = visual_meta
 
-        if self.audio is not None:
+        if export_audio:
             audio_output_dir = str(Path(exported_info.exported_dir) / "audio")
             self.audio.config.model_name = f"{exported_info.model_name}_audio"
             audio_meta = self.audio.export_hmonnx(audio_output_dir)
