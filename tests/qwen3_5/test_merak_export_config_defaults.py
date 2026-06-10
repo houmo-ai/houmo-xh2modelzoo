@@ -2,12 +2,31 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
+from pathlib import Path
 
 import pytest
 
 from xhmodel_merak.xh_llm.base_model import XHBaseModel
 from xhmodel_merak.xh_llm.types import KVCacheWithLinearConfig
-from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import XHQwen3_5ModelConfig
+from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
+    XHQwen3_5_DFlashConfig,
+    XHQwen3_5_MTPConfig,
+    XHQwen3_5ModelConfig,
+    build_spec_draft_quant_scheme,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MERAK_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+
+
+def _load_merak_export_script():
+    spec = importlib.util.spec_from_file_location("qwen3_5_xh_export_hmonnx", MERAK_EXPORT_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_qwen3_5_config_uses_merak_export_defaults():
@@ -16,6 +35,129 @@ def test_qwen3_5_config_uses_merak_export_defaults():
     assert cfg.split_conv_cache is True
     assert cfg.normalize_force_fp32 is False
     assert cfg.use_manual_depthwise_conv1d is False
+    assert cfg.mtp_head_k is None
+    assert cfg.reranked_repo_dir is None
+    assert cfg.force_rerank is False
+
+
+def test_qwen3_5_config_preserves_mtp_head_k_controls():
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_5",
+        hf_model="weights/qwen",
+        mtp_head_k=81920,
+        reranked_repo_dir="weights/qwen-reranked-K81920",
+        force_rerank=True,
+    )
+
+    assert cfg.mtp_head_k == 81920
+    assert cfg.reranked_repo_dir == "weights/qwen-reranked-K81920"
+    assert cfg.force_rerank is True
+
+
+@pytest.mark.parametrize("mode", ["mtp", "dflash"])
+def test_qwen3_5_spec_decode_is_single_batch_only(mode):
+    XHQwen3_5ModelConfig(model_name="qwen3_5", batch_size=1, spec_decode_mode=mode)
+
+    with pytest.raises(ValueError, match="batch_size=1"):
+        XHQwen3_5ModelConfig(model_name="qwen3_5", batch_size=2, spec_decode_mode=mode)
+
+
+def test_merak_export_reranks_target_and_mtp_hf_model(monkeypatch):
+    script = _load_merak_export_script()
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_5",
+        hf_model="weights/qwen",
+        spec_decode_mode="mtp",
+        mtp_head_k=81920,
+        mtp_config=dict(hf_model="weights/qwen"),
+    )
+    calls = []
+
+    def fake_prepare(*, original_model_dir, K, reranked_repo_dir, force_rerank):
+        calls.append(
+            dict(
+                original_model_dir=original_model_dir,
+                K=K,
+                reranked_repo_dir=reranked_repo_dir,
+                force_rerank=force_rerank,
+            )
+        )
+        return "/abs/weights/qwen-reranked-K81920"
+
+    monkeypatch.setattr(script, "prepare_reranked_repo", fake_prepare)
+
+    script._apply_mtp_head_k_rerank(cfg, logger=None)
+
+    assert calls == [
+        dict(
+            original_model_dir="weights/qwen",
+            K=81920,
+            reranked_repo_dir="weights/qwen-reranked-K81920",
+            force_rerank=False,
+        )
+    ]
+    assert cfg.hf_model == "/abs/weights/qwen-reranked-K81920"
+    assert cfg.mtp_config.hf_model == "/abs/weights/qwen-reranked-K81920"
+
+
+def test_qwen3_5_spec_draft_head_quant_defaults_to_w4():
+    cfg = build_spec_draft_quant_scheme()
+
+    assert cfg["quant_type"] == "w8a8h1_sefp"
+    assert cfg["nodes_cfg"]["lm_head"]["w_schema"] == {
+        "bits": 4,
+        "fp_mode": "ssfp",
+        "hidden_bit": False,
+    }
+
+
+def test_qwen3_5_spec_draft_head_quant_supports_w8_without_override():
+    cfg = build_spec_draft_quant_scheme(8)
+
+    assert cfg == {"quant_type": "w8a8h1_sefp"}
+
+
+def test_qwen3_5_spec_draft_head_quant_rejects_unsupported_bits():
+    with pytest.raises(ValueError, match="Expected 4 or 8"):
+        build_spec_draft_quant_scheme(6)
+
+
+@pytest.mark.parametrize("config_cls", [XHQwen3_5_MTPConfig, XHQwen3_5_DFlashConfig])
+def test_qwen3_5_spec_draft_configs_default_lm_head_to_w4(config_cls):
+    kwargs = dict(model_name="draft", hf_model="weights/draft")
+    if config_cls is XHQwen3_5_DFlashConfig:
+        kwargs["target_model_dir"] = "weights/target"
+
+    cfg = config_cls(**kwargs)
+
+    assert cfg.draft_head_weight_bits == 4
+    assert cfg.quant_scheme["nodes_cfg"]["lm_head"]["w_schema"]["bits"] == 4
+
+
+def test_qwen3_5_spec_draft_configs_keep_explicit_quant_scheme():
+    cfg = XHQwen3_5_MTPConfig(
+        model_name="draft",
+        hf_model="weights/draft",
+        draft_head_weight_bits=4,
+        quant_scheme=dict(quant_type="w8a8h1_sefp"),
+    )
+
+    assert cfg.quant_scheme == {"quant_type": "w8a8h1_sefp"}
+
+
+def test_qwen3_5_spec_draft_head_bits_propagate_from_main_config():
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_5",
+        hf_model="weights/target",
+        spec_draft_head_weight_bits=8,
+        mtp_config=dict(),
+        dflash_config=dict(hf_model="weights/dflash"),
+    )
+
+    assert cfg.mtp_config.draft_head_weight_bits == 8
+    assert cfg.mtp_config.quant_scheme == {"quant_type": "w8a8h1_sefp"}
+    assert cfg.dflash_config.draft_head_weight_bits == 8
+    assert cfg.dflash_config.quant_scheme == {"quant_type": "w8a8h1_sefp"}
 
 
 def test_qwen3_5_model_forwards_manual_depthwise_flag_to_wrap_cfg():

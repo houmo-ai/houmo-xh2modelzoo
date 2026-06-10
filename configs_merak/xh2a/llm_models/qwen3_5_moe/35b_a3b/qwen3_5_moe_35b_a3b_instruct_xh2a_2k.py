@@ -2,7 +2,7 @@ _base_ = [
     "../_qwen3_5_moe_xh2a_2k.py",
 ]
 
-hf_model_dir = "weights/Qwen3.6-35B-A3B"
+hf_model_dir = "/data01/home/yujy/work/xh2modelzoo/weights/Qwen3.6-35B-A3B"
 
 model = dict(
     hf_model=hf_model_dir,

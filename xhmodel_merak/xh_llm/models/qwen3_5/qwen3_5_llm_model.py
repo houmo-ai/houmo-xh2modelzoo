@@ -1016,15 +1016,28 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         meta_info.max_context_tokens = self.config.context_max_length
         if spec_decode_mode in ("mtp", "dflash"):
             num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
-            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
-            spec_block_size = num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
-            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+            draft_cfg = (
+                self.config.mtp_config if spec_decode_mode == "mtp" else self.config.dflash_config
+            )
+            draft_head_weight_bits = getattr(
+                draft_cfg,
+                "draft_head_weight_bits",
+                getattr(self.config, "spec_draft_head_weight_bits", 4),
+            )
+            hidden_output_name = (
+                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
+            )
+            spec_block_size = (
+                num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
+            )
             spec_decode_section = {
                 "mode": spec_decode_mode,
                 "block_size": spec_block_size,
                 "num_draft_tokens": num_draft_tokens,
+                "draft_head_weight_bits": draft_head_weight_bits,
                 "hidden_output_name": hidden_output_name,
             }
+            meta_info.spec_decode_draft_head_weight_bits = draft_head_weight_bits
             if spec_decode_mode == "mtp":
                 if hasattr(meta_info, "mtp_prefill_config"):
                     spec_decode_section["draft_prefill_onnx"] = meta_info.mtp_prefill_config.hmonnx

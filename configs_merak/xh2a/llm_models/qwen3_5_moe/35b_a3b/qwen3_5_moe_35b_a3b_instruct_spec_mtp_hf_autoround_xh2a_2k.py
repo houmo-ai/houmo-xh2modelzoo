@@ -7,6 +7,7 @@ model = dict(
     max_pe_length=32768,
     spec_decode_mode="mtp",
     num_draft_tokens=1,
+    spec_draft_head_weight_bits=4,
     output_post_norm_hidden=True,
     mtp_config=dict(
         hidden_size=2048,

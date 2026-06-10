@@ -24,6 +24,7 @@ model = dict(
     # spec decode: DFlash mode
     spec_decode_mode="dflash",
     num_draft_tokens=9,
+    spec_draft_head_weight_bits=4,
     output_hidden_state_indices=[1, 8, 15, 22, 29],
     dflash_config=dict(
         hf_model=dflash_model_dir,

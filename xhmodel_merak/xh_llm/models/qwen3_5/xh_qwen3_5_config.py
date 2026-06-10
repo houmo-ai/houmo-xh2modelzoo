@@ -4,6 +4,36 @@ from xhquant.api import QuantScheme
 from ...vision_llm_model import VisionLLMModelConfig
 
 
+DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
+
+
+def build_spec_draft_quant_scheme(head_weight_bits: int = 4) -> dict:
+    """Build the default MTP/DFlash draft quant scheme.
+
+    Draft graphs use the regular W8A8 base quantization, but the large logits
+    head is configurable.  Keep the default at W4 for spec-decode draft heads
+    unless callers provide an explicit per-draft ``quant_scheme``.
+    """
+    if head_weight_bits == 8:
+        return dict(quant_type=DRAFT_BASE_QUANT_TYPE)
+    if head_weight_bits != 4:
+        raise ValueError(
+            f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8."
+        )
+    return dict(
+        quant_type=DRAFT_BASE_QUANT_TYPE,
+        nodes_cfg=dict(
+            lm_head=dict(
+                w_schema=dict(
+                    bits=4,
+                    fp_mode="ssfp",
+                    hidden_bit=False,
+                )
+            )
+        ),
+    )
+
+
 class XHQwen3_5_VisualConfig(HFModelConfig):  # noqa: N801
     def __init__(
         self,
@@ -35,6 +65,7 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         context_max_length: int = 2048,
         max_pe_length: int = 262144,
         use_cache: bool = True,
+        draft_head_weight_bits: int = 4,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -46,6 +77,9 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         self.context_max_length = context_max_length
         self.max_pe_length = max_pe_length
         self.use_cache = use_cache
+        self.draft_head_weight_bits = draft_head_weight_bits
+        if getattr(self, "quant_scheme", None) is None:
+            self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
 
     @property
     def hf_model_dir(self) -> str:
@@ -68,6 +102,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         input_sequence_length: int = 1,
         max_pe_length: int = 262144,
         max_sequence_length: int = 256,
+        draft_head_weight_bits: int = 4,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -83,6 +118,9 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.input_sequence_length = input_sequence_length
         self.max_pe_length = max_pe_length
         self.max_sequence_length = max_sequence_length
+        self.draft_head_weight_bits = draft_head_weight_bits
+        if getattr(self, "quant_scheme", None) is None:
+            self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
 
     @property
     def dflash_model_dir(self) -> str:
@@ -116,6 +154,10 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         mtp_config: dict | XHQwen3_5_MTPConfig | None = None,
         dflash_config: dict | XHQwen3_5_DFlashConfig | None = None,
         num_draft_tokens: int = 4,
+        spec_draft_head_weight_bits: int = 4,
+        mtp_head_k: int | None = None,
+        reranked_repo_dir: str | None = None,
+        force_rerank: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -148,14 +190,27 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.use_manual_depthwise_conv1d = use_manual_depthwise_conv1d
         self.cumsum_matmul_quant_config = cumsum_matmul_quant_config
 
+        if spec_decode_mode in {"mtp", "dflash"} and int(batch_size) != 1:
+            raise ValueError(
+                "Qwen3.5 multi-batch export does not support "
+                f"spec_decode_mode={spec_decode_mode!r}; use batch_size=1 for MTP/DFlash "
+                "or disable spec_decode_mode for batch_size>1."
+            )
+
         self.spec_decode_mode = spec_decode_mode
         self.num_draft_tokens = num_draft_tokens
+        self.spec_draft_head_weight_bits = spec_draft_head_weight_bits
+        self.mtp_head_k = mtp_head_k
+        self.reranked_repo_dir = reranked_repo_dir
+        self.force_rerank = force_rerank
 
         if isinstance(mtp_config, dict):
             if "model_name" not in mtp_config:
                 mtp_config["model_name"] = f"{model_name}_mtp"
             if "hf_model" not in mtp_config:
                 mtp_config["hf_model"] = hf_model
+            if "draft_head_weight_bits" not in mtp_config:
+                mtp_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             mtp_config = XHQwen3_5_MTPConfig(**mtp_config)
         self.mtp_config = mtp_config
 
@@ -166,6 +221,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
                 dflash_config["hf_model"] = hf_model
             if "target_model_dir" not in dflash_config:
                 dflash_config["target_model_dir"] = hf_model
+            if "draft_head_weight_bits" not in dflash_config:
+                dflash_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             dflash_config = XHQwen3_5_DFlashConfig(**dflash_config)
         self.dflash_config = dflash_config
 

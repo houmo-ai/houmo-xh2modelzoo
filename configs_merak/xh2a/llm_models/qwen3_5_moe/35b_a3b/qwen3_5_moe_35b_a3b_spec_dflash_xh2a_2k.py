@@ -10,6 +10,7 @@ model = dict(
     max_pe_length=32768,
     spec_decode_mode="dflash",
     num_draft_tokens=9,
+    spec_draft_head_weight_bits=4,
     output_hidden_state_indices=[1, 10, 19, 28, 37],
     dflash_config=dict(
         hf_model=dflash_model_dir,

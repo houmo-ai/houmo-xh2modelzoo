@@ -23,6 +23,7 @@ model = dict(
     # spec decode: MTP mode
     spec_decode_mode="mtp",
     num_draft_tokens=4,
+    spec_draft_head_weight_bits=4,
     output_post_norm_hidden=True,
     mtp_config=dict(
         hidden_size=4096,
