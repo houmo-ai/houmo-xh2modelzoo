@@ -94,6 +94,22 @@ def _validate_dflash_target_layer_ids(target_layer_ids: List[int], max_layers: O
         )
 
 
+def _get_cfg_batch_size(cfg) -> int:
+    try:
+        return int(cfg.model.wrap_cfg.get("batch_size", 1))
+    except Exception:
+        return 1
+
+
+def _validate_spec_decode_batch_size(spec_decode_mode: Optional[str], batch_size: int) -> None:
+    if spec_decode_mode in {"mtp", "dflash"} and int(batch_size) != 1:
+        raise ValueError(
+            "Qwen3.5 dense multi-batch export does not support "
+            f"spec_decode_mode={spec_decode_mode!r}; use batch_size=1 for MTP/DFlash "
+            "or disable spec_decode_mode for batch_size>1."
+        )
+
+
 def _build_spec_draft_quant_config(head_weight_bits: int) -> ConfigDict:
     if head_weight_bits == 8:
         return ConfigDict(quant_type=DRAFT_BASE_QUANT_TYPE)
@@ -347,6 +363,71 @@ def _resolve_input_name(hm_model: HMONNXGoldenInference, candidates: Tuple[str, 
     if fallback is not None:
         return fallback(hm_model)
     raise ValueError(f"None of {candidates} found in inputs: {input_names}")
+
+
+def _resolve_input_names(hm_model: HMONNXGoldenInference, candidates: Tuple[str, ...], fallback=None) -> List[str]:
+    input_names = hm_model.get_input_names()
+    input_name_set = set(input_names)
+    for base_name in candidates:
+        if base_name in input_name_set:
+            return [base_name]
+        prefix = f"{base_name}_batch_"
+        batch_names = [
+            name
+            for name in input_names
+            if name.startswith(prefix) and name[len(prefix) :].isdigit()
+        ]
+        if batch_names:
+            return sorted(batch_names, key=lambda name: int(name.rsplit("_batch_", 1)[1]))
+    if fallback is not None:
+        return [fallback(hm_model)]
+    raise ValueError(f"None of {candidates} found in inputs: {input_names}")
+
+
+def _batch_index_from_name(name: str) -> Optional[int]:
+    match = re.search(r"_batch_(\d+)$", name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _select_batch_tensor(tensor: torch.Tensor, input_name: str, info) -> torch.Tensor:
+    batch_idx = _batch_index_from_name(input_name)
+    if batch_idx is None:
+        return tensor
+    selected = tensor[batch_idx : batch_idx + 1]
+    if list(selected.shape) != list(info.shape):
+        selected = selected.reshape(info.shape)
+    return selected
+
+
+def _build_length_tensor(value: int, input_name: str, info, device: torch.device) -> torch.Tensor:
+    batch_idx = _batch_index_from_name(input_name)
+    batch = 1 if batch_idx is not None else int(info.shape[0])
+    return torch.tensor([value] * batch, dtype=info.dtype, device=device).reshape(info.shape)
+
+
+def _build_position_tensor(start: int, input_name: str, info, device: torch.device) -> torch.Tensor:
+    del input_name
+    seq_len = int(info.shape[-1])
+    position_ids = torch.arange(start, start + seq_len, device=device, dtype=info.dtype)
+    if len(info.shape) == 1:
+        return position_ids.reshape(info.shape)
+    return position_ids.reshape((1, seq_len)).expand(info.shape).contiguous()
+
+
+def _collect_batch_outputs(output_map: Dict[str, torch.Tensor], base_name: str) -> torch.Tensor:
+    if base_name in output_map:
+        return output_map[base_name]
+    prefix = f"{base_name}_batch_"
+    batch_items = [
+        (int(name[len(prefix) :]), value)
+        for name, value in output_map.items()
+        if name.startswith(prefix) and name[len(prefix) :].isdigit()
+    ]
+    if not batch_items:
+        raise KeyError(f"Output {base_name!r} or {prefix}<idx> not found in outputs: {list(output_map)}")
+    return torch.cat([value for _, value in sorted(batch_items)], dim=0)
 
 
 def _infer_inputs_embeds_name(hm_model: HMONNXGoldenInference) -> str:
@@ -993,33 +1074,34 @@ def _generate_golden(
     if hasattr(prefill_session, "legacy_mode"):
         prefill_session.legacy_mode = False
 
-    prefill_inputs_name = _resolve_input_name(
+    prefill_inputs_names = _resolve_input_names(
         prefill_session,
         ("inputs_embeds", "input_1"),
         fallback=_infer_inputs_embeds_name,
     )
-    prefill_past_seq_name = _resolve_input_name(prefill_session, ("past_seq_length", "valid_length"))
-    prefill_current_seq_name = _resolve_input_name(prefill_session, ("current_input_length", "current_length"))
-    prefill_mask_name = _resolve_input_name(prefill_session, ("linear_attn_mask", "attention_mask", "attn_mask"))
+    prefill_past_seq_names = _resolve_input_names(prefill_session, ("past_seq_length", "valid_length"))
+    prefill_current_seq_names = _resolve_input_names(prefill_session, ("current_input_length", "current_length"))
+    prefill_mask_names = _resolve_input_names(prefill_session, ("linear_attn_mask", "attention_mask", "attn_mask"))
 
-    prefill_inputs_info = prefill_session.get_input(prefill_inputs_name)
-    prefill_mask_info = prefill_session.get_input(prefill_mask_name)
-    prefill_past_seq_info = prefill_session.get_input(prefill_past_seq_name)
-    prefill_current_seq_info = prefill_session.get_input(prefill_current_seq_name)
+    prefill_inputs_name_set = set(prefill_inputs_names)
+    prefill_past_seq_name_set = set(prefill_past_seq_names)
+    prefill_current_seq_name_set = set(prefill_current_seq_names)
+    prefill_mask_name_set = set(prefill_mask_names)
+
+    prefill_inputs_info = prefill_session.get_input(prefill_inputs_names[0])
+    prefill_batch = len(prefill_inputs_names) if _batch_index_from_name(prefill_inputs_names[0]) is not None else int(prefill_inputs_info.shape[0])
+    if input_ids_full.shape[0] == 1 and prefill_batch > 1:
+        prefill_input_ids = input_ids_full.repeat(prefill_batch, 1)
+    else:
+        prefill_input_ids = input_ids_full[:prefill_batch]
 
     prefill_inputs_embeds = _build_inputs_embeds(
         token_embedding,
-        input_ids_full,
+        prefill_input_ids,
         prefill_inputs_info.shape[1],
         pad_token_id,
         device,
         prefill_inputs_info.dtype,
-    )
-    prefill_linear_attn_mask = _build_linear_attn_mask(valid_len, prefill_mask_info, device)
-    prefill_batch = prefill_inputs_info.shape[0]
-    prefill_past_seq_length = torch.tensor([0] * prefill_batch, dtype=prefill_past_seq_info.dtype, device=device)
-    prefill_current_input_length = torch.tensor(
-        [valid_len] * prefill_batch, dtype=prefill_current_seq_info.dtype, device=device
     )
 
     prefill_seq_len = prefill_inputs_info.shape[1]
@@ -1028,22 +1110,30 @@ def _generate_golden(
     prefill_cache_inputs = _alloc_cache_inputs(prefill_session, device)
     prefill_input_feed: Dict[str, torch.Tensor] = {}
     for name in prefill_session.get_input_names():
-        if name == prefill_inputs_name:
-            prefill_input_feed[name] = prefill_inputs_embeds
-        elif name == prefill_past_seq_name:
-            prefill_input_feed[name] = prefill_past_seq_length
-        elif name == prefill_current_seq_name:
-            prefill_input_feed[name] = prefill_current_input_length
-        elif name == prefill_mask_name:
-            prefill_input_feed[name] = prefill_linear_attn_mask
-        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+        if name in prefill_inputs_name_set:
             info = prefill_session.get_input(name)
-            prefill_input_feed[name] = prefill_position_ids.to(dtype=info.dtype).reshape(info.shape)
+            prefill_input_feed[name] = _select_batch_tensor(prefill_inputs_embeds, name, info)
+        elif name in prefill_past_seq_name_set:
+            info = prefill_session.get_input(name)
+            prefill_input_feed[name] = _build_length_tensor(0, name, info, device)
+        elif name in prefill_current_seq_name_set:
+            info = prefill_session.get_input(name)
+            prefill_input_feed[name] = _build_length_tensor(valid_len, name, info, device)
+        elif name in prefill_mask_name_set:
+            info = prefill_session.get_input(name)
+            prefill_input_feed[name] = _build_linear_attn_mask(valid_len, info, device)
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or re.match(
+            r"^(time_position_ids|hight_position_ids|width_position_ids)_batch_\d+$", name
+        ):
+            info = prefill_session.get_input(name)
+            prefill_input_feed[name] = prefill_position_ids.to(dtype=info.dtype).reshape((1, prefill_seq_len)).expand(
+                info.shape
+            ).contiguous()
         else:
             prefill_input_feed[name] = prefill_cache_inputs[name]
 
     _, prefill_output_map = _run_hmonnx_with_golden(prefill_session, prefill_input_feed)
-    prefill_logits = prefill_output_map["logits"]
+    prefill_logits = _collect_batch_outputs(prefill_output_map, "logits")
     if args.num_logits_to_keep == 0:
         prefill_logits = prefill_logits[:, valid_len - 1 : valid_len, :]
     next_token_id, next_token_text = decode_next_token(tokenizer, prefill_logits)
@@ -1073,19 +1163,21 @@ def _generate_golden(
     if hasattr(decode_session, "legacy_mode"):
         decode_session.legacy_mode = False
 
-    decode_inputs_name = _resolve_input_name(
+    decode_inputs_names = _resolve_input_names(
         decode_session,
         ("inputs_embeds", "input_1"),
         fallback=_infer_inputs_embeds_name,
     )
-    decode_past_seq_name = _resolve_input_name(decode_session, ("past_seq_length", "valid_length"))
-    decode_current_seq_name = _resolve_input_name(decode_session, ("current_input_length", "current_length"))
-    decode_mask_name = _resolve_input_name(decode_session, ("linear_attn_mask", "attention_mask", "attn_mask"))
+    decode_past_seq_names = _resolve_input_names(decode_session, ("past_seq_length", "valid_length"))
+    decode_current_seq_names = _resolve_input_names(decode_session, ("current_input_length", "current_length"))
+    decode_mask_names = _resolve_input_names(decode_session, ("linear_attn_mask", "attention_mask", "attn_mask"))
 
-    decode_inputs_info = decode_session.get_input(decode_inputs_name)
-    decode_mask_info = decode_session.get_input(decode_mask_name)
-    decode_past_seq_info = decode_session.get_input(decode_past_seq_name)
-    decode_current_seq_info = decode_session.get_input(decode_current_seq_name)
+    decode_inputs_name_set = set(decode_inputs_names)
+    decode_past_seq_name_set = set(decode_past_seq_names)
+    decode_current_seq_name_set = set(decode_current_seq_names)
+    decode_mask_name_set = set(decode_mask_names)
+
+    decode_inputs_info = decode_session.get_input(decode_inputs_names[0])
 
     decode_input_ids = next_token_id.to(device)
     decode_inputs_embeds = _build_inputs_embeds(
@@ -1096,34 +1188,32 @@ def _generate_golden(
         device,
         decode_inputs_info.dtype,
     )
-    decode_linear_attn_mask = _build_linear_attn_mask(1, decode_mask_info, device)
-    decode_batch = decode_inputs_info.shape[0]
-    decode_past_seq_length = torch.tensor([valid_len] * decode_batch, dtype=decode_past_seq_info.dtype, device=device)
-    decode_current_input_length = torch.tensor([1] * decode_batch, dtype=decode_current_seq_info.dtype, device=device)
 
     decode_input_feed: Dict[str, torch.Tensor] = {}
     for name in decode_session.get_input_names():
-        if name == decode_inputs_name:
-            decode_input_feed[name] = decode_inputs_embeds
-        elif name == decode_past_seq_name:
-            decode_input_feed[name] = decode_past_seq_length
-        elif name == decode_current_seq_name:
-            decode_input_feed[name] = decode_current_input_length
-        elif name == decode_mask_name:
-            decode_input_feed[name] = decode_linear_attn_mask
-        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids"):
+        if name in decode_inputs_name_set:
             info = decode_session.get_input(name)
-            n_decode_tokens = decode_inputs_info.shape[1]
-            decode_pos = torch.arange(valid_len, valid_len + n_decode_tokens, device=device, dtype=info.dtype).reshape(
-                info.shape
-            )
-            decode_input_feed[name] = decode_pos
+            decode_input_feed[name] = _select_batch_tensor(decode_inputs_embeds, name, info)
+        elif name in decode_past_seq_name_set:
+            info = decode_session.get_input(name)
+            decode_input_feed[name] = _build_length_tensor(valid_len, name, info, device)
+        elif name in decode_current_seq_name_set:
+            info = decode_session.get_input(name)
+            decode_input_feed[name] = _build_length_tensor(1, name, info, device)
+        elif name in decode_mask_name_set:
+            info = decode_session.get_input(name)
+            decode_input_feed[name] = _build_linear_attn_mask(1, info, device)
+        elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or re.match(
+            r"^(time_position_ids|hight_position_ids|width_position_ids)_batch_\d+$", name
+        ):
+            info = decode_session.get_input(name)
+            decode_input_feed[name] = _build_position_tensor(valid_len, name, info, device)
         elif name.startswith("past_conv_cache_"):
             suffix = name[len("past_conv_cache_"):]
             decode_input_feed[name] = prefill_output_map[f"conv_cache_out_{suffix}"]
         elif name.startswith("past_recurrent_state_"):
-            idx = name.split("_")[-1]
-            decode_input_feed[name] = prefill_output_map[f"recurrent_state_out_{idx}"]
+            suffix = name[len("past_recurrent_state_"):]
+            decode_input_feed[name] = prefill_output_map[f"recurrent_state_out_{suffix}"]
         else:
             if name in prefill_cache_inputs:
                 decode_input_feed[name] = prefill_cache_inputs[name]
@@ -1382,6 +1472,9 @@ def _export_single_graph(
             model_cfg.wrap_cfg[key] = val
         logger.info(f"[{mode}] Spec decode config injected: {spec_decode_cfg}")
     input_sequence_length = model_cfg.wrap_cfg.input_sequence_length
+    batch_size = int(model_cfg.wrap_cfg.get("batch_size", 1))
+    if batch_size > 1 and input_ids.shape[0] != batch_size:
+        input_ids = input_ids[:1].repeat(batch_size, 1)
 
     qwen3_5_model: XHQwen3_5Model = MODELS.build(model_cfg)
     logger.info(f"[{mode}] Loading HF model with device_map='auto'")
@@ -1417,8 +1510,8 @@ def _export_single_graph(
         )
         data_batch = {
             "input_ids": input_ids_pad,
-            "past_seq_length": [0],
-            "current_input_length": [input_ids.shape[1]],
+            "past_seq_length": [0 for _ in range(batch_size)],
+            "current_input_length": [input_ids.shape[1] for _ in range(batch_size)],
         }
         onnx_prefix = f"{cfg_name}_prefill"
     else:
@@ -1452,8 +1545,8 @@ def _export_single_graph(
         )
         data_batch = {
             "input_ids": decode_input_ids,
-            "past_seq_length": [input_ids.shape[-1]],
-            "current_input_length": [decode_current_input_length],
+            "past_seq_length": [input_ids.shape[-1] for _ in range(batch_size)],
+            "current_input_length": [decode_current_input_length for _ in range(batch_size)],
         }
         onnx_prefix = f"{cfg_name}_decode"
 
@@ -1701,15 +1794,20 @@ def _build_normalized_meta(meta_info: ConfigDict, cfg, args) -> Dict[str, Any]:
         hf_config=meta_info.hf_config,
         token_embedding_file=meta_info.token_embedding_file,
         max_context_tokens=cfg.model.wrap_cfg.max_sequence_length,
+        wrap_cfg=cfg.model.wrap_cfg.to_dict() if hasattr(cfg.model.wrap_cfg, "to_dict") else dict(cfg.model.wrap_cfg),
         pad_token_id=meta_info.get("pad_token_id", None),
         kv_cache=dict(
             shape=meta_info.get("kv_cache_shape", None),
             num_decoder_layers=meta_info.get("num_full_attention_layers", None),
+            layer_indices=meta_info.get("full_attention_layer_indices", None),
         ),
         linear_cache=dict(
             conv_shape=meta_info.get("conv_cache_shape", None),
             recurrent_shape=meta_info.get("recurrent_state_shape", None),
             num_decoder_layers=meta_info.get("num_linear_attention_layers", None),
+            layer_indices=meta_info.get("linear_attention_layer_indices", None),
+            layers=meta_info.get("linear_cache_layers", []),
+            num_conv_caches=meta_info.get("num_conv_caches", None),
         ),
         spec_decode=dict(
             mode=meta_info.get("spec_decode_mode", None),
@@ -1845,18 +1943,78 @@ def _prepare_export_context(cfg, args, logger):
         logger.info("Skip precision checks (enable with --valid)")
 
     if qwen3_5_model.past_key_caches is not None and len(qwen3_5_model.past_key_caches) > 0:
+        batch_size = int(cfg.model.wrap_cfg.get("batch_size", 1))
         meta_info.kv_cache_shape = list(qwen3_5_model.past_key_caches[0].shape)
-        meta_info.num_full_attention_layers = len(qwen3_5_model.past_key_caches)
+        meta_info.num_full_attention_layers = (
+            len(qwen3_5_model.past_key_caches) // batch_size
+            if batch_size > 1
+            else len(qwen3_5_model.past_key_caches)
+        )
+        meta_info.full_attention_layer_indices = list(qwen3_5_model.full_attention_layer_indices)
     if (
         hasattr(qwen3_5_model, "past_conv_caches")
         and qwen3_5_model.past_conv_caches is not None
         and len(qwen3_5_model.past_conv_caches) > 0
     ):
+        batch_size = int(cfg.model.wrap_cfg.get("batch_size", 1))
         meta_info.conv_cache_shape = list(qwen3_5_model.past_conv_caches[0].shape)
+        meta_info.linear_cache_layers = []
+        split_conv_cache = bool(getattr(cfg.model.wrap_cfg, "split_conv_cache", False))
         if getattr(cfg.model.wrap_cfg, "split_conv_cache", False):
-            meta_info.num_linear_attention_layers = len(qwen3_5_model.past_recurrent_states)
+            meta_info.num_linear_attention_layers = (
+                len(qwen3_5_model.past_recurrent_states) // batch_size
+                if batch_size > 1
+                else len(qwen3_5_model.past_recurrent_states)
+            )
         else:
-            meta_info.num_linear_attention_layers = len(qwen3_5_model.past_conv_caches)
+            meta_info.num_linear_attention_layers = (
+                len(qwen3_5_model.past_conv_caches) // batch_size
+                if batch_size > 1
+                else len(qwen3_5_model.past_conv_caches)
+            )
+        for linear_idx in range(meta_info.num_linear_attention_layers):
+            if split_conv_cache:
+                if batch_size > 1:
+                    conv_start = linear_idx * 3 * batch_size
+                    conv_shapes = [
+                        list(qwen3_5_model.past_conv_caches[conv_start + branch_idx * batch_size + batch_idx].shape)
+                        for branch_idx in range(3)
+                        for batch_idx in range(batch_size)
+                    ]
+                else:
+                    conv_start = linear_idx * 3
+                    conv_shapes = [
+                        list(qwen3_5_model.past_conv_caches[conv_start + branch_idx].shape)
+                        for branch_idx in range(3)
+                    ]
+                layer_meta = dict(conv_shapes=conv_shapes)
+            else:
+                if batch_size > 1:
+                    conv_start = linear_idx * batch_size
+                    conv_shapes = [
+                        list(qwen3_5_model.past_conv_caches[conv_start + batch_idx].shape)
+                        for batch_idx in range(batch_size)
+                    ]
+                else:
+                    conv_shapes = [list(qwen3_5_model.past_conv_caches[linear_idx].shape)]
+                layer_meta = dict(conv_shapes=conv_shapes, conv_shape=conv_shapes[0])
+            if batch_size > 1:
+                rec_start = linear_idx * batch_size
+                recurrent_shapes = [
+                    list(qwen3_5_model.past_recurrent_states[rec_start + batch_idx].shape)
+                    for batch_idx in range(batch_size)
+                ]
+            else:
+                recurrent_shapes = [list(qwen3_5_model.past_recurrent_states[linear_idx].shape)]
+            layer_meta.update(
+                layer_idx=qwen3_5_model.linear_attention_layer_indices[linear_idx],
+                recurrent_shapes=recurrent_shapes,
+                recurrent_shape=recurrent_shapes[0],
+                per_batch=batch_size > 1,
+            )
+            meta_info.linear_cache_layers.append(layer_meta)
+        meta_info.linear_attention_layer_indices = list(qwen3_5_model.linear_attention_layer_indices)
+        meta_info.num_conv_caches = len(qwen3_5_model.past_conv_caches)
     if (
         hasattr(qwen3_5_model, "past_recurrent_states")
         and qwen3_5_model.past_recurrent_states is not None
@@ -2164,6 +2322,9 @@ def _draft_only_impl(cfg, args):
         raise FileNotFoundError(
             f"No export_meta_info.json or meta.json found under --existing_work_dir: {existing_work_dir}"
         )
+    existing_wrap_cfg = existing_meta.get("wrap_cfg", {})
+    existing_batch_size = int(existing_wrap_cfg.get("batch_size", 1)) if isinstance(existing_wrap_cfg, dict) else 1
+    _validate_spec_decode_batch_size(spec_decode_mode, existing_batch_size)
 
     prefill_onnx = _require_existing_meta_path(
         existing_work_dir,
@@ -2425,6 +2586,9 @@ def main(args):
                 args.config = str(existing_config_path)
 
     cfg = Config.fromfile(str(config_path))
+    if getattr(args, "batch_size", None) is not None:
+        cfg.model.wrap_cfg.batch_size = int(args.batch_size)
+    _validate_spec_decode_batch_size(getattr(args, "spec_decode_mode", None), _get_cfg_batch_size(cfg))
     cfg_name = config_path.stem
     if getattr(args, "draft_only", False):
         existing_work_dir = Path(args.existing_work_dir).resolve()
@@ -2534,6 +2698,14 @@ def parse_arguments():
         help="comma-separated no_split_module_classes for accelerate dispatch (default: auto)",
     )
     parser.add_argument("--max_sequence_length", type=int, default=8192)
+    parser.add_argument(
+        "--batch-size",
+        "--batch_size",
+        dest="batch_size",
+        type=int,
+        default=None,
+        help="Override model.wrap_cfg.batch_size for ordinary continue-batch export.",
+    )
     parser.add_argument(
         "--support_long_context_over_fp16_limit",
         action="store_true",

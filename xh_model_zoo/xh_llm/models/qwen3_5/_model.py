@@ -75,6 +75,81 @@ def _with_hf_alias(local_cls, registry_name: str):
     return mapping
 
 
+def _cat_single_batch_inputs(value, dim: int = 0):
+    if isinstance(value, (list, tuple)):
+        return torch.cat(list(value), dim=dim)
+    return value
+
+
+def _cat_exported_single_batch_inputs(value, batch_size: int, dim: int = 0):
+    """Concat graph inputs intentionally exported as one tensor per batch item."""
+    return torch.cat([value[batch_idx] for batch_idx in range(batch_size)], dim=dim)
+
+
+def _split_single_batch_outputs(value, batch_size: int):
+    if batch_size > 1:
+        return tuple(value[batch_idx : batch_idx + 1] for batch_idx in range(batch_size))
+    return value
+
+
+def _single_batch_cache_items(value, batch_size: int):
+    """Return cache tensors as one item per exported batch.
+
+    Continue-batch export exposes cache inputs/outputs as separate single-batch
+    tensors.  Keep that structure until after per-batch DynamicSlice so the
+    exported graph does not contain the compiler-hostile pattern
+    ``Concat(batch) -> DynamicSlice -> Slice(batch)`` on conv/state outputs.
+    """
+    if batch_size > 1:
+        if isinstance(value, (list, tuple)):
+            return tuple(_normalize_linear_conv_cache_rank(item) for item in value)
+        value = _normalize_linear_conv_cache_rank(value)
+        return tuple(value[batch_idx : batch_idx + 1] for batch_idx in range(batch_size))
+    return (_normalize_linear_conv_cache_rank(_cat_single_batch_inputs(value)),)
+
+
+def _slice_single_batch_items(slice_module, values, current_input_length, batch_size: int):
+    if batch_size > 1:
+        return tuple(
+            slice_module(
+                values[batch_idx],
+                current_input_length[batch_idx : batch_idx + 1],
+            )
+            for batch_idx in range(batch_size)
+        )
+    return slice_module(values[0], current_input_length)
+
+
+def _cat_single_batch_items(values, dim: int = 0):
+    if len(values) == 1:
+        return values[0]
+    return torch.cat(list(values), dim=dim)
+
+
+def _gather_last_token_per_batch(slice_module, hidden_states, current_input_length, batch_size: int):
+    """Gather the last valid token without BatchGather's batch-offset Add.
+
+    ``xhnn.BatchGather`` implements multi-batch gather by flattening the
+    sequence dimension and adding a constant per-batch offset to
+    ``current_input_length - 1``.  That leaves a raw integer ``Add`` in the
+    exported ONNX graph for batch > 1, which the current HMONNX runtime/compiler
+    does not accept.  Slice one batch row at a time instead so the exported graph
+    is expressed as independent DynamicSlice ops and a final batch concat.
+    """
+    if batch_size <= 1:
+        return slice_module(hidden_states, current_input_length - 1)
+    return torch.cat(
+        [
+            slice_module(
+                hidden_states[batch_idx : batch_idx + 1],
+                current_input_length[batch_idx : batch_idx + 1] - 1,
+            )
+            for batch_idx in range(batch_size)
+        ],
+        dim=0,
+    )
+
+
 def _resolve_python_int_length(value) -> Optional[int]:
     """Best-effort convert ``current_input_length`` to python int.
 
@@ -416,30 +491,74 @@ class _Qwen3_5TextAttention(DynamicModule):
             )
 
         if self.use_cache:
-            key_states = self.k_cache(
-                key_states, past_seq_length, current_input_length, past_k_cache
-            )
-            value_states = self.v_cache(
-                value_states, past_seq_length, current_input_length, past_v_cache
-            )
+            if self.batch_size > 1:
+                key_states_list = []
+                value_states_list = []
+                for batch_idx in range(self.batch_size):
+                    key_states_list.append(
+                        self.k_cache(
+                            key_states[batch_idx : batch_idx + 1],
+                            past_seq_length[batch_idx : batch_idx + 1],
+                            current_input_length[batch_idx : batch_idx + 1],
+                            past_k_cache[batch_idx],
+                        )
+                    )
+                    value_states_list.append(
+                        self.v_cache(
+                            value_states[batch_idx : batch_idx + 1],
+                            past_seq_length[batch_idx : batch_idx + 1],
+                            current_input_length[batch_idx : batch_idx + 1],
+                            past_v_cache[batch_idx],
+                        )
+                    )
+            else:
+                key_states = self.k_cache(
+                    key_states, past_seq_length, current_input_length, past_k_cache
+                )
+                value_states = self.v_cache(
+                    value_states, past_seq_length, current_input_length, past_v_cache
+                )
+        elif self.batch_size > 1:
+            key_states_list = [key_states[batch_idx : batch_idx + 1] for batch_idx in range(self.batch_size)]
+            value_states_list = [value_states[batch_idx : batch_idx + 1] for batch_idx in range(self.batch_size)]
 
         if self.use_bfp_flash_attention:
+            if self.batch_size > 1:
+                key_states = torch.cat(key_states_list, dim=0)
+                value_states = torch.cat(value_states_list, dim=0)
             attn_output = self.bfp_attn(query_states, key_states, value_states)
         else:
-            query_states = query_states * self.kv_scale
-            key_states = key_states.transpose(2, 3)
-            key_states = torch.repeat_interleave(
-                key_states, self.num_key_value_groups, dim=1
-            )
-            attn_weights = torch.matmul(query_states, key_states)
-            attn_weights = self.masked_softmax(attn_weights, past_seq_length)
-            value_states = torch.repeat_interleave(
-                value_states, self.num_key_value_groups, dim=1
-            )
-            attn_output = torch.matmul(attn_weights, value_states)
-            attn_output = attn_output.transpose(1, 2).reshape(
-                bsz, q_len, self.attn_hidden_dim
-            )
+            if self.batch_size > 1:
+                attn_out_list = []
+                for batch_idx in range(self.batch_size):
+                    q_i = query_states[batch_idx : batch_idx + 1] * self.kv_scale
+                    k_i = key_states_list[batch_idx].transpose(2, 3)
+                    k_i = torch.repeat_interleave(k_i, self.num_key_value_groups, dim=1)
+                    attn_weights_i = torch.matmul(q_i, k_i)
+                    attn_weights_i = self.masked_softmax(
+                        attn_weights_i, past_seq_length[batch_idx : batch_idx + 1]
+                    )
+                    v_i = torch.repeat_interleave(
+                        value_states_list[batch_idx], self.num_key_value_groups, dim=1
+                    )
+                    attn_out_list.append(torch.matmul(attn_weights_i, v_i))
+                attn_output = torch.cat(attn_out_list, dim=0)
+                attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.attn_hidden_dim)
+            else:
+                query_states = query_states * self.kv_scale
+                key_states = key_states.transpose(2, 3)
+                key_states = torch.repeat_interleave(
+                    key_states, self.num_key_value_groups, dim=1
+                )
+                attn_weights = torch.matmul(query_states, key_states)
+                attn_weights = self.masked_softmax(attn_weights, past_seq_length)
+                value_states = torch.repeat_interleave(
+                    value_states, self.num_key_value_groups, dim=1
+                )
+                attn_output = torch.matmul(attn_weights, value_states)
+                attn_output = attn_output.transpose(1, 2).reshape(
+                    bsz, q_len, self.attn_hidden_dim
+                )
 
         attn_output = attn_output * torch.sigmoid(gate)
         attn_output = self.o_proj(attn_output)
@@ -476,6 +595,7 @@ class _Qwen3_5TextAttention(DynamicModule):
                 self.out_fp_manbit,
             )
 
+        self.batch_size = cfg.get("batch_size", 1)
         self.use_cache = cfg.use_cache
         if self.use_cache:
             cache_axis = cfg.kv_cache.cache_axis
@@ -538,6 +658,8 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
             use_recurrent = (resolved_len == 1) if resolved_len is not None else False
 
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
+        if isinstance(recurrent_state, (list, tuple)):
+            recurrent_state = torch.cat(list(recurrent_state), dim=0)
 
         if getattr(self, "split_conv_cache", False):
             # === Split conv_cache path (3 separate q/k/v tensors) ===
@@ -555,9 +677,15 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                     raise RuntimeError(
                         f"Expected 3 conv caches for linear attention, got {len(conv_cache)}"
                     )
-                conv_cache_q = _normalize_linear_conv_cache_rank(conv_cache[0])
-                conv_cache_k = _normalize_linear_conv_cache_rank(conv_cache[1])
-                conv_cache_v = _normalize_linear_conv_cache_rank(conv_cache[2])
+                conv_cache_q_items = _single_batch_cache_items(
+                    conv_cache[0], self.batch_size
+                )
+                conv_cache_k_items = _single_batch_cache_items(
+                    conv_cache[1], self.batch_size
+                )
+                conv_cache_v_items = _single_batch_cache_items(
+                    conv_cache[2], self.batch_size
+                )
             else:
                 conv_cache, recurrent_state = _align_linear_cache_args(
                     conv_cache,
@@ -568,22 +696,43 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                     self.head_v_dim,
                 )
                 assert conv_cache is not None, "conv_cache is required"
-                conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
-                conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
-                    conv_cache,
-                    self.key_dim,
-                    self.value_dim,
-                    dim=1,
-                )
-            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
-                self.conv1d_q.weight.dtype
+                conv_cache_items = _single_batch_cache_items(conv_cache, self.batch_size)
+                split_items = [
+                    _split_linear_qkv_tensor(
+                        item,
+                        self.key_dim,
+                        self.value_dim,
+                        dim=1,
+                    )
+                    for item in conv_cache_items
+                ]
+                conv_cache_q_items = tuple(item[0] for item in split_items)
+                conv_cache_k_items = tuple(item[1] for item in split_items)
+                conv_cache_v_items = tuple(item[2] for item in split_items)
+            query_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_q_items[batch_idx], query_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_q.weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
-            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
-                self.conv1d_k.weight.dtype
+            key_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_k_items[batch_idx], key_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_k.weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
-            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
-                self.conv1d_v.weight.dtype
+            value_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_v_items[batch_idx], value_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_v.weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
+            query_states_new = _cat_single_batch_items(query_states_new_items, dim=0)
+            key_states_new = _cat_single_batch_items(key_states_new_items, dim=0)
+            value_states_new = _cat_single_batch_items(value_states_new_items, dim=0)
 
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
@@ -599,9 +748,24 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 )
             else:
                 conv_cache_out = (
-                    self.conv_cache_slice(query_states_new, current_input_length),
-                    self.conv_cache_slice(key_states_new, current_input_length),
-                    self.conv_cache_slice(value_states_new, current_input_length),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        query_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        key_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        value_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
                 )
             # QTL-341: prefer nn.Conv1d module so hmonnx emits a single Conv
             # node. nn.Conv1d here uses padding=K-1, so the output length is
@@ -666,10 +830,15 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 self.head_v_dim,
             )
             assert conv_cache is not None, "conv_cache is required"
-            conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
-            hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(
-                self.conv1d.weight.dtype
+            conv_cache_items = _single_batch_cache_items(conv_cache, self.batch_size)
+            hidden_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_items[batch_idx], mixed_qkv[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d.weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
+            hidden_states_new = _cat_single_batch_items(hidden_states_new_items, dim=0)
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 # Verify mode emits one conv state per draft step as a separate
                 # tensor of shape [B, conv_dim, kernel_size]. The runtime selects
@@ -682,8 +851,11 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                     for t in range(self.input_sequence_length)
                 )
             else:
-                conv_cache_out = self.conv_cache_slice(
-                    hidden_states_new, current_input_length
+                conv_cache_out = _slice_single_batch_items(
+                    self.conv_cache_slice,
+                    hidden_states_new_items,
+                    current_input_length,
+                    self.batch_size,
                 )
             if self.use_manual_depthwise_conv1d:
                 conv_out = _manual_depthwise_conv1d_tail(
@@ -812,6 +984,9 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 last_recurrent_state
                 if last_recurrent_state is not None
                 else recurrent_state
+            )
+            recurrent_state_out = _split_single_batch_outputs(
+                recurrent_state_out, self.batch_size
             )
 
         b_sz, s, n, h = z.shape
@@ -1280,6 +1455,7 @@ class _Qwen3_5TextModel(DynamicModule):
 
         self.llm_gather = xhnn.BatchGather(1)
         self.llm_gather.update_offset_indices(self.batch_size, input_seq_len)
+        self.llm_gather_slice = xhnn.DynamicSlice([1], [1], [1])
          
         self.cos = Cos()
         self.sin = Sin()
@@ -1378,7 +1554,11 @@ class _Qwen3_5TextModel(DynamicModule):
         attention_scaling: float,
     ) -> tuple[Tensor, Tensor]:
         position_ids = position_ids.to(inv_freq.device)
-        freqs = position_ids.reshape(-1, 1) * inv_freq.reshape(1, -1)
+        # Keep the leading position-id dimensions (batch, seq) instead of
+        # flattening them.  Continue-batch export traces q/k/v as
+        # [B, heads, S, D], so rotary cos/sin must be [B, 1, S, D].
+        # The batch=1 shape remains [1, 1, S, D], matching the old path.
+        freqs = position_ids.unsqueeze(-1) * inv_freq.reshape(1, 1, -1)
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = self.cos(emb) * attention_scaling
         sin = self.sin(emb) * attention_scaling
@@ -1405,13 +1585,12 @@ class _Qwen3_5TextModel(DynamicModule):
                     "cos_cached and sin_cached are required when use_precomputed_cache=True"
                 )
 
-            time_cos = cos_cached[time_position_ids.reshape(-1).to(cos_cached.device)]
-            time_sin = sin_cached[time_position_ids.reshape(-1).to(sin_cached.device)]
-            hight_cos = cos_cached[hight_position_ids.reshape(-1).to(cos_cached.device)]
-            hight_sin = sin_cached[hight_position_ids.reshape(-1).to(sin_cached.device)]
-            width_cos = cos_cached[width_position_ids.reshape(-1).to(cos_cached.device)]
-            width_sin = sin_cached[width_position_ids.reshape(-1).to(sin_cached.device)]
-            # Shapes: (seq_len, rotary_dim) → unsqueeze to (seq_len, 1, rotary_dim)
+            time_cos = cos_cached[time_position_ids.to(cos_cached.device)]
+            time_sin = sin_cached[time_position_ids.to(sin_cached.device)]
+            hight_cos = cos_cached[hight_position_ids.to(cos_cached.device)]
+            hight_sin = sin_cached[hight_position_ids.to(sin_cached.device)]
+            width_cos = cos_cached[width_position_ids.to(cos_cached.device)]
+            width_sin = sin_cached[width_position_ids.to(sin_cached.device)]
             time_cos = time_cos.unsqueeze(1)
             time_sin = time_sin.unsqueeze(1)
             hight_cos = hight_cos.unsqueeze(1)
@@ -1439,11 +1618,6 @@ class _Qwen3_5TextModel(DynamicModule):
         combined_cos = time_cos + hight_cos + width_cos
         combined_sin = time_sin + hight_sin + width_sin
 
-        # Flatten to (seq_len, rotary_dim) then reshape to (1, 1, seq_len, rotary_dim)
-        # Handles both cached path (may have extra dims from mask broadcast) and non-cached path
-        rotary_dim = combined_cos.shape[-1]
-        combined_cos = combined_cos.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
-        combined_sin = combined_sin.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
         return combined_cos, combined_sin
 
     def forward(
@@ -1464,6 +1638,23 @@ class _Qwen3_5TextModel(DynamicModule):
         Returns:
             hidden_states, conv_cache_out_list, recurrent_state_out_list
         """
+        if self.batch_size > 1:
+            input_embeds = _cat_exported_single_batch_inputs(input_embeds, self.batch_size)
+            time_position_ids = _cat_exported_single_batch_inputs(time_position_ids, self.batch_size)
+            hight_position_ids = _cat_exported_single_batch_inputs(hight_position_ids, self.batch_size)
+            width_position_ids = _cat_exported_single_batch_inputs(width_position_ids, self.batch_size)
+            past_seq_length = _cat_exported_single_batch_inputs(past_seq_length, self.batch_size)
+            current_input_length = _cat_exported_single_batch_inputs(current_input_length, self.batch_size)
+            linear_attn_mask = _cat_exported_single_batch_inputs(linear_attn_mask, self.batch_size)
+        else:
+            input_embeds = _cat_single_batch_inputs(input_embeds)
+            time_position_ids = _cat_single_batch_inputs(time_position_ids)
+            hight_position_ids = _cat_single_batch_inputs(hight_position_ids)
+            width_position_ids = _cat_single_batch_inputs(width_position_ids)
+            past_seq_length = _cat_single_batch_inputs(past_seq_length)
+            current_input_length = _cat_single_batch_inputs(current_input_length)
+            linear_attn_mask = _cat_single_batch_inputs(linear_attn_mask)
+
         hidden_states = input_embeds
         position_embeddings = self._build_qwen3_5_mrope_position_embeddings(
             time_position_ids=time_position_ids,
@@ -1495,16 +1686,29 @@ class _Qwen3_5TextModel(DynamicModule):
 
             if self.use_cache:
                 if layer_type == "full_attention":
-                    _past_k_cache = (
-                        past_key_cache[full_attn_cache_idx]
-                        if past_key_cache is not None
-                        else None
-                    )
-                    _past_v_cache = (
-                        past_value_cache[full_attn_cache_idx]
-                        if past_value_cache is not None
-                        else None
-                    )
+                    if self.batch_size > 1:
+                        start = full_attn_cache_idx * self.batch_size
+                        _past_k_cache = (
+                            [past_key_cache[start + batch_idx] for batch_idx in range(self.batch_size)]
+                            if past_key_cache is not None
+                            else None
+                        )
+                        _past_v_cache = (
+                            [past_value_cache[start + batch_idx] for batch_idx in range(self.batch_size)]
+                            if past_value_cache is not None
+                            else None
+                        )
+                    else:
+                        _past_k_cache = (
+                            past_key_cache[full_attn_cache_idx]
+                            if past_key_cache is not None
+                            else None
+                        )
+                        _past_v_cache = (
+                            past_value_cache[full_attn_cache_idx]
+                            if past_value_cache is not None
+                            else None
+                        )
                     _past_conv_cache = None
                     _past_recurrent_state = None
                     full_attn_cache_idx += 1
@@ -1512,23 +1716,50 @@ class _Qwen3_5TextModel(DynamicModule):
                     _past_k_cache = None
                     _past_v_cache = None
                     if self.split_conv_cache:
-                        _past_conv_cache = (
-                            tuple(
-                                past_conv_cache[linear_conv_cache_idx + offset]
-                                for offset in range(3)
+                        if self.batch_size > 1:
+                            _past_conv_cache = (
+                                tuple(
+                                    [
+                                        past_conv_cache[linear_conv_cache_idx + branch_idx * self.batch_size + batch_idx]
+                                        for batch_idx in range(self.batch_size)
+                                    ]
+                                    for branch_idx in range(3)
+                                )
+                                if past_conv_cache is not None
+                                else None
                             )
-                            if past_conv_cache is not None
-                            else None
-                        )
-                        linear_conv_cache_idx += 3
+                            linear_conv_cache_idx += 3 * self.batch_size
+                        else:
+                            _past_conv_cache = (
+                                tuple(
+                                    past_conv_cache[linear_conv_cache_idx + offset]
+                                    for offset in range(3)
+                                )
+                                if past_conv_cache is not None
+                                else None
+                            )
+                            linear_conv_cache_idx += 3
                     else:
-                        _past_conv_cache = (
-                            past_conv_cache[linear_attn_cache_idx]
-                            if past_conv_cache is not None
-                            else None
-                        )
+                        if self.batch_size > 1:
+                            start = linear_attn_cache_idx * self.batch_size
+                            _past_conv_cache = (
+                                [past_conv_cache[start + batch_idx] for batch_idx in range(self.batch_size)]
+                                if past_conv_cache is not None
+                                else None
+                            )
+                        else:
+                            _past_conv_cache = (
+                                past_conv_cache[linear_attn_cache_idx]
+                                if past_conv_cache is not None
+                                else None
+                            )
                     _past_recurrent_state = (
-                        past_recurrent_state[linear_attn_cache_idx]
+                        [
+                            past_recurrent_state[linear_attn_cache_idx * self.batch_size + batch_idx]
+                            for batch_idx in range(self.batch_size)
+                        ]
+                        if self.batch_size > 1 and past_recurrent_state is not None
+                        else past_recurrent_state[linear_attn_cache_idx]
                         if past_recurrent_state is not None
                         else None
                     )
@@ -1540,23 +1771,50 @@ class _Qwen3_5TextModel(DynamicModule):
                 _past_v_cache = None
                 if layer_type == "linear_attention":
                     if self.split_conv_cache:
-                        _past_conv_cache = (
-                            tuple(
-                                past_conv_cache[linear_conv_cache_idx + offset]
-                                for offset in range(3)
+                        if self.batch_size > 1:
+                            _past_conv_cache = (
+                                tuple(
+                                    [
+                                        past_conv_cache[linear_conv_cache_idx + branch_idx * self.batch_size + batch_idx]
+                                        for batch_idx in range(self.batch_size)
+                                    ]
+                                    for branch_idx in range(3)
+                                )
+                                if past_conv_cache is not None
+                                else None
                             )
-                            if past_conv_cache is not None
-                            else None
-                        )
-                        linear_conv_cache_idx += 3
+                            linear_conv_cache_idx += 3 * self.batch_size
+                        else:
+                            _past_conv_cache = (
+                                tuple(
+                                    past_conv_cache[linear_conv_cache_idx + offset]
+                                    for offset in range(3)
+                                )
+                                if past_conv_cache is not None
+                                else None
+                            )
+                            linear_conv_cache_idx += 3
                     else:
-                        _past_conv_cache = (
-                            past_conv_cache[linear_attn_cache_idx]
-                            if past_conv_cache is not None
-                            else None
-                        )
+                        if self.batch_size > 1:
+                            start = linear_attn_cache_idx * self.batch_size
+                            _past_conv_cache = (
+                                [past_conv_cache[start + batch_idx] for batch_idx in range(self.batch_size)]
+                                if past_conv_cache is not None
+                                else None
+                            )
+                        else:
+                            _past_conv_cache = (
+                                past_conv_cache[linear_attn_cache_idx]
+                                if past_conv_cache is not None
+                                else None
+                            )
                     _past_recurrent_state = (
-                        past_recurrent_state[linear_attn_cache_idx]
+                        [
+                            past_recurrent_state[linear_attn_cache_idx * self.batch_size + batch_idx]
+                            for batch_idx in range(self.batch_size)
+                        ]
+                        if self.batch_size > 1 and past_recurrent_state is not None
+                        else past_recurrent_state[linear_attn_cache_idx]
                         if past_recurrent_state is not None
                         else None
                     )
@@ -1577,17 +1835,32 @@ class _Qwen3_5TextModel(DynamicModule):
                     past_conv_cache=_past_conv_cache,
                     past_recurrent_state=_past_recurrent_state,
                 )
-                if isinstance(conv_cache_out, (list, tuple)):
-                    # Verify-intermediates: flatten per-step conv snapshots.
-                    conv_cache_out_list.extend(conv_cache_out)
-                else:
-                    conv_cache_out_list.append(conv_cache_out)
-                if isinstance(recurrent_state_out, (list, tuple)):
-                    # Verify-intermediates: flatten per-step snapshots into the
-                    # flat recurrent_state output list.
-                    recurrent_state_out_list.extend(recurrent_state_out)
-                else:
-                    recurrent_state_out_list.append(recurrent_state_out)
+                def _extend_single_batch(out_list, value):
+                    if isinstance(value, (list, tuple)):
+                        if (
+                            self.batch_size > 1
+                            and len(value) == self.batch_size
+                            and not any(isinstance(item, (list, tuple)) for item in value)
+                        ):
+                            # GatedDeltaNet already emitted one tensor per
+                            # batch item (e.g. after per-batch DynamicSlice).
+                            # Do not split those single-batch outputs again;
+                            # otherwise ONNX graph outputs double while the
+                            # export naming contract stays batch_size-wide.
+                            out_list.extend(value)
+                            return
+                        for item in value:
+                            _extend_single_batch(out_list, item)
+                    elif self.batch_size > 1:
+                        out_list.extend(
+                            value[batch_idx : batch_idx + 1]
+                            for batch_idx in range(self.batch_size)
+                        )
+                    else:
+                        out_list.append(value)
+
+                _extend_single_batch(conv_cache_out_list, conv_cache_out)
+                _extend_single_batch(recurrent_state_out_list, recurrent_state_out)
             else:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -1612,13 +1885,21 @@ class _Qwen3_5TextModel(DynamicModule):
         if self.output_hidden_state_indices is not None:
             target_hidden = torch.cat(collected_hidden_states, dim=-1)
             if self.num_logits_to_keep != 0:
-                target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
+                target_hidden = _gather_last_token_per_batch(
+                    self.llm_gather_slice,
+                    target_hidden,
+                    current_input_length,
+                    self.batch_size,
+                )
 
         if self.num_logits_to_keep == 0:
             pass
         else:
-            hidden_states = self.llm_gather(
-                hidden_states, current_input_length - 1
+            hidden_states = _gather_last_token_per_batch(
+                self.llm_gather_slice,
+                hidden_states,
+                current_input_length,
+                self.batch_size,
             )
         hidden_states = self.norm(hidden_states)
 
@@ -1691,6 +1972,7 @@ class _Qwen3_5ForConditionalGeneration(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
+        self.batch_size = int(cfg.get("batch_size", 1))
         self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_post_norm_hidden", False)
 
     def forward(
@@ -1724,8 +2006,10 @@ class _Qwen3_5ForConditionalGeneration(DynamicModule):
         conv_cache_out_list = result[1]
         recurrent_state_out_list = result[2]
         logits = self.lm_head(hidden_states)
+        logits = _split_single_batch_outputs(logits, self.batch_size)
         if self._has_extra_hidden_output:
-            return logits, conv_cache_out_list, recurrent_state_out_list, result[3]
+            extra_hidden = _split_single_batch_outputs(result[3], self.batch_size)
+            return logits, conv_cache_out_list, recurrent_state_out_list, extra_hidden
         return logits, conv_cache_out_list, recurrent_state_out_list
 
 
@@ -1737,6 +2021,7 @@ class _Qwen3_5ForCausalLM(DynamicModule):
 
     def _setup(self, cfg):
         self.cfg = cfg
+        self.batch_size = int(cfg.get("batch_size", 1))
         self._has_extra_hidden_output = cfg.get("output_hidden_state_indices") is not None or cfg.get("output_post_norm_hidden", False)
 
     def forward(
@@ -1770,8 +2055,10 @@ class _Qwen3_5ForCausalLM(DynamicModule):
         conv_cache_out_list = result[1]
         recurrent_state_out_list = result[2]
         logits = self.lm_head(hidden_states)
+        logits = _split_single_batch_outputs(logits, self.batch_size)
         if self._has_extra_hidden_output:
-            return logits, conv_cache_out_list, recurrent_state_out_list, result[3]
+            extra_hidden = _split_single_batch_outputs(result[3], self.batch_size)
+            return logits, conv_cache_out_list, recurrent_state_out_list, extra_hidden
         return logits, conv_cache_out_list, recurrent_state_out_list
 
 

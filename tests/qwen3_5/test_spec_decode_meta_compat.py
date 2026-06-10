@@ -197,12 +197,13 @@ def test_export_hmonnx_writes_spec_decode_section():
     assert "meta_info.decode_onnx = meta_info.decode_hmonnx" in src
     assert "meta_info.token_embedding_file = meta_info.quant_embedding" in src
     assert "meta_info.max_context_tokens" in src
+    assert "meta_info.spec_decode_draft_head_weight_bits" in src
 
 
 def test_export_hmonnx_spec_decode_fields():
     """Verify spec_decode section has fields expected by test scripts."""
     src = MERAK_MODEL.read_text()
-    for field in ("mode", "block_size", "hidden_output_name"):
+    for field in ("mode", "block_size", "draft_head_weight_bits", "hidden_output_name"):
         assert f'"{field}"' in src or f"'{field}'" in src, f"missing spec_decode field: {field}"
     assert "draft_prefill_onnx" in src
     assert "draft_decode_onnx" in src
@@ -406,6 +407,7 @@ def test_config_has_spec_decode_fields():
     arg_names = [a.arg for a in init_fn.args.args + init_fn.args.kwonlyargs]
     assert "spec_decode_mode" in arg_names
     assert "num_draft_tokens" in arg_names
+    assert "spec_draft_head_weight_bits" in arg_names
     assert "mtp_config" in arg_names
     assert "dflash_config" in arg_names
 

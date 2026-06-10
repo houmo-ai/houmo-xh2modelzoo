@@ -180,7 +180,7 @@ def run_batch_greedy(runtime, tokenizer, prompts: List[str], args):
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Qwen3.5-MoE continue-batch HMONNX demo with one prompt per exported batch item",
+        description="Qwen3.5 dense continue-batch HMONNX demo with one prompt per exported batch item",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", type=str, required=True)
@@ -236,7 +236,7 @@ def main():
     prompts = args.prompt
     if not prompts:
         prompts = [
-            "请用一句话介绍混合专家模型。",
+            "请用一句话介绍 Qwen3.5。",
             "请用一句话解释线性注意力。",
             "请给出一个 Python 列表推导式示例。",
             "请用英文回答：what is batch inference?",

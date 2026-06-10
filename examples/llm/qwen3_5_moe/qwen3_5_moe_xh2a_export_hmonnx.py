@@ -589,6 +589,9 @@ def _generate_draft_golden_for_onnx(
     """Run draft ONNX once and let HMONNXGoldenInference dump step_0 golden."""
     golden_dir.mkdir(exist_ok=True, parents=True)
     valid_len = input_ids_full.shape[1]
+    work_meta = _load_work_meta(work_dir, logger)
+    export_batch = int(work_meta.get("wrap_cfg", {}).get("batch_size", getattr(args, "batch_size", 1)))
+    input_ids_batch = input_ids_full.expand(export_batch, -1).contiguous()
     past_seq_val = valid_len if is_decode else 0
 
     session = _create_golden_session(onnx_file, golden_dir, device, logger)

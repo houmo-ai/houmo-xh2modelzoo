@@ -86,6 +86,10 @@ def _linear_split_conv_dims(linear_attn) -> tuple[int, int, int]:
     return q_dim, k_dim, v_dim
 
 
+def _split_batch_tensor(tensor: Tensor, batch_size: int) -> List[Tensor]:
+    return [tensor[batch_idx : batch_idx + 1] for batch_idx in range(batch_size)]
+
+
 @MODELS.register_module()
 class XHQwen3_5Model(LLMBaseModel):
     def __init__(
@@ -222,7 +226,8 @@ class XHQwen3_5Model(LLMBaseModel):
         self.pad_token_id = getattr(hf_model.config, "eos_token_id", None) or getattr(
             text_config, "eos_token_id", 151645
         )
-        batch_size = self.wrap_cfg.batch_size
+        batch_size = int(self.wrap_cfg.batch_size)
+        cache_batch_size = 1 if batch_size > 1 else batch_size
 
         self.layer_types = list(text_config.layer_types)
         self.full_attention_layer_indices = [
@@ -244,7 +249,14 @@ class XHQwen3_5Model(LLMBaseModel):
             "linear_attn_mask",
         ]
         if self.export_cfg is not None:
-            self.export_cfg.input_names = base_input_names
+            if batch_size > 1:
+                self.export_cfg.input_names = [
+                    f"{name}_batch_{batch_idx}"
+                    for name in base_input_names
+                    for batch_idx in range(batch_size)
+                ]
+            else:
+                self.export_cfg.input_names = base_input_names
 
         self.past_conv_caches = []
         self.past_recurrent_states = []
@@ -263,18 +275,31 @@ class XHQwen3_5Model(LLMBaseModel):
                 num_full_attn_layers = self.num_full_attention_layers
                 num_linear_attn_layers = self.num_linear_attention_layers
 
-            self.prepare_kv_cache(
-                num_full_attn_layers,
-                [
-                    batch_size,
-                    text_config.num_key_value_heads,
-                    self.cache_length,
-                    self.head_dim,
-                ],
-            )
+            kv_cache_shape = [
+                cache_batch_size,
+                text_config.num_key_value_heads,
+                self.cache_length,
+                self.head_dim,
+            ]
+            if batch_size > 1:
+                self.past_key_caches = []
+                self.past_value_caches = []
+                for _layer_idx in range(num_full_attn_layers):
+                    for _batch_idx in range(batch_size):
+                        self.past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+                        self.past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+                if self.export_cfg is not None:
+                    for layer_idx in range(num_full_attn_layers):
+                        for batch_idx in range(batch_size):
+                            self.export_cfg.input_names.append(f"past_key_cache_{layer_idx}_batch_{batch_idx}")
+                    for layer_idx in range(num_full_attn_layers):
+                        for batch_idx in range(batch_size):
+                            self.export_cfg.input_names.append(f"past_value_cache_{layer_idx}_batch_{batch_idx}")
+            else:
+                self.prepare_kv_cache(num_full_attn_layers, kv_cache_shape)
             self.prepare_linear_cache(num_linear_attn_layers)
         else:
-            self.prepare_kv_cache(0, [batch_size, 1, 0, 1])
+            self.prepare_kv_cache(0, [cache_batch_size, 1, 0, 1])
             self.prepare_linear_cache(self.num_linear_attention_layers)
 
         hf_model = None
@@ -288,7 +313,8 @@ class XHQwen3_5Model(LLMBaseModel):
         self.past_recurrent_states = []
         linear_layer_indices = self.linear_attention_layer_indices[:num_linear_attention_layers]
 
-        batch_size = self.wrap_cfg.batch_size
+        batch_size = int(self.wrap_cfg.batch_size)
+        cache_batch_size = 1 if batch_size > 1 else batch_size
         split_conv_cache = getattr(self, "split_conv_cache", False)
         text_model = self._get_wrap_text_model()
         for layer_idx in linear_layer_indices:
@@ -296,7 +322,7 @@ class XHQwen3_5Model(LLMBaseModel):
             assert layer.layer_type == "linear_attention", f"Layer {layer_idx} should be linear_attention"
             linear_attn = layer.linear_attn
             recurrent_cache_shape = [
-                batch_size,
+                cache_batch_size,
                 linear_attn.num_v_heads,
                 linear_attn.head_k_dim,
                 linear_attn.head_v_dim,
@@ -309,32 +335,60 @@ class XHQwen3_5Model(LLMBaseModel):
                     else linear_attn.conv1d.weight.dtype
                 )
                 q_dim, k_dim, v_dim = _linear_split_conv_dims(linear_attn)
-                # q/k/v: [batch_size, branch_dim, conv_kernel_size]
-                conv_cache_q_shape = [batch_size, q_dim, linear_attn.conv_kernel_size]
-                conv_cache_k_shape = [batch_size, k_dim, linear_attn.conv_kernel_size]
-                conv_cache_v_shape = [batch_size, v_dim, linear_attn.conv_kernel_size]
-                self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_q_shape, dtype=cache_dtype)))
-                self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_k_shape, dtype=cache_dtype)))
-                self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_v_shape, dtype=cache_dtype)))
+                # q/k/v: [1, branch_dim, conv_kernel_size] per exported batch
+                # item for continue-batch, otherwise [batch_size, ...].
+                conv_cache_q_shape = [cache_batch_size, q_dim, linear_attn.conv_kernel_size]
+                conv_cache_k_shape = [cache_batch_size, k_dim, linear_attn.conv_kernel_size]
+                conv_cache_v_shape = [cache_batch_size, v_dim, linear_attn.conv_kernel_size]
+                for shape in (conv_cache_q_shape, conv_cache_k_shape, conv_cache_v_shape):
+                    if batch_size > 1:
+                        for _batch_idx in range(batch_size):
+                            self.past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+                    else:
+                        self.past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
             else:
                 cache_dtype = linear_attn.conv1d.weight.dtype
-                conv_cache_shape = [batch_size, linear_attn.conv_dim, linear_attn.conv_kernel_size]
-                self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
+                conv_cache_shape = [cache_batch_size, linear_attn.conv_dim, linear_attn.conv_kernel_size]
+                if batch_size > 1:
+                    for _batch_idx in range(batch_size):
+                        self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
+                else:
+                    self.past_conv_caches.append(CacheTensor(torch.zeros(conv_cache_shape, dtype=cache_dtype)))
 
-            self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
+            if batch_size > 1:
+                for _batch_idx in range(batch_size):
+                    self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
+            else:
+                self.past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_cache_shape, dtype=cache_dtype)))
 
         if self.export_cfg is not None:
             if split_conv_cache:
                 for cache_idx in range(num_linear_attention_layers):
                     for branch in ("q", "k", "v"):
-                        self.export_cfg.input_names.append(f"past_conv_cache_{branch}_{cache_idx}")
+                        if batch_size > 1:
+                            for batch_idx in range(batch_size):
+                                self.export_cfg.input_names.append(f"past_conv_cache_{branch}_{cache_idx}_batch_{batch_idx}")
+                        else:
+                            self.export_cfg.input_names.append(f"past_conv_cache_{branch}_{cache_idx}")
             else:
                 for cache_idx in range(num_linear_attention_layers):
-                    self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}_batch_{batch_idx}")
+                    else:
+                        self.export_cfg.input_names.append(f"past_conv_cache_{cache_idx}")
             for cache_idx in range(num_linear_attention_layers):
-                self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
+                if batch_size > 1:
+                    for batch_idx in range(batch_size):
+                        self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}_batch_{batch_idx}")
+                else:
+                    self.export_cfg.input_names.append(f"past_recurrent_state_{cache_idx}")
             if self.use_cache:
-                output_names = ["logits"]
+                output_names = (
+                    [f"logits_batch_{batch_idx}" for batch_idx in range(batch_size)]
+                    if batch_size > 1
+                    else ["logits"]
+                )
                 # Verify-intermediates path expands BOTH conv_cache and
                 # recurrent_state into per-step snapshots so the runtime can
                 # pick the snapshot for the committed accepted_steps by name
@@ -350,30 +404,60 @@ class XHQwen3_5Model(LLMBaseModel):
                         for cache_idx in range(num_linear_attention_layers):
                             for branch in ("q", "k", "v"):
                                 for step_idx in range(verify_steps):
-                                    output_names.append(
-                                        f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"
-                                    )
+                                    if batch_size > 1:
+                                        for batch_idx in range(batch_size):
+                                            output_names.append(
+                                                f"conv_cache_out_{branch}_{cache_idx}_{step_idx}_batch_{batch_idx}"
+                                            )
+                                    else:
+                                        output_names.append(
+                                            f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"
+                                        )
                     else:
                         for cache_idx in range(num_linear_attention_layers):
                             for step_idx in range(verify_steps):
-                                output_names.append(
-                                    f"conv_cache_out_{cache_idx}_{step_idx}"
-                                )
+                                if batch_size > 1:
+                                    for batch_idx in range(batch_size):
+                                        output_names.append(
+                                            f"conv_cache_out_{cache_idx}_{step_idx}_batch_{batch_idx}"
+                                        )
+                                else:
+                                    output_names.append(
+                                        f"conv_cache_out_{cache_idx}_{step_idx}"
+                                    )
                     for cache_idx in range(num_linear_attention_layers):
                         for step_idx in range(verify_steps):
-                            output_names.append(
-                                f"recurrent_state_out_{cache_idx}_{step_idx}"
-                            )
+                            if batch_size > 1:
+                                for batch_idx in range(batch_size):
+                                    output_names.append(
+                                        f"recurrent_state_out_{cache_idx}_{step_idx}_batch_{batch_idx}"
+                                    )
+                            else:
+                                output_names.append(
+                                    f"recurrent_state_out_{cache_idx}_{step_idx}"
+                                )
                 else:
                     if split_conv_cache:
                         for cache_idx in range(num_linear_attention_layers):
                             for branch in ("q", "k", "v"):
-                                output_names.append(f"conv_cache_out_{branch}_{cache_idx}")
+                                if batch_size > 1:
+                                    for batch_idx in range(batch_size):
+                                        output_names.append(f"conv_cache_out_{branch}_{cache_idx}_batch_{batch_idx}")
+                                else:
+                                    output_names.append(f"conv_cache_out_{branch}_{cache_idx}")
                     else:
                         for cache_idx in range(num_linear_attention_layers):
-                            output_names.append(f"conv_cache_out_{cache_idx}")
+                            if batch_size > 1:
+                                for batch_idx in range(batch_size):
+                                    output_names.append(f"conv_cache_out_{cache_idx}_batch_{batch_idx}")
+                            else:
+                                output_names.append(f"conv_cache_out_{cache_idx}")
                     for cache_idx in range(num_linear_attention_layers):
-                        output_names.append(f"recurrent_state_out_{cache_idx}")
+                        if batch_size > 1:
+                            for batch_idx in range(batch_size):
+                                output_names.append(f"recurrent_state_out_{cache_idx}_batch_{batch_idx}")
+                        else:
+                            output_names.append(f"recurrent_state_out_{cache_idx}")
                 # Add spec_decode_hidden output if configured
                 if self.wrap_cfg.get("output_hidden_state_indices") is not None:
                     output_names.append("target_hidden")
@@ -473,14 +557,28 @@ class XHQwen3_5Model(LLMBaseModel):
             past_recurrent_states = [t.to(device) for t in past_recurrent_states]
             self.past_recurrent_states = past_recurrent_states
 
+        export_batch_size = int(self.wrap_cfg.get("batch_size", batch_size))
+        if export_batch_size > 1:
+            if batch_size != export_batch_size:
+                raise ValueError(
+                    f"Expected {export_batch_size} input rows for continue-batch export, got {batch_size}"
+                )
+            inputs_embeds = _split_batch_tensor(inputs_embeds, export_batch_size)
+            time_position_ids = _split_batch_tensor(time_position_ids, export_batch_size)
+            hight_position_ids = _split_batch_tensor(hight_position_ids, export_batch_size)
+            width_position_ids = _split_batch_tensor(width_position_ids, export_batch_size)
+            past_seq_length = _split_batch_tensor(past_seq_length, export_batch_size)
+            current_input_length = _split_batch_tensor(current_input_length, export_batch_size)
+            linear_attn_mask = _split_batch_tensor(linear_attn_mask, export_batch_size)
+
         return (
-            inputs_embeds.to(device),
+            inputs_embeds if export_batch_size > 1 else inputs_embeds.to(device),
             time_position_ids,
             hight_position_ids,
             width_position_ids,
-            past_seq_length.to(device),
+            past_seq_length if export_batch_size > 1 else past_seq_length.to(device),
             current_input_length,
-            linear_attn_mask.to(device),
+            linear_attn_mask if export_batch_size > 1 else linear_attn_mask.to(device),
             past_key_caches,
             past_value_caches,
             past_conv_caches,

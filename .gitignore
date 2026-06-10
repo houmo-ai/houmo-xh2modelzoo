@@ -228,3 +228,6 @@ QODER.md
 analysis
 tmp
 1758c05d216dc2bc4221653c0f43329b
+verify_logs
+# Local QTL export reports
+docs/qtl338_*.md

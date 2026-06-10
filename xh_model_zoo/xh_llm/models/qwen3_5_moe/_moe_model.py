@@ -101,6 +101,56 @@ def _split_single_batch_outputs(value, batch_size: int):
     return value
 
 
+def _single_batch_cache_items(value, batch_size: int):
+    """Return cache tensors as one item per exported batch.
+
+    Continue-batch export exposes cache inputs/outputs as separate single-batch
+    tensors.  Keep that structure until after per-batch DynamicSlice so the
+    exported graph avoids ``Concat(batch) -> DynamicSlice -> Slice(batch)`` on
+    conv/state outputs, which current compiler does not support.
+    """
+    if batch_size > 1:
+        if isinstance(value, (list, tuple)):
+            return tuple(_normalize_linear_conv_cache_rank(item) for item in value)
+        value = _normalize_linear_conv_cache_rank(value)
+        return tuple(value[batch_idx : batch_idx + 1] for batch_idx in range(batch_size))
+    return (_normalize_linear_conv_cache_rank(_cat_single_batch_inputs(value)),)
+
+
+def _slice_single_batch_items(slice_module, values, current_input_length, batch_size: int):
+    if batch_size > 1:
+        return tuple(
+            slice_module(
+                values[batch_idx],
+                current_input_length[batch_idx : batch_idx + 1],
+            )
+            for batch_idx in range(batch_size)
+        )
+    return slice_module(values[0], current_input_length)
+
+
+def _cat_single_batch_items(values, dim: int = 0):
+    if len(values) == 1:
+        return values[0]
+    return torch.cat(list(values), dim=dim)
+
+
+def _gather_last_token_per_batch(slice_module, hidden_states, current_input_length, batch_size: int):
+    """Gather the last valid token without BatchGather's batch-offset Add."""
+    if batch_size <= 1:
+        return slice_module(hidden_states, current_input_length - 1)
+    return torch.cat(
+        [
+            slice_module(
+                hidden_states[batch_idx : batch_idx + 1],
+                current_input_length[batch_idx : batch_idx + 1] - 1,
+            )
+            for batch_idx in range(batch_size)
+        ],
+        dim=0,
+    )
+
+
 def _resolve_python_int_length(value) -> Optional[int]:
     """Best-effort convert ``current_input_length`` to python int.
 
@@ -694,23 +744,44 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 conv_cache_q, conv_cache_k, conv_cache_v = _split_linear_qkv_tensor(
                     conv_cache, self.key_dim, self.value_dim, dim=1,
                 )
-            conv_cache_q = _cat_single_batch_inputs(conv_cache_q)
-            conv_cache_k = _cat_single_batch_inputs(conv_cache_k)
-            conv_cache_v = _cat_single_batch_inputs(conv_cache_v)
+            conv_cache_q_items = _single_batch_cache_items(
+                conv_cache_q, self.batch_size
+            )
+            conv_cache_k_items = _single_batch_cache_items(
+                conv_cache_k, self.batch_size
+            )
+            conv_cache_v_items = _single_batch_cache_items(
+                conv_cache_v, self.batch_size
+            )
 
             query_states, key_states, value_states = _split_linear_qkv_tensor(
                 mixed_qkv_t, self.key_dim, self.value_dim, dim=1,
             )
 
-            query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(
-                self.conv1d_q_manual_weight.dtype
+            query_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_q_items[batch_idx], query_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_q_manual_weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
-            key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(
-                self.conv1d_k_manual_weight.dtype
+            key_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_k_items[batch_idx], key_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_k_manual_weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
-            value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(
-                self.conv1d_v_manual_weight.dtype
+            value_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_v_items[batch_idx], value_states[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d_v_manual_weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
+            query_states_new = _cat_single_batch_items(query_states_new_items, dim=0)
+            key_states_new = _cat_single_batch_items(key_states_new_items, dim=0)
+            value_states_new = _cat_single_batch_items(value_states_new_items, dim=0)
 
             _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
@@ -727,9 +798,24 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 )
             else:
                 conv_cache_out = (
-                    self.conv_cache_slice(query_states_new, current_input_length),
-                    self.conv_cache_slice(key_states_new, current_input_length),
-                    self.conv_cache_slice(value_states_new, current_input_length),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        query_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        key_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
+                    _slice_single_batch_items(
+                        self.conv_cache_slice,
+                        value_states_new_items,
+                        current_input_length,
+                        self.batch_size,
+                    ),
                 )
 
             # QTL-341: prefer nn.Conv1d module so hmonnx emits a single Conv
@@ -782,12 +868,17 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             )
         else:
             # --- Original merged conv_cache path ---
-            conv_cache = _cat_single_batch_inputs(conv_cache)
+            conv_cache_items = _single_batch_cache_items(conv_cache, self.batch_size)
             mixed_qkv = mixed_qkv.transpose(1, 2)  # [bs, conv_dim, seq]
 
-            hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(
-                self.conv1d.weight.dtype
+            hidden_states_new_items = tuple(
+                torch.cat(
+                    [conv_cache_items[batch_idx], mixed_qkv[batch_idx : batch_idx + 1]],
+                    dim=-1,
+                ).to(self.conv1d.weight.dtype)
+                for batch_idx in range(self.batch_size)
             )
+            hidden_states_new = _cat_single_batch_items(hidden_states_new_items, dim=0)
             _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 # Verify mode emits one conv state per draft step as a separate
@@ -798,8 +889,11 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                     for t in range(self.input_sequence_length)
                 )
             else:
-                conv_cache_out = self.conv_cache_slice(
-                    hidden_states_new, current_input_length
+                conv_cache_out = _slice_single_batch_items(
+                    self.conv_cache_slice,
+                    hidden_states_new_items,
+                    current_input_length,
+                    self.batch_size,
                 )
             if self.use_manual_depthwise_conv1d:
                 conv_out = _manual_depthwise_conv1d_tail(
@@ -927,6 +1021,9 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
                 last_recurrent_state
                 if last_recurrent_state is not None
                 else recurrent_state
+            )
+            recurrent_state_out = _split_single_batch_outputs(
+                recurrent_state_out, self.batch_size
             )
 
         if _expand_verify_tokens:
@@ -1384,6 +1481,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
         self.llm_gather = xhnn.BatchGather(1)
         self.llm_gather.update_offset_indices(self.batch_size, input_seq_len)
+        self.llm_gather_slice = xhnn.DynamicSlice([1], [1], [1])
 
         def _llm_gather_update_cfg(self_g: xhnn.BatchGather, cfg_inner: Optional[Dict] = None):
             input_seq_len_inner = cfg_inner.input_sequence_length
@@ -1708,6 +1806,18 @@ class _Qwen3_5MoeTextModel(DynamicModule):
                 # batch item.  Preserve branch/step order while splitting.
                 def _extend_single_batch(out_list, value):
                     if isinstance(value, (list, tuple)):
+                        if (
+                            self.batch_size > 1
+                            and len(value) == self.batch_size
+                            and not any(isinstance(item, (list, tuple)) for item in value)
+                        ):
+                            # GatedDeltaNet already emitted one tensor per
+                            # batch item (e.g. after per-batch DynamicSlice).
+                            # Do not split those single-batch outputs again;
+                            # otherwise ONNX graph outputs double while the
+                            # export naming contract stays batch_size-wide.
+                            out_list.extend(value)
+                            return
                         for item in value:
                             _extend_single_batch(out_list, item)
                     elif self.batch_size > 1:
@@ -1752,11 +1862,21 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         if self.num_logits_to_keep == 0:
             pass
         else:
-            hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
+            hidden_states = _gather_last_token_per_batch(
+                self.llm_gather_slice,
+                hidden_states,
+                current_input_length,
+                self.batch_size,
+            )
         if self.output_hidden_state_indices is not None:
             target_hidden = torch.cat(collected_hidden_states, dim=-1)
             if self.num_logits_to_keep != 0:
-                target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
+                target_hidden = _gather_last_token_per_batch(
+                    self.llm_gather_slice,
+                    target_hidden,
+                    current_input_length,
+                    self.batch_size,
+                )
 
         # MTP draft consumes the POST-norm hidden state (vLLM/LMDeploy convention).
         hidden_states = self.norm(hidden_states)

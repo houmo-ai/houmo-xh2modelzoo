@@ -56,6 +56,17 @@ def _extract_quant_method(config: AutoConfig) -> Optional[str]:
 
 def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
     result = self._qwen3_5_original_forward(*args, **kwargs)
+    batch_size = int(getattr(getattr(self, "cfg", None), "get", lambda *_: 1)("batch_size", 1))
+
+    def _append_batch(outputs: List[torch.Tensor], value):
+        if isinstance(value, (list, tuple)):
+            outputs.extend(value)
+            return
+        if batch_size > 1:
+            outputs.extend(value[batch_idx : batch_idx + 1] for batch_idx in range(batch_size))
+        else:
+            outputs.append(value)
+
     # Handle 3-tuple (logits, conv_caches, recurrent_states) and
     # 4-tuple (+ post_norm_hidden or target_hidden for spec decode).
     if len(result) == 4:
@@ -64,13 +75,14 @@ def _flatten_cache_outputs(self: nn.Module, *args, **kwargs):
         logits, conv_cache_out_list, recurrent_state_out_list = result
         hidden_output = None
 
-    outputs: List[torch.Tensor] = [logits]
+    outputs: List[torch.Tensor] = []
+    _append_batch(outputs, logits)
     if conv_cache_out_list is not None:
         outputs.extend(list(conv_cache_out_list))
     if recurrent_state_out_list is not None:
         outputs.extend(list(recurrent_state_out_list))
     if hidden_output is not None:
-        outputs.append(hidden_output)
+        _append_batch(outputs, hidden_output)
     return tuple(outputs)
 
 
@@ -125,6 +137,19 @@ def _build_spec_draft_quant_config(head_weight_bits: int) -> ConfigDict:
 
 
 _LINEAR_CONV_CACHE_BRANCHES = ("q", "k", "v")
+
+
+def _split_batch_tensor(tensor: torch.Tensor, batch_size: int) -> List[torch.Tensor]:
+    return [tensor[i : i + 1] for i in range(batch_size)]
+
+
+def _validate_spec_decode_batch_size(spec_decode_mode: Optional[str], batch_size: int) -> None:
+    if spec_decode_mode in {"mtp", "dflash"} and int(batch_size) != 1:
+        raise ValueError(
+            "Qwen3.5 dense multi-batch export does not support "
+            f"spec_decode_mode={spec_decode_mode!r}; use batch_size=1 for MTP/DFlash "
+            "or disable spec_decode_mode for batch_size>1."
+        )
 
 
 class Qwen3_5ConverterXH2a(HFTransfromersConverter):
@@ -245,6 +270,7 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
 
         qwen3_5_register_wrap_modules()
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
+        _validate_spec_decode_batch_size(spec_decode_mode, self.config.batch_size)
         output_post_norm_hidden = spec_decode_mode == "mtp"
         output_hidden_state_indices = None
         if spec_decode_mode == "dflash":
@@ -293,20 +319,30 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         ]
 
         head_dim = text_config.head_dim
-        kv_cache_shape = [
-            self.config.batch_size,
-            text_config.num_key_value_heads,
-            context_length,
-            head_dim,
-        ]
-        past_key_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            for _ in full_attention_layer_indices
-        ]
-        past_value_caches = [
-            CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
-            for _ in full_attention_layer_indices
-        ]
+        batch_size = int(self.config.batch_size)
+        if batch_size > 1:
+            kv_cache_shape = [1, text_config.num_key_value_heads, context_length, head_dim]
+            past_key_caches = []
+            past_value_caches = []
+            for _ in full_attention_layer_indices:
+                for _batch_idx in range(batch_size):
+                    past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+                    past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+        else:
+            kv_cache_shape = [
+                batch_size,
+                text_config.num_key_value_heads,
+                context_length,
+                head_dim,
+            ]
+            past_key_caches = [
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+                for _ in full_attention_layer_indices
+            ]
+            past_value_caches = [
+                CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16))
+                for _ in full_attention_layer_indices
+            ]
 
         past_conv_caches = []
         past_recurrent_states = []
@@ -320,57 +356,91 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
                     else linear_attn.conv1d.weight.dtype
                 )
                 conv_shape_q = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.head_k_dim * linear_attn.num_v_heads,
                     linear_attn.conv_kernel_size,
                 ]
                 conv_shape_k = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.head_k_dim * linear_attn.num_v_heads,
                     linear_attn.conv_kernel_size,
                 ]
                 conv_shape_v = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.head_v_dim * linear_attn.num_v_heads,
                     linear_attn.conv_kernel_size,
                 ]
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_q, dtype=cache_dtype)))
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_k, dtype=cache_dtype)))
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape_v, dtype=cache_dtype)))
+                conv_shapes = [conv_shape_q, conv_shape_k, conv_shape_v]
+                if batch_size > 1:
+                    expanded_conv_shapes = []
+                    for shape in conv_shapes:
+                        for _batch_idx in range(batch_size):
+                            past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
+                            expanded_conv_shapes.append(list(shape))
+                else:
+                    expanded_conv_shapes = conv_shapes
+                    for shape in conv_shapes:
+                        past_conv_caches.append(CacheTensor(torch.zeros(shape, dtype=cache_dtype)))
                 recurrent_shape = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.num_v_heads,
                     linear_attn.head_k_dim,
                     linear_attn.head_v_dim,
                 ]
-                past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                if batch_size > 1:
+                    recurrent_shapes = []
+                    for _batch_idx in range(batch_size):
+                        past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                        recurrent_shapes.append(list(recurrent_shape))
+                else:
+                    recurrent_shapes = [recurrent_shape]
+                    past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
                 linear_cache_meta.append(
                     dict(
                         layer_idx=layer_idx,
-                        conv_shapes=[conv_shape_q, conv_shape_k, conv_shape_v],
+                        conv_shapes=expanded_conv_shapes,
+                        recurrent_shapes=recurrent_shapes,
                         recurrent_shape=recurrent_shape,
+                        per_batch=batch_size > 1,
                     )
                 )
             else:
                 cache_dtype = linear_attn.conv1d.weight.dtype
                 conv_shape = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.conv_dim,
                     linear_attn.conv_kernel_size,
                 ]
+                if batch_size > 1:
+                    expanded_conv_shapes = []
+                    for _batch_idx in range(batch_size):
+                        past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
+                        expanded_conv_shapes.append(list(conv_shape))
+                else:
+                    expanded_conv_shapes = [conv_shape]
+                    past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
                 recurrent_shape = [
-                    self.config.batch_size,
+                    1 if batch_size > 1 else batch_size,
                     linear_attn.num_v_heads,
                     linear_attn.head_k_dim,
                     linear_attn.head_v_dim,
                 ]
-                past_conv_caches.append(CacheTensor(torch.zeros(conv_shape, dtype=cache_dtype)))
-                past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                if batch_size > 1:
+                    recurrent_shapes = []
+                    for _batch_idx in range(batch_size):
+                        past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
+                        recurrent_shapes.append(list(recurrent_shape))
+                else:
+                    recurrent_shapes = [recurrent_shape]
+                    past_recurrent_states.append(CacheTensor(torch.zeros(recurrent_shape, dtype=cache_dtype)))
                 linear_cache_meta.append(
                     dict(
                         layer_idx=layer_idx,
+                        conv_shapes=expanded_conv_shapes,
                         conv_shape=conv_shape,
+                        recurrent_shapes=recurrent_shapes,
                         recurrent_shape=recurrent_shape,
+                        per_batch=batch_size > 1,
                     )
                 )
 
@@ -476,51 +546,123 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         hight_position_ids = position_ids
         width_position_ids = position_ids
 
+        batch_size = int(self.config.batch_size)
+        if batch_size > 1:
+            # Export every batch item as an independent graph input.  The
+            # wrapper concatenates those single-batch tensors before compute and
+            # splits logits/cache outputs back to single-batch tensors so the
+            # runtime can maintain per-request KV/linear caches.
+            graph_inputs_embeds = _split_batch_tensor(inputs_embeds, batch_size)
+            graph_time_position_ids = _split_batch_tensor(time_position_ids, batch_size)
+            graph_hight_position_ids = _split_batch_tensor(hight_position_ids, batch_size)
+            graph_width_position_ids = _split_batch_tensor(width_position_ids, batch_size)
+            graph_past_seq_length = _split_batch_tensor(past_seq_length_t, batch_size)
+            graph_current_input_length = _split_batch_tensor(current_input_length_t, batch_size)
+            graph_linear_attn_mask = _split_batch_tensor(linear_attn_mask_t, batch_size)
+        else:
+            graph_inputs_embeds = inputs_embeds
+            graph_time_position_ids = time_position_ids
+            graph_hight_position_ids = hight_position_ids
+            graph_width_position_ids = width_position_ids
+            graph_past_seq_length = past_seq_length_t
+            graph_current_input_length = current_input_length_t
+            graph_linear_attn_mask = linear_attn_mask_t
+
         inputs = (
-            inputs_embeds,
-            time_position_ids,
-            hight_position_ids,
-            width_position_ids,
-            past_seq_length_t,
-            current_input_length_t,
-            linear_attn_mask_t,
+            graph_inputs_embeds,
+            graph_time_position_ids,
+            graph_hight_position_ids,
+            graph_width_position_ids,
+            graph_past_seq_length,
+            graph_current_input_length,
+            graph_linear_attn_mask,
             past_key_caches,
             past_value_caches,
             past_conv_caches,
             past_recurrent_states,
         )
 
-        input_names = [
-            "inputs_embeds",
-            "time_position_ids",
-            "hight_position_ids",
-            "width_position_ids",
-            "past_seq_length",
-            "current_input_length",
-            "linear_attn_mask",
-        ]
+        if batch_size > 1:
+            input_names = []
+            for base_name in (
+                "inputs_embeds",
+                "time_position_ids",
+                "hight_position_ids",
+                "width_position_ids",
+                "past_seq_length",
+                "current_input_length",
+                "linear_attn_mask",
+            ):
+                for batch_idx in range(batch_size):
+                    input_names.append(f"{base_name}_batch_{batch_idx}")
+        else:
+            input_names = [
+                "inputs_embeds",
+                "time_position_ids",
+                "hight_position_ids",
+                "width_position_ids",
+                "past_seq_length",
+                "current_input_length",
+                "linear_attn_mask",
+            ]
         for layer_idx in range(len(full_attention_layer_indices)):
-            input_names.append(f"past_key_cache_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_key_cache_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(len(full_attention_layer_indices)):
-            input_names.append(f"past_value_cache_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_value_cache_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_value_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
             if self.config.split_conv_cache:
                 for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                    input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            input_names.append(f"past_conv_cache_{branch}_{layer_idx}_batch_{batch_idx}")
+                    else:
+                        input_names.append(f"past_conv_cache_{branch}_{layer_idx}")
             else:
-                input_names.append(f"past_conv_cache_{layer_idx}")
+                if batch_size > 1:
+                    for batch_idx in range(batch_size):
+                        input_names.append(f"past_conv_cache_{layer_idx}_batch_{batch_idx}")
+                else:
+                    input_names.append(f"past_conv_cache_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            input_names.append(f"past_recurrent_state_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    input_names.append(f"past_recurrent_state_{layer_idx}_batch_{batch_idx}")
+            else:
+                input_names.append(f"past_recurrent_state_{layer_idx}")
 
-        output_names_base = ["logits"]
+        output_names_base = (
+            [f"logits_batch_{batch_idx}" for batch_idx in range(batch_size)]
+            if batch_size > 1
+            else ["logits"]
+        )
         for layer_idx in range(len(linear_attention_layer_indices)):
             if self.config.split_conv_cache:
                 for branch in _LINEAR_CONV_CACHE_BRANCHES:
-                    output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}_batch_{batch_idx}")
+                    else:
+                        output_names_base.append(f"conv_cache_out_{branch}_{layer_idx}")
             else:
-                output_names_base.append(f"conv_cache_out_{layer_idx}")
+                if batch_size > 1:
+                    for batch_idx in range(batch_size):
+                        output_names_base.append(f"conv_cache_out_{layer_idx}_batch_{batch_idx}")
+                else:
+                    output_names_base.append(f"conv_cache_out_{layer_idx}")
         for layer_idx in range(len(linear_attention_layer_indices)):
-            output_names_base.append(f"recurrent_state_out_{layer_idx}")
+            if batch_size > 1:
+                for batch_idx in range(batch_size):
+                    output_names_base.append(f"recurrent_state_out_{layer_idx}_batch_{batch_idx}")
+            else:
+                output_names_base.append(f"recurrent_state_out_{layer_idx}")
 
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
         num_draft_tokens = int(getattr(self.config, "num_draft_tokens", 4))
@@ -542,23 +684,53 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         # Spec decode verify runs draft tokens + the current token in one decode
         # pass and emits per-step linear-attention intermediates for accept/reject.
         if spec_decode_mode:
-            decode_output_names = ["logits"]
+            decode_output_names = (
+                [f"logits_batch_{batch_idx}" for batch_idx in range(batch_size)]
+                if batch_size > 1
+                else ["logits"]
+            )
             for layer_idx in range(len(linear_attention_layer_indices)):
                 if self.config.split_conv_cache:
                     for branch in _LINEAR_CONV_CACHE_BRANCHES:
                         for step_idx in range(verify_length):
-                            decode_output_names.append(f"conv_cache_out_{branch}_{layer_idx}_{step_idx}")
+                            if batch_size > 1:
+                                for batch_idx in range(batch_size):
+                                    decode_output_names.append(
+                                        f"conv_cache_out_{branch}_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                                    )
+                            else:
+                                decode_output_names.append(f"conv_cache_out_{branch}_{layer_idx}_{step_idx}")
                 else:
                     for step_idx in range(verify_length):
-                        decode_output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
+                        if batch_size > 1:
+                            for batch_idx in range(batch_size):
+                                decode_output_names.append(
+                                    f"conv_cache_out_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                                )
+                        else:
+                            decode_output_names.append(f"conv_cache_out_{layer_idx}_{step_idx}")
             for layer_idx in range(len(linear_attention_layer_indices)):
                 for step_idx in range(verify_length):
-                    decode_output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
+                    if batch_size > 1:
+                        for batch_idx in range(batch_size):
+                            decode_output_names.append(
+                                f"recurrent_state_out_{layer_idx}_{step_idx}_batch_{batch_idx}"
+                            )
+                    else:
+                        decode_output_names.append(f"recurrent_state_out_{layer_idx}_{step_idx}")
         else:
             decode_output_names = list(output_names_base)
         if extra_hidden_output_name is not None:
-            prefill_output_names.append(extra_hidden_output_name)
-            decode_output_names.append(extra_hidden_output_name)
+            if batch_size > 1:
+                extra_hidden_output_names = [
+                    f"{extra_hidden_output_name}_batch_{batch_idx}"
+                    for batch_idx in range(batch_size)
+                ]
+                prefill_output_names.extend(extra_hidden_output_names)
+                decode_output_names.extend(extra_hidden_output_names)
+            else:
+                prefill_output_names.append(extra_hidden_output_name)
+                decode_output_names.append(extra_hidden_output_name)
 
         quant_config = self._build_quant_config(wraped_model)
         wraped_model_prefill = copy.deepcopy(wraped_model)
@@ -609,14 +781,28 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         wraped_model.apply(_apply_update_cfg)
 
         decode_position_ids = torch.zeros(self.config.batch_size, decode_seq_len, dtype=torch.long)
+        decode_current_input_length_t = torch.full_like(current_input_length_t, decode_seq_len)
+        decode_linear_attn_mask_t = torch.ones(batch_size, decode_seq_len, dtype=inputs_embeds.dtype)
+        if batch_size > 1:
+            decode_graph_inputs_embeds = _split_batch_tensor(inputs_embeds[:, :decode_seq_len, :], batch_size)
+            decode_graph_position_ids = _split_batch_tensor(decode_position_ids, batch_size)
+            decode_graph_past_seq_length = _split_batch_tensor(past_seq_length_t, batch_size)
+            decode_graph_current_input_length = _split_batch_tensor(decode_current_input_length_t, batch_size)
+            decode_graph_linear_attn_mask = _split_batch_tensor(decode_linear_attn_mask_t, batch_size)
+        else:
+            decode_graph_inputs_embeds = inputs_embeds[:, :decode_seq_len, :]
+            decode_graph_position_ids = decode_position_ids
+            decode_graph_past_seq_length = past_seq_length_t
+            decode_graph_current_input_length = decode_current_input_length_t
+            decode_graph_linear_attn_mask = decode_linear_attn_mask_t
         decode_inputs = (
-            inputs_embeds[:, :decode_seq_len, :],
-            decode_position_ids,
-            decode_position_ids,
-            decode_position_ids,
-            past_seq_length_t,
-            torch.full_like(current_input_length_t, decode_seq_len),
-            torch.ones(self.config.batch_size, decode_seq_len, dtype=inputs_embeds.dtype),
+            decode_graph_inputs_embeds,
+            decode_graph_position_ids,
+            decode_graph_position_ids,
+            decode_graph_position_ids,
+            decode_graph_past_seq_length,
+            decode_graph_current_input_length,
+            decode_graph_linear_attn_mask,
             past_key_caches,
             past_value_caches,
             past_conv_caches,
@@ -921,6 +1107,8 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
         hf_model_path = str(existing_meta.get("hf_model_path") or hf_model_path)
         context_length = int(existing_meta.get("max_context_tokens", self.config.context_length))
         wrap_cfg = existing_meta.get("wrap_cfg", {})
+        existing_batch_size = int(wrap_cfg.get("batch_size", 1)) if isinstance(wrap_cfg, dict) else 1
+        _validate_spec_decode_batch_size(spec_decode_mode, existing_batch_size)
         if isinstance(wrap_cfg, dict) and wrap_cfg.get("input_sequence_length") is not None:
             self.config.input_sequence_length = int(wrap_cfg["input_sequence_length"])
         self.config.context_length = context_length

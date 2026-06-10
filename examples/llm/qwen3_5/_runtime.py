@@ -44,6 +44,13 @@ def parse_auto_offload_max_memory(max_memory_json: Optional[str]):
     return fixed
 
 
+def parse_cuda_graph_modules(modules_arg: str):
+    if not modules_arg or not modules_arg.strip():
+        return None
+    modules = tuple(part.strip().lower() for part in modules_arg.split(",") if part.strip())
+    return modules or None
+
+
 def resolve_path(base_dir: Path, path_str: str) -> Path:
     path = Path(path_str)
     if not path.is_absolute():
@@ -90,10 +97,38 @@ def load_runtime_from_meta(
     prefill_auto_offload_max_memory=None,
     decode_auto_offload_max_memory=None,
     resource_tight_mode: bool = False,
+    enable_cuda_graph: bool = False,
+    cuda_graph_modules=None,
+    cuda_graph_warmup_runs: int = 3,
+    cuda_graph_graph_warmup_runs: int = 6,
 ) -> Tuple[Qwen3_5ONNXModel, AutoTokenizer, dict]:
     meta_file = Path(meta_path).resolve()
     model_dir = meta_file.parent
     meta_info = json.load(open(meta_file, "r", encoding="utf-8"))
+    wrap_cfg = meta_info.get("wrap_cfg", {})
+    if isinstance(wrap_cfg, dict) and int(wrap_cfg.get("batch_size", 1)) > 1:
+        # The continue-batch runtime originally landed under qwen3_5_moe, but it
+        # is architecture-agnostic: it resolves split ``*_batch_N`` graph inputs,
+        # keeps KV/linear caches per batch item, and loads dense meta.json just
+        # like MoE meta.json.
+        from xh_model_zoo.xh_llm.models.qwen3_5_moe import load_moe_inference
+
+        runtime = load_moe_inference(
+            str(meta_file),
+            device=device,
+            execution_device=exec_device,
+            auto_offload=auto_offload,
+            auto_offload_max_memory=auto_offload_max_memory,
+            prefill_auto_offload_max_memory=prefill_auto_offload_max_memory,
+            decode_auto_offload_max_memory=decode_auto_offload_max_memory,
+            resource_tight_mode=resource_tight_mode,
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
+        )
+        runtime.to(dtype)
+        return runtime, runtime.tokenizer, runtime.meta_info
 
     prefill_onnx = resolve_path(model_dir, meta_info.get("prefill_onnx") or meta_info["prefill_onnx_file"])
     decode_onnx = resolve_path(model_dir, meta_info.get("decode_onnx") or meta_info["decode_onnx_file"])
@@ -123,16 +158,33 @@ def load_runtime_from_meta(
     if pad_token_id is None:
         pad_token_id = 0
 
-    # Check for speculative decoding config in meta
+    # Check for speculative decoding config in meta.  The spec runtime expects
+    # a structured draft config so MTP gets prefill/decode sessions and DFlash
+    # gets context/context-decode/decode sessions.  Passing only draft_onnx as a
+    # flat dict leaves those named sessions unset.
     spec_decode = meta_info.get("spec_decode")
     if spec_decode and spec_decode.get("mode") in ("dflash", "mtp"):
-        draft_onnx = resolve_path(model_dir, spec_decode["draft_onnx"])
         block_size = spec_decode.get("block_size", 4)
         hidden_output_name = spec_decode.get("hidden_output_name", "post_norm_hidden")
+
+        def _draft_entry(key: str):
+            value = spec_decode.get(key)
+            if not value:
+                return None
+            return {"onnx": str(resolve_path(model_dir, value))}
+
+        draft_cfg = {
+            "prefill": _draft_entry("draft_prefill_onnx"),
+            "context": _draft_entry("draft_context_onnx"),
+            "context_decode": _draft_entry("draft_context_decode_onnx"),
+            "decode": _draft_entry("draft_decode_onnx") or _draft_entry("draft_onnx"),
+        }
+        if draft_cfg["decode"] is None:
+            raise ValueError(f"draft decode ONNX path missing from {meta_file}")
         runtime = Qwen3_5SpecDecodeONNXModel(
             prefill=dict(onnx=str(prefill_onnx)),
             decode=dict(onnx=str(decode_onnx)),
-            draft=dict(onnx=str(draft_onnx)),
+            draft=draft_cfg,
             spec_decode_mode=spec_decode["mode"],
             block_size=block_size,
             hidden_output_name=hidden_output_name,
@@ -143,6 +195,10 @@ def load_runtime_from_meta(
             decode_auto_offload_max_memory=decode_auto_offload_max_memory,
             resource_tight_mode=resource_tight_mode,
             pad_token_id=pad_token_id,
+            enable_cuda_graph=enable_cuda_graph,
+            cuda_graph_modules=cuda_graph_modules,
+            cuda_graph_warmup_runs=cuda_graph_warmup_runs,
+            cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
         )
     else:
         runtime = Qwen3_5ONNXModel(

@@ -112,14 +112,28 @@ def first_model_device(model) -> torch.device:
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def load_fp_backend(model_dir: str, dtype: str, device_map: str):
+def load_fp_backend(
+    model_dir: str,
+    dtype: str,
+    device_map: str,
+    experts_implementation: str | None = None,
+):
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    config_kwargs = {}
+    if experts_implementation:
+        config_kwargs["experts_implementation"] = experts_implementation
+        config_kwargs["_experts_implementation"] = experts_implementation
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         trust_remote_code=True,
         torch_dtype=parse_torch_dtype(dtype),
         device_map=device_map,
+        **config_kwargs,
     ).eval()
+    if experts_implementation:
+        for cfg in (getattr(model, "config", None), getattr(getattr(model, "config", None), "text_config", None)):
+            if cfg is not None:
+                setattr(cfg, "_experts_implementation", experts_implementation)
     return FPBackend(model=model, tokenizer=tokenizer, model_dir=model_dir)
 
 
@@ -314,7 +328,7 @@ def load_backend(args):
     if args.backend == "fp":
         if not args.model:
             raise ValueError("--model is required for --backend fp")
-        return load_fp_backend(args.model, args.dtype, args.device_map)
+        return load_fp_backend(args.model, args.dtype, args.device_map, args.experts_implementation)
     if args.backend == "hmonnx":
         if not args.config:
             raise ValueError("--config is required for --backend hmonnx")
@@ -593,6 +607,13 @@ def parse_args():
     p.add_argument("--config", type=str, default=None, help="meta.json for hmonnx backend")
     p.add_argument("--dtype", type=str, default="bf16")
     p.add_argument("--device-map", type=str, default="auto")
+    p.add_argument(
+        "--experts-implementation",
+        type=str,
+        default=None,
+        choices=["batched_mm", "grouped_mm"],
+        help="Optional Transformers MoE experts implementation for FP backend; use batched_mm on non-SM90 GPUs.",
+    )
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--exec-device", type=str, default="cuda")
     p.add_argument("--resource-tight-mode", action="store_true")
