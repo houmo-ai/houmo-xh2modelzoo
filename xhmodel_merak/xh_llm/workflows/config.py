@@ -1,0 +1,143 @@
+import copy
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+@dataclass
+class WorkflowConfig:
+    data: dict[str, Any]
+    source: str
+
+    @classmethod
+    def from_file(cls, config_file: str) -> "WorkflowConfig":
+        path = Path(config_file)
+        if path.suffix not in {".yaml", ".yml"}:
+            raise ValueError(f"Workflow config only supports YAML files for now: {path}")
+        with path.open("r", encoding="utf-8") as fin:
+            data = yaml.safe_load(fin) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"Workflow config must be a YAML mapping: {path}")
+        cls._validate_workflow_data(data, str(path))
+        return cls(data=data, source=str(path))
+
+    def dump(self, config_file: str) -> str:
+        if config_file is None:
+            raise ValueError("config_file must be provided")
+        path = Path(config_file)
+        if path.suffix not in {".yaml", ".yml"}:
+            raise ValueError(f"Workflow config only supports YAML files for now: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fout:
+            yaml.safe_dump(self.data, fout, allow_unicode=True, sort_keys=False)
+        return str(path)
+
+    @property
+    def name(self) -> str:
+        if self.source is None:
+            raise ValueError("WorkflowConfig source can't be None!")
+        return Path(self.source).stem
+
+    @property
+    def quant(self) -> dict[str, Any] | None:
+        quant = self.data["quant"]
+        if quant is None:
+            return None
+        if not isinstance(quant, dict):
+            raise TypeError("workflow quant config must be a mapping or null")
+        return quant
+
+    @property
+    def export(self) -> dict[str, Any]:
+        export = self.data["export"]
+        if not isinstance(export, dict) or not export:
+            raise ValueError("workflow export config must be a non-empty mapping")
+        return export
+
+    def build_export_dict(self, export_hf_model_dir: str) -> dict[str, Any]:
+        export_cfg = copy.deepcopy(self.export)
+        # TODO 为兼容老版本导出config，实时覆盖["model"]["hf_model"]字段。重构？
+        export_cfg["model"]["hf_model"] = os.path.abspath(os.path.normpath(str(export_hf_model_dir)))
+        # TODO 为兼容format_model_name，外层增加["chip_arch"]字段。重构？
+        export_cfg["chip_arch"] = export_cfg["model"]["chip_arch"]
+        return export_cfg
+
+    def with_overrides(self, overrides: Mapping[str, Any] | None = None) -> "WorkflowConfig":
+        if not overrides:
+            return self
+        self._validate_override_paths(overrides)
+        data = copy.deepcopy(self.data)
+        for path, value in overrides.items():
+            self._set_existing_path(data, path, value)
+        
+        p = Path(self.source)
+        override_source = str(p.with_stem(p.stem + "_override"))
+        self._validate_workflow_data(data, override_source)
+        return WorkflowConfig(data=data, source=override_source)
+
+    # TODO valid逻辑简化？
+    def _validate_override_paths(self, overrides: Mapping[str, Any]) -> None:
+        for path, value in overrides.items():
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"Override path must be a non-empty string, got: {path!r}")
+            existing_value = self._get_existing_path(self.data, path)
+            self._validate_override_value(existing_value, value, path)
+
+    @staticmethod
+    def _get_existing_path(data: dict[str, Any], path: str) -> Any:
+        current: Any = data
+        parts = path.split(".")
+        for index, part in enumerate(parts):
+            if not part:
+                raise ValueError(f"Invalid override path with empty segment: {path!r}")
+            if not isinstance(current, dict):
+                prefix = ".".join(parts[:index])
+                raise ValueError(f"Override path {path!r} cannot descend into non-mapping field {prefix!r}")
+            if part not in current:
+                raise KeyError(f"Override path {path!r} does not exist in workflow config")
+            current = current[part]
+        return current
+
+    @staticmethod
+    def _set_existing_path(data: dict[str, Any], path: str, value: Any) -> None:
+        current: Any = data
+        parts = path.split(".")
+        for part in parts[:-1]:
+            current = current[part]
+        current[parts[-1]] = value
+
+    @classmethod
+    def _validate_override_value(cls, existing_value: Any, override_value: Any, path: str) -> None:
+        if not isinstance(override_value, Mapping):
+            return
+        if not isinstance(existing_value, Mapping):
+            raise ValueError(f"Override path {path!r} cannot replace a non-mapping field with a mapping")
+        for key, value in override_value.items():
+            if key not in existing_value:
+                raise KeyError(f"Override path {path}.{key} does not exist in workflow config")
+            cls._validate_override_value(existing_value[key], value, f"{path}.{key}")
+
+    @staticmethod
+    def _validate_workflow_data(data: dict[str, Any], source: str) -> None:
+        for field in ("quant", "export"):
+            if field not in data:
+                raise ValueError(f"workflow config {source} must contain {field!r}")
+
+        quant = data["quant"]
+        if quant is not None and not isinstance(quant, dict):
+            raise TypeError(f"workflow config {source} field 'quant' must be a mapping or null")
+
+        export = data["export"]
+        if not isinstance(export, dict) or not export:
+            raise ValueError(f"workflow config {source} field 'export' must be a non-empty mapping")
+        model = export.get("model")
+        if not isinstance(model, dict) or not model:
+            raise ValueError(f"workflow config {source} must contain non-empty export.model")
+        if not model.get("chip_arch"):
+            raise ValueError(f"workflow config {source} must specify export.model.chip_arch")
+        if not model.get("model_type"):
+            raise ValueError(f"workflow config {source} must specify export.model.model_type")
