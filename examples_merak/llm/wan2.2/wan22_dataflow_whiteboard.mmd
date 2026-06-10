@@ -1,0 +1,81 @@
+flowchart LR
+    subgraph A["输入与条件"]
+      P["Prompt<br/>正/负提示词"]
+      IMG["I2V图片<br/>可选"]
+      N14["A14B noise latent<br/>[16,21,90,160]"]
+      N5["TI2V noise latent<br/>[48,31,44,80]"]
+    end
+
+    subgraph B["文本编码"]
+      TOK["T5 tokenizer"]
+      T5["UMT5-XXL Encoder<br/>cond+uncond<br/>9.690 TFLOPs"]
+      TXT["context<br/>[1,512,4096]"]
+    end
+
+    subgraph C["A14B I2V条件分支"]
+      RSZ14["Resize/Pad<br/>max_area 720*1280"]
+      VAEENC14["Wan2.1 VAE encode<br/>841.087 TFLOPs"]
+      MASK14["mask<br/>[4,21,90,160]"]
+      Y14["y condition<br/>[20,21,90,160]"]
+    end
+
+    subgraph D["A14B 40步去噪循环"]
+      SW14{"timestep<br/>boundary"}
+      HIGH["High-noise expert"]
+      LOW["Low-noise expert"]
+      WAN14["A14B Wan DiT forward<br/>6.552 PFLOPs/pass<br/>tokens 75,600"]
+      INSIDE14["A14B每层热点<br/>SelfAttn QK/AV 117.051 TFLOPs<br/>FFN 21.404 TFLOPs"]
+      CFG14["CFG cond/uncond<br/>13.103 PFLOPs/step<br/>524.130 PFLOPs/loop"]
+      STEP14["Scheduler step"]
+    end
+
+    subgraph T["TI2V-5B 50步去噪循环"]
+      RSZ5["I2V best_output_size<br/>max_area 704*1280"]
+      VAEENC5["Wan2.2 VAE encode<br/>414.739 TFLOPs<br/>I2V only"]
+      MASK5["latent mask约束<br/>不扩in_dim"]
+      WAN5["TI2V Wan DiT forward<br/>520.695 TFLOPs/pass<br/>tokens 27,280"]
+      INSIDE5["TI2V每层热点<br/>SelfAttn QK/AV 9.145 TFLOPs<br/>FFN 4.806 TFLOPs"]
+      CFG5["CFG cond/uncond<br/>1.041 PFLOPs/step<br/>52.070 PFLOPs/loop"]
+      STEP5["Scheduler step"]
+    end
+
+    subgraph E["输出与M50估时"]
+      LAT14["A14B final latent<br/>[16,21,90,160]"]
+      VAEDEC14["Wan2.1 VAE decode<br/>1.193 PFLOPs"]
+      OUT14["A14B RGB video<br/>[3,81,720,1280]<br/>5.06s"]
+      M5014["M50 45 TFLOP/s<br/>约194.6-194.9 min"]
+
+      LAT5["TI2V final latent<br/>[48,31,44,80]"]
+      VAEDEC5["Wan2.2 VAE decode<br/>3.979 PFLOPs"]
+      OUT5["TI2V RGB video<br/>[3,121,704,1280]<br/>5.04s"]
+      M505["M50 45 TFLOP/s<br/>约20.8-20.9 min"]
+    end
+
+    P --> TOK --> T5 --> TXT
+    TXT --> WAN14
+    TXT --> WAN5
+    N14 --> WAN14
+    N5 --> WAN5
+
+    IMG -. A14B I2V .-> RSZ14 --> VAEENC14 --> Y14
+    RSZ14 --> MASK14 --> Y14
+    Y14 -. concat to 36ch .-> WAN14
+    SW14 -->|high| HIGH --> WAN14
+    SW14 -->|low| LOW --> WAN14
+    WAN14 --> INSIDE14 --> CFG14 --> STEP14 --> SW14
+    STEP14 --> LAT14 --> VAEDEC14 --> OUT14 --> M5014
+
+    IMG -. TI2V I2V .-> RSZ5 --> VAEENC5 --> MASK5 --> WAN5
+    WAN5 --> INSIDE5 --> CFG5 --> STEP5 --> WAN5
+    STEP5 --> LAT5 --> VAEDEC5 --> OUT5 --> M505
+
+    classDef input fill:#F0F4FC,stroke:#5178C6,color:#1F2329;
+    classDef text fill:#EAE2FE,stroke:#8569CB,color:#1F2329;
+    classDef i2v fill:#DFF5E5,stroke:#509863,color:#1F2329;
+    classDef loop fill:#FEF1CE,stroke:#D4B45B,color:#1F2329;
+    classDef out fill:#FEE3E2,stroke:#D25D5A,color:#1F2329;
+    class A,P,IMG,N14,N5 input;
+    class B,TOK,T5,TXT text;
+    class C,RSZ14,VAEENC14,MASK14,Y14,RSZ5,VAEENC5,MASK5 i2v;
+    class D,SW14,HIGH,LOW,WAN14,INSIDE14,CFG14,STEP14,T,WAN5,INSIDE5,CFG5,STEP5 loop;
+    class E,LAT14,VAEDEC14,OUT14,M5014,LAT5,VAEDEC5,OUT5,M505 out;
