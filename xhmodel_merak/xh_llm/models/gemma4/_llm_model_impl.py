@@ -203,20 +203,28 @@ class _Gemma4TextDecoderLayer(DynamicModule):
 class _Gemma4TextModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict]):
         self.use_cache = cfg.get("use_cache", True)
-        max_seq_len = (
+        # Use config.max_position_embeddings for the full cos/sin buffer length,
+        # not config.context_max_length. This ensures DynamicSlice can properly
+        # truncate from the full position range (parity with gemma4_moe).
+        context_len = (
             cfg.get("context_max_length", 2048) if hasattr(cfg, "get") else getattr(cfg, "context_max_length", 2048)
         )
+        # Read max_seq_len directly from the text model config, same as how
+        # rotary_emb.max_seq_len_cached is initialized (= config.max_position_embeddings).
+        max_seq_len = getattr(self.config, "max_position_embeddings", None)
+        if max_seq_len is None:
+            max_seq_len = getattr(self.rotary_emb, "max_seq_len_cached", context_len)
         input_seq_len = (
-            cfg.get("input_sequence_length", max_seq_len)
+            cfg.get("input_sequence_length", context_len)
             if hasattr(cfg, "get")
-            else getattr(cfg, "input_sequence_length", max_seq_len)
+            else getattr(cfg, "input_sequence_length", context_len)
         )
         self._precompute_rope_cache(max_seq_len)
         self._setup_rope_slices(input_seq_len)
         return self
 
     def _precompute_rope_cache(self, max_seq_len: int):
-        """Pre-compute cos/sin tables. Shape: [1, max_seq_len, 1, head_dim] for DynamicSlice + xhnn.Rope."""
+        """Pre-compute cos/sin tables. Shape: [1, 1, max_seq_len, head_dim] for DynamicSlice dim=2 + xhnn.Rope."""
         rope = self.rotary_emb
         for layer_type in set(self.config.layer_types):
             inv_freq = getattr(rope, f"{layer_type}_inv_freq")
@@ -226,17 +234,17 @@ class _Gemma4TextModel(DynamicModule):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos_table = (emb.cos() * attn_scaling).to(inv_freq.dtype)
             sin_table = (emb.sin() * attn_scaling).to(inv_freq.dtype)
-            # [max_seq_len, head_dim] → [1, max_seq_len, 1, head_dim]
-            cos_table = cos_table.unsqueeze(0).unsqueeze(2)
-            sin_table = sin_table.unsqueeze(0).unsqueeze(2)
+            # [max_seq_len, head_dim] → [1, 1, max_seq_len, head_dim]
+            cos_table = cos_table.unsqueeze(0).unsqueeze(0)
+            sin_table = sin_table.unsqueeze(0).unsqueeze(0)
             self.register_buffer(f"_{layer_type}_cos", cos_table, persistent=False)
             self.register_buffer(f"_{layer_type}_sin", sin_table, persistent=False)
 
     def _setup_rope_slices(self, input_seq_len: int):
         """Create DynamicSlice modules for cos/sin lookup by past_seq_length."""
         for layer_type in set(self.config.layer_types):
-            cos_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
-            sin_slice = xhnn.DynamicSlice([input_seq_len], [1], [1])
+            cos_slice = xhnn.DynamicSlice([input_seq_len], [2], [1])
+            sin_slice = xhnn.DynamicSlice([input_seq_len], [2], [1])
 
             def _slice_update_cfg(self, cfg=None):
                 self.valid_length = [cfg.input_sequence_length]
@@ -251,7 +259,7 @@ class _Gemma4TextModel(DynamicModule):
         sin_table = getattr(self, f"_{layer_type}_sin")
         cos_slice = getattr(self, f"_{layer_type}_cos_slice")
         sin_slice = getattr(self, f"_{layer_type}_sin_slice")
-        cos = cos_slice(cos_table, past_seq_length).to(dtype)  # [1, seq_len, 1, head_dim]
+        cos = cos_slice(cos_table, past_seq_length).to(dtype)  # [1, 1, seq_len, head_dim]
         sin = sin_slice(sin_table, past_seq_length).to(dtype)
         return cos, sin
 

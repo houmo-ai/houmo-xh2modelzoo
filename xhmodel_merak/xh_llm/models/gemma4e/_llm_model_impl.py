@@ -179,10 +179,12 @@ class _Gemma4TextAttention(DynamicModule):
         seq_length = hidden_states.shape[1]
         cos, sin = position_embeddings
 
+        # Transpose q/k to [B, n_heads, S, D] BEFORE rope so cos/sin in shape
+        # [1, 1, S, D] broadcasts correctly (parity with gemma4_moe layout).
         query_states = self.q_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dim)
-        query_states = self.q_norm(query_states)
+        query_states = self.q_norm(query_states).transpose(1, 2)
         query_states = self.attn_compute_cast(query_states)
-        query_states = self.attn_compute_cast(self.rope(query_states, cos, sin)).transpose(1, 2)
+        query_states = self.attn_compute_cast(self.rope(query_states, cos, sin))
 
         if self.is_kv_shared_layer:
             assert shared_kv is not None
@@ -196,9 +198,9 @@ class _Gemma4TextAttention(DynamicModule):
                 else key_states
             )
 
-            key_states = self.k_norm(key_states)
+            key_states = self.k_norm(key_states).transpose(1, 2)
             key_states = self.attn_compute_cast(key_states)
-            key_states = self.attn_compute_cast(self.rope(key_states, cos, sin)).transpose(1, 2)
+            key_states = self.attn_compute_cast(self.rope(key_states, cos, sin))
             value_states = self.attn_compute_cast(self.v_norm(value_states)).transpose(1, 2)
 
             if self.use_cache and past_k_cache is not None and past_v_cache is not None:
@@ -327,16 +329,23 @@ class _Gemma4TextModel(DynamicModule):
 
     def _setup_rope_cache(self, cfg=None):
         # Pre-compute cos/sin per layer_type and register as buffers with shape
-        # (1, max_seq_len, 1, head_dim) so a DynamicSlice on dim=1 can pick the
-        # current chunk indexed by past_seq_length. This removes the need for an
-        # explicit position_ids graph input (parity with gemma4_moe).
-        max_seq_len = int(
-            _cfg_get(
-                cfg,
-                "context_max_length",
-                getattr(self.rotary_emb, "max_seq_len_cached", getattr(self.rotary_emb, "original_max_seq_len", 2048)),
+        # (1, 1, max_seq_len, head_dim) so a DynamicSlice on dim=2 can pick the
+        # current chunk indexed by past_seq_length. Layout matches gemma4_moe so
+        # the downstream compiler sees an identical DynamicSlice subgraph.
+        # max_seq_len = config.max_position_embeddings (e.g. 262144), independent
+        # of context_max_length (the runtime KV cache length, e.g. 2k/4k).
+        max_seq_len = getattr(self.config, "max_position_embeddings", None)
+        if max_seq_len is None:
+            max_seq_len = int(
+                _cfg_get(
+                    cfg,
+                    "context_max_length",
+                    getattr(
+                        self.rotary_emb, "max_seq_len_cached", getattr(self.rotary_emb, "original_max_seq_len", 2048)
+                    ),
+                )
             )
-        )
+        max_seq_len = int(max_seq_len)
         target_dtype = self.embed_tokens.weight.dtype
         for layer_type in set(self.config.layer_types):
             inv_freq = getattr(self.rotary_emb, f"{layer_type}_inv_freq", None)
@@ -344,13 +353,13 @@ class _Gemma4TextModel(DynamicModule):
             if inv_freq is None or attention_scaling is None:
                 continue
             cos, sin = _compute_gemma4_rotary_cache(inv_freq, attention_scaling, max_seq_len)
-            # (max_seq_len, head_dim) -> (1, max_seq_len, 1, head_dim)
-            cos_buf = cos.unsqueeze(0).unsqueeze(2).to(dtype=target_dtype).contiguous()
-            sin_buf = sin.unsqueeze(0).unsqueeze(2).to(dtype=target_dtype).contiguous()
+            # (max_seq_len, head_dim) -> (1, 1, max_seq_len, head_dim)
+            cos_buf = cos.unsqueeze(0).unsqueeze(0).to(dtype=target_dtype).contiguous()
+            sin_buf = sin.unsqueeze(0).unsqueeze(0).to(dtype=target_dtype).contiguous()
             self.register_buffer(f"_{layer_type}_cos_cache", cos_buf, persistent=False)
             self.register_buffer(f"_{layer_type}_sin_cache", sin_buf, persistent=False)
-            cos_slice = xhnn.DynamicSlice([self.input_sequence_length], [1], [1])
-            sin_slice = xhnn.DynamicSlice([self.input_sequence_length], [1], [1])
+            cos_slice = xhnn.DynamicSlice([self.input_sequence_length], [2], [1])
+            sin_slice = xhnn.DynamicSlice([self.input_sequence_length], [2], [1])
 
             def _slice_update_cfg(slice_self, new_cfg=None):
                 slice_self.valid_length = [
