@@ -320,7 +320,7 @@ class XHQwen2VLModel(VisionLLMModel):
         # relative visual HMONNX path consumed by XHQwen2VLHMONNXModel.
         exported_info = self.get_export_info(output_dir)
         self.config.model_name = exported_info.model_name
-        visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
+        visual_output_dir = str(Path(exported_info.exported_dir) / f"visual_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}")
         self.visual.config.model_name = f"{exported_info.model_name}"
         visual_meta = self.visual.export_hmonnx(visual_output_dir)
         visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())

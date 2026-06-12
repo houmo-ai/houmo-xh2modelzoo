@@ -44,9 +44,13 @@ class BaseHMONNXWorkflow:
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
+        """
+        绝大多数情况可复用基类export()方法导出HMONNX
+        特殊情况例如mineru2_5需要导出多个vit，则由子类自己实现
+        """
         import torch
 
-        from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel, format_model_name
+        from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel
         from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
         from xhquant.utils import MemoryTracker, TimeProfiler
 
@@ -68,12 +72,7 @@ class BaseHMONNXWorkflow:
 
         config_file = str(work_dir_path / f"{workflow_config.name}.yaml")
         workflow_config.dump(config_file)
-
-        formatted_cfg = format_model_name(export_cfg)
-        if formatted_cfg is not None:
-            export_cfg = formatted_cfg
         cfg = Config(export_cfg)
-        # cfg.seed = self.seed
 
         logger.info(f"Workflow config: {workflow_config.name}")
         logger.info(f"Using device: {device}, cuda_available: {torch.cuda.is_available()}")
@@ -103,79 +102,13 @@ class BaseHMONNXWorkflow:
             meta = xh_model.export_hmonnx(str(work_dir_path))
         return ExportResult(work_dir=str(work_dir_path), config_file=config_file, meta=meta)
 
-
-    def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
-        raise NotImplementedError(f"{type(self).__name__}.build_input_message() must be implemented")
-
     def dump_golden(
         self,
         export_result: ExportResult,
         device: str,
         input_messages: Any,
     ) -> str:
-        from transformers import TextStreamer
-
-        from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
-        from xhquant.api import get_xhquant_logger
-        from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
-
-        meta_file = self._find_golden_meta_file(export_result)
-        logger = get_xhquant_logger()
-        hmonnx_model = AutoLLMHONNXModel.from_pretrained(meta_file)
-        processor = hmonnx_model.get_tf_processor()
-        tokenizer = processor.tokenizer
-
-        messages = self.build_input_message(input_messages)
-        model_inputs = processor.apply_chat_template(messages).to(device)
-        streamer = TextStreamer(tokenizer)
-        hmonnx_model.to(device)
-        hmonnx_model.enable_golden = True
-        logger.warning("Golden outputs should be generated in aligned precision for stability.")
-
-        contexts = [
-            TimeProfiler("hmonnx_generate_golden", logger),
-            MemoryTracker(device=device, name="generate_golden", logger=logger),
-            LLMInferenceContextManager(hmonnx_model),
-        ]
-        with ContextManagers(contexts):
-            generated_ids = hmonnx_model.generate(
-                **model_inputs,
-                max_new_tokens=2,
-                streamer=streamer,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
-        ]
-        output_text = processor.batch_decode(
-            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        logger.info(f"{'-' * 20} Golden output {'-' * 20}")
-        logger.info(f"{output_text}")
-        return meta_file
-
-    @staticmethod
-    def _find_golden_meta_file(export_result: ExportResult) -> str:
-        work_dir = Path(export_result.work_dir)
-        if not work_dir.is_dir():
-            raise FileNotFoundError(f"Export work_dir does not exist or is not a directory: {export_result.work_dir}")
-
-        meta_files = []
-        for path in work_dir.iterdir():
-            if not path.is_dir() or not path.name.startswith("hmquant"):
-                continue
-            meta_file = path / "golden_meta_info.json"
-            if meta_file.is_file():
-                meta_files.append(meta_file)
-
-        if not meta_files:
-            raise FileNotFoundError(f"No golden_meta_info.json found under hmquant* directories in {work_dir}")
-        if len(meta_files) > 1:
-            meta_file_list = ", ".join(str(path) for path in meta_files)
-            raise ValueError(f"Found multiple golden_meta_info.json files under {work_dir}: {meta_file_list}")
-        return str(meta_files[0])
+        raise NotImplementedError(f"{type(self).__name__}.dump_golden() must be implemented")
 
     def _resolve_export_hf_model_dir(self, quant_result: QuantResult) -> str:
         if not same_abs_path(quant_result.hf_model_dir, self.hf_model_dir):

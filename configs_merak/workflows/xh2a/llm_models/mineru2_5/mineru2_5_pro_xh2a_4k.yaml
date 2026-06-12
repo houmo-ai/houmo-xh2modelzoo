@@ -1,0 +1,88 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Qwen2VLForConditionalGeneration
+
+    # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
+    hf_model: null
+
+    model_name: xh2_mineru2.5-pro_w8a16_256_4k
+    context_max_length: 4096
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a16h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a16h0_ssfp
+      # 建议使用16-bit激活值matmul，否则attention会有严重的精度问题
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    visual_config:
+      max_size_w: 1036
+      max_size_h: 1036
+      patch_size: 14
+      quant_scheme:
+        quant_type: w8a16h0_ssfp
+        # 建议使用16-bit激活值matmul，否则attention会有严重的精度问题
+        ops:
+          MatMul:
+            act_scheme:
+              bits: 16
+              fp_mode: sefp
+            act_schema_2:
+              bits: 16
+              fp_mode: sefp
+    only_first_block: false
+
+  visual_buckets:
+    model:
+      chip_arch: XH2a
+      model_type: Qwen2VLForConditionalGeneration_visual
+      patch_size: 14
+      quant_scheme:
+        quant_type: w8a16h0_ssfp
+        # 建议使用16-bit激活值matmul，否则attention会有严重的精度问题
+        ops:
+          MatMul:
+            act_scheme:
+              bits: 16
+              fp_mode: sefp
+            act_schema_2:
+              bits: 16
+              fp_mode: sefp
+    buckets:
+      # Medium horizontal content: title, short text, captions, small tables.
+      - max_size_h: 140
+        max_size_w: 392
+      - max_size_h: 196
+        max_size_w: 560
+      # - max_size_h: 280
+      #   max_size_w: 784
+      # - max_size_h: 392
+      #   max_size_w: 1036
+
+      # Long horizontal content: PPT text strips, formulas, wide table rows.
+      # - max_size_h: 112
+      #   max_size_w: 1792
+      # - max_size_h: 168
+      #   max_size_w: 1792
+      # - max_size_h: 252
+      #   max_size_w: 1792
+      # - max_size_h: 392
+      #   max_size_w: 2044
+
+      # Non-horizontal content buckets.
+      # - max_size_h: 560
+      #   max_size_w: 560
+      # - max_size_h: 1036
+      #   max_size_w: 392

@@ -62,8 +62,6 @@ class WorkflowConfig:
         export_cfg = copy.deepcopy(self.export)
         # TODO 为兼容老版本导出config，实时覆盖["model"]["hf_model"]字段。重构？
         export_cfg["model"]["hf_model"] = os.path.abspath(os.path.normpath(str(export_hf_model_dir)))
-        # TODO 为兼容format_model_name，外层增加["chip_arch"]字段。重构？
-        export_cfg["chip_arch"] = export_cfg["model"]["chip_arch"]
         return export_cfg
 
     def with_overrides(self, overrides: Mapping[str, Any] | None = None) -> "WorkflowConfig":

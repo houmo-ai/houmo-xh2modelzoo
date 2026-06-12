@@ -8,9 +8,9 @@ export:
     # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
     hf_model: null
     
-    model_name: qwen2_vl_2b
+    model_name: xh2_qwen2-vl-2b_w8a8_256_4k
     context_max_length: 4096
-    prefill_chunk_length: 512
+    prefill_chunk_length: 256
     use_cache: true
     num_logits_to_keep: 1
     quant_scheme:

@@ -7,7 +7,7 @@ class QuantResult:
     hf_model_dir: str # 原始HF模型路径
     skipped: bool = False # 量化是否被跳过。如果被跳过，相当于直接从原始HF模型导出hmonnx
     quanted_model_dir: str | None = None # 量化模型路径
-    is_quant_weight_format: bool = False # 产物是否为量化权重文件，这种情况无法直接加载量化模型到内存中
+    is_quant_weight_format: bool = False # 产物是否为量化权重文件，这种情况无法直接加载量化模型到内存中。一般情况下使用默认值即可
 
 
 @dataclass
