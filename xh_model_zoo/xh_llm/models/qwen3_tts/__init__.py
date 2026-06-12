@@ -10,6 +10,7 @@ from .qwen3_tts_code_predictor_model import (
     build_qwen3_tts_code_predictor_hf_compatible,
 )
 from .qwen3_tts_inference import Qwen3TTSHMONNXInference
+from .qwen3_tts_stateful_decoder import Qwen3TTSDecoderState, Qwen3TTSStatefulDecoderInference
 from .qwen3_tts_talker_model import XHQwen3TTSTalker, build_qwen3_tts_talker_hf_compatible
 
 
@@ -22,4 +23,6 @@ __all__ = [
     "XHQwen3TTSCodePredictor",
     "build_qwen3_tts_code_predictor_hf_compatible",
     "Qwen3TTSHMONNXInference",
+    "Qwen3TTSDecoderState",
+    "Qwen3TTSStatefulDecoderInference",
 ]

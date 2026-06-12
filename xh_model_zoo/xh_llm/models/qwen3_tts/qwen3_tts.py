@@ -307,6 +307,10 @@ class XHQwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGener
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            if streamer is not None and hasattr(streamer, "put_codec_ids"):
+                codec_ids = model_inputs.get("codec_ids", None)
+                if codec_ids is not None:
+                    streamer.put_codec_ids(codec_ids)
 
             if is_prefill:
                 outputs = self(**model_inputs, return_dict=True)
@@ -455,6 +459,7 @@ class XHQwen3TTSForConditionalGeneration(Qwen3TTSForConditionalGeneration):
             ],
             "output_hidden_states": getattr(kwargs, "output_hidden_states", True),
             "return_dict_in_generate": getattr(kwargs, "return_dict_in_generate", True),
+            "streamer": kwargs.get("streamer", None),
         }
 
         talker_input_embeds = [[] for _ in range(len(input_ids))]

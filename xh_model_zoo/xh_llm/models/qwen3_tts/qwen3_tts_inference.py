@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Union, cast
+from typing import Generator, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -118,7 +118,7 @@ class Qwen3TTSCodePredictorInference(LLMONNXModel):
             assert self.prefill_session is not None, "Prefill session is not initialized!"
             return self.prefill_session(*args)
         else:
-            logger.info("CodePredictor HMONNX Inference: decode mode")
+            logger.debug("CodePredictor HMONNX Inference: decode mode")
             assert self.decode_session is not None, "Decode session is not initialized!"
             return self.decode_session(*args)
 
@@ -219,7 +219,7 @@ class Qwen3TTSTalkerInference(LLMONNXModel):
             assert self.prefill_session is not None, "Prefill session is not initialized!"
             return self.prefill_session(*args)
         else:
-            logger.info("Talker HMONNX Inference: decode mode")
+            logger.debug("Talker HMONNX Inference: decode mode")
             assert self.decode_session is not None, "Decode session is not initialized!"
             return self.decode_session(*args)
 
@@ -537,6 +537,106 @@ def build_qwen3_tts_speech_tokenizer_hmonnx_hf_compatible(
     return decoder
 
 
+class _Qwen3TTSCodeChunkStreamer:
+    """Collect complete Qwen3-TTS codec frames from the generation loop."""
+
+    _END = object()
+
+    def __init__(self, chunk_size: int = 12):
+        import queue
+        import threading
+
+        self.chunk_size = max(1, int(chunk_size))
+        self._queue = queue.Queue()
+        self._frames = []
+        self._lock = threading.Lock()
+        self._closed = False
+        self._error = None
+        self._total_frames = 0
+        self._total_chunks = 0
+
+    def put(self, value):
+        """Transformers streamer compatibility; code0 tokens are not enough to decode audio."""
+        return None
+
+    def put_codec_ids(self, codec_ids) -> None:
+        if codec_ids is None:
+            return
+        if torch.is_tensor(codec_ids):
+            codes = codec_ids.detach().cpu().long()
+        else:
+            codes = torch.as_tensor(codec_ids, dtype=torch.long)
+        if codes.dim() == 1:
+            codes = codes.view(1, -1)
+        elif codes.dim() == 3:
+            codes = codes.reshape(-1, codes.shape[-1])
+        elif codes.dim() != 2:
+            raise ValueError(f"unsupported codec_ids shape for streaming: {tuple(codes.shape)}")
+        if codes.shape[-1] != 16:
+            raise ValueError(f"expected Qwen3-TTS codec frame width 16, got {codes.shape[-1]}")
+
+        with self._lock:
+            if self._closed:
+                return
+            for frame in codes:
+                self._frames.append(frame.clone())
+                self._total_frames += 1
+                if self._total_frames == 1:
+                    get_root_logger().info(
+                        f"CodeChunkStreamer: received first codec frame, chunk_size={self.chunk_size}"
+                    )
+                if len(self._frames) >= self.chunk_size:
+                    self._flush_locked()
+
+    def end(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._flush_locked()
+            self._closed = True
+            self._queue.put(self._END)
+
+    def fail(self, exc: BaseException) -> None:
+        self._error = exc
+        self.end()
+
+    def _flush_locked(self) -> None:
+        if not self._frames:
+            return
+        chunk = torch.stack(self._frames, dim=0)
+        self._total_chunks += 1
+        get_root_logger().info(
+            f"CodeChunkStreamer: emit chunk={self._total_chunks}, frames={chunk.shape[0]}, "
+            f"total_frames={self._total_frames}"
+        )
+        self._queue.put(chunk)
+        self._frames = []
+
+    def __iter__(self):
+        import queue
+
+        while True:
+            try:
+                item = self._queue.get(timeout=30.0)
+            except queue.Empty:
+                with self._lock:
+                    total_frames = self._total_frames
+                    buffered = len(self._frames)
+                    closed = self._closed
+                if closed:
+                    continue
+                get_root_logger().info(
+                    f"CodeChunkStreamer: waiting for chunk, total_frames={total_frames}, "
+                    f"buffered={buffered}/{self.chunk_size}"
+                )
+                continue
+            if item is self._END:
+                break
+            yield item
+        if self._error is not None:
+            raise self._error
+
+
 @MODELS.register_module()
 class Qwen3TTSHMONNXInference:
     def __init__(
@@ -598,14 +698,72 @@ class Qwen3TTSHMONNXInference:
         hf_model = cast(XHQwen3TTSModel, hf_model)
         return hf_model
 
-    def generate_voice_design(self, text: str, language: str, instruct: str):
-        # 获取文本投影的输入
+    @staticmethod
+    def _normalize_tts_mode(mode: str) -> str:
+        aliases = {
+            "customvoice": "custom_voice",
+            "custom-voice": "custom_voice",
+            "custom_voice": "custom_voice",
+            "cv": "custom_voice",
+            "voicedesign": "voice_design",
+            "voice-design": "voice_design",
+            "voice_design": "voice_design",
+            "vd": "voice_design",
+            "base": "voice_clone",
+            "voiceclone": "voice_clone",
+            "voice-clone": "voice_clone",
+            "voice_clone": "voice_clone",
+        }
+        key = str(mode).strip().lower()
+        if key not in aliases:
+            raise ValueError(
+                f"unsupported Qwen3-TTS mode: {mode}; expected custom_voice, voice_design, or voice_clone/base"
+            )
+        return aliases[key]
+
+    def generate_by_mode(
+        self,
+        mode: str,
+        text: str,
+        language: str,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+        ref_audio: Optional[str] = None,
+        ref_text: Optional[str] = None,
+        **kwargs,
+    ):
+        mode = self._normalize_tts_mode(mode)
+        if mode == "voice_design":
+            return self.generate_voice_design(
+                text=text,
+                language=language,
+                instruct=instruct or "",
+                **kwargs,
+            )
+        if mode == "voice_clone":
+            if not ref_audio:
+                raise ValueError("ref_audio is required for voice_clone/base mode")
+            return self.generate_voice_clone(
+                text=text,
+                language=language,
+                ref_audio=ref_audio,
+                ref_text=ref_text or "",
+                **kwargs,
+            )
+        return self.generate_custom_voice(
+            text=text,
+            language=language,
+            speaker=speaker or "vivian",
+            **kwargs,
+        )
+
+    def generate_voice_design(self, text: str, language: str, instruct: str, **kwargs):
         wavs, sr = self.native_model.generate_voice_design(
             text=text,
             language=language,
             instruct=instruct,
+            **kwargs,
         )
-
         return wavs, sr
 
     def generate_custom_voice(self, text: str, language: str, speaker: str, **kwargs):
@@ -619,3 +777,156 @@ class Qwen3TTSHMONNXInference:
             text=text, language=language, ref_audio=ref_audio, ref_text=ref_text, **kwargs
         )
         return wavs, sr
+
+    def generate_code_stream(
+        self,
+        mode: str,
+        text: str,
+        language: str,
+        chunk_size: int = 12,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+        ref_audio: Optional[str] = None,
+        ref_text: Optional[str] = None,
+        **kwargs,
+    ) -> Generator[torch.Tensor, None, None]:
+        """Yield Qwen3-TTS codec code chunks while talker generation is still running.
+
+        ``mode`` accepts ``custom_voice``, ``voice_design``, or ``voice_clone``
+        aliases. Each yielded tensor has shape ``[N, 16]`` where ``N <= chunk_size``
+        for the final chunk.
+        """
+        import threading
+
+        import numpy as np
+
+        tts_mode = self._normalize_tts_mode(mode)
+        streamer = _Qwen3TTSCodeChunkStreamer(chunk_size=chunk_size)
+        speech_tokenizer = self.native_model.model.speech_tokenizer
+        real_decode = speech_tokenizer.decode
+
+        def _skip_final_decode(encoded, *args, **decode_kwargs):
+            sr = int(getattr(real_decode, "sample_rate", 24000) or 24000)
+            return [np.zeros(1, dtype=np.float32)], sr
+
+        gen_kwargs = dict(kwargs)
+        gen_kwargs["streamer"] = streamer
+
+        def _run_generation():
+            speech_tokenizer.decode = _skip_final_decode
+            try:
+                self.generate_by_mode(
+                    mode=tts_mode,
+                    text=text,
+                    language=language,
+                    speaker=speaker,
+                    instruct=instruct,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
+                    **gen_kwargs,
+                )
+            except BaseException as exc:  # propagate to the consumer thread
+                streamer.fail(exc)
+            finally:
+                speech_tokenizer.decode = real_decode
+                streamer.end()
+
+        thread = threading.Thread(target=_run_generation, daemon=True)
+        thread.start()
+        for codes in streamer:
+            yield codes
+        thread.join()
+
+    def generate_custom_voice_code_stream(
+        self, text: str, language: str, speaker: str, chunk_size: int = 12, **kwargs
+    ) -> Generator[torch.Tensor, None, None]:
+        return self.generate_code_stream(
+            mode="custom_voice",
+            text=text,
+            language=language,
+            speaker=speaker,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
+
+    def generate_voice_design_code_stream(
+        self, text: str, language: str, instruct: str, chunk_size: int = 12, **kwargs
+    ) -> Generator[torch.Tensor, None, None]:
+        return self.generate_code_stream(
+            mode="voice_design",
+            text=text,
+            language=language,
+            instruct=instruct,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
+
+    def generate_voice_clone_code_stream(
+        self,
+        text: str,
+        language: str,
+        ref_audio: str,
+        ref_text: str,
+        chunk_size: int = 12,
+        **kwargs,
+    ) -> Generator[torch.Tensor, None, None]:
+        return self.generate_code_stream(
+            mode="voice_clone",
+            text=text,
+            language=language,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            chunk_size=chunk_size,
+            **kwargs,
+        )
+
+    def generate_stream(
+        self,
+        mode: str,
+        text: str,
+        language: str,
+        chunk_size: int = 12,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+        ref_audio: Optional[str] = None,
+        ref_text: Optional[str] = None,
+        **kwargs,
+    ) -> Generator[Tuple[object, int], None, None]:
+        """Yield stateless decoded audio chunks while talker generation progresses.
+
+        This is a convenience wrapper around ``generate_code_stream`` and the
+        current stateless speech_tokenizer decoder. The strict GGUF live demo uses
+        ``generate_code_stream`` plus an external stateful decoder instead.
+        """
+        import numpy as np
+
+        speech_tokenizer = self.native_model.model.speech_tokenizer
+        real_decode = speech_tokenizer.decode
+        for codes in self.generate_code_stream(
+            mode=mode,
+            text=text,
+            language=language,
+            speaker=speaker,
+            instruct=instruct,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            chunk_size=chunk_size,
+            **kwargs,
+        ):
+            wavs, sr = real_decode([{"audio_codes": codes}])
+            wav = wavs[0]
+            if torch.is_tensor(wav):
+                wav = wav.detach().cpu().numpy()
+            yield np.asarray(wav, dtype=np.float32).reshape(-1), int(sr)
+
+    def generate_custom_voice_stream(
+        self, text: str, language: str, speaker: str, chunk_size: int = 12, **kwargs
+    ) -> Generator[Tuple[object, int], None, None]:
+        return self.generate_stream(
+            mode="custom_voice",
+            text=text,
+            language=language,
+            speaker=speaker,
+            chunk_size=chunk_size,
+            **kwargs,
+        )

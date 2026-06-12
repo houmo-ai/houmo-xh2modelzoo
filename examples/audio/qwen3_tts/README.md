@@ -546,9 +546,135 @@ CUDA_VISIBLE_DEVICES=3 python qwen3_tts_speech_tokenizer_export.py \
 
 ### 流式推理
 
-```bash
-python qwen3_tts_0p6b_cv_streaming_demo.py
+严格 GGUF 对齐的流式 demo 位于 `eval/qwen3_tts_streaming_demo.py`，支持 `customvoice`、`base` 和 `voicedesign` 三个 variant。当前 live 路径是：
+
+```text
+talker/code predictor 逐帧生成 codec frame -> streamer 攒满 12 帧 -> stateful decoder -> AUDIO/FINISH
 ```
+
+其中已有的 `speech_tokenizer` HMONNX 是 stateless 的整段 decoder，不能直接提供 GGUF 风格的流式状态；live 模式需要额外导出 stateful decoder。HMONNX 版 stateful decoder 使用固定 KV/history buffer，加 `kv_valid_len`、`valid_frames` 和 attention mask 来表达真实有效长度。
+
+#### 1. 导出 stateful decoder
+
+以 0.6B-CustomVoice 为例：
+
+```bash
+cd examples/audio/qwen3_tts
+
+PYTHONPATH=<xh2modelzoo path> \
+python qwen3_tts_stateful_decoder_export.py \
+  --variant 0_6B_customvoice \
+  --name qwen3_tts_12hz_0_6B_customvoice_stateful_decoder_xh2a
+```
+
+产物位于：
+
+```text
+work_dirs/qwen3_tts_12hz_0_6B_customvoice_stateful_decoder_xh2a/
+├── meta.json
+├── onnx/qwen3_tts_decoder_stateful_static.onnx
+└── hmonnx/qwen3_tts_decoder_stateful_static_XH2a.onnx
+```
+
+其它变体只需要替换 `--variant` 和 `--name`：
+
+```bash
+# 0.6B-Base / voice-clone
+PYTHONPATH=<xh2modelzoo path> \
+python qwen3_tts_stateful_decoder_export.py \
+  --variant 0_6B_base \
+  --name qwen3_tts_12hz_0_6B_base_stateful_decoder_xh2a
+
+# 1.7B-VoiceDesign
+PYTHONPATH=<xh2modelzoo path> \
+python qwen3_tts_stateful_decoder_export.py \
+  --variant 1_7B_voicedesign \
+  --name qwen3_tts_12hz_1_7B_voicedesign_stateful_decoder_xh2a
+```
+
+#### 2. 运行 live 流式 demo
+
+`--stateful-decoder` 推荐直接传 stateful decoder 的 `meta.json`。`--stateful-decoder-backend auto` 会自动识别：`meta.json` / `hmonnx` 路径走 HMONNX runtime，普通 ONNX 路径走 ONNX Runtime。
+
+```bash
+cd examples/audio/qwen3_tts
+```
+
+CustomVoice：
+
+```bash
+PYTHONPATH=<xh2modelzoo path> \
+python eval/qwen3_tts_streaming_demo.py \
+  --config ./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py \
+  --variant customvoice \
+  --stateful-decoder work_dirs/qwen3_tts_12hz_0_6B_customvoice_stateful_decoder_xh2a/meta.json \
+  --text "你好，这是一个流式语音合成测试。" \
+  --speaker vivian \
+  --mode live \
+  --chunk-size 12 \
+  --output output_streaming_customvoice.wav
+```
+
+Base / Voice Clone：
+
+```bash
+PYTHONPATH=<xh2modelzoo path> \
+python eval/qwen3_tts_streaming_demo.py \
+  --config ./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py \
+  --variant base \
+  --stateful-decoder work_dirs/qwen3_tts_12hz_0_6B_base_stateful_decoder_xh2a/meta.json \
+  --text "你好，这是一个音色克隆流式语音合成测试。" \
+  --ref-audio /tmp/clone_1.wav \
+  --ref-text "甚至出现交易几乎停滞的情况。" \
+  --mode live \
+  --chunk-size 12 \
+  --output output_streaming_base.wav
+```
+
+VoiceDesign：
+
+```bash
+PYTHONPATH=<xh2modelzoo path> \
+python eval/qwen3_tts_streaming_demo.py \
+  --config ./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py \
+  --variant voicedesign \
+  --stateful-decoder work_dirs/qwen3_tts_12hz_1_7B_voicedesign_stateful_decoder_xh2a/meta.json \
+  --text "你好，这是一个音色设计流式语音合成测试。" \
+  --instruct "体现温柔甜美的女声，音调适中，语速平稳。" \
+  --mode live \
+  --chunk-size 12 \
+  --output output_streaming_voicedesign.wav
+```
+
+#### 3. 流式行为说明
+
+- Talker / CodePredictor 侧逐帧生成 codec frame，每帧形状是 `[16]`。
+- Streamer 会缓存 codec frame，满 `12` 帧后输出一个 `[12, 16]` chunk 给 decoder。
+- Stateful decoder 每次解码一个 chunk，维护 `pre_conv_history`、`latent_buffer`、`conv_history`、`kv_cache`、`latent_audio` 等状态。
+- 非 final chunk 必须满 `12` 帧；最后一个 chunk 可以不足 `12` 帧，内部 pad 到 `12`，再通过 `valid_frames` 裁掉 padding 对应的音频。
+- 第一包通常因为 lookahead 只输出约 `8` 帧音频；后续中间包通常按 `12` 帧节奏输出。
+- `--mode oneshot` 可作为非流式参考推理，不需要 `--stateful-decoder`。
+
+#### 4. 已验证命令示例
+
+当前仓库里已验证过的 smoke 产物示例：
+
+```bash
+PYTHONPATH=<xh2modelzoo path> \
+python eval/qwen3_tts_streaming_demo.py \
+  --config ./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py \
+  --variant customvoice \
+  --stateful-decoder work_dirs/codex_stateful_decoder_static_v2/meta.json \
+  --text 你好 \
+  --speaker vivian \
+  --mode live \
+  --chunk-size 12 \
+  --max-new-tokens 48 \
+  --name codex_streaming_full_smoke \
+  --output smoke_streaming.wav
+```
+
+该命令会生成 `work_dirs/codex_streaming_full_smoke/smoke_streaming.wav`，日志中应看到 `AUDIO` packet 和最终 `FINISH`。
 
 ---
 
