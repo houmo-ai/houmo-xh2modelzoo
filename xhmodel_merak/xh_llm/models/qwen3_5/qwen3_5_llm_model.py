@@ -57,6 +57,7 @@ from ...types import (
 )
 from ...utils import get_cpu_memory_mb
 from ...vision_llm_model import VisionLLMModel
+from ._gdr_ops import GDRChunkScan
 from .data_preprocess import Qwen3_5_DataPreprocess
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForConditionalGeneration
@@ -274,6 +275,11 @@ def build_qwen3_5_hf_compatible_model(
     return llm_compatible_modules.convert(hf_model, text_llm_model=xh_model)
 
 
+def _prefill_recurrent_state_uses_cache_tensor(wrap_cfg: ConfigDict, config: XHQwen3_5ModelConfig) -> bool:
+    fuse_gdr_ops = bool(wrap_cfg.get("fuse_gdr_ops", getattr(config, "fuse_gdr_ops", False)))
+    return fuse_gdr_ops and bool(getattr(GDRChunkScan, "state_is_cache", False))
+
+
 def _enforce_split_conv_cache_wrap_cfg(llm_model: nn.Module, wrap_cfg: ConfigDict) -> None:
     """Ensure traceable TextModel/GatedDeltaNet modules see split cache mode.
 
@@ -331,6 +337,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.wrap_cfg["fuse_gdr_ops"] = self.config.fuse_gdr_ops
         self.wrap_cfg["split_conv_cache"] = self.config.split_conv_cache
         self.wrap_cfg["use_manual_depthwise_conv1d"] = self.config.use_manual_depthwise_conv1d
+        self._set_recurrent_state_output_contract(prefill=True)
         if self.config.spec_decode_mode == "dflash":
             self.wrap_cfg["output_hidden_state_indices"] = self._get_dflash_target_layer_ids()
 
@@ -371,6 +378,22 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         ]:
             return False
         return False
+
+    def _prefill_recurrent_state_uses_cache(self) -> bool:
+        return _prefill_recurrent_state_uses_cache_tensor(self.wrap_cfg, self.config)
+
+    def _set_recurrent_state_output_contract(self, prefill: Optional[bool] = None) -> bool:
+        if prefill is None:
+            prefill = self.is_prefill()
+        prefill_uses_cache = self._prefill_recurrent_state_uses_cache()
+        suppress_outputs = bool(prefill and prefill_uses_cache)
+        self.wrap_cfg["suppress_recurrent_state_outputs"] = suppress_outputs
+        # Persist the concrete export/runtime contract in metadata for HMONNX
+        # runtimes. The config already records fuse_gdr_ops, but this flag also
+        # captures whether the selected GDRChunkScan implementation is the new
+        # CacheTensor-in-place variant.
+        self.config.prefill_recurrent_state_uses_cache = prefill_uses_cache
+        return suppress_outputs
 
     def get_dummy_inputs(self):
         data_batch = super().get_dummy_inputs()
@@ -468,19 +491,25 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
     def set_prefill(self):
         self.wrap_cfg["linear_attention_mode"] = "chunk"
+        self._set_recurrent_state_output_contract(prefill=True)
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("prefill")
         elif self._state in [LLMModelState.QUANTED_ALIGNED, LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_DISABLE]:
             self._quanted_model.set_activate_model("prefill")
         super().set_prefill()
+        self._set_recurrent_state_output_contract(prefill=True)
+        self.update_cfg(self.wrap_cfg)
 
     def set_decode(self):
         self.wrap_cfg["linear_attention_mode"] = "recurrent"
+        self._set_recurrent_state_output_contract(prefill=False)
         if self._state == LLMModelState.FRONTED:
             self._frontend_model.set_activate_model("decode")
         elif self._state in [LLMModelState.QUANTED_ALIGNED, LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_DISABLE]:
             self._quanted_model.set_activate_model("decode")
         super().set_decode()
+        self._set_recurrent_state_output_contract(prefill=False)
+        self.update_cfg(self.wrap_cfg)
 
     def get_quant_cfg(self):
         quant_cfg = super().get_quant_cfg()
@@ -530,6 +559,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.wrap_cfg["verify_output_intermediates"] = False
         self.wrap_cfg["num_logits_to_keep"] = self.config.num_logits_to_keep
         self.wrap_cfg["input_sequence_length"] = self.config.prefill_chunk_length
+        self._set_recurrent_state_output_contract(prefill=True)
         output_post_norm_hidden = getattr(self.config, "output_post_norm_hidden", False)
         if output_post_norm_hidden:
             self.wrap_cfg["output_post_norm_hidden"] = output_post_norm_hidden
@@ -727,10 +757,13 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             else:
                 for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
                     past_conv_cache[:] = conv_cache_out[:]
-            for past_recurrent_state, recurrent_state_out in zip(
-                past_recurrent_states, recurrent_state_out_list, strict=True
-            ):
-                past_recurrent_state[:] = recurrent_state_out[:]
+            if recurrent_state_out_list:
+                for past_recurrent_state, recurrent_state_out in zip(
+                    past_recurrent_states, recurrent_state_out_list, strict=True
+                ):
+                    past_recurrent_state[:] = recurrent_state_out[:]
+            elif past_recurrent_states and not self._prefill_recurrent_state_uses_cache():
+                raise RuntimeError("Missing recurrent state outputs for non-CacheTensor GDR prefill/decode path.")
 
         if spec_decode_hidden is not None:
             return logits, conv_cache_out_list, recurrent_state_out_list, spec_decode_hidden
@@ -790,6 +823,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         linear_num_layers = self.kvcache_config.linear_kv_cache_config.num_layers
         split_conv_cache = bool(self.wrap_cfg.get("split_conv_cache", self.config.split_conv_cache))
         self._kvcache_mixin.split_conv_cache = split_conv_cache
+        suppress_recurrent_state_outputs = self._set_recurrent_state_output_contract()
 
         if split_conv_cache:
             for cache_idx in range(linear_num_layers):
@@ -818,9 +852,10 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                 for cache_idx in range(linear_num_layers):
                     for step_idx in range(verify_steps):
                         export_cfg["output_names"].append(f"conv_cache_out_{cache_idx}_{step_idx}")
-            for cache_idx in range(linear_num_layers):
-                for step_idx in range(verify_steps):
-                    export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}_{step_idx}")
+            if not suppress_recurrent_state_outputs:
+                for cache_idx in range(linear_num_layers):
+                    for step_idx in range(verify_steps):
+                        export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}_{step_idx}")
         else:
             if split_conv_cache:
                 for cache_idx in range(linear_num_layers):
@@ -829,8 +864,9 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             else:
                 for cache_idx in range(linear_num_layers):
                     export_cfg["output_names"].append(f"conv_cache_out_{cache_idx}")
-            for cache_idx in range(linear_num_layers):
-                export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}")
+            if not suppress_recurrent_state_outputs:
+                for cache_idx in range(linear_num_layers):
+                    export_cfg["output_names"].append(f"recurrent_state_out_{cache_idx}")
 
         if self.wrap_cfg.get("output_hidden_state_indices") is not None:
             export_cfg["output_names"].append("target_hidden")

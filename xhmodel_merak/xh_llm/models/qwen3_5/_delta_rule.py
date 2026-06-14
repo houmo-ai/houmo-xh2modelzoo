@@ -2,6 +2,9 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from torch.fx import Proxy
+
+from xhquant.core import CacheTensor
 
 
 def _vp_matmul_8x8(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -107,7 +110,7 @@ def parallel_chunk_inverse_block(
     # --- Step 1: Batch compute all 8 diagonal block inverses ---
     # Stack diagonal blocks: (BHN, 8, 8, 8) → (BHN*8, 8, 8)
     diag_blocks = torch.stack(
-        [flat[:, I * b : (I + 1) * b, I * b : (I + 1) * b] for I in range(nb)],
+        [flat[:, block_idx * b : (block_idx + 1) * b, block_idx * b : (block_idx + 1) * b] for block_idx in range(nb)],
         dim=1,
     )  # (BHN, 8, 8, 8)
     batched = diag_blocks.reshape(-1, b, b)  # (BHN*8, 8, 8)
@@ -119,24 +122,24 @@ def parallel_chunk_inverse_block(
     # R_upper starts as the first diagonal block and grows each step.
     R_upper = diag_invs_all[:, 0]  # (BHN, 8, 8) — R[0:8, 0:8]  # noqa: N806
 
-    for I in range(1, nb):  # noqa: N806
-        s = I * b  # start index of current block row
+    for block_idx in range(1, nb):
+        s = block_idx * b  # start index of current block row
 
         # A[s:s+8, 0:s] @ R_upper → off-diagonal contribution
         # shapes: (BHN, 8, s) @ (BHN, s, s) → (BHN, 8, s)
         T = torch.matmul(flat[:, s : s + b, :s], R_upper)  # noqa: N806
 
-        # off_diag = diag_inv[I] @ T
+        # off_diag = diag_inv[block_idx] @ T
         # shapes: (BHN, 8, 8) @ (BHN, 8, s) → (BHN, 8, s)
-        diag_inv_I = diag_invs_all[:, I]  # (BHN, 8, 8)  # noqa: N806
-        off_diag = torch.matmul(diag_inv_I, T)  # (BHN, 8, s)
+        diag_inv_i = diag_invs_all[:, block_idx]  # (BHN, 8, 8)
+        off_diag = torch.matmul(diag_inv_i, T)  # (BHN, 8, s)
 
         # Extend R_upper from (BHN, s, s) to (BHN, s+8, s+8)
         # Old rows get 8 zero-columns appended on the right via Pad
         old_rows = F.pad(R_upper, (0, b))  # (BHN, s, s+8)
 
-        # New rows: [off_diag | diag_inv_I]
-        new_rows = torch.cat([off_diag, diag_inv_I], dim=-1)  # (BHN, 8, s+8)
+        # New rows: [off_diag | diag_inv_i]
+        new_rows = torch.cat([off_diag, diag_inv_i], dim=-1)  # (BHN, 8, s+8)
 
         # Stack vertically
         R_upper = torch.cat([old_rows, new_rows], dim=-2)  # (BHN, s+8, s+8)  # noqa: N806
@@ -266,9 +269,26 @@ def torch_chunk_gated_delta_rule(
     )
 
     if chunk_scan_op is not None:
-        core_attn_out, last_recurrent_state = chunk_scan_op(
-            query, key, value, k_cumdecay, decay_mask, mask_incl, g, last_recurrent_state
+        chunk_scan_state_is_cache = bool(getattr(chunk_scan_op, "state_is_cache", False))
+        if (
+            chunk_scan_state_is_cache
+            and not isinstance(last_recurrent_state, (CacheTensor, Proxy))
+        ):
+            last_recurrent_state = CacheTensor(last_recurrent_state)
+        chunk_scan_result = chunk_scan_op(
+            query,
+            key,
+            value,
+            k_cumdecay,
+            decay_mask,
+            mask_incl,
+            g,
+            last_recurrent_state,
         )
+        if chunk_scan_state_is_cache:
+            core_attn_out = chunk_scan_result
+        else:
+            core_attn_out, last_recurrent_state = chunk_scan_result
     else:
         core_attn_chunks = []
         # Use concrete num_chunks for TorchFX tracing compatibility
@@ -344,9 +364,25 @@ def torch_recurrent_gated_delta_rule(
     )
 
     if recurrent_scan_op is not None:
-        result = recurrent_scan_op(query, key, value, g, beta, last_recurrent_state)
-        core_attn_out = result[0]
-        last_recurrent_state = result[1]
+        recurrent_scan_returns_state = bool(getattr(recurrent_scan_op, "returns_state", False))
+        if recurrent_scan_returns_state:
+            core_attn_steps = []
+            for i in range(sequence_length):
+                q_t = query[:, :, i]
+                last_recurrent_state = recurrent_scan_op(
+                    query[:, :, i : i + 1],
+                    key[:, :, i : i + 1],
+                    value[:, :, i : i + 1],
+                    g[:, :, i : i + 1],
+                    beta[:, :, i : i + 1],
+                    last_recurrent_state,
+                )
+                core_attn_steps.append((last_recurrent_state * q_t.unsqueeze(-1)).sum(dim=-2))
+            core_attn_out = torch.stack(core_attn_steps, dim=2)
+        else:
+            result = recurrent_scan_op(query, key, value, g, beta, last_recurrent_state)
+            core_attn_out = result[0]
+            last_recurrent_state = result[1]
     else:
         core_attn_steps = []
         for i in range(sequence_length):

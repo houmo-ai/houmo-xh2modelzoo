@@ -88,6 +88,8 @@ def main(args):
     logger = get_xhquant_logger()
 
     cfg = Config.fromfile(config_file)
+    if args.fuse_gdr_ops is not None:
+        cfg.model.fuse_gdr_ops = bool(args.fuse_gdr_ops)
     cfg.seed = seed
     logger.info(f"Config:\n{cfg.pretty_text}")
     cfg.dump(work_dir / f"{cfg_name}.py")
@@ -117,6 +119,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
     parser.add_argument("--force", action="store_true", help="Whether to force export even if the model exists")
     parser.add_argument("--seed", type=int, default=1024, help="random seed")
+    parser.add_argument(
+        "--fuse-gdr-ops",
+        "--fuse_gdr_ops",
+        dest="fuse_gdr_ops",
+        action="store_true",
+        default=None,
+        help="override config and export with fused GDR operators",
+    )
+    parser.add_argument(
+        "--no-fuse-gdr-ops",
+        "--no_fuse_gdr_ops",
+        dest="fuse_gdr_ops",
+        action="store_false",
+        help="override config and export without fused GDR operators",
+    )
     parser.add_argument(
         "--work-dir",
         "--work_dir",

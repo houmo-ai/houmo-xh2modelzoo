@@ -12,8 +12,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from xhquant.nn.builder import FX_LEAF_MODULES
-
 
 # QTL-332: route GDRBlockTriInverse through the xhquant first-class custom op
 # (xh::GDRBlockTriInverse). The legacy in-file implementation is preserved
@@ -64,7 +62,11 @@ def _neumann_8x8(block: torch.Tensor, eye_8: torch.Tensor) -> torch.Tensor:
 
 
 class LegacyGDRBlockTriInverse(nn.Module):
-    """DEPRECATED — kept only for XHQUANT_GDR_USE_LEGACY=1 regression diff; bit-identical evidence (QTL-343 / T7) shows the xhquant first-class fused op is a complete drop-in replacement. Scheduled for removal in a future QTL ticket.
+    """DEPRECATED legacy block inverse implementation.
+
+    Kept only for ``XHQUANT_GDR_USE_LEGACY=1`` regression diff. Bit-identical
+    evidence (QTL-343 / T7) shows the xhquant first-class fused op is a
+    complete drop-in replacement.
 
     Block lower-triangular matrix inverse: (I - A)^{-1}.
 
@@ -82,7 +84,9 @@ class LegacyGDRBlockTriInverse(nn.Module):
         self.block_size = block_size
         self._nb = chunk_size // block_size
         warnings.warn(
-            "LegacyGDRBlockTriInverse is deprecated and only kept behind XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is bit-identical to this legacy chain (QTL-343). Scheduled for removal in a future QTL.",
+            "LegacyGDRBlockTriInverse is deprecated and only kept behind "
+            "XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is "
+            "bit-identical to this legacy chain (QTL-343).",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -98,7 +102,10 @@ class LegacyGDRBlockTriInverse(nn.Module):
 
         # Step 1: Batch compute all diagonal block inverses via Neumann series
         diag_blocks = torch.stack(
-            [flat[:, I * b : (I + 1) * b, I * b : (I + 1) * b] for I in range(nb)],
+            [
+                flat[:, block_idx * b : (block_idx + 1) * b, block_idx * b : (block_idx + 1) * b]
+                for block_idx in range(nb)
+            ],
             dim=1,
         )  # (BHN, nb, b, b)
         batched = diag_blocks.reshape(-1, b, b)  # (BHN*nb, b, b)
@@ -108,20 +115,24 @@ class LegacyGDRBlockTriInverse(nn.Module):
         # Step 2: Block forward substitution (nb serial steps)
         R_upper = diag_invs_all[:, 0]  # (BHN, b, b)
 
-        for I in range(1, nb):
-            s = I * b
+        for block_idx in range(1, nb):
+            s = block_idx * b
             T = torch.matmul(flat[:, s : s + b, :s], R_upper)
-            diag_inv_I = diag_invs_all[:, I]
-            off_diag = torch.matmul(diag_inv_I, T)
+            diag_inv_i = diag_invs_all[:, block_idx]
+            off_diag = torch.matmul(diag_inv_i, T)
             old_rows = F.pad(R_upper, (0, b))
-            new_rows = torch.cat([off_diag, diag_inv_I], dim=-1)
+            new_rows = torch.cat([off_diag, diag_inv_i], dim=-1)
             R_upper = torch.cat([old_rows, new_rows], dim=-2)
 
         return R_upper.reshape(B, heads, num_chunks, cs, cs)
 
 
 class LegacyGDRChunkScan(nn.Module):
-    """DEPRECATED — kept only for XHQUANT_GDR_USE_LEGACY=1 regression diff; bit-identical evidence (QTL-343 / T7) shows the xhquant first-class fused op is a complete drop-in replacement. Scheduled for removal in a future QTL ticket.
+    """DEPRECATED legacy chunk scan implementation.
+
+    Kept only for ``XHQUANT_GDR_USE_LEGACY=1`` regression diff. Bit-identical
+    evidence (QTL-343 / T7) shows the xhquant first-class fused op is a
+    complete drop-in replacement.
 
     Chunk-level state scan for Gated Delta Rule.
 
@@ -135,6 +146,9 @@ class LegacyGDRChunkScan(nn.Module):
         v_head_dim: Value head dimension.
         chunk_size: Chunk size (default 64).
     """
+
+    state_is_cache = False
+    returns_state = True
 
     def __init__(
         self,
@@ -151,7 +165,9 @@ class LegacyGDRChunkScan(nn.Module):
         self.v_head_dim = v_head_dim
         self.chunk_size = chunk_size
         warnings.warn(
-            "LegacyGDRChunkScan is deprecated and only kept behind XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is bit-identical to this legacy chain (QTL-343). Scheduled for removal in a future QTL.",
+            "LegacyGDRChunkScan is deprecated and only kept behind "
+            "XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is "
+            "bit-identical to this legacy chain (QTL-343).",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -206,7 +222,11 @@ class LegacyGDRChunkScan(nn.Module):
 
 
 class LegacyGDRRecurrentScan(nn.Module):
-    """DEPRECATED — kept only for XHQUANT_GDR_USE_LEGACY=1 regression diff; bit-identical evidence (QTL-343 / T7) shows the xhquant first-class fused op is a complete drop-in replacement. Scheduled for removal in a future QTL ticket.
+    """DEPRECATED legacy recurrent scan implementation.
+
+    Kept only for ``XHQUANT_GDR_USE_LEGACY=1`` regression diff. Bit-identical
+    evidence (QTL-343 / T7) shows the xhquant first-class fused op is a
+    complete drop-in replacement.
 
     Token-level recurrent state scan for Gated Delta Rule.
 
@@ -219,12 +239,16 @@ class LegacyGDRRecurrentScan(nn.Module):
         output_all_states: If True, return per-step state snapshots.
     """
 
+    returns_state = False
+
     def __init__(self, sequence_length: int = 1, output_all_states: bool = False):
         super().__init__()
         self.sequence_length = sequence_length
         self.output_all_states = output_all_states
         warnings.warn(
-            "LegacyGDRRecurrentScan is deprecated and only kept behind XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is bit-identical to this legacy chain (QTL-343). Scheduled for removal in a future QTL.",
+            "LegacyGDRRecurrentScan is deprecated and only kept behind "
+            "XHQUANT_GDR_USE_LEGACY=1; the xhquant first-class fused op is "
+            "bit-identical to this legacy chain (QTL-343).",
             DeprecationWarning,
             stacklevel=2,
         )

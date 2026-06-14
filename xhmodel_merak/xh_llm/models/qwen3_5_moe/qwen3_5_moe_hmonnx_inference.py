@@ -5,13 +5,16 @@ from xhmodel_merak.xh_llm.utils import unfold_args
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
-from .data_preprocess import Qwen3_5_DataPreprocess
-from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
+from ..qwen3_5.qwen3_5_hmonnx_inference import (
+    Qwen3_5HMONNXKVCacheMixin,
+    _model_config_prefill_recurrent_state_uses_cache,
+)
+from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from ..qwen3_5.split_conv_cache_utils import (
     _flatten_split_conv_cache_outputs,
     _regroup_flat_split_conv_cache,
 )
-from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
+from .data_preprocess import Qwen3_5_DataPreprocess
 
 
 class VisualHMONNXModel(HMONNXModel):
@@ -63,6 +66,9 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             return int(num_draft_tokens) + 1
         return 1
 
+    def _prefill_recurrent_state_uses_cache(self) -> bool:
+        return _model_config_prefill_recurrent_state_uses_cache(self.meta_info.model_config)
+
     def get_input_sequence_length(self) -> int:
         if getattr(self, "_llm_prefill", True):
             return self.meta_info.model_config.prefill_chunk_length
@@ -103,7 +109,11 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         conv_cache_out_per_step = (
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
-        recurrent_state_out_per_step = len(past_recurrent_states)
+        prefill_recurrent_state_uses_cache = (
+            getattr(self, "_llm_prefill", True)
+            and self._prefill_recurrent_state_uses_cache()
+        )
+        recurrent_state_out_per_step = 0 if prefill_recurrent_state_uses_cache else len(past_recurrent_states)
         conv_cache_out_count = conv_cache_out_per_step * verify_steps
         recurrent_state_out_count = recurrent_state_out_per_step * verify_steps
         expected_linear_cache_outputs = conv_cache_out_count + recurrent_state_out_count
@@ -156,10 +166,11 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
                 past_conv_cache[:] = conv_cache_out[:]
 
-        for past_recurrent_state, recurrent_state_out in zip(
-            past_recurrent_states, recurrent_state_out_list, strict=True
-        ):
-            past_recurrent_state[:] = recurrent_state_out[:]
+        if recurrent_state_out_list:
+            for past_recurrent_state, recurrent_state_out in zip(
+                past_recurrent_states, recurrent_state_out_list, strict=True
+            ):
+                past_recurrent_state[:] = recurrent_state_out[:]
         return logits, conv_cache_out_list, recurrent_state_out_list
 
     def _get_data_preprocessor(self) -> Qwen3_5_DataPreprocess:

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# ruff: noqa: N801
 # Copyright 2025 The Qwen Team, Alibaba Group and The HuggingFace Inc. team. All rights reserved.
 # Copyright 2025 HOUMO AI. All rights reserved.
 #
@@ -66,6 +67,15 @@ from .modeling_qwen3_5 import (
     Qwen3_5TextModel,
     Qwen3_5TextRotaryEmbedding,
 )
+from .split_conv_cache_utils import (
+    _flatten_merged_conv_cache_outputs,
+    _flatten_split_conv_cache_outputs,
+    _is_nested_split_conv_cache,
+    _layers_use_split_conv_cache,
+    _looks_like_flat_split_conv_cache,
+    _regroup_flat_split_conv_cache,
+    _select_linear_attn_conv_cache,
+)
 
 
 # FusedRMSNormGated from fla package (used when fla is installed)
@@ -76,16 +86,15 @@ except ImportError:
 
 _HF_QWEN35_MODELING = "transformers.models.qwen3_5.modeling_qwen3_5"
 
-from .split_conv_cache_utils import (
-    _flatten_merged_conv_cache_outputs,
-    _flatten_split_conv_cache_outputs,
-    _get_linear_layer_conv_cache,
-    _is_nested_split_conv_cache,
-    _layers_use_split_conv_cache,
-    _looks_like_flat_split_conv_cache,
-    _regroup_flat_split_conv_cache,
-    _select_linear_attn_conv_cache,
-)
+
+def _neumann_8x8(block: torch.Tensor, eye_8: torch.Tensor) -> torch.Tensor:
+    p = block
+    r = eye_8 + p
+    p = (p.unsqueeze(-1) * p.unsqueeze(-3)).sum(-2)
+    r = (r.unsqueeze(-1) * (eye_8 + p).unsqueeze(-3)).sum(-2)
+    p = (p.unsqueeze(-1) * p.unsqueeze(-3)).sum(-2)
+    r = (r.unsqueeze(-1) * (eye_8 + p).unsqueeze(-3)).sum(-2)
+    return r
 
 
 def parallel_chunk_inverse_block(
@@ -122,7 +131,7 @@ def parallel_chunk_inverse_block(
     # --- Step 1: Batch compute all 8 diagonal block inverses ---
     # Stack diagonal blocks: (BHN, 8, 8, 8) → (BHN*8, 8, 8)
     diag_blocks = torch.stack(
-        [flat[:, I * b : (I + 1) * b, I * b : (I + 1) * b] for I in range(nb)],
+        [flat[:, block_idx * b : (block_idx + 1) * b, block_idx * b : (block_idx + 1) * b] for block_idx in range(nb)],
         dim=1,
     )  # (BHN, 8, 8, 8)
     batched = diag_blocks.reshape(-1, b, b)  # (BHN*8, 8, 8)
@@ -134,24 +143,24 @@ def parallel_chunk_inverse_block(
     # R_upper starts as the first diagonal block and grows each step.
     R_upper = diag_invs_all[:, 0]  # (BHN, 8, 8) — R[0:8, 0:8]  # noqa: N806
 
-    for I in range(1, nb):  # noqa: N806
-        s = I * b  # start index of current block row
+    for block_idx in range(1, nb):
+        s = block_idx * b  # start index of current block row
 
         # A[s:s+8, 0:s] @ R_upper → off-diagonal contribution
         # shapes: (BHN, 8, s) @ (BHN, s, s) → (BHN, 8, s)
         T = torch.matmul(flat[:, s : s + b, :s], R_upper)  # noqa: N806
 
-        # off_diag = diag_inv[I] @ T
+        # off_diag = diag_inv[block_idx] @ T
         # shapes: (BHN, 8, 8) @ (BHN, 8, s) → (BHN, 8, s)
-        diag_inv_I = diag_invs_all[:, I]  # (BHN, 8, 8)  # noqa: N806
-        off_diag = torch.matmul(diag_inv_I, T)  # (BHN, 8, s)
+        diag_inv_i = diag_invs_all[:, block_idx]  # (BHN, 8, 8)
+        off_diag = torch.matmul(diag_inv_i, T)  # (BHN, 8, s)
 
         # Extend R_upper from (BHN, s, s) to (BHN, s+8, s+8)
         # Old rows get 8 zero-columns appended on the right via Pad
         old_rows = F.pad(R_upper, (0, b))  # (BHN, s, s+8)
 
-        # New rows: [off_diag | diag_inv_I]
-        new_rows = torch.cat([off_diag, diag_inv_I], dim=-1)  # (BHN, 8, s+8)
+        # New rows: [off_diag | diag_inv_i]
+        new_rows = torch.cat([off_diag, diag_inv_i], dim=-1)  # (BHN, 8, s+8)
 
         # Stack vertically
         R_upper = torch.cat([old_rows, new_rows], dim=-2)  # (BHN, s+8, s+8)  # noqa: N806
@@ -866,7 +875,13 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
                 chunk_scan_op=self.chunk_scan_op,
             )
 
-        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
+        suppress_recurrent_state_outputs = (
+            getattr(self, "suppress_recurrent_state_outputs", False)
+            and not use_recurrent
+        )
+        if suppress_recurrent_state_outputs:
+            recurrent_state_out = None
+        elif _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
             recurrent_state_out = tuple(_recurrent_snapshots)
         else:
             recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
@@ -892,6 +907,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.batch_size = cfg.get("batch_size", 1)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", False)
         self.split_conv_cache = cfg.get("split_conv_cache", True)
+        self.suppress_recurrent_state_outputs = cfg.get("suppress_recurrent_state_outputs", False)
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d so hmonnx
         # export emits a clean Conv op. xhquant 2d86b60+ routes any-kernel
@@ -1155,6 +1171,10 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.batch_size = cfg.get("batch_size", self.batch_size)
         self._verify_output_intermediates = cfg.get("verify_output_intermediates", self._verify_output_intermediates)
         self.split_conv_cache = cfg.get("split_conv_cache", self.split_conv_cache) or hasattr(self, "in_proj_q")
+        self.suppress_recurrent_state_outputs = cfg.get(
+            "suppress_recurrent_state_outputs",
+            getattr(self, "suppress_recurrent_state_outputs", False),
+        )
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1403,9 +1423,9 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         # Keep rotary cache buffers on rotary_emb (same pattern as qwen3next).
         # Multi-GPU placement is controlled by device_map assignment in script.
         if hasattr(self.rotary_emb, "cos_cached"):
-            self.rotary_emb.cos_cached
+            _ = self.rotary_emb.cos_cached
         if hasattr(self.rotary_emb, "sin_cached"):
-            self.rotary_emb.sin_cached
+            _ = self.rotary_emb.sin_cached
 
     def _compute_qwen3_5_rotary_from_position_ids(
         self,
@@ -1570,7 +1590,8 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
                     past_recurrent_state=_past_recurrent_state,
                 )
                 conv_cache_out_list.append(conv_cache_out)
-                recurrent_state_out_list.append(recurrent_state_out)
+                if recurrent_state_out is not None:
+                    recurrent_state_out_list.append(recurrent_state_out)
             else:
                 hidden_states = decoder_layer(
                     hidden_states,

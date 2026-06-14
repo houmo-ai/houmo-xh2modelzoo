@@ -8,6 +8,7 @@ from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
 from xhquant.api import get_xhquant_logger, xhquant_init
 from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
+
 try:
     from validate_hm_release_layout import ensure_step_artifact_links
 except ImportError:
@@ -57,7 +58,11 @@ def main(args):
     if Path(prompt).is_file():
         prompt = Path(prompt).read_text()
 
-    use_multimodal = bool(args.image_path) and Path(args.image_path).exists() and hasattr(hmonnx_model, "get_tf_processor")
+    use_multimodal = (
+        bool(args.image_path)
+        and Path(args.image_path).exists()
+        and hasattr(hmonnx_model, "get_tf_processor")
+    )
     if use_multimodal:
         tokenizer, model_inputs = _build_multimodal_inputs(hmonnx_model, prompt, args.image_path, args.think, device)
     else:
@@ -86,6 +91,10 @@ def main(args):
 
     output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
     content = tokenizer.decode(output_ids, skip_special_tokens=True).strip("\n")
+    if args.min_output_tokens > 0 and len(output_ids) < args.min_output_tokens:
+        raise RuntimeError(
+            f"Generated {len(output_ids)} tokens, expected at least {args.min_output_tokens}."
+        )
     logger.info(f"{'-' * 20} content {'-' * 20}")
     logger.info(content)
 
@@ -108,6 +117,12 @@ if __name__ == "__main__":
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--golden", action="store_true", help="save golden outputs")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--min-output-tokens",
+        type=int,
+        default=0,
+        help="fail if the generated continuation is shorter than this many tokens",
+    )
     parser.add_argument(
         "--auto-offload", action="store_true", help="Whether to enable auto offload, only for debug and development"
     )

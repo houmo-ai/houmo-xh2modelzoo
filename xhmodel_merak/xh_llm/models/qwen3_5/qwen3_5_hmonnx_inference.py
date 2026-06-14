@@ -15,6 +15,13 @@ from .split_conv_cache_utils import (
 )
 
 
+def _model_config_prefill_recurrent_state_uses_cache(model_config) -> bool:
+    explicit = getattr(model_config, "prefill_recurrent_state_uses_cache", None)
+    if explicit is not None:
+        return bool(explicit)
+    return bool(getattr(model_config, "fuse_gdr_ops", False))
+
+
 class VisualHMONNXModel(HMONNXModel):
     def forward(self, *args):
         out = super().forward(*args)
@@ -117,6 +124,9 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             return int(num_draft_tokens) + 1
         return 1
 
+    def _prefill_recurrent_state_uses_cache(self) -> bool:
+        return _model_config_prefill_recurrent_state_uses_cache(self.meta_info.model_config)
+
     def get_input_sequence_length(self) -> int:
         if getattr(self, "_llm_prefill", True):
             return self.meta_info.model_config.prefill_chunk_length
@@ -157,7 +167,11 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         conv_cache_out_per_step = (
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
-        recurrent_state_out_per_step = len(past_recurrent_states)
+        prefill_recurrent_state_uses_cache = (
+            getattr(self, "_llm_prefill", True)
+            and self._prefill_recurrent_state_uses_cache()
+        )
+        recurrent_state_out_per_step = 0 if prefill_recurrent_state_uses_cache else len(past_recurrent_states)
         conv_cache_out_count = conv_cache_out_per_step * verify_steps
         recurrent_state_out_count = recurrent_state_out_per_step * verify_steps
         expected_linear_cache_outputs = conv_cache_out_count + recurrent_state_out_count
@@ -210,10 +224,11 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
                 past_conv_cache[:] = conv_cache_out[:]
 
-        for past_recurrent_state, recurrent_state_out in zip(
-            past_recurrent_states, recurrent_state_out_list, strict=True
-        ):
-            past_recurrent_state[:] = recurrent_state_out[:]
+        if recurrent_state_out_list:
+            for past_recurrent_state, recurrent_state_out in zip(
+                past_recurrent_states, recurrent_state_out_list, strict=True
+            ):
+                past_recurrent_state[:] = recurrent_state_out[:]
         return logits, conv_cache_out_list, recurrent_state_out_list
 
     def _get_data_preprocessor(self) -> Qwen3_5_DataPreprocess:

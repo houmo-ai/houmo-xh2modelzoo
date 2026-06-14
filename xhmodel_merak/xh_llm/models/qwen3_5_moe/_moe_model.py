@@ -66,7 +66,6 @@ from ..qwen3_5._gdr_ops import GDRBlockTriInverse, GDRChunkScan, GDRRecurrentSca
 from ..qwen3_5.split_conv_cache_utils import (
     _flatten_merged_conv_cache_outputs,
     _flatten_split_conv_cache_outputs,
-    _get_linear_layer_conv_cache,
     _is_nested_split_conv_cache,
     _layers_use_split_conv_cache,
     _looks_like_flat_split_conv_cache,
@@ -876,7 +875,13 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
                 chunk_scan_op=self.chunk_scan_op,
             )
 
-        if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
+        suppress_recurrent_state_outputs = (
+            getattr(self, "suppress_recurrent_state_outputs", False)
+            and not use_recurrent
+        )
+        if suppress_recurrent_state_outputs:
+            recurrent_state_out = None
+        elif _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
             recurrent_state_out = tuple(_recurrent_snapshots)
         else:
             recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
@@ -905,6 +910,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
         self.input_sequence_length = cfg.get("input_sequence_length", 256)
         self.batch_size = cfg.get("batch_size", 1)
         self.split_conv_cache = cfg.get("split_conv_cache", True) or hasattr(self, "in_proj_q")
+        self.suppress_recurrent_state_outputs = cfg.get("suppress_recurrent_state_outputs", False)
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d module
         # (default) so hmonnx export emits a clean Conv op. Set True to fall
@@ -1168,6 +1174,10 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
         self.input_sequence_length = cfg.get("input_sequence_length", self.input_sequence_length)
         self.batch_size = cfg.get("batch_size", self.batch_size)
         self.split_conv_cache = cfg.get("split_conv_cache", self.split_conv_cache) or hasattr(self, "in_proj_q")
+        self.suppress_recurrent_state_outputs = cfg.get(
+            "suppress_recurrent_state_outputs",
+            getattr(self, "suppress_recurrent_state_outputs", False),
+        )
 
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
@@ -1572,7 +1582,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):  # noqa: N801
                     conv_cache_out_list.append(conv_cache_out)
                 if isinstance(recurrent_state_out, (list, tuple)):
                     recurrent_state_out_list.extend(recurrent_state_out)
-                else:
+                elif recurrent_state_out is not None:
                     recurrent_state_out_list.append(recurrent_state_out)
             else:
                 hidden_states = decoder_layer(
