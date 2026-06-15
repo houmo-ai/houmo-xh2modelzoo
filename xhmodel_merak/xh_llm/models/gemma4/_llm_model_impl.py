@@ -120,10 +120,9 @@ class _Gemma4TextAttention(DynamicModule):
         key_states = self.k_norm(key_states_linear)
         value_states = self.v_norm(value_states_linear)
 
-        if position_embeddings is not None:
-            cos, sin = position_embeddings
-            query_states = self.rope(query_states, cos, sin)
-            key_states = self.rope(key_states, cos, sin)
+        cos, sin = position_embeddings
+        query_states = self.rope(query_states, cos, sin)
+        key_states = self.rope(key_states, cos, sin)
 
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
@@ -132,15 +131,13 @@ class _Gemma4TextAttention(DynamicModule):
         if self.use_cache:
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
+
+        query_states = query_states * self.kv_scale
         key_states = key_states.transpose(2, 3)
         key_states = torch.repeat_interleave(key_states, self.num_key_value_groups, dim=1)
         value_states = torch.repeat_interleave(value_states, self.num_key_value_groups, dim=1)
-        if self.kv_scale == 1.0:
-            attn_weights = torch.matmul(query_states, key_states)
-        else:
-            attn_weights = torch.matmul(query_states, key_states) * self.kv_scale
-        if attention_mask is not None:
-            attn_weights = self.masked_add(attn_weights, attention_mask)
+        attn_weights = torch.matmul(query_states, key_states)
+        attn_weights = self.masked_add(attn_weights, attention_mask)
         attn_weights = self.softmax(attn_weights).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.num_heads * self.head_dim)
@@ -336,11 +333,8 @@ def register_wrap_modules():
     from xhquant.nn.modules.normalized_modules import FloorDiv
     from xhquant.quantization.xh2a.builder import register_none_quanted_module
 
-    # Register Gemma4TextRotaryEmbedding as FX leaf so the tracer doesn't trace into it
-    # (its forward uses getattr with f-strings and x.device which are not proxy-safe)
     FX_LEAF_MODULES._module_dict["Gemma4TextRotaryEmbedding"] = True
 
-    # Register modules as none-quanted so the quantization pipeline passes them through
     register_none_quanted_module(Gemma4TextRotaryEmbedding)
     register_none_quanted_module(FloorDiv)
     return None

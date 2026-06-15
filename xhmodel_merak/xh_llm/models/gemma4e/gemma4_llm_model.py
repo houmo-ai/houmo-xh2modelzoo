@@ -61,7 +61,6 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         past_seq_length,
         current_input_length,
         local_attention_mask,
-        global_attention_mask,
         past_key_cache,
         past_value_cache,
         per_layer_inputs,
@@ -72,7 +71,6 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             local_attention_mask=local_attention_mask,
-            global_attention_mask=global_attention_mask,
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )
@@ -95,13 +93,12 @@ class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
         past_seq_length,
         current_input_length,
         local_attention_mask,
-        global_attention_mask,
         past_key_cache=None,
         past_value_cache=None,
     ):
         return self._run(
             inputs_embeds, past_seq_length, current_input_length,
-            local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
+            local_attention_mask, past_key_cache, past_value_cache,
             per_layer_inputs,
         )
 
@@ -115,13 +112,12 @@ class _Gemma4TextExportBridgeDense(_Gemma4TextExportBridgeBase):
         past_seq_length,
         current_input_length,
         local_attention_mask,
-        global_attention_mask,
         past_key_cache=None,
         past_value_cache=None,
     ):
         return self._run(
             inputs_embeds, past_seq_length, current_input_length,
-            local_attention_mask, global_attention_mask, past_key_cache, past_value_cache,
+            local_attention_mask, past_key_cache, past_value_cache,
             None,
         )
 
@@ -663,7 +659,6 @@ class XHGemma4Model(VisionLLMModel):
             "past_seq_length",
             "current_input_length",
             "local_attention_mask",
-            "global_attention_mask",
         ]
         export_cfg = {"input_names": input_names, "output_names": ["logits"]}
         for layer_idx in range(self.kvcache_config.num_layers):
@@ -696,6 +691,10 @@ class XHGemma4Model(VisionLLMModel):
     def export_hmonnx(self, output_dir: str) -> Gemma4ModelMeta:
         logger = get_xhquant_logger()
         self.work_dir = str(output_dir)
+        if self.visual is not None:
+            self.visual.work_dir = str(output_dir)
+        if self.audio is not None:
+            self.audio.work_dir = str(output_dir)
         if self._state != LLMModelState.QUANTED_ALIGNED:
             self.to_quanted_aligned()
         self._quanted_model.fixed()

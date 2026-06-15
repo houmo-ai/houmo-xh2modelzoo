@@ -333,14 +333,13 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             self.past_value_caches,
         ]
         if self.use_explicit_attention_mask:
-            global_attention_mask, local_attention_mask = self._build_attention_masks(
+            _, local_attention_mask = self._build_attention_masks(
                 current_input_length=current_input_length,
                 past_seq_length=past_seq_length,
                 mm_token_type_ids=mm_token_type_ids[0],
                 device=self._device,
             )
             output.insert(3, local_attention_mask)
-            output.insert(4, global_attention_mask)
         if per_layer_inputs is not None:
             output.insert(0, per_layer_inputs.to(self._device, inputs_embeds.dtype))
         return tuple(output)

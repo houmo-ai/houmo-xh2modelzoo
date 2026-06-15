@@ -12,7 +12,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextModel,
     Gemma4TextRotaryEmbedding,
 )
-from xhquant.nn import LLMCacheV2, MaskedAdd, RMSNorm, SoftmaxPlus
+from xhquant.nn import LLMCacheV2, MaskedAdd, MaskedSoftmax, RMSNorm, SoftmaxPlus
 from xhquant.utils.registry import DynamicModule
 
 from ...register import XHLLM_TRACEABLE_MODULES
@@ -153,9 +153,12 @@ class _Gemma4TextAttention(DynamicModule):
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
         attention_max_length = getattr(self, "sliding_window", None)
         attention_max_length = int(attention_max_length) if attention_max_length is not None else -1
-        self.masked_add = MaskedAdd()
-        self.masked_add_2 = MaskedAdd()
-        self.softmax = SoftmaxPlus(dim=-1)
+        self.is_sliding_attention = attention_max_length > 0
+        if self.is_sliding_attention:
+            self.masked_add = MaskedAdd()
+            self.softmax = SoftmaxPlus(dim=-1)
+        else:
+            self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
         if self.use_cache:
             cache_axis = cfg.kv_cache.cache_axis
             self.k_cache = LLMCacheV2(axis=cache_axis, attention_max_length=attention_max_length)
@@ -225,10 +228,12 @@ class _Gemma4TextAttention(DynamicModule):
         value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
 
         attn_weights = self.qk_matmul(query_states, key_states)
-        if attention_mask is not None:
-            attn_weights = self.masked_add(attn_weights, attention_mask)
-            attn_weights = self.masked_add_2(attn_weights, attention_mask)
-        attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        if self.is_sliding_attention:
+            if attention_mask is not None:
+                attn_weights = self.masked_add(attn_weights, attention_mask)
+            attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        else:
+            attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
 
         attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
@@ -406,7 +411,6 @@ class _Gemma4TextModel(DynamicModule):
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
         local_attention_mask: Optional[Tensor] = None,
-        global_attention_mask: Optional[Tensor] = None,
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
     ):
@@ -448,7 +452,7 @@ class _Gemma4TextModel(DynamicModule):
 
             layer_type = self.config.layer_types[layer_idx]
             layer_position_embeddings = position_embeddings_by_type[layer_type]
-            layer_attention_mask = global_attention_mask if layer_type == "full_attention" else local_attention_mask
+            layer_attention_mask = local_attention_mask if layer_type == "sliding_attention" else None
             layer_per_input = per_layer_inputs[:, layer_idx, :, :] if per_layer_inputs is not None else None
 
             hidden_states = decoder_layer(
