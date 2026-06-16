@@ -62,6 +62,33 @@ logging.getLogger("onnxscript.rewriter.rules.common._collapse_slices").setLevel(
 logging.getLogger("onnxscript.optimizer._constant_folding").setLevel(logging.WARNING)
 logging.getLogger("onnx_ir.passes.common.initializer_deduplication").setLevel(logging.WARNING)
 
+FP16_MAX_FINITE_POSITION = 65504
+
+
+def _validate_offline_rope_required_for_fp16_limit(args):
+    if getattr(args, "support_long_context_over_fp16_limit", True):
+        return
+
+    checked_ranges = {
+        "max_pe_length": int(getattr(args, "max_pe_length", 0) or 0),
+        "context_length": int(getattr(args, "context_length", 0) or 0),
+        "input_sequence_length": int(getattr(args, "input_sequence_length", 0) or 0),
+    }
+    offenders = {
+        name: value
+        for name, value in checked_ranges.items()
+        if value > FP16_MAX_FINITE_POSITION
+    }
+    if not offenders:
+        return
+
+    offender_text = ", ".join(f"{name}={value}" for name, value in offenders.items())
+    raise ValueError(
+        "--no-support_long_context_over_fp16_limit is invalid because "
+        f"{offender_text} exceeds fp16 max finite value {FP16_MAX_FINITE_POSITION}. "
+        "Keep offline RoPE enabled for long-context exports."
+    )
+
 
 def _get_default_device() -> torch.device:
     return torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -1171,11 +1198,16 @@ def main(args):
         spec_decode_mode = None
         args.spec_decode_mode = None
     num_draft_tokens = args.num_draft_tokens
+    _validate_offline_rope_required_for_fp16_limit(args)
 
     config = Qwen3_5MoeConvertConfig(
         batch_size=args.batch_size,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
+        max_pe_length=args.max_pe_length,
+        support_long_context_over_fp16_limit=getattr(
+            args, "support_long_context_over_fp16_limit", True
+        ),
         quant_scheme=quant_scheme,
         quant_weight=args.quant_weight,
         num_logits_to_keep=args.num_logits_to_keep,
@@ -1251,6 +1283,8 @@ def main(args):
 
 
 def main_golden_only(args):
+    _validate_offline_rope_required_for_fp16_limit(args)
+
     if args.existing_work_dir:
         work_dir = Path(args.existing_work_dir)
     elif args.work_dir:
@@ -1294,7 +1328,26 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size for export model inputs")
     parser.add_argument("--context-length", type=int, default=2048, help="Maximum context length (kv cache size)")
+    parser.add_argument("--max-pe-length", "--max_pe_length", dest="max_pe_length", type=int, default=262144, help="RoPE cache length; 256K is required for long context over fp16 position limit")
     parser.add_argument("--input-sequence-length", type=int, default=256, help="Prefill chunk size")
+    parser.set_defaults(support_long_context_over_fp16_limit=True)
+    long_context_group = parser.add_mutually_exclusive_group()
+    long_context_group.add_argument(
+        "--support_long_context_over_fp16_limit",
+        dest="support_long_context_over_fp16_limit",
+        action="store_true",
+        help=(
+            "Use precomputed rotary cache (offline RoPE) so exported graphs can "
+            "support position_id > 65504. Enabled by default; offline RoPE is required for 256K context."
+        ),
+    )
+    long_context_group.add_argument(
+        "--no-support_long_context_over_fp16_limit",
+        "--no-support-long-context-over-fp16-limit",
+        dest="support_long_context_over_fp16_limit",
+        action="store_false",
+        help="Disable offline RoPE cache support; invalid for 256K long-context exports.",
+    )
     parser.add_argument("--quant-type", type=str, default="w8a8h0_sefp", help="Quantisation type string")
     parser.add_argument("--quant-weight", type=str, default=None, help="Path to GPTQModel quantised weights (optional)")
     parser.add_argument(

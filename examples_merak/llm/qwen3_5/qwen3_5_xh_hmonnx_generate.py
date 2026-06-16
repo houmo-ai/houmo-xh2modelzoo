@@ -85,7 +85,7 @@ def main(args):
             **model_inputs,
             max_new_tokens=2 if args.golden else args.max_new_tokens,
             streamer=streamer,
-            do_sample=True,
+            do_sample=args.do_sample,
             pad_token_id=tokenizer.eos_token_id,
         )
 
@@ -117,6 +117,8 @@ if __name__ == "__main__":
     parser.add_argument("--think", action="store_true", help="enable think mode")
     parser.add_argument("--golden", action="store_true", help="save golden outputs")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true", default=True)
+    parser.add_argument("--no-sample", dest="do_sample", action="store_false")
     parser.add_argument(
         "--min-output-tokens",
         type=int,

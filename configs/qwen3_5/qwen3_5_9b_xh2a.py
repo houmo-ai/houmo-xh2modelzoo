@@ -63,7 +63,7 @@ model = dict(
     type="XHQwen3_5Model",
     wrap_cfg=dict(
         batch_size=1,
-        max_pe_length=256*1024,
+        max_pe_length=262144,
         max_sequence_length=2048,
         input_sequence_length=256,
         use_cache=True,
@@ -71,7 +71,7 @@ model = dict(
         linear_attention_mode="auto",
         linear_chunk_size=64,
         fuse_gdr_ops=False,
-        support_long_context_over_fp16_limit=False,
+        support_long_context_over_fp16_limit=True,
         kv_cache=dict(
             cache_axis=2,
         ),

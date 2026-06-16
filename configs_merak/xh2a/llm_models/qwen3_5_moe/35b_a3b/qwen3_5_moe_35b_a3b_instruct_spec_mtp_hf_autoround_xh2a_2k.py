@@ -4,7 +4,7 @@ _base_ = [
 
 model = dict(
     model_name="qwen3_6_35b_a3b_spec_mtp_test",
-    max_pe_length=32768,
+    max_pe_length=262144,
     spec_decode_mode="mtp",
     num_draft_tokens=1,
     spec_draft_head_weight_bits=4,
@@ -16,7 +16,7 @@ model = dict(
         batch_size=1,
         input_sequence_length=1,
         context_max_length=2048,
-        max_pe_length=32768,
+        max_pe_length=262144,
         use_cache=True,
     ),
 )

@@ -386,6 +386,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 linear_attention_mode=self.config.linear_attention_mode,
                 linear_chunk_size=self.config.linear_chunk_size,
                 enable_rope=self.config.enable_rope,
+                max_pe_length=getattr(self.config, "max_pe_length", 262144),
+                support_long_context_over_fp16_limit=getattr(
+                    self.config, "support_long_context_over_fp16_limit", True
+                ),
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
                 output_hidden_state_indices=output_hidden_state_indices,

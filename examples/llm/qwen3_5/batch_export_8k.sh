@@ -42,8 +42,8 @@ mkdir -p "$LOG_DIR"
 
 # model_id | config | float_dir | dflash_dir | autoround_dir
 ROWS=(
-  "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only"
-  "qwen3_5_9b|configs/qwen3_5/qwen3_5_9b_xh2a.py|weights/Qwen3.5-9B|weights/Qwen3.5-9B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only"
+  "qwen3_5_4b|configs/qwen3_5/qwen3_5_4b_xh2a.py|weights/Qwen3.5-4B|weights/Qwen3.5-4B-DFlash|weights/Qwen3.5-4B-mode1-llm-only"
+  "qwen3_5_9b|configs/qwen3_5/qwen3_5_9b_xh2a.py|weights/Qwen3.5-9B|weights/Qwen3.5-9B-DFlash|weights/Qwen3.5-9B-mode1-llm-only"
   "qwen3_5_27b|configs/qwen3_5/qwen3_5_27b_xh2a.py|weights/Qwen3.5-27B|weights/Qwen3.5-27B-DFlash|/data01/home/yujy/work/auto-round/output/sym-mode1"
   # "qwen3_5_35b_a3b|configs/qwen3_5/qwen3_5_35b_a3b_xh2a.py|weights/Qwen3.5-35B-A3B|weights/Qwen3.5-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.5-35B-A3B-mode1-llm-only"
   # "qwen3_6_35b_a3b|configs/qwen3_5/qwen3_6_35b_a3b_xh2a.py|weights/Qwen3.6-35B-A3B|weights/Qwen3.6-35B-A3B-DFlash|/data01/home/yujy/work/auto-round/output/Qwen3.6-35B-A3B-mode1-llm-only"

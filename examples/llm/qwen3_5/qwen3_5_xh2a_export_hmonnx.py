@@ -66,6 +66,35 @@ DTYPE_NAME_MAP = {
 }
 
 DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
+FP16_MAX_FINITE_POSITION = 65504
+
+
+def _validate_offline_rope_required_for_fp16_limit(cfg, args):
+    if getattr(args, "support_long_context_over_fp16_limit", True):
+        return
+
+    wrap_cfg = cfg.model.wrap_cfg
+    checked_ranges = {
+        "max_pe_length": int(wrap_cfg.get("max_pe_length", 0) or 0),
+        "max_sequence_length": int(
+            getattr(args, "max_sequence_length", wrap_cfg.get("max_sequence_length", 0)) or 0
+        ),
+        "input_sequence_length": int(wrap_cfg.get("input_sequence_length", 0) or 0),
+    }
+    offenders = {
+        name: value
+        for name, value in checked_ranges.items()
+        if value > FP16_MAX_FINITE_POSITION
+    }
+    if not offenders:
+        return
+
+    offender_text = ", ".join(f"{name}={value}" for name, value in offenders.items())
+    raise ValueError(
+        "--no-support_long_context_over_fp16_limit is invalid because "
+        f"{offender_text} exceeds fp16 max finite value {FP16_MAX_FINITE_POSITION}. "
+        "Keep offline RoPE enabled for long-context exports."
+    )
 
 
 def _load_dflash_target_layer_ids(dflash_model_dir: str) -> List[int]:
@@ -1836,8 +1865,9 @@ def _prepare_export_context(cfg, args, logger):
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
     cfg.model.wrap_cfg.support_long_context_over_fp16_limit = getattr(
-        args, "support_long_context_over_fp16_limit", False
+        args, "support_long_context_over_fp16_limit", True
     )
+    _validate_offline_rope_required_for_fp16_limit(cfg, args)
 
     source_quant = _detect_source_quant_method(args.hf_model_dir)
     if source_quant == "gptq":
@@ -2176,8 +2206,9 @@ def _prepare_golden_only_context(cfg, args, logger):
     cfg.model.wrap_cfg.max_sequence_length = args.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
     cfg.model.wrap_cfg.support_long_context_over_fp16_limit = getattr(
-        args, "support_long_context_over_fp16_limit", False
+        args, "support_long_context_over_fp16_limit", True
     )
+    _validate_offline_rope_required_for_fp16_limit(cfg, args)
 
     qwen3_5_model: XHQwen3_5Model = MODELS.build(cfg.model)
     tokenizer = qwen3_5_model.get_tokenizer()
@@ -2371,8 +2402,9 @@ def _draft_only_impl(cfg, args):
     args.max_sequence_length = cfg.model.wrap_cfg.max_sequence_length
     cfg.model.wrap_cfg.num_logits_to_keep = args.num_logits_to_keep
     cfg.model.wrap_cfg.support_long_context_over_fp16_limit = getattr(
-        args, "support_long_context_over_fp16_limit", False
+        args, "support_long_context_over_fp16_limit", True
     )
+    _validate_offline_rope_required_for_fp16_limit(cfg, args)
 
     logger.info(f"Draft-only export: reusing target work_dir={existing_work_dir}")
     logger.info(f"Reused target prefill ONNX: {prefill_onnx}")
@@ -2706,13 +2738,23 @@ def parse_arguments():
         default=None,
         help="Override model.wrap_cfg.batch_size for ordinary continue-batch export.",
     )
-    parser.add_argument(
+    parser.set_defaults(support_long_context_over_fp16_limit=True)
+    long_context_group = parser.add_mutually_exclusive_group()
+    long_context_group.add_argument(
         "--support_long_context_over_fp16_limit",
+        dest="support_long_context_over_fp16_limit",
         action="store_true",
         help=(
             "Use precomputed rotary cache (offline RoPE) so exported graphs can "
-            "support position_id > 65504. Default uses online rotary computation."
+            "support position_id > 65504. Enabled by default; offline RoPE is required for 256K context."
         ),
+    )
+    long_context_group.add_argument(
+        "--no-support_long_context_over_fp16_limit",
+        "--no-support-long-context-over-fp16-limit",
+        dest="support_long_context_over_fp16_limit",
+        action="store_false",
+        help="Disable offline RoPE cache support; invalid for 256K long-context exports.",
     )
     parser.add_argument("--valid", action="store_true", help="run precision checks (HF/wrap/frontend/quant)")
     parser.add_argument("--valid_exported", action="store_true", help="validate exported graph before ONNX save")

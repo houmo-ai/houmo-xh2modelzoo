@@ -11,7 +11,7 @@ model = dict(
     model_name="qwen3_5_9b_spec_dflash_test",
     context_max_length=2048,
     prefill_chunk_length=256,
-    max_pe_length=32768,
+    max_pe_length=262144,
     visual_config=dict(
         max_size_w=448,
         max_size_h=448,
@@ -43,7 +43,7 @@ model = dict(
         batch_size=1,
         input_sequence_length=256,
         max_sequence_length=2048,
-        max_pe_length=32768,
+        max_pe_length=262144,
     ),
     only_first_block=False,
 )

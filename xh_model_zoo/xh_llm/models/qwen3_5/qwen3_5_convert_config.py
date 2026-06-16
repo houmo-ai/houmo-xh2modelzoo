@@ -31,6 +31,8 @@ class Qwen3_5ConvertConfig(LLMConvertConfig):
     linear_attention_mode: str = "auto"
     linear_chunk_size: int = 64
     enable_rope: bool = True
+    max_pe_length: int = 262144
+    support_long_context_over_fp16_limit: bool = True
     cumsum_matmul_quant_config: Optional[Dict] = None
     # Speculative decoding
     spec_decode_mode: Optional[str] = None  # "mtp", "dflash", or None

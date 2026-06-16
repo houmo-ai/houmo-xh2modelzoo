@@ -7,7 +7,7 @@ dflash_model_dir = "weights/Qwen3.6-35B-A3B-DFlash"
 
 model = dict(
     model_name="qwen3_6_35b_a3b_spec_dflash_test",
-    max_pe_length=32768,
+    max_pe_length=262144,
     spec_decode_mode="dflash",
     num_draft_tokens=9,
     spec_draft_head_weight_bits=4,
@@ -27,6 +27,6 @@ model = dict(
         batch_size=1,
         input_sequence_length=256,
         max_sequence_length=2048,
-        max_pe_length=32768,
+        max_pe_length=262144,
     ),
 )

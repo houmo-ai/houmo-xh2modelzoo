@@ -18,7 +18,7 @@ Qwen3.5 目录当前已经支持两条链路：
 conda activate xhquant
 export PYTHONPATH=./
 export CUDA_VISIBLE_DEVICES=0
-MODEL=/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only
+MODEL=weights/Qwen3.5-9B-mode1-llm-only
 DFLASH=weights/Qwen3.5-9B-DFlash
 OUT=work_dirs/qwen3_5_9b_xh2a_$(date +%Y%m%d_%H%M%S)
 ```
@@ -138,7 +138,7 @@ BASE=/data01/home/yujy/work/xh2modelzoo/work_dirs/full_goal_20260604_0824
 ```bash
 # 标准完整导出
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
-  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --hf_model_dir weights/Qwen3.5-9B-mode1-llm-only \
   --work_dir "$BASE/qwen35_dense_split_full_reexport_20260604_1135" \
   --dtype fp16 \
   --max_sequence_length 512 \
@@ -147,7 +147,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
 
 # MTP 完整导出
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
-  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --hf_model_dir weights/Qwen3.5-9B-mode1-llm-only \
   --work_dir "$BASE/qwen35_dense_mtp_split_full_reexport_20260604_1135" \
   --dtype fp16 \
   --max_sequence_length 512 \
@@ -158,7 +158,7 @@ python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
 
 # DFlash 完整导出
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
-  --hf_model_dir /data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only \
+  --hf_model_dir weights/Qwen3.5-9B-mode1-llm-only \
   --work_dir "$BASE/qwen35_dense_dflash_split_full_reexport_20260604_1135" \
   --dtype fp16 \
   --max_sequence_length 512 \
@@ -302,10 +302,10 @@ Spec decode 模式默认同样使用 split conv cache，MTP 和 DFlash 均兼容
 
 | 模型 | `MODEL_KEY` | `CONFIG` | `HF_MODEL_DIR` | `DFLASH_MODEL_DIR` |
 | --- | --- | --- | --- | --- |
-| Qwen3.5 4B | `qwen3_5_4b` | `configs/qwen3_5/qwen3_5_4b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.5-4B-mode1-llm-only` | `weights/Qwen3.5-4B-DFlash` |
-| Qwen3.5 9B | `qwen3_5_9b` | `configs/qwen3_5/qwen3_5_9b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only` | `weights/Qwen3.5-9B-DFlash` |
+| Qwen3.5 4B | `qwen3_5_4b` | `configs/qwen3_5/qwen3_5_4b_xh2a.py` | `weights/Qwen3.5-4B-mode1-llm-only` | `weights/Qwen3.5-4B-DFlash` |
+| Qwen3.5 9B | `qwen3_5_9b` | `configs/qwen3_5/qwen3_5_9b_xh2a.py` | `weights/Qwen3.5-9B-mode1-llm-only` | `weights/Qwen3.5-9B-DFlash` |
 | Qwen3.5 27B | `qwen3_5_27b` | `configs/qwen3_5/qwen3_5_27b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/sym-mode1` | `weights/Qwen3.5-27B-DFlash` |
-| Qwen3.6 27B | `qwen3_6_27b` | `configs/qwen3_5/qwen3_6_27b_xh2a.py` | `/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only` | `weights/Qwen3.6-27B-DFlash` |
+| Qwen3.6 27B | `qwen3_6_27b` | `configs/qwen3_5/qwen3_6_27b_xh2a.py` | `weights/Qwen3.6-27B-mode1-llm-only` | `weights/Qwen3.6-27B-DFlash` |
 
 MTP：先导 W4 head 完整产物。
 
@@ -351,7 +351,7 @@ export CUDA_VISIBLE_DEVICES=5
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
@@ -373,7 +373,7 @@ export CUDA_VISIBLE_DEVICES=1
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8_gptq_norm_fp32_False_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
@@ -393,7 +393,7 @@ export CUDA_VISIBLE_DEVICES=0
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_2k_w4a8_gptq_spec_norm_fp32_True_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
@@ -411,7 +411,7 @@ export CUDA_VISIBLE_DEVICES=6
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_6_27b
 CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.6-27B-mode1-llm-only
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
   --config "$CONFIG" \
@@ -432,7 +432,7 @@ export CUDA_VISIBLE_DEVICES=7
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 MTPK=81920
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
@@ -455,7 +455,7 @@ export CUDA_VISIBLE_DEVICES=4
 TS=$(date +%Y%m%d_%H%M%S); HEAD_W_BITS=${HEAD_W_BITS:-4}
 MODEL_KEY=qwen3_6_27b
 CONFIG=configs/qwen3_5/qwen3_6_27b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.6-27B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.6-27B-mode1-llm-only
 MTPK=81920
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_mtp_k${MTPK}_draft4_headw${HEAD_W_BITS}_${TS}"
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \
@@ -551,7 +551,7 @@ export CUDA_VISIBLE_DEVICES=5
 TS=$(date +%Y%m%d_%H%M%S)
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 DFLASH_MODEL_DIR=weights/Qwen3.5-9B-DFlash
 EXISTING_WORK_DIR=work_dirs/qwen3_5_9b_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw4_<timestamp>
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2a_8k_w4a8_gptq_spec_dflash_draft9_input10_headw4_fix_${TS}"
@@ -1111,7 +1111,7 @@ export CUDA_VISIBLE_DEVICES=0
 TS=$(date +%Y%m%d)
 MODEL_KEY=qwen3_5_9b
 CONFIG=configs/qwen3_5/qwen3_5_9b_xh2a.py
-HF_MODEL_DIR=/data01/home/yujy/work/auto-round/output/Qwen3.5-9B-mode1-llm-only
+HF_MODEL_DIR=weights/Qwen3.5-9B-mode1-llm-only
 WORK_DIR="work_dirs/${MODEL_KEY}_xh2_release_${TS}"
 
 python examples/llm/qwen3_5/qwen3_5_xh2a_export_hmonnx.py \

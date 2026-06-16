@@ -379,9 +379,9 @@ class _Qwen3_5TextRotaryEmbedding(DynamicModule):
 
     def _setup(self, cfg):
         support_long_context = (
-            cfg.get("support_long_context_over_fp16_limit", False)
+            cfg.get("support_long_context_over_fp16_limit", True)
             if hasattr(cfg, "get")
-            else getattr(cfg, "support_long_context_over_fp16_limit", False)
+            else getattr(cfg, "support_long_context_over_fp16_limit", True)
         )
         self.support_long_context_over_fp16_limit = support_long_context
         if support_long_context:
@@ -989,11 +989,11 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 recurrent_state_out, self.batch_size
             )
 
-        b_sz, s, n, h = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        # b_sz, s, n, h = z.shape
+        # core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        # z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
+        # core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
         core_attn_out = core_attn_out.reshape(
             core_attn_out.shape[0], core_attn_out.shape[1], -1
         )
@@ -1440,7 +1440,7 @@ class _Qwen3_5TextModel(DynamicModule):
                 self.max_layers = cfg.max_layers
         self.num_logits_to_keep = cfg.num_logits_to_keep
         self.support_long_context_over_fp16_limit = cfg.get(
-            "support_long_context_over_fp16_limit", False
+            "support_long_context_over_fp16_limit", True
         )
         assert self.num_logits_to_keep in [0, 1]
 
@@ -1591,12 +1591,6 @@ class _Qwen3_5TextModel(DynamicModule):
             hight_sin = sin_cached[hight_position_ids.to(sin_cached.device)]
             width_cos = cos_cached[width_position_ids.to(cos_cached.device)]
             width_sin = sin_cached[width_position_ids.to(sin_cached.device)]
-            time_cos = time_cos.unsqueeze(1)
-            time_sin = time_sin.unsqueeze(1)
-            hight_cos = hight_cos.unsqueeze(1)
-            hight_sin = hight_sin.unsqueeze(1)
-            width_cos = width_cos.unsqueeze(1)
-            width_sin = width_sin.unsqueeze(1)
         else:
             time_cos, time_sin = self._compute_qwen3_5_rotary_from_position_ids(
                 time_position_ids, inv_freq, attention_scaling
@@ -1617,6 +1611,14 @@ class _Qwen3_5TextModel(DynamicModule):
 
         combined_cos = time_cos + hight_cos + width_cos
         combined_sin = time_sin + hight_sin + width_sin
+
+        if use_precomputed_cache:
+            # cos_cached/sin_cached are [max_seq, 1, rotary_dim], so indexed
+            # tensors are [batch, seq, 1, rotary_dim].  Rope expects
+            # [batch, 1, seq, rotary_dim] for broadcasting against
+            # [batch, heads, seq, rotary_dim].
+            combined_cos = combined_cos.squeeze(-2).unsqueeze(1)
+            combined_sin = combined_sin.squeeze(-2).unsqueeze(1)
 
         return combined_cos, combined_sin
 

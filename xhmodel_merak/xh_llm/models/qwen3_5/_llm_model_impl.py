@@ -886,11 +886,11 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         else:
             recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
 
-        b_sz, s, n, h = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        # b_sz, s, n, h = z.shape
+        # core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        # z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
+        # core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
         core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
 
         core_attn_out = core_attn_out.to(self.out_proj.weight.dtype)

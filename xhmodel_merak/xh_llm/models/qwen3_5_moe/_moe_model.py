@@ -377,9 +377,9 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
 
     def _setup(self, cfg):
         support_long_context = (
-            cfg.get("support_long_context_over_fp16_limit", False)
+            cfg.get("support_long_context_over_fp16_limit", True)
             if hasattr(cfg, "get")
-            else getattr(cfg, "support_long_context_over_fp16_limit", False)
+            else getattr(cfg, "support_long_context_over_fp16_limit", True)
         )
         self.support_long_context_over_fp16_limit = support_long_context
         # Use max_pe_length if explicitly set, otherwise fall back to max_sequence_length.
@@ -889,11 +889,11 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
         if _expand_verify_tokens:
             z = z.repeat_interleave(self.input_sequence_length, dim=1)
 
-        b_sz, s, n, h = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        # b_sz, s, n, h = z.shape
+        # core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        # z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
+        # core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
         core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
 
         core_attn_out = core_attn_out.to(self.out_proj.weight.dtype)

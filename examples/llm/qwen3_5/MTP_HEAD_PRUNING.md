@@ -308,7 +308,7 @@ CUDA_VISIBLE_DEVICES=0 python examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test
 
 `rerank_model_for_mtp` 自动处理此情况：若找不到 `vocab.json`，则 fallback 从 `tokenizer.json["model"]["vocab"]` 读取词表。用法与 FP16 模型完全一致，把 `--hf_model_dir` 换成量化模型目录即可。
 
-**已验证**：`/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only/` smoke 通过。
+**已验证**：`weights/Qwen3.5-9B-mode1-llm-only/` smoke 通过。
 
 ---
 

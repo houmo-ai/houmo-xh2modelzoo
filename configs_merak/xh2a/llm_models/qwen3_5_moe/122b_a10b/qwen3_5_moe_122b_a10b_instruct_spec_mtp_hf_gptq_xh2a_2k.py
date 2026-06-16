@@ -24,7 +24,7 @@ model = dict(
         batch_size=1,
         input_sequence_length=1,
         context_max_length=2048,
-        max_pe_length=32768,
+        max_pe_length=262144,
         use_cache=True,
     ),
 )

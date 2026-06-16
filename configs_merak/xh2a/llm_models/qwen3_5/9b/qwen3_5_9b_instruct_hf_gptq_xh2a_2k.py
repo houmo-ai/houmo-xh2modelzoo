@@ -5,7 +5,7 @@ _base_ = [
 # Quantized HF/GPTQModel repository.  For this format the standard loading
 # contract is: set model.hf_model to the quantized directory and keep
 # model.quant_weight unset.
-hf_model_dir = "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only"
+hf_model_dir = "weights/Qwen3.5-9B-mode1-llm-only"
 
 model = dict(
     hf_model=hf_model_dir,
