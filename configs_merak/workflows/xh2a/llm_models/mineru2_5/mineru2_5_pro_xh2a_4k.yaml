@@ -43,7 +43,7 @@ export:
               bits: 16
               fp_mode: sefp
     only_first_block: false
-
+  # 该字段用于导出多个不同尺寸的vit，属于minerU模型的自定义字段
   visual_buckets:
     model:
       chip_arch: XH2a

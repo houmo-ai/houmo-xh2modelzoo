@@ -4,26 +4,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..result import QuantResult, ExportResult
-from .qwen2_vl import XHQwen2VLHMONNXWorkflow
+from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.result import ExportResult, QuantResult
 
 
 MINERU_VISUAL_BUCKETS_MANIFEST = "mineru_visual_buckets.json"
 
 
-class XHMinerU25HMONNXWorkflow(XHQwen2VLHMONNXWorkflow):
-    def quant(
-        self,
-        output_dir: str,
-        device: str,
-        config_overrides: Mapping[str, Any] | None = None,
-    ) -> QuantResult:
-        quant_result = super().quant(
-            output_dir=output_dir,
-            device=device,
-            config_overrides=config_overrides
-        )
-        return quant_result
+class XHQwen2VLHMONNXWorkflow(BaseHMONNXWorkflow):
+    expected_model_config_cls_name = "XHQwen2VLModelConfig"
+    expected_model_cls_name = "XHQwen2VLModel"
 
     def export(
         self,
@@ -51,6 +41,75 @@ class XHMinerU25HMONNXWorkflow(XHQwen2VLHMONNXWorkflow):
             visual_buckets_cfg=visual_buckets_cfg,
         )
         return export_result
+
+    def dump_golden(
+        self,
+        export_result: ExportResult,
+        device: str,
+        input_messages: Any,
+    ) -> str:
+        from transformers import TextStreamer
+
+        from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
+        from xhquant.api import get_xhquant_logger
+        from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
+
+        meta_file = self._find_golden_meta_file(export_result)
+        logger = get_xhquant_logger()
+        hmonnx_model = AutoLLMHONNXModel.from_pretrained(meta_file)
+        processor = hmonnx_model.get_tf_processor()
+        tokenizer = processor.tokenizer
+
+        messages = self.build_input_message(input_messages)
+        model_inputs = processor.apply_chat_template(messages).to(device)
+        streamer = TextStreamer(tokenizer)
+        hmonnx_model.to(device)
+        hmonnx_model.enable_golden = True
+        logger.warning("Golden outputs should be generated in aligned precision for stability.")
+
+        contexts = [
+            TimeProfiler("hmonnx_generate_golden", logger),
+            MemoryTracker(device=device, name="generate_golden", logger=logger),
+            LLMInferenceContextManager(hmonnx_model),
+        ]
+        with ContextManagers(contexts):
+            generated_ids = hmonnx_model.generate(
+                **model_inputs,
+                max_new_tokens=2,
+                streamer=streamer,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        logger.info(f"{'-' * 20} Golden output {'-' * 20}")
+        logger.info(f"{output_text}")
+        return meta_file
+
+    def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
+        if not isinstance(input_messages, Mapping):
+            raise ValueError("Qwen2-VL input_messages must be a mapping with 'image' and 'text'")
+        if "image" not in input_messages:
+            raise ValueError("Qwen2-VL input_messages must contain 'image'")
+        if "text" not in input_messages:
+            raise ValueError("Qwen2-VL input_messages must contain 'text'")
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": input_messages["image"],
+                    },
+                    {"type": "text", "text": input_messages["text"]},
+                ],
+            }
+        ]
 
     def _write_visual_bucket_manifest(
         self,
@@ -138,7 +197,7 @@ class XHMinerU25HMONNXWorkflow(XHQwen2VLHMONNXWorkflow):
         buckets_cfg = visual_buckets_cfg.get("buckets")
         if not isinstance(buckets_cfg, Sequence) or isinstance(buckets_cfg, (str, bytes)):
             raise ValueError("export.visual_buckets.buckets must be a non-empty sequence")
-        buckets = [XHMinerU25HMONNXWorkflow._parse_bucket(bucket) for bucket in buckets_cfg]
+        buckets = [XHQwen2VLHMONNXWorkflow._parse_bucket(bucket) for bucket in buckets_cfg]
         if not buckets:
             raise ValueError("export.visual_buckets.buckets must contain at least one bucket")
         return buckets
@@ -220,7 +279,9 @@ class XHMinerU25HMONNXWorkflow(XHQwen2VLHMONNXWorkflow):
         source_resolution = cls._bucket_resolution_name(source_bucket)
         target_resolution = cls._bucket_resolution_name(target_bucket)
         if source_resolution not in model_name:
-            raise ValueError(f"Cannot find default visual resolution {source_resolution!r} in model name {model_name!r}")
+            raise ValueError(
+                f"Cannot find default visual resolution {source_resolution!r} in model name {model_name!r}"
+            )
         return model_name.replace(source_resolution, target_resolution, 1)
 
     def _export_visual_bucket(
@@ -256,4 +317,4 @@ class XHMinerU25HMONNXWorkflow(XHQwen2VLHMONNXWorkflow):
         return self._relative_to_export_dir(visual_meta.hmonnx, exported_dir)
 
 
-__all__ = ["XHMinerU25HMONNXWorkflow"]
+__all__ = ["XHQwen2VLHMONNXWorkflow"]

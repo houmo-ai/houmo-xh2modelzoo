@@ -181,6 +181,7 @@ class XHQwen2VLModel(VisionLLMModel):
     HMONNXINFERENCE_CLS = XHQwen2VLHMONNXModel
     BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_qwen2_vl_hf_compatible_model)
     CONFIG_CLS = XHQwen2VLModelConfig
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.qwen2_vl.workflow:XHQwen2VLHMONNXWorkflow"
 
     def __init__(self, config: XHQwen2VLModelConfig):
         super().__init__(config)

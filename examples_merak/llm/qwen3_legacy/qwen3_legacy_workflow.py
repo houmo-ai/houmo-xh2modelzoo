@@ -29,12 +29,12 @@ def _remove_output_dir_if_needed(output_dir: str, force: bool) -> None:
 
 
 def main() -> None:
-    from xhmodel_merak.xh_llm.workflows.models.qwen3_legacy import XHQwen3LegacyHMONNXWorkflow
+    from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
     _remove_output_dir_if_needed(QUANT_OUTPUT_DIR, FORCE_OVERWRITE)
     _remove_output_dir_if_needed(EXPORT_OUTPUT_DIR, FORCE_OVERWRITE)
 
-    workflow = XHQwen3LegacyHMONNXWorkflow(
+    workflow = AutoLLMWorkflow.from_config(
         hf_model_dir=HF_MODEL_DIR,
         config_path=CONFIG_PATH,
         seed=SEED,

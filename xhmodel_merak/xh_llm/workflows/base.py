@@ -118,3 +118,24 @@ class BaseHMONNXWorkflow:
         if not quant_result.quanted_model_dir:
             raise ValueError("QuantResult.quanted_model_dir must be provided when quant is not skipped")
         return quant_result.quanted_model_dir
+
+    @staticmethod
+    def _find_golden_meta_file(export_result: ExportResult) -> str:
+        work_dir = Path(export_result.work_dir)
+        if not work_dir.is_dir():
+            raise FileNotFoundError(f"Export work_dir does not exist or is not a directory: {export_result.work_dir}")
+
+        meta_files = []
+        for path in work_dir.iterdir():
+            if not path.is_dir() or not path.name.startswith("hmquant"):
+                continue
+            meta_file = path / "golden_meta_info.json"
+            if meta_file.is_file():
+                meta_files.append(meta_file)
+
+        if not meta_files:
+            raise FileNotFoundError(f"No golden_meta_info.json found under hmquant* directories in {work_dir}")
+        if len(meta_files) > 1:
+            meta_file_list = ", ".join(str(path) for path in meta_files)
+            raise ValueError(f"Found multiple golden_meta_info.json files under {work_dir}: {meta_file_list}")
+        return str(meta_files[0])

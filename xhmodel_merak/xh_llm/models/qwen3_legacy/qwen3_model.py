@@ -19,6 +19,7 @@ class XHQwen3LegacyModel(TextLLMModel):
     HF_AUTO_MODEL_CLS = AutoModelForCausalLM
     HMONNXINFERENCE_CLS = XHQwen3LegacyHMONNXModel
     CONFIG_CLS = XHQwen3LegacyModelConfig
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.qwen3_legacy.workflow:XHQwen3LegacyHMONNXWorkflow"
 
     def __init__(self, config: XHQwen3LegacyModelConfig):
         super().__init__(config)
