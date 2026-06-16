@@ -579,7 +579,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs_merak/xh2a/llm_models/qwen3_legacy/8b/qwen3_8b_legacy_xh2a_2k.py",
+        default="configs_merak/xh2a/llm_models/qwen3/8b/qwen3_8b_xh2a_2k.py",
     )
     parser.add_argument(
         "--warmup-runs",

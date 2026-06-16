@@ -6,9 +6,9 @@ from ...workflows.base import BaseHMONNXWorkflow
 from ...workflows.result import ExportResult, QuantResult
 
 
-class XHQwen3LegacyHMONNXWorkflow(BaseHMONNXWorkflow):
-    expected_model_config_cls_name = "XHQwen3LegacyModelConfig"
-    expected_model_cls_name = "XHQwen3LegacyModel"
+class XHQwen3HMONNXWorkflow(BaseHMONNXWorkflow):
+    expected_model_config_cls_name = "XHQwen3ModelConfig"
+    expected_model_cls_name = "XHQwen3Model"
 
     def quant(
         self,
@@ -113,13 +113,13 @@ class XHQwen3LegacyHMONNXWorkflow(BaseHMONNXWorkflow):
             prompt = input_messages
         elif isinstance(input_messages, Mapping):
             if "text" not in input_messages:
-                raise ValueError("Qwen3 legacy input_messages must contain 'text'")
+                raise ValueError("Qwen3 input_messages must contain 'text'")
             prompt = input_messages["text"]
         else:
-            raise ValueError("Qwen3 legacy input_messages must be a string or a mapping with 'text'")
+            raise ValueError("Qwen3 input_messages must be a string or a mapping with 'text'")
 
         if not isinstance(prompt, str) or not prompt:
-            raise ValueError("Qwen3 legacy input text must be a non-empty string")
+            raise ValueError("Qwen3 input text must be a non-empty string")
         return [
             {
                 "role": "user",
@@ -128,4 +128,4 @@ class XHQwen3LegacyHMONNXWorkflow(BaseHMONNXWorkflow):
         ]
 
 
-__all__ = ["XHQwen3LegacyHMONNXWorkflow"]
+__all__ = ["XHQwen3HMONNXWorkflow"]

@@ -130,7 +130,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default="",
-        help="model config file, for development and debugging, use configs in examples_merak/llm/qwen3_legacy/configs.",
+        help="model config file, for development and debugging, use configs in examples_merak/llm/qwen3/configs.",
     )
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
     parser.add_argument("--force", action="store_true", help="Whether to force export even if the model is exist.")

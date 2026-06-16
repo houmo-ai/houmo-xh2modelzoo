@@ -422,7 +422,7 @@ if __name__ == "__main__":
     eval_types = LLMModelState.get_all_values()
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "--config", type=str, default="configs_merak/xh2a/llm_models/qwen3_legacy/8b/qwen3_8b_legacy_xh2a_2k.py"
+        "--config", type=str, default="configs_merak/xh2a/llm_models/qwen3/8b/qwen3_8b_xh2a_2k.py"
     )
     parser.add_argument("--warmup-runs", type=int, default=2, help="number of warmup runs before node profiling")
     parser.add_argument("--profile-runs", type=int, default=1, help="number of profiled runs to average per node")

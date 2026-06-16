@@ -19,7 +19,7 @@
 #
 # File: _model.py
 # Description:
-#   Qwen3 legacy model implementation adapted for the xh2 model zoo (xh2modelzoo).
+#   Qwen3 model implementation adapted for the xh2 model zoo (xh2modelzoo).
 
 import math
 import sys

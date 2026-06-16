@@ -22,7 +22,7 @@ xhquant_llm中的配置：
 
 ```text
     model = dict(
-        type="XHQwen3LegacyModel",
+        type="XHQwen3Model",
         hf_model=hf_model_dir,
         wrap_cfg=dict(
             max_sequence_length=2048,
@@ -51,7 +51,7 @@ xhmodel_merak中的配置
 
 ```
 model = dict(
-    model_type="Qwen3ForCausalLM_legacy",
+    model_type="Qwen3ForCausalLM",
     model_name="Qwen3-1.7B_w4a8",
     context_max_length=2048,
     prefill_chunk_length=256,

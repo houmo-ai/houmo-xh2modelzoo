@@ -3,10 +3,10 @@ from pathlib import Path
 from typing import Any
 
 
-HF_MODEL_DIR = "/data02/datasets/Qwen3-1.7B"
-CONFIG_PATH = "./configs_merak/workflows/xh2a/llm_models/qwen3_legacy/1_7b/qwen3_1_7b_legacy_xh2a_w4a8_gptq_2k.yaml"
-QUANT_OUTPUT_DIR = "./work_dirs/qwen3_legacy_workflow_quant"
-EXPORT_OUTPUT_DIR = "./work_dirs/qwen3_legacy_workflow_export"
+HF_MODEL_DIR = "/data01/datasets/Qwen3-1.7B"
+CONFIG_PATH = "./configs_merak/workflows/xh2a/llm_models/qwen3/1_7b/qwen3_1_7b_xh2a_w4a8_gptq_2k.yaml"
+QUANT_OUTPUT_DIR = "./work_dirs/qwen3_workflow_quant"
+EXPORT_OUTPUT_DIR = "./work_dirs/qwen3_workflow_export"
 DEVICE = "cuda"
 SEED = 1024
 DEBUG = False

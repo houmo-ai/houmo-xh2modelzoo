@@ -41,7 +41,7 @@ xhmodel_merak/xh_llm/workflows/
 xhmodel_merak/xh_llm/models/qwen2_vl/
   workflow.py
 
-xhmodel_merak/xh_llm/models/qwen3_legacy/
+xhmodel_merak/xh_llm/models/qwen3/
   workflow.py
 ```
 
@@ -312,10 +312,10 @@ mineru_visual_buckets.json
 
 ## Qwen3 Legacy Workflow
 
-`XHQwen3LegacyHMONNXWorkflow` 位于：
+`XHQwen3HMONNXWorkflow` 位于：
 
 ```text
-xhmodel_merak/xh_llm/models/qwen3_legacy/workflow.py
+xhmodel_merak/xh_llm/models/qwen3/workflow.py
 ```
 
 量化逻辑：
@@ -359,7 +359,7 @@ python examples_merak/llm/mineru2.5/mineru2_5_workflow.py
 Qwen3 Legacy：
 
 ```bash
-python examples_merak/llm/qwen3_legacy/qwen3_legacy_workflow.py
+python examples_merak/llm/qwen3/qwen3_workflow.py
 ```
 
 这些示例均通过 `AutoLLMWorkflow.from_config()` 创建 workflow。

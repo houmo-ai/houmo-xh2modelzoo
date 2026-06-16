@@ -1,5 +1,5 @@
 _base_ = [
-    "./qwen3_8b_legacy_xh2a_2k.py",
+    "./qwen3_8b_xh2a_2k.py",
 ]
 hf_model_dir = "./data/models/Qwen3-8B-GPTQ-Int4"  # 模型路径
 model = dict(

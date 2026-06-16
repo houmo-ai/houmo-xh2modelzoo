@@ -2,7 +2,7 @@ _base_ = [
     "../../_base_/xh2a_base.py",
 ]
 model = dict(
-    model_type="Qwen3ForCausalLM_legacy",
+    model_type="Qwen3ForCausalLM",
     model_name="xh2_Qwen3-1.7B_w8a8",
     context_max_length=2048,
     prefill_chunk_length=256,

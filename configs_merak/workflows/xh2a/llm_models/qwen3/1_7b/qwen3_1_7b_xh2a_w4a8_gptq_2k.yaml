@@ -4,7 +4,7 @@ quant:
 export:
   model:
     chip_arch: XH2a
-    model_type: Qwen3ForCausalLM_legacy
+    model_type: Qwen3ForCausalLM
 
     # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
     hf_model: null

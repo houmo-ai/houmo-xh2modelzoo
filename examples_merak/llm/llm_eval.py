@@ -177,7 +177,7 @@ if __name__ == "__main__":
     eval_types = LLMModelState.get_all_values()
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, default="configs_merak/xh2a/llm_models/qwen3_legacy/8b/qwen3_8b_legacy_xh2a_2k.py"
+        "--config", type=str, default="configs_merak/xh2a/llm_models/qwen3/8b/qwen3_8b_xh2a_2k.py"
     )
     parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")

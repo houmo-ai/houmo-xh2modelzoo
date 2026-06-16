@@ -14,7 +14,7 @@ from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
 
 if TYPE_CHECKING:
-    from xhmodel_merak.xh_llm.models.qwen3_legacy import XHQwen3LegacyHMONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3 import XHQwen3HMONNXModel
 
 
 def main(args):
@@ -22,9 +22,9 @@ def main(args):
     xhquant_init(None, debug)
     logger = get_xhquant_logger()
     model_meta_file = args.config
-    hmonnx_model: XHQwen3LegacyHMONNXModel = AutoLLMHONNXModel.from_pretrained(model_meta_file)
-    assert type(hmonnx_model).__name__ == "XHQwen3LegacyHMONNXModel", (
-        f"Expected model type XHQwen3LegacyHMONNXModel, but got {type(hmonnx_model).__name__}"
+    hmonnx_model: XHQwen3HMONNXModel = AutoLLMHONNXModel.from_pretrained(model_meta_file)
+    assert type(hmonnx_model).__name__ == "XHQwen3HMONNXModel", (
+        f"Expected model type XHQwen3HMONNXModel, but got {type(hmonnx_model).__name__}"
     )
 
     hmonnx_model.enable_auto_offload = args.auto_offload
@@ -98,7 +98,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="work_dirs/qwen3_8b_legacy_xh2a_2k/hmquant_xh2_qwen3-1.7b_w8a8_20260309/golden_meta_info.json",
+        default="work_dirs/qwen3_8b_xh2a_2k/hmquant_xh2_qwen3-1.7b_w8a8_20260309/golden_meta_info.json",
     )
 
     parser.add_argument("--fast", action="store_true", help="run in fast mode")

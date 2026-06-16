@@ -21,7 +21,7 @@ class LLMExportCommand:
             default="",
             help=(
                 "model config file, for development and debugging, "
-                "use configs in examples_merak/llm/qwen3_legacy/configs."
+                "use configs in examples_merak/llm/qwen3/configs."
             ),
         )
         parser.add_argument(
@@ -78,7 +78,7 @@ class LLMExportCommand:
             cfg = dict(
                 chip_arch=target_device,
                 model=dict(
-                    model_type="Qwen3ForCausalLM_legacy",
+                    model_type="Qwen3ForCausalLM",
                     chip_arch=target_device,
                     hf_model=hf_model_path,
                     model_name=model_name,

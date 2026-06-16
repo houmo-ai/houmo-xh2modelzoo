@@ -54,7 +54,7 @@ class XHQwen3VLVisualModel(BaseVisionModel):
     transformers_min_version = "4.57.6"
     HF_MODEL_CLS = XHQwen3VLForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
-    # HMONNXINFERENCE_CLS = Qwen3LegacyHMONNXModel
+    # HMONNXINFERENCE_CLS = Qwen3HMONNXModel
     BUILD_HF_COMPATIBLE_FUNC = build_qwen3_vl_visual_hf_compatible_model
     META_CLS = VisualModelMeta
     CONFIG_CLS = XHQwen3VLVisualConfig

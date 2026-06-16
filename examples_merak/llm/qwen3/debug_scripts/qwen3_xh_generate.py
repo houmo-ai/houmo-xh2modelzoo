@@ -15,7 +15,7 @@ from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
 
 if TYPE_CHECKING:
-    from xhmodel_merak.xh_llm.models.qwen3_legacy import XHQwen3LegacyModel, XHQwen3LegacyModelConfig
+    from xhmodel_merak.xh_llm.models.qwen3 import XHQwen3Model, XHQwen3ModelConfig
 from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
 
 
@@ -53,20 +53,20 @@ def main(args):
     dtype = torch.float16
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}, dtype: {dtype}")
-    model_cfg: XHQwen3LegacyModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
+    model_cfg: XHQwen3ModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
     model_cfg.enable_auto_offload = args.auto_offload  # 是否启用自动显存卸载
     enable_prefill_chunk = args.enable_prefill_chunk
     if enable_prefill_chunk:
         model_cfg.enable_prefill_chunk = True  # 开启prefill chunk后，设置chunk长度为512
         model_cfg.use_cache = True
 
-    assert type(model_cfg).__name__ in ["XHQwen3LegacyModelConfig", "XHQwen3LegacyOptModelConfig"], (
-        f"Expected model config type XHQwen3LegacyModelConfig, but got {type(model_cfg).__name__}"
+    assert type(model_cfg).__name__ == "XHQwen3ModelConfig", (
+        f"Expected model config type XHQwen3ModelConfig, but got {type(model_cfg).__name__}"
     )
     logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
-    xh_model: XHQwen3LegacyModel = AutoLLMModel.from_pretrained(config=model_cfg)
-    assert type(xh_model).__name__ in ["XHQwen3LegacyModel", "XHQwen3LegacyOptModel"], (
-        f"Expected model type XHQwen3LegacyModel, but got {type(xh_model).__name__}"
+    xh_model: XHQwen3Model = AutoLLMModel.from_pretrained(config=model_cfg)
+    assert type(xh_model).__name__ == "XHQwen3Model", (
+        f"Expected model type XHQwen3Model, but got {type(xh_model).__name__}"
     )
     eval_type = LLMModelState.from_string(eval_type)
     xh_model.set_state(eval_type)
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs_merak/xh2a/llm_models/qwen3_legacy/1.7b/qwen3_1.7b_legacy_xh2a_2k.py",
+        default="configs_merak/xh2a/llm_models/qwen3/1.7b/qwen3_1.7b_xh2a_2k.py",
     )
     parser.add_argument("--model", type=str)
     parser.add_argument(

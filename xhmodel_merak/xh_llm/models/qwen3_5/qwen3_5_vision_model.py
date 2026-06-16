@@ -76,7 +76,7 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
     transformers_min_version = "5.2.0"
     HF_MODEL_CLS = XHQwen3_5ForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
-    # HMONNXINFERENCE_CLS = Qwen3LegacyHMONNXModel
+    # HMONNXINFERENCE_CLS = Qwen3HMONNXModel
     BUILD_HF_COMPATIBLE_FUNC = build_qwen3_5_visual_hf_compatible_model
 
     META_CLS = VisualModelMeta

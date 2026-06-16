@@ -11,7 +11,7 @@ from xhquant.utils import MemoryTracker, TimeProfiler
 
 
 if TYPE_CHECKING:
-    from xhmodel_merak.xh_llm.models.qwen3_legacy import XHQwen3LegacyModel, XHQwen3LegacyModelConfig
+    from xhmodel_merak.xh_llm.models.qwen3 import XHQwen3Model, XHQwen3ModelConfig
 
 
 def _override_hf_model_dir(cfg, hf_model_dir):
@@ -102,15 +102,15 @@ def main(args):
     dtype = torch.float16
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}, dtype: {dtype}")
-    model_cfg: XHQwen3LegacyModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
-    assert type(model_cfg).__name__ == "XHQwen3LegacyModelConfig", (
-        f"Expected model config type XHQwen3LegacyModelConfig, but got {type(model_cfg).__name__}"
+    model_cfg: XHQwen3ModelConfig = AutoLLMConfig.from_pretrained(cfg.model)
+    assert type(model_cfg).__name__ == "XHQwen3ModelConfig", (
+        f"Expected model config type XHQwen3ModelConfig, but got {type(model_cfg).__name__}"
     )
-    # model_cfg = XHQwen3LegacyModelConfig.from_dict(cfg.model)
+    # model_cfg = XHQwen3ModelConfig.from_dict(cfg.model)
     logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
-    xh_model: XHQwen3LegacyModel = AutoLLMModel.from_pretrained(config=model_cfg)
-    assert type(xh_model).__name__ == "XHQwen3LegacyModel", (
-        f"Expected model type XHQwen3LegacyModel, but got {type(xh_model).__name__}"
+    xh_model: XHQwen3Model = AutoLLMModel.from_pretrained(config=model_cfg)
+    assert type(xh_model).__name__ == "XHQwen3Model", (
+        f"Expected model type XHQwen3Model, but got {type(xh_model).__name__}"
     )
     with TimeProfiler("convert", logger), MemoryTracker("cuda:0", "convert2hmonnx", logger):
         xh_model.export_hmonnx(str(work_dir))
@@ -130,12 +130,12 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default="",
-        help="model config file, for development and debugging, use configs in examples_merak/llm/qwen3_legacy/configs.",
+        help="model config file, for development and debugging, use configs in examples_merak/llm/qwen3/configs.",
     )
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
     parser.add_argument("--force", action="store_true", help="Whether to force export even if the model is exist.")
     parser.add_argument(
-        "--model-type", type=str, default="Qwen3ForCausalLM_legacy", help="", choices=support_llm_model_types
+        "--model-type", type=str, default="Qwen3ForCausalLM", help="", choices=support_llm_model_types
     )
     parser.add_argument(
         "--chip-arch", type=str, default="XH2a", help="chip architecture, default is XH2a", choices=["XH2a", "YueHui"]

@@ -1,5 +1,5 @@
 _base_ = [
-    "./qwen3_8b_legacy_xh2a_2k.py",
+    "./qwen3_8b_xh2a_2k.py",
 ]
 model = dict(
     model_name="xh2_Qwen3-8B_w4a8_256_2k",
