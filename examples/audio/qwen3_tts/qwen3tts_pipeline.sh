@@ -237,7 +237,7 @@ export_0p6b_base() {
     ensure_ref_audio
 
     # 1. Talker
-    log_info "[1/4] export Talker..."
+    log_info "[1/5] export Talker..."
     PYTHONPATH=${PYTHONPATH} python qwen3_tts_talker_export.py \
         --config ./config/llm/qwen3_tts_12hz_talker_2k_xh2a.py \
         --variant 0_6B_base \
@@ -248,7 +248,7 @@ export_0p6b_base() {
     log_success "Talker export done"
 
     # 2. CodePredictor
-    log_info "[2/4] export CodePredictor..."
+    log_info "[2/5] export CodePredictor..."
     PYTHONPATH=${PYTHONPATH} python qwen3_tts_code_predictor_export.py \
         --config ./config/llm/qwen3_tts_12hz_code_predictor_2k_xh2a.py \
         --variant 0_6B_base \
@@ -259,7 +259,7 @@ export_0p6b_base() {
     log_success "CodePredictor export done"
 
     # 3. TextProjection
-    log_info "[3/4] export TextProjection..."
+    log_info "[3/5] export TextProjection..."
     PYTHONPATH=${PYTHONPATH} python qwen3_tts_text_projection_export.py \
         --config ./config/llm/qwen3_tts_12hz_text_projection_xh2a.py \
         --variant 0_6B_base \
@@ -270,7 +270,7 @@ export_0p6b_base() {
     log_success "TextProjection export done"
 
     # 4. SpeechTokenizer
-    log_info "[4/4] export SpeechTokenizer..."
+    log_info "[4/5] export SpeechTokenizer..."
     PYTHONPATH=${PYTHONPATH} python qwen3_tts_speech_tokenizer_export.py \
         --config ./config/llm/qwen3_tts_12hz_speech_tokenizer_xh2a.py \
         --variant 0_6B_base \
@@ -279,6 +279,17 @@ export_0p6b_base() {
         >> "${LOG_FILE}" 2>&1
     check_status "SpeechTokenizer export"
     log_success "SpeechTokenizer export done"
+
+    # 5. Voice-clone frontend: speech_tokenizer.encode + speaker_encoder
+    log_info "[5/5] export voice-clone frontend (speech_tokenizer.encode + speaker_encoder)..."
+    PYTHONPATH=${PYTHONPATH} python qwen3_tts_base_frontend_export.py \
+        --variant 0_6B_base \
+        --name qwen3_tts_12hz_0_6B_base_frontend_xh2a \
+        --force \
+        ${GOLDEN_FLAG} \
+        >> "${LOG_FILE}" 2>&1
+    check_status "Voice-clone frontend export"
+    log_success "Voice-clone frontend export done"
 
     log_success "0.6B-Base export complete"
 }
@@ -419,34 +430,47 @@ test_hmonnx_0p6b_base() {
 # ============================================================================
 
 run_eval() {
+    local variant="$1"
+    local exp_dir="qwen3tts_eval_zh"
+    local eval_desc="custom voice"
+
+    if [ "${variant}" = "0_6B_base" ]; then
+        exp_dir="qwen3tts_eval_zh_voice_clone"
+        eval_desc="voice clone"
+    fi
+
     log_info "=========================================="
-    log_info "Running accuracy evaluation"
-    log_info "config: samples=${EVAL_MAX_SAMPLES}, GPUs=${EVAL_GPUS}, speaker-mode=${EVAL_SPEAKER_MODE}"
+    log_info "Running ${eval_desc} accuracy evaluation for ${variant}"
+    log_info "config: samples=${EVAL_MAX_SAMPLES}, GPUs=${EVAL_GPUS}, speaker-mode=${EVAL_SPEAKER_MODE}, exp-dir=${exp_dir}"
     log_info "=========================================="
 
     # native mode eval
-    log_info "Running native-mode accuracy eval..."
+    log_info "Running native-mode accuracy eval (${variant})..."
     PYTHONPATH=${PYTHONPATH} python eval/qwen3_tts_eval.py \
         --mode native \
+        --variant ${variant} \
         --gpus ${EVAL_GPUS} \
         --max-samples ${EVAL_MAX_SAMPLES} \
         --speaker-mode ${EVAL_SPEAKER_MODE} \
+        --exp-dir ${exp_dir} \
         >> "${LOG_FILE}" 2>&1
-    check_status "native-mode eval"
-    log_success "native-mode eval done"
+    check_status "native-mode eval (${variant})"
+    log_success "native-mode eval done (${variant})"
 
     # hmonnx mode eval
-    log_info "Running HMONNX-mode accuracy eval..."
+    log_info "Running HMONNX-mode accuracy eval (${variant})..."
     PYTHONPATH=${PYTHONPATH} python eval/qwen3_tts_eval.py \
         --mode hmonnx \
+        --variant ${variant} \
         --gpus ${EVAL_GPUS} \
         --max-samples ${EVAL_MAX_SAMPLES} \
         --speaker-mode ${EVAL_SPEAKER_MODE} \
+        --exp-dir ${exp_dir} \
         >> "${LOG_FILE}" 2>&1
-    check_status "HMONNX-mode eval"
-    log_success "HMONNX-mode eval done"
+    check_status "HMONNX-mode eval (${variant})"
+    log_success "HMONNX-mode eval done (${variant})"
 
-    log_success "accuracy eval done, results in qwen3tts_eval_zh/"
+    log_success "accuracy eval done (${variant}), results in ${exp_dir}/"
 }
 
 # ============================================================================
@@ -559,6 +583,10 @@ main() {
                 if [ "${do_test_hmonnx}" = true ]; then
                     test_hmonnx_1p7b
                 fi
+
+                if [ "${do_eval}" = true ]; then
+                    log_info "Skipping --eval for 1_7B_voicedesign: eval/qwen3_tts_eval.py covers custom voice and base voice-clone."
+                fi
                 ;;
 
             0_6B_customvoice|0.6b)
@@ -575,6 +603,10 @@ main() {
                 # test hmonnx
                 if [ "${do_test_hmonnx}" = true ]; then
                     test_hmonnx_0p6b
+                fi
+
+                if [ "${do_eval}" = true ]; then
+                    run_eval 0_6B_customvoice
                 fi
                 ;;
 
@@ -593,6 +625,10 @@ main() {
                 if [ "${do_test_hmonnx}" = true ]; then
                     test_hmonnx_0p6b_base
                 fi
+
+                if [ "${do_eval}" = true ]; then
+                    run_eval 0_6B_base
+                fi
                 ;;
 
             *)
@@ -601,11 +637,6 @@ main() {
                 ;;
         esac
     done
-
-    # Accuracy evaluation (run once, model-agnostic)
-    if [ "${do_eval}" = true ]; then
-        run_eval
-    fi
 
     log_info "=========================================="
     log_success "all tasks complete!"

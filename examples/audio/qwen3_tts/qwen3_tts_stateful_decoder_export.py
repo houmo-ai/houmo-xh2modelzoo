@@ -68,7 +68,7 @@ class DecoderPart2Transformer(nn.Module):
         values_in = list(past_kv_flat[self.num_layers :])
         kv_stack = FixedKVStack(keys_in, values_in, self.window_size)
 
-        past_len = kv_valid_len.to(torch.long).reshape(())[()]
+        past_len = kv_valid_len.to(torch.long).reshape(1)
         hidden = self.trans.input_proj(hidden)
         frame_idx = torch.arange(self.chunk_size, device=device, dtype=torch.long)
         position_ids = (past_len + frame_idx).unsqueeze(0)
@@ -145,7 +145,7 @@ class DecoderPart3Upsample(nn.Module):
         next_latent_buf = accumulated[:, :, -self.lookahead_frames :]
         batch, channels = accumulated.size(0), accumulated.size(1)
         indices = torch.arange(self.conv_history_window, device=device, dtype=torch.long)
-        latent_pad = (1.0 - has_history).to(torch.long).view(())[()] * self.lookahead_frames
+        latent_pad = (1.0 - has_history).to(torch.long).view(1) * self.lookahead_frames
         target_indices = latent_pad + (num_finalize_idx - self.conv_history_window) + indices
         gather_indices = torch.clamp(target_indices, min=0).unsqueeze(0).unsqueeze(0).expand(batch, channels, -1)
         next_conv_hist = torch.gather(accumulated, 2, gather_indices)

@@ -32,6 +32,10 @@ import torchaudio
 from tqdm import tqdm
 from torch.multiprocessing import spawn, set_start_method
 
+QWEN3_TTS_DIR = Path(__file__).resolve().parents[1]
+if str(QWEN3_TTS_DIR) not in sys.path:
+    sys.path.insert(0, str(QWEN3_TTS_DIR))
+
 from xhquant.api import Config
 from xh_model_zoo.api import xhquant_llm_init
 from xh_model_zoo.xh_llm.models.builder import MODELS
@@ -39,7 +43,8 @@ from xh_model_zoo.xh_llm.models.qwen3_tts import (
     Qwen3TTSHMONNXInference
 )
 # use the original Qwen3TTSModel, not the XH wrapper
-from qwen_tts import Qwen3TTSModel
+from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
+from qwen_tts.core.models.modeling_qwen3_tts import mel_spectrogram
 
 # configure logging
 logging.basicConfig(
@@ -52,6 +57,9 @@ try:
     set_start_method('spawn')
 except RuntimeError:
     pass
+
+
+DEFAULT_FRONTEND_HMONNX_DIR = "./work_dirs/qwen3_tts_12hz_0_6B_base_frontend_xh2a"
 
 
 def load_voice_clone_data(data_path: str, max_samples: int = None) -> List[Dict[str, str]]:
@@ -139,6 +147,120 @@ def load_voice_clone_data(data_path: str, max_samples: int = None) -> List[Dict[
 
     logging.info(f"Loaded {len(data_list)} valid voice clone samples from {data_path}")
     return data_list
+
+
+def _resolve_frontend_hmonnx_paths(args: argparse.Namespace) -> Tuple[Path, Path]:
+    frontend_dir = Path(args.frontend_hmonnx_dir)
+    encode_hmonnx = Path(args.speech_tokenizer_encode_hmonnx) if args.speech_tokenizer_encode_hmonnx else (
+        frontend_dir / "hmonnx" / "speech_tokenizer_encode_XH2a.onnx"
+    )
+    speaker_hmonnx = Path(args.speaker_encoder_hmonnx) if args.speaker_encoder_hmonnx else (
+        frontend_dir / "hmonnx" / "speaker_encoder_XH2a.onnx"
+    )
+    if not encode_hmonnx.exists():
+        raise FileNotFoundError(f"speech_tokenizer.encode HMONNX not found: {encode_hmonnx}")
+    if not speaker_hmonnx.exists():
+        raise FileNotFoundError(f"speaker_encoder HMONNX not found: {speaker_hmonnx}")
+    return encode_hmonnx, speaker_hmonnx
+
+
+def _pad_or_trim_1d(x: torch.Tensor, target_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    valid_len = min(int(x.numel()), target_len)
+    out = torch.zeros(target_len, dtype=torch.float32)
+    mask = torch.zeros(target_len, dtype=torch.int32)
+    if valid_len > 0:
+        out[:valid_len] = x[:valid_len].to(torch.float32)
+        mask[:valid_len] = 1
+    return out.unsqueeze(0), mask.unsqueeze(0)
+
+
+def _pad_or_trim_mels(mels: torch.Tensor, target_frames: int, target_dim: int) -> torch.Tensor:
+    if mels.shape[-1] != target_dim:
+        raise ValueError(f"speaker mels dim mismatch: expected {target_dim}, got {mels.shape[-1]}")
+    out = torch.zeros((mels.shape[0], target_frames, target_dim), dtype=torch.float32)
+    valid_frames = min(int(mels.shape[1]), target_frames)
+    if valid_frames > 0:
+        out[:, :valid_frames, :] = mels[:, :valid_frames, :].to(torch.float32)
+    return out
+
+
+class VoiceCloneFrontendHMONNX:
+    """Run exported speech_tokenizer.encode and speaker_encoder HMONNX modules."""
+
+    def __init__(self, args: argparse.Namespace, device: torch.device):
+        from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference
+
+        encode_hmonnx, speaker_hmonnx = _resolve_frontend_hmonnx_paths(args)
+        logging.info(f"Loading speech_tokenizer.encode HMONNX: {encode_hmonnx}")
+        self.encode_session = HMONNXInference(str(encode_hmonnx))
+        self.encode_session.to(device)
+        logging.info(f"Loading speaker_encoder HMONNX: {speaker_hmonnx}")
+        self.speaker_session = HMONNXInference(str(speaker_hmonnx))
+        self.speaker_session.to(device)
+        self.device = device
+
+        self.audio_samples = int(self.encode_session.inputs[0].shape[1])
+        self.mel_frames = int(self.speaker_session.inputs[0].shape[1])
+        self.mel_dim = int(self.speaker_session.inputs[0].shape[2])
+        self.encode_input_dtype = self.encode_session.inputs[0].dtype
+        self.encode_mask_dtype = self.encode_session.inputs[1].dtype
+        self.speaker_input_dtype = self.speaker_session.inputs[0].dtype
+        self.sample_rate = int(args.frontend_sample_rate)
+
+    def _load_audio(self, wav_path: str) -> torch.Tensor:
+        wav, sr = torchaudio.load(wav_path)
+        wav = wav.to(torch.float32)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if int(sr) != self.sample_rate:
+            wav = torchaudio.functional.resample(wav, int(sr), self.sample_rate)
+        return wav.squeeze(0).contiguous()
+
+    def _speaker_mels(self, wav: torch.Tensor) -> torch.Tensor:
+        mels = mel_spectrogram(
+            wav.unsqueeze(0),
+            n_fft=1024,
+            num_mels=128,
+            sampling_rate=self.sample_rate,
+            hop_size=256,
+            win_size=1024,
+            fmin=0,
+            fmax=12000,
+        ).transpose(1, 2)
+        return _pad_or_trim_mels(mels, self.mel_frames, self.mel_dim)
+
+    @torch.no_grad()
+    def build_prompt(self, ref_audio: str, ref_text: str, xvec_only: bool) -> List[VoiceClonePromptItem]:
+        wav = self._load_audio(ref_audio)
+        if wav.numel() > self.audio_samples:
+            logging.warning(
+                f"Reference audio {ref_audio} has {wav.numel()} samples; "
+                f"truncating to {self.audio_samples} for static speech_tokenizer.encode HMONNX"
+            )
+
+        input_values, padding_mask = _pad_or_trim_1d(wav, self.audio_samples)
+        input_values = input_values.to(device=self.device, dtype=self.encode_input_dtype)
+        padding_mask = padding_mask.to(device=self.device, dtype=self.encode_mask_dtype)
+        encode_out = self.encode_session(input_values, padding_mask)
+        audio_codes, valid_frames = encode_out if isinstance(encode_out, (tuple, list)) else (encode_out, None)
+        valid_len = audio_codes.shape[1] if valid_frames is None else int(valid_frames.detach().cpu().reshape(-1)[0])
+        ref_code = None if xvec_only else audio_codes[0, :valid_len, :].detach().cpu().to(torch.long)
+
+        mels = self._speaker_mels(wav).to(device=self.device, dtype=self.speaker_input_dtype)
+        speaker_out = self.speaker_session(mels)
+        if isinstance(speaker_out, (tuple, list)):
+            speaker_out = speaker_out[0]
+        ref_spk_embedding = speaker_out[0].detach().cpu().to(torch.float32)
+
+        return [
+            VoiceClonePromptItem(
+                ref_code=ref_code,
+                ref_spk_embedding=ref_spk_embedding,
+                x_vector_only_mode=bool(xvec_only),
+                icl_mode=bool(not xvec_only),
+                ref_text=ref_text,
+            )
+        ]
 
 
 def worker_native(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
@@ -273,6 +395,7 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
     model = MODELS.build(cfg.model)
     assert isinstance(model, Qwen3TTSHMONNXInference)
     model.to(device)
+    voice_clone_frontend = VoiceCloneFrontendHMONNX(args, device)
 
     logging.info(f"Worker {rank} (GPU {gpu_id}): Model loaded")
 
@@ -293,12 +416,13 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
 
         # generate audio (voice clone)
         try:
+            voice_clone_prompt = voice_clone_frontend.build_prompt(ref_audio, ref_text, args.xvec_only)
             wavs, sr = model.generate_voice_clone(
                 text=text,
                 language="Chinese",
-                ref_audio=ref_audio,
+                ref_audio=None,
                 ref_text=ref_text,
-                x_vector_only_mode=args.xvec_only,
+                voice_clone_prompt=voice_clone_prompt,
                 max_new_tokens=2048,
                 do_sample=True,
                 top_k=50,
@@ -329,6 +453,7 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
             continue
 
     # free GPU memory
+    del voice_clone_frontend
     del model
     torch.cuda.empty_cache()
     logging.info(f"Worker {rank} (GPU {gpu_id}): Finished and cleaned up")
@@ -456,7 +581,7 @@ def parse_arguments():
         "--variant",
         type=str,
         choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"],
-        default=None,
+        default="0_6B_base",
         help="TTS variant; injects work_dirs paths into the unified hmonnx config"
     )
     parser.add_argument(
@@ -464,6 +589,30 @@ def parse_arguments():
         type=str,
         default="./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py",
         help="config file path for hmonnx mode"
+    )
+    parser.add_argument(
+        "--frontend-hmonnx-dir",
+        type=str,
+        default=DEFAULT_FRONTEND_HMONNX_DIR,
+        help="work dir containing exported voice-clone frontend HMONNX files"
+    )
+    parser.add_argument(
+        "--speech-tokenizer-encode-hmonnx",
+        type=str,
+        default=None,
+        help="explicit speech_tokenizer.encode HMONNX path; overrides --frontend-hmonnx-dir"
+    )
+    parser.add_argument(
+        "--speaker-encoder-hmonnx",
+        type=str,
+        default=None,
+        help="explicit speaker_encoder HMONNX path; overrides --frontend-hmonnx-dir"
+    )
+    parser.add_argument(
+        "--frontend-sample-rate",
+        type=int,
+        default=24000,
+        help="sample rate expected by exported voice-clone frontend modules"
     )
 
     return parser.parse_args()

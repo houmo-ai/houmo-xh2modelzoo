@@ -741,8 +741,9 @@ class Qwen3TTSHMONNXInference:
                 **kwargs,
             )
         if mode == "voice_clone":
-            if not ref_audio:
-                raise ValueError("ref_audio is required for voice_clone/base mode")
+            voice_clone_prompt = kwargs.get("voice_clone_prompt")
+            if not ref_audio and voice_clone_prompt is None:
+                raise ValueError("ref_audio or voice_clone_prompt is required for voice_clone/base mode")
             return self.generate_voice_clone(
                 text=text,
                 language=language,
@@ -772,9 +773,22 @@ class Qwen3TTSHMONNXInference:
         )
         return wavs, sr
 
-    def generate_voice_clone(self, text: str, language: str, ref_audio: str, ref_text: str, **kwargs):
+    def generate_voice_clone(
+        self,
+        text: str,
+        language: str,
+        ref_audio: Optional[str] = None,
+        ref_text: str = "",
+        voice_clone_prompt=None,
+        **kwargs,
+    ):
         wavs, sr = self.native_model.generate_voice_clone(
-            text=text, language=language, ref_audio=ref_audio, ref_text=ref_text, **kwargs
+            text=text,
+            language=language,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            voice_clone_prompt=voice_clone_prompt,
+            **kwargs,
         )
         return wavs, sr
 

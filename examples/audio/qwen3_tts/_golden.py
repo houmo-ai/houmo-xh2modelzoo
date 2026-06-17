@@ -29,6 +29,16 @@ def _align_dtype(input_args, float_dtype=torch.float16):
     return out
 
 
+def _get_logger():
+    try:
+        return get_root_logger()
+    except ValueError:
+        import logging
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+        return logging.getLogger(__name__)
+
+
 def run_hmonnx_golden(hmonnx_file, golden_dir, input_args, device="cuda:0"):
     """
     Args:
@@ -42,7 +52,7 @@ def run_hmonnx_golden(hmonnx_file, golden_dir, input_args, device="cuda:0"):
     """
     from xhquant.api import HMONNXGoldenInference
 
-    logger = get_root_logger()
+    logger = _get_logger()
     Path(golden_dir).mkdir(exist_ok=True, parents=True)
 
     input_args = _align_dtype(_flatten_inputs(input_args))

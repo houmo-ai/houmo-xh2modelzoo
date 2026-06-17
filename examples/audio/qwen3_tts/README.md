@@ -31,7 +31,7 @@ Qwen3-TTS 模型由 4 个子模型构成：Talker、CodePredictor、TextProjecti
 > 也接受短别名 `1.7b` / `0.6b` / `0.6b-base`。
 
 **支持的操作**：
-- `--export`: 导出 HMONNX 模型（4 个子模型）
+- `--export`: 导出 HMONNX 模型（主链路 4 个子模型；`0_6B_base` 会额外导出 voice-clone frontend）
 - `--test-native`: 测试原始浮点模型
 - `--test-hmonnx`: 测试 HMONNX 模型
 - `--eval`: 运行精度评估（Native + HMONNX）
@@ -100,7 +100,7 @@ pip install torch==2.8.0 transformers==4.57.3 torchaudio==2.8.0
 pip install soundfile==0.13.1 loguru==0.7.3 tqdm==4.67.3 numpy==2.2.6
 
 # 安装 ONNX 相关（如需导出 HMONNX）
-pip install onnx==1.16.2 onnxruntime==1.19.0 onnx-simplifier==0.4.0 onnxscript==0.4.0
+pip install onnx==1.16.2 onnxruntime==1.19.0 onnxsim==0.4.36 onnxscript==0.4.0
 
 # 安装 Qwen3-TTS
 pip install qwen_tts
@@ -212,14 +212,14 @@ python native_demo.py \
 
 ## 多 GPU 并行精度评估
 
-`eval/` 目录下提供两个评估脚本，对应两种测试场景：
+`eval/qwen3_tts_eval.py` 支持 Native PyTorch 和 HMONNX 两种推理模式、多 GPU 并行、断点续传。评估模式由 `--variant` 决定：
 
-| 脚本 | 适用模型 | 数据 |
+| `--variant` | 适用模型 | 数据 |
 |------|---------|------|
-| `eval/qwen3_tts_eval.py` | 0.6B-CustomVoice（预定义 speaker） | CV3-Eval text（仅目标文本） |
-| `eval/qwen3_tts_eval_voice_clone.py` | 0.6B-Base（voice-clone） | CV3-Eval text + prompt_text + prompt_wav.scp（含参考音频） |
+| `0_6B_customvoice` | 0.6B-CustomVoice（预定义 speaker） | CV3-Eval text（仅目标文本） |
+| `0_6B_base` | 0.6B-Base（voice-clone） | CV3-Eval text + prompt_text + prompt_wav.scp（含参考音频） |
 
-两个脚本都支持 Native PyTorch 和 HMONNX 两种推理模式、多 GPU 并行、断点续传。
+当 `--variant 0_6B_base` 时，脚本会自动走 voice-clone 流程，并使用已导出的 `speech_tokenizer.encode` 与 `speaker_encoder` HMONNX 前端模块构建 `voice_clone_prompt`。
 
 ---
 
@@ -243,6 +243,7 @@ python eval/qwen3_tts_eval.py \
 # Native 模式，测试前 20 条
 python eval/qwen3_tts_eval.py \
     --mode native \
+    --variant 0_6B_customvoice \
     --gpus 0,1,2,3 \
     --max-samples 20 \
     --speaker-mode round-robin
@@ -254,30 +255,35 @@ python eval/qwen3_tts_eval.py \
 |------|------|--------|
 | `--mode` | `native` 或 `hmonnx` | 必填 |
 | `--gpus` | GPU 列表，逗号分隔，如 `0,1,2,3` | 必填 |
-| `--variant` | hmonnx 变体：`0_6B_customvoice` / `1_7B_voicedesign` | None |
+| `--variant` | hmonnx 变体：`0_6B_customvoice` / `0_6B_base` | None |
 | `--max-samples` | 最大样本数，None 表示全部 500 条 | None |
-| `--speaker-mode` | `fixed` / `random` / `round-robin` | `fixed` |
+| `--max-new-tokens` | 最大生成 token 数 | 2048 |
+| `--speaker-mode` | `fixed` / `random` / `round-robin`，仅 custom voice 使用 | `fixed` |
 | `--speaker` | 固定 speaker（仅 `fixed` 模式）| `vivian` |
-| `--data-path` | CV3-Eval 数据集路径 | `/data01/home/she.gao/CV3-Eval/data/zero_shot/zh` |
+| `--xvec-only` | voice-clone 仅使用 x-vector 模式 | off |
+| `--data-path` | CV3-Eval 数据集路径；base voice-clone 需包含 `prompt_text` / `prompt_wav.scp` | `/data01/home/she.gao/CV3-Eval/data/zero_shot/zh` |
 | `--exp-dir` | 输出根目录 | `qwen3tts_eval_zh` |
 | `--hmonnx-config` | HMONNX 配置文件 | `./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py` |
-| `--hf-model` | Native 模式模型路径 | `./data/models/Qwen3-TTS-12Hz-0.6B-CustomVoice` |
+| `--frontend-hmonnx-dir` | base voice-clone 前端 HMONNX 目录 | `./work_dirs/qwen3_tts_12hz_0_6B_base_frontend_xh2a` |
+| `--hf-model` | Native 模式模型路径；base voice-clone 会自动切到 Base 模型 | `./data/models/Qwen3-TTS-12Hz-0.6B-CustomVoice` |
 
 #### 输出
 
-```
+CustomVoice 输出：
+
+```text
 qwen3tts_eval_zh/
-├── native_fp16/          # Native 模式输出
+├── native_fp16/
 │   ├── uttid_1.wav
 │   └── ...
-└── hmonnx/               # HMONNX 模式输出
+└── hmonnx/
     ├── uttid_1.wav
     └── ...
 ```
 
 ---
 
-### eval/qwen3_tts_eval_voice_clone.py（0.6B-Base）
+### eval/qwen3_tts_eval.py（0.6B-Base voice-clone）
 
 使用数据集中的参考音频克隆音色，适用于 0.6B-Base 模型的精度评估。数据集需包含 `text`、`prompt_text`、`prompt_wav.scp` 三个文件。
 
@@ -288,40 +294,29 @@ cd examples/audio/qwen3_tts
 PYTHONPATH=<xh2modelzoo path>
 
 # HMONNX 模式，500 条，4 GPU
-python eval/qwen3_tts_eval_voice_clone.py \
+python eval/qwen3_tts_eval.py \
     --mode hmonnx \
     --variant 0_6B_base \
-    --gpus 0,1,2,3
+    --gpus 0,1,2,3 \
+    --exp-dir qwen3tts_eval_zh_voice_clone
 
 # Native 模式，测试前 20 条
-python eval/qwen3_tts_eval_voice_clone.py \
+python eval/qwen3_tts_eval.py \
     --mode native \
+    --variant 0_6B_base \
     --gpus 0,1,2,3 \
-    --max-samples 20
+    --max-samples 20 \
+    --exp-dir qwen3tts_eval_zh_voice_clone
 ```
-
-#### 参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--mode` | `native` 或 `hmonnx` | 必填 |
-| `--gpus` | GPU 列表，逗号分隔 | 必填 |
-| `--variant` | hmonnx 变体，voice-clone 用 `0_6B_base` | None |
-| `--max-samples` | 最大样本数，None 表示全部 500 条 | None |
-| `--xvec-only` | 仅使用 x-vector 模式（不使用参考音频细节特征） | off |
-| `--data-path` | CV3-Eval 数据集路径（需包含 prompt_text / prompt_wav.scp） | `/data01/home/she.gao/CV3-Eval/data/zero_shot/zh` |
-| `--exp-dir` | 输出根目录 | `qwen3tts_eval_zh_voice_clone` |
-| `--hmonnx-config` | HMONNX 配置文件 | `./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py` |
-| `--hf-model` | Native 模式模型路径 | `./data/models/Qwen3-TTS-12Hz-0.6B-Base` |
 
 #### 输出
 
-```
+```text
 qwen3tts_eval_zh_voice_clone/
-├── native_voice_clone/   # Native 模式输出
+├── native_voice_clone/
 │   ├── uttid_1.wav
 │   └── ...
-└── hmonnx_voice_clone/   # HMONNX 模式输出
+└── hmonnx_voice_clone/
     ├── uttid_1.wav
     └── ...
 ```
@@ -332,12 +327,12 @@ qwen3tts_eval_zh_voice_clone/
 
 基于 4 × NVIDIA RTX A6000 测试（HMONNX 模式）：
 
-| 脚本 | 500 条总耗时 | 单条耗时 | 显存/卡 |
+| 场景 | 500 条总耗时 | 单条耗时 | 显存/卡 |
 |------|------------|---------|--------|
-| `qwen3_tts_eval.py` | ~2 小时 | ~1 分钟 | ~3 GB |
-| `qwen3_tts_eval_voice_clone.py` | ~6 小时 | ~3 分钟 | ~3 GB |
+| `0_6B_customvoice` | ~2 小时 | ~1 分钟 | ~3 GB |
+| `0_6B_base voice-clone` | ~6 小时 | ~3 分钟 | ~3 GB |
 
-> voice-clone 每条耗时较长，因为 0.6B-Base 的 talker 需要先编码参考音频的 x-vector。
+> voice-clone 每条耗时较长，因为 0.6B-Base 需要先用前端模块从参考音频生成 `ref_code` 和 `ref_spk_embedding`。
 
 ---
 
@@ -447,7 +442,7 @@ config，通过 `--variant {1_7B_voicedesign,0_6B_customvoice,0_6B_base}` 切换
 | HMONNX 整链路 | `config/llm/qwen3_tts_12hz_xh2a_hmonnx.py` |
 | 共享组件 / 变体表 | `config/llm/_components.py` |
 
-### 导出 HMONNX（4 步）
+### 导出 HMONNX（主链路 4 步，Base 额外 frontend）
 
 以 0.6B-CustomVoice（`--variant 0_6B_customvoice`）为例。`--name` 给定的产物目录名沿用各变体既有命名。
 
@@ -477,7 +472,7 @@ python qwen3_tts_speech_tokenizer_export.py \
 
 其它变体把 `--variant` 和 `--name` 换成对应值即可（产物目录名见 `_components.py` 的 `WORKNAME`）：
 - **1.7B-VoiceDesign**：`--variant 1_7B_voicedesign`，`--name qwen3_tts_12hz_1_7B_voicedesign_{talker_2k,code_predictor_2k}_xh2a` 及 `qwen3_tts_12hz_1_7B_{text_projection,speech_tokenizer}_xh2a`（注意 1.7B 的 text_projection/speech_tokenizer 命名不带 `voicedesign`）。
-- **0.6B-Base**：`--variant 0_6B_base`，`--name qwen3_tts_12hz_0_6B_base_{talker_2k,code_predictor_2k,text_projection,speech_tokenizer}_xh2a`。
+- **0.6B-Base**：`--variant 0_6B_base`，`--name qwen3_tts_12hz_0_6B_base_{talker_2k,code_predictor_2k,text_projection,speech_tokenizer}_xh2a`；voice-clone 前端另导出到 `qwen3_tts_12hz_0_6B_base_frontend_xh2a`，包含 `speech_tokenizer.encode` 和 `speaker_encoder`。
 
 每条命令的产物落在 `./work_dirs/<name>/` 下，包含 prefill/decode ONNX、`meta.json` 等。
 推荐直接用一键脚本 `./qwen3tts_pipeline.sh --model {1.7b,0.6b,0.6b-base} --export`，已封装好上述 `--variant`/`--name`。
@@ -495,7 +490,7 @@ curl -sSL -o /tmp/clone_1.wav \
 
 ### XH2a Demo（整链路 HMONNX 推理）
 
-完成 4 步导出后，跑整链路 demo（同样用 `--variant` 切换）：
+完成导出后，跑整链路 demo（同样用 `--variant` 切换）。其中 `0_6B_base` 除 4 个主链路子模型外，还需要 frontend HMONNX：
 
 ```bash
 python qwen3_tts_demo.py \
@@ -503,14 +498,13 @@ python qwen3_tts_demo.py \
 # 期望产物：work_dirs/qwen3_tts_12hz_xh2a_hmonnx_cv/output_<mode>.wav
 ```
 
-`Qwen3TTSHMONNXInference` 会把 4 个子模型的 HMONNX 串起来，根据 `--variant` 自动选择
+`Qwen3TTSHMONNXInference` 会把主链路子模型的 HMONNX 串起来，根据 `--variant` 自动选择
 `generate_voice_design` / `generate_custom_voice` / `generate_voice_clone`，走完
-prefill → decode → text projection → speech tokenizer 全流程。1.7B 用 `--variant 1_7B_voicedesign`，
-Base 用 `--variant 0_6B_base`。
+prefill → decode → text projection → speech tokenizer 全流程。Base 用 `--variant 0_6B_base` 时，demo / eval 会额外调用 frontend HMONNX 生成 `voice_clone_prompt`。1.7B 用 `--variant 1_7B_voicedesign`，Base 用 `--variant 0_6B_base`。
 
 ### Golden 导出（可选，用于硬件比对）
 
-以上 4 个导出脚本（Talker / CodePredictor / TextProjection / SpeechTokenizer，配 `--variant` 适用于 1.7B / 0.6B-CustomVoice / 0.6B-Base）都支持 `--golden` 开关。开启后会在导出 HMONNX 之后，用 `HMONNXGoldenInference` 加载该 HMONNX 并跑一次 forward，由运行时把 golden（输入 + 输出张量）落盘，可用于和硬件结果做逐算子 / 端到端比对。导出方式与 `xh_model_zoo/xh_llm/models/qwen3_vl/qwen3_vl_converter.py` 中的 golden 导出一致。
+主链路 4 个导出脚本（Talker / CodePredictor / TextProjection / SpeechTokenizer，配 `--variant` 适用于 1.7B / 0.6B-CustomVoice / 0.6B-Base）都支持 `--golden` 开关；0.6B-Base 的 frontend 导出脚本 `qwen3_tts_base_frontend_export.py` 也支持 `--golden`，会分别导出 `speech_tokenizer.encode` 和 `speaker_encoder` 的 golden。开启后会在导出 HMONNX 之后，用 `HMONNXGoldenInference` 加载该 HMONNX 并跑一次 forward，由运行时把 golden（输入 + 输出张量）落盘，可用于和硬件结果做逐算子 / 端到端比对。导出方式与 `xh_model_zoo/xh_llm/models/qwen3_vl/qwen3_vl_converter.py` 中的 golden 导出一致。
 
 ```bash
 # 在任意导出命令后追加 --golden 即可，例如：
@@ -537,6 +531,8 @@ CUDA_VISIBLE_DEVICES=3 python qwen3_tts_speech_tokenizer_export.py \
 | Talker / CodePredictor | `golden/<config_stem>_prefill`、`golden/<config_stem>_decode` | `prefill_golden_dir`、`decode_golden_dir` |
 | TextProjection | `golden/text_projection` | `golden_dir` |
 | SpeechTokenizer | `golden/speech_tokenizer` | `golden_dir` |
+| Base frontend / speech_tokenizer.encode | `golden/speech_tokenizer_encode` | `speech_tokenizer_encode_golden_dir` |
+| Base frontend / speaker_encoder | `golden/speaker_encoder` | `speaker_encoder_golden_dir` |
 
 > 公共实现见 `_golden.py` 的 `run_hmonnx_golden(...)`：普通浮点输入会对齐到 fp16，kv-cache（`CacheTensor`）与整型输入保持不变。
 
@@ -694,7 +690,7 @@ python eval/qwen3_tts_streaming_demo.py \
 
 ## 已知问题
 
-1. **0.6B-Base voice-clone 需准备参考音频**: Base 模型走 voice clone 接口（需参考音 + 参考文本），导出/推理前需先下载 `clone_1.wav`（见「HMONNX 导出和推理」），参考音/文本可在 `config/llm/_components.py` 的 `VARIANTS["0_6B_base"]` 中配置。HMONNX 导出已支持（统一脚本 `qwen3_tts_*_export.py` + `qwen3_tts_demo.py`，配 `--variant 0_6B_base`）。
+1. **0.6B-Base voice-clone 需准备参考音频**: Base 模型走 voice clone 接口（需参考音 + 参考文本），导出/推理前需先下载 `clone_1.wav`（见「HMONNX 导出和推理」），参考音/文本可在 `config/llm/_components.py` 的 `VARIANTS["0_6B_base"]` 中配置。HMONNX 导出已支持（4 个主链路导出脚本 + `qwen3_tts_base_frontend_export.py`，或直接用 `qwen3tts_pipeline.sh --model 0_6B_base --export`）。
 2. **Native 推理建议用 fp32**: README 记录 fp16+sdpa 在 native 采样会出 multinomial NaN，voice-clone native 测试默认用 `--dtype fp32`（HMONNX 路径不受影响）。
 
 ---

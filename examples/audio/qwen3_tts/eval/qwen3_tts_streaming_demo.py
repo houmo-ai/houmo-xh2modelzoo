@@ -55,6 +55,7 @@ from xh_model_zoo.xh_llm.models.qwen3_tts.qwen3_tts_stateful_decoder import (
     Qwen3TTSDecoderState as HMONNXDecoderState,
     Qwen3TTSStatefulDecoderInference,
 )
+from qwen3_tts_demo import DEFAULT_FRONTEND_HMONNX_DIR, VoiceCloneFrontendHMONNX
 
 
 CODE_RATE_HZ = 12
@@ -915,7 +916,13 @@ def main(args: argparse.Namespace) -> None:
 
     gen_kwargs = dict(max_new_tokens=args.max_new_tokens)
     if tts_request.tts_mode == "voice_clone":
-        gen_kwargs["x_vector_only_mode"] = args.xvec_only
+        voice_clone_frontend = VoiceCloneFrontendHMONNX(args, torch.device(cfg.exec_device), logger)
+        gen_kwargs["voice_clone_prompt"] = voice_clone_frontend.build_prompt(
+            tts_request.ref_audio,
+            tts_request.ref_text or "",
+            args.xvec_only,
+        )
+        tts_request.ref_audio = None
     output_file = Path(cfg.work_dir) / args.output
 
     if args.mode == "oneshot":
@@ -1035,6 +1042,30 @@ if __name__ == "__main__":
         dest="xvec_only",
         action="store_true",
         help="base/voice-clone only: use x-vector speaker embedding mode",
+    )
+    parser.add_argument(
+        "--frontend-hmonnx-dir",
+        type=str,
+        default=DEFAULT_FRONTEND_HMONNX_DIR,
+        help="work dir containing exported voice-clone frontend HMONNX files",
+    )
+    parser.add_argument(
+        "--speech-tokenizer-encode-hmonnx",
+        type=str,
+        default=None,
+        help="explicit speech_tokenizer.encode HMONNX path; overrides --frontend-hmonnx-dir",
+    )
+    parser.add_argument(
+        "--speaker-encoder-hmonnx",
+        type=str,
+        default=None,
+        help="explicit speaker_encoder HMONNX path; overrides --frontend-hmonnx-dir",
+    )
+    parser.add_argument(
+        "--frontend-sample-rate",
+        type=int,
+        default=24000,
+        help="sample rate expected by exported voice-clone frontend modules",
     )
     parser.add_argument(
         "--mode",
