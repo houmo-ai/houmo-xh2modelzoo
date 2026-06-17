@@ -53,10 +53,20 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
         "default": 200,
         "description": "AutoRound 每层优化迭代次数。",
     },
+    "seed": {
+        "type": "int",
+        "default": 42,
+        "description": "AutoRound 随机种子，与现有 mode1 shell 脚本保持一致。",
+    },
+    "quant_nontext_module": {
+        "type": "bool",
+        "default": False,
+        "description": "LLM-only 量化开关：False 表示不量化视觉/非文本模块。",
+    },
     "autoround_format": {
         "type": "str",
         "default": "auto_gptq",
-        "description": "AutoRound 上游保存格式名；对外产物语义仍记录为 gptqmodel_hf。",
+        "description": "AutoRound 上游保存格式名；dense 脚本默认为 auto_gptq，MoE YAML 使用 auto_round:gptqmodel。",
     },
     "save_path": {
         "type": "str|null",
@@ -65,13 +75,8 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
     },
     "calibration.dataset": {
         "type": "str",
-        "default": "wikitext",
-        "description": "AutoRound 校准数据集名称。",
-    },
-    "calibration.split": {
-        "type": "str",
-        "default": "train",
-        "description": "AutoRound 校准数据集 split。",
+        "default": "NeelNanda/pile-10k",
+        "description": "AutoRound 校准数据集名称，与 mode1 LLM-only shell 脚本保持一致。",
     },
     "calibration.nsamples": {
         "type": "int",
@@ -85,13 +90,48 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
     },
     "runtime.batch_size": {
         "type": "int",
-        "default": 1,
-        "description": "AutoRound 校准 batch size。",
+        "default": 8,
+        "description": "AutoRound 校准 batch size，与 mode1 LLM-only shell 脚本保持一致。",
     },
     "runtime.trust_remote_code": {
         "type": "bool",
         "default": True,
         "description": "加载 HuggingFace 模型时是否允许 remote code。",
+    },
+    "runtime.device_map": {
+        "type": "str|null",
+        "default": "MoE: balanced",
+        "description": "MoE AutoRound 多卡切分策略；dense YAML 默认不设置。",
+    },
+    "runtime.low_gpu_mem_usage": {
+        "type": "bool",
+        "default": "MoE: True",
+        "description": "MoE 低显存加载开关；dense YAML 默认不设置。",
+    },
+    "moe.attn_bits": {
+        "type": "int|null",
+        "default": "MoE: 8",
+        "description": "MoE attention linears 的 bit override，对齐 scripts_qwen35moe mode1。",
+    },
+    "moe.shared_expert_bits": {
+        "type": "int|null",
+        "default": "MoE: 8",
+        "description": "MoE shared_expert gate/up/down projection 的 bit override。",
+    },
+    "moe.expert_bits": {
+        "type": "int|null",
+        "default": None,
+        "description": "可选：MoE 非 shared experts gate/up/down 的统一 bit override。",
+    },
+    "moe.expert_up_gate_bits": {
+        "type": "int|null",
+        "default": None,
+        "description": "可选：MoE 非 shared experts gate_proj/up_proj 的 bit override。",
+    },
+    "moe.expert_down_bits": {
+        "type": "int|null",
+        "default": None,
+        "description": "可选：MoE 非 shared experts down_proj 的 bit override。",
     },
     "existing_hf.algorithm": {
         "type": "str",
@@ -204,7 +244,8 @@ _QUANT_CONFIG_HELP: dict[str, Any] = {
     "required_constraints": [
         "group_size must be 64",
         "artifact_format/output_format must be gptqmodel_hf",
-        "autoround_format defaults to auto_gptq because AutoRound uses this exporter name",
+        "autoround_format defaults to auto_gptq for dense YAML; MoE YAML uses auto_round:gptqmodel",
+        "quant_nontext_module defaults to False for mode1 LLM-only quantization",
         "default YAML quant is not null; use config_overrides={'quant': None} only for explicit base validation",
     ],
     "template": quant_config_template(),

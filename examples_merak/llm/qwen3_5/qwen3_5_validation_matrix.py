@@ -20,10 +20,17 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import json
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 QWEN35_9B_HF_MODEL_DIR = "weights/Qwen3.5-9B"
@@ -33,12 +40,8 @@ QWEN35_9B_DFLASH_CONFIG = "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qw
 QWEN35_9B_EXISTING_HF_QUANT = "weights/Qwen3.5-9B-mode1-llm-only"
 
 QWEN36_35B_A3B_HF_MODEL_DIR = "weights/Qwen3.6-35B-A3B"
-QWEN36_35B_A3B_CONFIG = (
-    "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml"
-)
-QWEN36_35B_A3B_MTP_CONFIG = (
-    "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml"
-)
+QWEN36_35B_A3B_CONFIG = "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml"
+QWEN36_35B_A3B_MTP_CONFIG = "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml"
 QWEN36_35B_A3B_DFLASH_CONFIG = (
     "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml"
 )
@@ -222,9 +225,7 @@ def preflight_scenarios(scenarios: list[ValidationScenario], *, check_modules: b
         if isinstance(quant_cfg, dict):
             existing_hf_model_dir = quant_cfg.get("existing_hf_model_dir")
             if existing_hf_model_dir and not Path(existing_hf_model_dir).exists():
-                issues.append(
-                    f"{scenario.name}: quant.existing_hf_model_dir does not exist: {existing_hf_model_dir}"
-                )
+                issues.append(f"{scenario.name}: quant.existing_hf_model_dir does not exist: {existing_hf_model_dir}")
     return issues
 
 
@@ -242,38 +243,72 @@ def run_scenario(
     debug: bool,
     force: bool,
     dump_golden: bool,
+    skip_export: bool,
+    quick_test: bool,
+    quick_test_max_new_tokens: int,
     prompt: str,
 ) -> None:
-    from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow
+    from xhmodel_merak.xh_llm.models.qwen3_5 import (
+        Qwen35Workflow,
+        find_hmonnx_meta_file,
+        print_quick_test_result,
+        quick_test_hmonnx,
+    )
 
     scenario_root = output_root / scenario.name
     quant_output_dir = scenario_root / "quant"
     export_output_dir = scenario_root / "export"
-    _remove_output_dir_if_needed(scenario_root, force)
-    scenario_root.mkdir(parents=True, exist_ok=True)
+    if skip_export:
+        if force:
+            raise ValueError("--skip-export cannot be combined with --force")
+        if not export_output_dir.is_dir():
+            raise FileNotFoundError(f"{scenario.name}: --skip-export requires existing export dir: {export_output_dir}")
+        scenario_root.mkdir(parents=True, exist_ok=True)
+        print(f"[{scenario.name}] skip_export=True reuse_export_dir={export_output_dir}")
+        meta_file = find_hmonnx_meta_file(export_output_dir)
+    else:
+        _remove_output_dir_if_needed(scenario_root, force)
+        scenario_root.mkdir(parents=True, exist_ok=True)
 
-    workflow = Qwen35Workflow.from_config(
-        hf_model_dir=scenario.hf_model_dir,
-        config_path=scenario.config_path,
-        seed=seed,
-        debug=debug,
-    )
-    quant_result = workflow.quant(
-        output_dir=str(quant_output_dir),
-        device=device,
-        config_overrides=scenario.config_overrides,
-    )
-    export_result = workflow.export(
-        quant_result=quant_result,
-        output_dir=str(export_output_dir),
-        device=device,
-        config_overrides=scenario.config_overrides,
-    )
-    if dump_golden:
-        workflow.dump_golden(export_result=export_result, device=device, input_messages={"text": prompt})
+        workflow = Qwen35Workflow.from_config(
+            hf_model_dir=scenario.hf_model_dir,
+            config_path=scenario.config_path,
+            seed=seed,
+            debug=debug,
+        )
+        quant_result = workflow.quant(
+            output_dir=str(quant_output_dir),
+            device=device,
+            config_overrides=scenario.config_overrides,
+        )
+        export_result = workflow.export(
+            quant_result=quant_result,
+            output_dir=str(export_output_dir),
+            device=device,
+            config_overrides=scenario.config_overrides,
+        )
+        if dump_golden:
+            workflow.dump_golden(export_result=export_result, device=device, input_messages={"text": prompt})
 
-    print(f"[{scenario.name}] quant_result={quant_result}")
-    print(f"[{scenario.name}] export_result={export_result}")
+        print(f"[{scenario.name}] quant_result={quant_result}")
+        print(f"[{scenario.name}] export_result={export_result}")
+        meta_file = find_hmonnx_meta_file(export_result)
+    print(f"[{scenario.name}] hmonnx_meta_file={meta_file}")
+    if quick_test:
+        quick_result = quick_test_hmonnx(
+            meta_file,
+            prompt=prompt,
+            device=device,
+            max_new_tokens=quick_test_max_new_tokens,
+            do_sample=False,
+        )
+        print_quick_test_result(quick_result)
+        result_file = scenario_root / "quick_test_result.json"
+        result_file.write_text(
+            json.dumps(quick_result.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[{scenario.name}] quick_test_result={result_file}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -284,7 +319,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--force", action="store_true", help="Remove previous scenario output before running")
+    parser.add_argument(
+        "--skip-export",
+        action="store_true",
+        help="Reuse existing <output-root>/<scenario>/export and only run meta lookup or quick test",
+    )
     parser.add_argument("--skip-golden", action="store_true", help="Skip dump_golden after export")
+    parser.add_argument("--quick-test", action="store_true", help="Run a quick HMONNX generate/spec-decode test")
+    parser.add_argument("--quick-test-max-new-tokens", type=int, default=64)
     parser.add_argument("--preflight-only", action="store_true", help="Check imports and paths, then exit")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     return parser
@@ -311,6 +353,9 @@ def main(argv: list[str] | None = None) -> None:
             debug=args.debug,
             force=args.force,
             dump_golden=not args.skip_golden,
+            skip_export=args.skip_export,
+            quick_test=args.quick_test,
+            quick_test_max_new_tokens=args.quick_test_max_new_tokens,
             prompt=args.prompt,
         )
 

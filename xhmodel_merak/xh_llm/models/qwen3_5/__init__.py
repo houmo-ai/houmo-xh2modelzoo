@@ -18,6 +18,14 @@ from .workflow_api import (
     list_recommended_configs,
     quant,
 )
+from .workflow_runtime import (
+    HMONNXQuickTestResult,
+    find_hmonnx_meta_file,
+    hmonnx_generate,
+    print_quick_test_result,
+    quick_test_hmonnx,
+    spec_decode_generate,
+)
 from .xh_qwen3_5_config import XHQwen3_5_VisualConfig, XHQwen3_5ModelConfig
 
 
@@ -41,4 +49,10 @@ __all__ = [
     "get_quant_config_help",
     "get_recommended_config_path",
     "list_recommended_configs",
+    "HMONNXQuickTestResult",
+    "find_hmonnx_meta_file",
+    "hmonnx_generate",
+    "print_quick_test_result",
+    "quick_test_hmonnx",
+    "spec_decode_generate",
 ]

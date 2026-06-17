@@ -8,10 +8,16 @@ shape, quantization, visual size, MTP/DFlash, and GDR options stay in YAML or
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
-from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow, print_quick_test_result, quick_test_hmonnx  # noqa: E402
 
 
 HF_MODEL_DIR = "weights/Qwen3.5-9B"
@@ -23,6 +29,8 @@ SEED = 1024
 DEBUG = False
 FORCE_OVERWRITE = True
 PROMPT = "用中文简单介绍 Qwen3.5。"
+QUICK_TEST = True
+QUICK_TEST_MAX_NEW_TOKENS = 64
 
 # Base validation skips quantization and exports from HF_MODEL_DIR:
 # CONFIG_OVERRIDES: dict[str, Any] | None = {"quant": None}
@@ -74,6 +82,15 @@ def main() -> None:
 
     print(f"quant_result: {quant_result}")
     print(f"export_result: {export_result}")
+    if QUICK_TEST:
+        quick_result = quick_test_hmonnx(
+            export_result,
+            prompt=PROMPT,
+            device=DEVICE,
+            max_new_tokens=QUICK_TEST_MAX_NEW_TOKENS,
+            do_sample=False,
+        )
+        print_quick_test_result(quick_result)
 
 
 if __name__ == "__main__":

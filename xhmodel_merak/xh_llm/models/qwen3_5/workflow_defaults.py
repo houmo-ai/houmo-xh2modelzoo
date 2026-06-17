@@ -22,15 +22,16 @@ DEFAULT_QUANT_CONFIG: dict[str, Any] = {
     "group_size": 64,
     "sym": True,
     "iters": 200,
+    "seed": 42,
+    "quant_nontext_module": False,
     "autoround_format": "auto_gptq",
     "calibration": {
-        "dataset": "wikitext",
-        "split": "train",
+        "dataset": "NeelNanda/pile-10k",
         "nsamples": 128,
         "seqlen": 2048,
     },
     "runtime": {
-        "batch_size": 1,
+        "batch_size": 8,
         "trust_remote_code": True,
     },
 }

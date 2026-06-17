@@ -1,4 +1,5 @@
 """Lightweight checks for the config-only Merak Qwen3.5 export entrypoint."""
+
 from __future__ import annotations
 
 import runpy
@@ -12,23 +13,16 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+QUANT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_quant.py"
 VALIDATION_MATRIX_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py"
 REMOVED_MOE_EXAMPLE_DIR = REPO_ROOT / "examples_merak/llm/qwen3_5_moe"
 README = REPO_ROOT / "examples_merak/llm/qwen3_5/README.md"
 README_WORKFLOW = REPO_ROOT / "examples_merak/llm/qwen3_5/README_workflow.md"
 
-WORKFLOW_9B_FULL = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml"
-)
-WORKFLOW_9B_MTP = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml"
-)
-WORKFLOW_9B_DFLASH = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml"
-)
-WORKFLOW_MOE_FULL = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml"
-)
+WORKFLOW_9B_FULL = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml"
+WORKFLOW_9B_MTP = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml"
+WORKFLOW_9B_DFLASH = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml"
+WORKFLOW_MOE_FULL = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml"
 WORKFLOW_MOE_MTP = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml"
 )
@@ -82,6 +76,10 @@ def _load_validation_matrix_script():
     return runpy.run_path(str(VALIDATION_MATRIX_SCRIPT), run_name="qwen3_5_validation_matrix_test")
 
 
+def _load_quant_script():
+    return runpy.run_path(str(QUANT_SCRIPT), run_name="qwen3_5_quant_test")
+
+
 def test_unified_export_script_parses(monkeypatch):
     _load_export_script(monkeypatch)
 
@@ -112,6 +110,90 @@ def test_export_entrypoint_keeps_legacy_compat_flags(monkeypatch):
 def _load_yaml(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fin:
         return yaml.safe_load(fin)
+
+
+def test_quant_script_exposes_small_path_only_cli():
+    namespace = _load_quant_script()
+    parser = namespace["build_parser"]()
+    option_strings = {opt for action in parser._actions for opt in action.option_strings}
+
+    assert {
+        "--hf-model-dir",
+        "--config",
+        "--output-dir",
+        "--device",
+        "--force",
+        "--base",
+        "--existing-hf-model-dir",
+    } <= option_strings
+    for forbidden in (
+        "--bits",
+        "--group-size",
+        "--llm-bits",
+        "--llm-group-size",
+        "--attn-bits",
+        "--shared-expert-bits",
+        "--dataset",
+        "--iters",
+        "--nsamples",
+    ):
+        assert forbidden not in option_strings
+
+    args = parser.parse_args(
+        [
+            "--hf-model-dir",
+            "weights/Qwen3.5-9B",
+            "--config",
+            str(WORKFLOW_9B_FULL),
+            "--output-dir",
+            "work_dirs/qwen35_quant",
+            "--device",
+            "cuda:0",
+        ]
+    )
+    assert args.hf_model_dir == "weights/Qwen3.5-9B"
+    assert args.config == str(WORKFLOW_9B_FULL)
+    assert args.output_dir == "work_dirs/qwen35_quant"
+    assert args.device == "cuda:0"
+
+
+def test_quant_script_builds_only_explicit_source_overrides():
+    namespace = _load_quant_script()
+    parser = namespace["build_parser"]()
+
+    base_args = parser.parse_args(
+        [
+            "--hf-model-dir",
+            "weights/Qwen3.5-9B",
+            "--config",
+            str(WORKFLOW_9B_FULL),
+            "--output-dir",
+            "work_dirs/qwen35_quant",
+            "--base",
+        ]
+    )
+    assert namespace["_build_quant_overrides"](base_args) == {"quant": None}
+
+    existing_args = parser.parse_args(
+        [
+            "--hf-model-dir",
+            "weights/Qwen3.5-9B",
+            "--config",
+            str(WORKFLOW_9B_FULL),
+            "--output-dir",
+            "work_dirs/qwen35_quant",
+            "--existing-hf-model-dir",
+            "weights/Qwen3.5-9B-mode1-llm-only",
+        ]
+    )
+    assert namespace["_build_quant_overrides"](existing_args) == {
+        "quant": {
+            "algorithm": "existing_hf",
+            "artifact_format": "gptqmodel_hf",
+            "source_algorithm": "autoround",
+            "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
+        }
+    }
 
 
 def test_legacy_moe_example_directory_is_not_part_of_new_workflow_docs():
@@ -165,15 +247,15 @@ def test_validation_matrix_covers_requested_runtime_cases():
         "quant": None,
         "export.model.fuse_gdr_ops": True,
     }
-    assert by_name["qwen35_9b_existing_hf_fuse_false"].config_overrides["quant"][
-        "existing_hf_model_dir"
-    ] == "weights/Qwen3.5-9B-mode1-llm-only"
-    assert by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides["quant"][
-        "existing_hf_model_dir"
-    ] == "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400"
-    assert by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides[
-        "export.model.fuse_gdr_ops"
-    ] is True
+    assert (
+        by_name["qwen35_9b_existing_hf_fuse_false"].config_overrides["quant"]["existing_hf_model_dir"]
+        == "weights/Qwen3.5-9B-mode1-llm-only"
+    )
+    assert (
+        by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides["quant"]["existing_hf_model_dir"]
+        == "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400"
+    )
+    assert by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides["export.model.fuse_gdr_ops"] is True
     assert by_name["qwen35_9b_mtp_existing_hf"].config_path.endswith("qwen3_5_9b_full_mtp.yaml")
     assert by_name["qwen35_9b_mtp_existing_hf"].config_overrides == {
         "quant": {
@@ -185,12 +267,8 @@ def test_validation_matrix_covers_requested_runtime_cases():
         "export.model.fuse_gdr_ops": False,
     }
     assert by_name["qwen35_9b_dflash_existing_hf"].config_path.endswith("qwen3_5_9b_full_dflash.yaml")
-    assert by_name["qwen36_35b_a3b_mtp_existing_hf"].config_path.endswith(
-        "qwen3_6_35b_a3b_full_mtp.yaml"
-    )
-    assert by_name["qwen36_35b_a3b_dflash_existing_hf"].config_path.endswith(
-        "qwen3_6_35b_a3b_full_dflash.yaml"
-    )
+    assert by_name["qwen36_35b_a3b_mtp_existing_hf"].config_path.endswith("qwen3_6_35b_a3b_full_mtp.yaml")
+    assert by_name["qwen36_35b_a3b_dflash_existing_hf"].config_path.endswith("qwen3_6_35b_a3b_full_dflash.yaml")
 
 
 def test_validation_matrix_preflight_checks_paths_without_importing_runtime_modules():
@@ -221,9 +299,22 @@ def test_validation_matrix_preflight_checks_paths_without_importing_runtime_modu
 def test_validation_matrix_parser_supports_preflight_only():
     namespace = _load_validation_matrix_script()
     parser = namespace["build_parser"]()
-    args = parser.parse_args(["--preflight-only", "--scenario", "qwen35_9b_base_fuse_false"])
+    args = parser.parse_args(
+        [
+            "--preflight-only",
+            "--quick-test",
+            "--quick-test-max-new-tokens",
+            "16",
+            "--skip-export",
+            "--scenario",
+            "qwen35_9b_base_fuse_false",
+        ]
+    )
 
     assert args.preflight_only is True
+    assert args.quick_test is True
+    assert args.quick_test_max_new_tokens == 16
+    assert args.skip_export is True
     assert args.scenario == ["qwen35_9b_base_fuse_false"]
 
 
@@ -234,27 +325,36 @@ def test_validation_matrix_version_tuple_handles_suffixes():
     assert namespace["_version_tuple"]("2.8.0+cu128") == (2, 8, 0)
 
 
-def test_workflow_yamls_keep_default_quant_generic():
-    for path in (WORKFLOW_9B_FULL, WORKFLOW_MOE_FULL):
-        cfg = _load_yaml(path)
-        assert cfg["quant"] == {
-            "algorithm": "autoround",
-            "output_format": "gptqmodel_hf",
-            "artifact_format": "gptqmodel_hf",
-            "bits": 4,
-            "group_size": 64,
-            "calibration": {
-                "dataset": "wikitext",
-                "split": "train",
-                "nsamples": 128,
-                "seqlen": 2048,
-            },
-            "runtime": {
-                "batch_size": 1,
-                "trust_remote_code": True,
-            },
+def test_workflow_yamls_keep_autoround_llm_only_quant_contract():
+    dense_cfg = _load_yaml(WORKFLOW_9B_FULL)
+    moe_cfg = _load_yaml(WORKFLOW_MOE_FULL)
+
+    for cfg in (dense_cfg, moe_cfg):
+        quant = cfg["quant"]
+        assert quant["algorithm"] == "autoround"
+        assert quant["output_format"] == "gptqmodel_hf"
+        assert quant["artifact_format"] == "gptqmodel_hf"
+        assert quant["bits"] == 4
+        assert quant["group_size"] == 64
+        assert quant["sym"] is True
+        assert quant["iters"] == 200
+        assert quant["seed"] == 42
+        assert quant["quant_nontext_module"] is False
+        assert quant["calibration"] == {
+            "dataset": "NeelNanda/pile-10k",
+            "nsamples": 128,
+            "seqlen": 2048,
         }
+        assert quant["runtime"]["batch_size"] == 8
+        assert quant["runtime"]["trust_remote_code"] is True
         assert cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+
+    assert dense_cfg["quant"]["autoround_format"] == "auto_gptq"
+    assert "device_map" not in dense_cfg["quant"]["runtime"]
+    assert moe_cfg["quant"]["autoround_format"] == "auto_round:gptqmodel"
+    assert moe_cfg["quant"]["runtime"]["device_map"] == "balanced"
+    assert moe_cfg["quant"]["runtime"]["low_gpu_mem_usage"] is True
+    assert moe_cfg["quant"]["moe"] == {"attn_bits": 8, "shared_expert_bits": 8}
 
 
 def test_spec_decode_workflow_yamls_are_file_based():

@@ -5,13 +5,17 @@ quant:
   bits: 4
   group_size: 64
   calibration:
-    dataset: wikitext
-    split: train
+    dataset: NeelNanda/pile-10k
     nsamples: 128
     seqlen: 2048
   runtime:
-    batch_size: 1
+    batch_size: 8
     trust_remote_code: true
+  seed: 42
+  quant_nontext_module: false
+  sym: true
+  iters: 200
+  autoround_format: auto_gptq
 export:
   model:
     chip_arch: XH2a
