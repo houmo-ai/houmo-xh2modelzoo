@@ -16,7 +16,6 @@ from qwen_tts import Qwen3TTSModel
 from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
 from transformers.models.mimi.modeling_mimi import MimiConv1d, MimiEuclideanCodebook
 from xhquant.api import Config, convert_onnx_to_hmonnx, set_random_seed
-from xhquant.export.onnx.transforms import hmonnx_transforms
 
 
 class SpeechTokenizerEncodeWrapper(nn.Module):
@@ -59,8 +58,8 @@ class SpeechTokenizerEncodeWrapper(nn.Module):
         hidden = self.downsample(hidden, padding_cache=None)
         audio_codes = self.quantizer.encode(hidden, self.num_quantizers)
         audio_codes = audio_codes.transpose(0, 1)[:, : self.valid_num_quantizers].transpose(1, 2).to(torch.int32)
-        valid_samples = padding_mask.to(torch.float32).sum(dim=1)
-        valid_frames = torch.ceil(valid_samples / float(self.encode_downsample_rate)).to(torch.int32)
+        valid_samples = padding_mask.to(torch.int64).sum(dim=1)
+        valid_frames = ((valid_samples + self.encode_downsample_rate - 1) // self.encode_downsample_rate).to(torch.int32)
         return audio_codes, valid_frames
 
 
@@ -185,7 +184,6 @@ def _export_onnx(model, dummy_inputs, onnx_file: Path, input_names, output_names
         else:
             torch.onnx.export(**export_kwargs, dynamo=False)
     onnx_model = onnx.load(str(onnx_file))
-    hmonnx_transforms(onnx_model)
     onnx.save(onnx_model, str(onnx_file))
 
 

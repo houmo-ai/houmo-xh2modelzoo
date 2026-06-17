@@ -112,7 +112,6 @@ class VoiceCloneFrontendHMONNX:
         self.mel_frames = int(self.speaker_session.inputs[0].shape[1])
         self.mel_dim = int(self.speaker_session.inputs[0].shape[2])
         self.encode_input_dtype = self.encode_session.inputs[0].dtype
-        self.encode_mask_dtype = self.encode_session.inputs[1].dtype
         self.speaker_input_dtype = self.speaker_session.inputs[0].dtype
         self.sample_rate = int(args.frontend_sample_rate)
 
@@ -149,7 +148,7 @@ class VoiceCloneFrontendHMONNX:
 
         input_values, padding_mask = _pad_or_trim_1d(wav, self.audio_samples)
         input_values = input_values.to(device=self.device, dtype=self.encode_input_dtype)
-        padding_mask = padding_mask.to(device=self.device, dtype=self.encode_mask_dtype)
+        padding_mask = padding_mask.to(device=self.device, dtype=torch.int32)
         encode_out = self.encode_session(input_values, padding_mask)
         audio_codes, valid_frames = encode_out if isinstance(encode_out, (tuple, list)) else (encode_out, None)
         valid_len = audio_codes.shape[1] if valid_frames is None else int(valid_frames.detach().cpu().reshape(-1)[0])
