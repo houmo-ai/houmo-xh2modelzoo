@@ -232,6 +232,10 @@ class LLMConverter:
             from .models.qwen3_5_moe import Qwen3_5MoeConverterXH2a
 
             converter_cls = Qwen3_5MoeConverterXH2a
+        elif architecture == "DeepseekV4ForCausalLM":
+            from .models.deepseek_v4 import DeepseekV4ConverterXH2a
+
+            converter_cls = DeepseekV4ConverterXH2a
 
         if converter_cls is None:
             raise ValueError(f"Unsupported architecture: {architecture}")
