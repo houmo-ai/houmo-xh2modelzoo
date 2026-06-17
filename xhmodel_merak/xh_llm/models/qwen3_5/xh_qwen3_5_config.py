@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from xhmodel_merak.configuration_utils import HFModelConfig
 from xhquant.api import QuantScheme
 
@@ -175,7 +177,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             use_cache=use_cache,
             **kwargs,
         )
-        if isinstance(visual_config, dict):
+        if isinstance(visual_config, Mapping):
+            visual_config = dict(visual_config)
             if "model_name" not in visual_config:
                 visual_config["model_name"] = f"{model_name}_visual"
             if "hf_model" not in visual_config:
@@ -204,7 +207,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.reranked_repo_dir = reranked_repo_dir
         self.force_rerank = force_rerank
 
-        if isinstance(mtp_config, dict):
+        if isinstance(mtp_config, Mapping):
+            mtp_config = dict(mtp_config)
             if "model_name" not in mtp_config:
                 mtp_config["model_name"] = f"{model_name}_mtp"
             if "hf_model" not in mtp_config:
@@ -214,17 +218,20 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             mtp_config = XHQwen3_5_MTPConfig(**mtp_config)
         self.mtp_config = mtp_config
 
-        if isinstance(dflash_config, dict):
+        if isinstance(dflash_config, Mapping):
+            dflash_config = dict(dflash_config)
             if "model_name" not in dflash_config:
                 dflash_config["model_name"] = f"{model_name}_dflash"
             if "hf_model" not in dflash_config:
                 dflash_config["hf_model"] = hf_model
-            if "target_model_dir" not in dflash_config:
+            if dflash_config.get("target_model_dir") is None:
                 dflash_config["target_model_dir"] = hf_model
             if "draft_head_weight_bits" not in dflash_config:
                 dflash_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             dflash_config = XHQwen3_5_DFlashConfig(**dflash_config)
         self.dflash_config = dflash_config
+        if self.dflash_config is not None and getattr(self.dflash_config, "target_model_dir", None) is None:
+            self.dflash_config.target_model_dir = hf_model
 
         self.image_token_id: int | None = None
         self.video_token_id: int | None = None

@@ -807,7 +807,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_xh2a_2k_1_layer.py",
+        required=True,
+        help="Model config path. Legacy Qwen3.5 xh2a Python config defaults were removed; pass an explicit compatible config.",
     )
     parser.add_argument("--warmup-runs", type=int, default=2, help="number of warmup runs before profiling")
     parser.add_argument("--profile-runs", type=int, default=1, help="number of profiled runs")

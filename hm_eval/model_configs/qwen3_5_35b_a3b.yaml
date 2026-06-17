@@ -34,8 +34,8 @@ backends:
   hmonnx:
     type: hmonnx
     onnx_model_type: qwen3_next
-    export_script: examples_merak/llm/qwen3_5_moe/qwen3_5_moe_xh_export_hmonnx.py
+    export_script: examples_merak/llm/qwen3_5/qwen3_5_workflow.py
     export_configs:
-      - configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py
-      - configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_hf_autoround_xh2a_2k.py
+      - configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml
+      - configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml
     extra_args: {}

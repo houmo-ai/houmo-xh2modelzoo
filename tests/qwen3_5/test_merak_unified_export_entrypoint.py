@@ -7,29 +7,39 @@ import types
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+VALIDATION_MATRIX_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py"
 REMOVED_MOE_EXAMPLE_DIR = REPO_ROOT / "examples_merak/llm/qwen3_5_moe"
 README = REPO_ROOT / "examples_merak/llm/qwen3_5/README.md"
+README_WORKFLOW = REPO_ROOT / "examples_merak/llm/qwen3_5/README_workflow.md"
 
-CONFIG_9B_FLOAT = REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_xh2a_2k.py"
-CONFIG_9B_QUANT = REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_hf_gptq_xh2a_2k.py"
-CONFIG_9B_MTP = REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_spec_mtp_xh2a_2k.py"
-CONFIG_9B_DFLASH = REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_spec_dflash_xh2a_2k.py"
-CONFIG_MOE_FLOAT = (
-    REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py"
+WORKFLOW_9B_FULL = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml"
 )
-CONFIG_MOE_QUANT = (
-    REPO_ROOT
-    / "configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_hf_autoround_xh2a_2k.py"
+WORKFLOW_9B_MTP = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml"
 )
-CONFIG_MOE_MTP = (
-    REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_spec_mtp_xh2a_2k.py"
+WORKFLOW_9B_DFLASH = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml"
 )
-CONFIG_MOE_DFLASH = (
-    REPO_ROOT / "configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_spec_dflash_xh2a_2k.py"
+WORKFLOW_MOE_FULL = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml"
+)
+WORKFLOW_MOE_MTP = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml"
+)
+WORKFLOW_MOE_DFLASH = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml"
+)
+WORKFLOW_27B_VISUAL_448 = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_448.yaml"
+)
+WORKFLOW_27B_VISUAL_896 = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_896.yaml"
 )
 
 
@@ -68,16 +78,21 @@ def _load_export_script(monkeypatch):
     return runpy.run_path(str(EXPORT_SCRIPT), run_name="qwen3_5_unified_export_test")
 
 
+def _load_validation_matrix_script():
+    return runpy.run_path(str(VALIDATION_MATRIX_SCRIPT), run_name="qwen3_5_validation_matrix_test")
+
+
 def test_unified_export_script_parses(monkeypatch):
     _load_export_script(monkeypatch)
 
 
-def test_export_entrypoint_is_config_only(monkeypatch):
+def test_export_entrypoint_keeps_legacy_compat_flags(monkeypatch):
     namespace = _load_export_script(monkeypatch)
     parser = namespace["build_parser"]()
     option_strings = {opt for action in parser._actions for opt in action.option_strings}
 
     assert {"--config", "--debug", "--force", "--seed", "--work-dir", "--work_dir"} <= option_strings
+    assert {"--fuse-gdr-ops", "--fuse_gdr_ops", "--no-fuse-gdr-ops", "--no_fuse_gdr_ops"} <= option_strings
     for forbidden in (
         "--model",
         "--model-type",
@@ -91,11 +106,18 @@ def test_export_entrypoint_is_config_only(monkeypatch):
         "--max-size-h",
     ):
         assert forbidden not in option_strings
-    assert getattr(parser._option_string_actions["--config"], "required") is True
+    assert parser._option_string_actions["--config"].required is True
 
 
-def test_removed_moe_example_directory_is_deleted():
-    assert not REMOVED_MOE_EXAMPLE_DIR.exists()
+def _load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as fin:
+        return yaml.safe_load(fin)
+
+
+def test_legacy_moe_example_directory_is_not_part_of_new_workflow_docs():
+    assert REMOVED_MOE_EXAMPLE_DIR.exists()
+    src = README.read_text(encoding="utf-8")
+    assert "examples_merak/llm/qwen3_5_moe" not in src
 
 
 def test_readme_does_not_document_model_override_cli():
@@ -105,36 +127,151 @@ def test_readme_does_not_document_model_override_cli():
     assert "qwen3_5_moe/qwen3_5_moe" not in src
 
 
-def test_config_paths_cover_requested_models():
-    assert 'hf_model_dir = "weights/Qwen3.5-9B"' in CONFIG_9B_FLOAT.read_text()
-    assert "/data01/home/yujy/work/gptqmodel/output/Qwen3.5-9B-mode1-llm-only" in CONFIG_9B_QUANT.read_text()
-    assert 'hf_model_dir = "weights/Qwen3.6-35B-A3B"' in CONFIG_MOE_FLOAT.read_text()
-    assert 'hf_model_dir = "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400"' in CONFIG_MOE_QUANT.read_text()
+def test_workflow_config_paths_cover_requested_models_and_existing_hf_overrides():
+    assert _load_yaml(WORKFLOW_9B_FULL)["export"]["model"]["hf_model"] == "weights/Qwen3.5-9B"
+    assert _load_yaml(WORKFLOW_MOE_FULL)["export"]["model"]["hf_model"] == "weights/Qwen3.6-35B-A3B"
+    assert _load_yaml(WORKFLOW_27B_VISUAL_448)["export"]["model"]["hf_model"] == "weights/Qwen3.6-27B"
+    assert _load_yaml(WORKFLOW_27B_VISUAL_896)["export"]["model"]["hf_model"] == "weights/Qwen3.6-27B"
+
+    src = README_WORKFLOW.read_text(encoding="utf-8")
+    assert "weights/Qwen3.5-9B-mode1-llm-only" in src
+    assert "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400" in src
 
 
-def test_quantized_hf_configs_use_hf_model_not_quant_weight():
-    for path in (CONFIG_9B_QUANT, CONFIG_MOE_QUANT):
-        src = path.read_text()
-        assert "quant_weight=None" in src
-        assert "hf_model=hf_model_dir" in src
-        assert "quant_type=\"w4a8h1_sefp\"" in src
+def test_validation_matrix_covers_requested_runtime_cases():
+    namespace = _load_validation_matrix_script()
+    scenarios = namespace["VALIDATION_SCENARIOS"]
+    by_name = {scenario.name: scenario for scenario in scenarios}
+
+    assert set(by_name) == {
+        "qwen35_9b_base_fuse_false",
+        "qwen35_9b_base_fuse_true",
+        "qwen35_9b_existing_hf_fuse_false",
+        "qwen35_9b_existing_hf_fuse_true",
+        "qwen35_9b_mtp_existing_hf",
+        "qwen35_9b_dflash_existing_hf",
+        "qwen36_35b_a3b_base_fuse_false",
+        "qwen36_35b_a3b_base_fuse_true",
+        "qwen36_35b_a3b_existing_hf_fuse_false",
+        "qwen36_35b_a3b_existing_hf_fuse_true",
+        "qwen36_35b_a3b_mtp_existing_hf",
+        "qwen36_35b_a3b_dflash_existing_hf",
+    }
+    assert by_name["qwen35_9b_base_fuse_false"].config_overrides == {
+        "quant": None,
+        "export.model.fuse_gdr_ops": False,
+    }
+    assert by_name["qwen35_9b_base_fuse_true"].config_overrides == {
+        "quant": None,
+        "export.model.fuse_gdr_ops": True,
+    }
+    assert by_name["qwen35_9b_existing_hf_fuse_false"].config_overrides["quant"][
+        "existing_hf_model_dir"
+    ] == "weights/Qwen3.5-9B-mode1-llm-only"
+    assert by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides["quant"][
+        "existing_hf_model_dir"
+    ] == "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400"
+    assert by_name["qwen36_35b_a3b_existing_hf_fuse_true"].config_overrides[
+        "export.model.fuse_gdr_ops"
+    ] is True
+    assert by_name["qwen35_9b_mtp_existing_hf"].config_path.endswith("qwen3_5_9b_full_mtp.yaml")
+    assert by_name["qwen35_9b_mtp_existing_hf"].config_overrides == {
+        "quant": {
+            "algorithm": "existing_hf",
+            "artifact_format": "gptqmodel_hf",
+            "source_algorithm": "autoround",
+            "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
+        },
+        "export.model.fuse_gdr_ops": False,
+    }
+    assert by_name["qwen35_9b_dflash_existing_hf"].config_path.endswith("qwen3_5_9b_full_dflash.yaml")
+    assert by_name["qwen36_35b_a3b_mtp_existing_hf"].config_path.endswith(
+        "qwen3_6_35b_a3b_full_mtp.yaml"
+    )
+    assert by_name["qwen36_35b_a3b_dflash_existing_hf"].config_path.endswith(
+        "qwen3_6_35b_a3b_full_dflash.yaml"
+    )
 
 
-def test_spec_decode_configs_are_file_based():
-    mtp_9b = CONFIG_9B_MTP.read_text()
-    dflash_9b = CONFIG_9B_DFLASH.read_text()
-    mtp_moe = CONFIG_MOE_MTP.read_text()
-    dflash_moe = CONFIG_MOE_DFLASH.read_text()
+def test_validation_matrix_preflight_checks_paths_without_importing_runtime_modules():
+    namespace = _load_validation_matrix_script()
+    ValidationScenario = namespace["ValidationScenario"]
+    preflight_scenarios = namespace["preflight_scenarios"]
+    scenario = ValidationScenario(
+        name="missing_paths",
+        hf_model_dir="missing/base",
+        config_path=str(WORKFLOW_9B_FULL),
+        quant_overrides={
+            "quant": {
+                "algorithm": "existing_hf",
+                "artifact_format": "gptqmodel_hf",
+                "source_algorithm": "autoround",
+                "existing_hf_model_dir": "missing/quant",
+            }
+        },
+        fuse_gdr_ops=False,
+    )
 
-    assert 'spec_decode_mode="mtp"' in mtp_9b
-    assert 'hf_model_dir = "weights/Qwen3.5-9B"' in mtp_9b
-    assert 'dflash_model_dir = "weights/Qwen3.5-9B-DFlash"' in dflash_9b
-    assert "output_hidden_state_indices=[1, 8, 15, 22, 29]" in dflash_9b
+    issues = preflight_scenarios([scenario], check_modules=False)
 
-    assert 'spec_decode_mode="mtp"' in mtp_moe
-    assert 'hf_model_dir = "weights/Qwen3.6-35B-A3B"' in mtp_moe
-    assert 'dflash_model_dir = "weights/Qwen3.6-35B-A3B-DFlash"' in dflash_moe
-    assert "output_hidden_state_indices=[1, 10, 19, 28, 37]" in dflash_moe
+    assert "missing_paths: hf_model_dir does not exist: missing/base" in issues
+    assert "missing_paths: quant.existing_hf_model_dir does not exist: missing/quant" in issues
+
+
+def test_validation_matrix_parser_supports_preflight_only():
+    namespace = _load_validation_matrix_script()
+    parser = namespace["build_parser"]()
+    args = parser.parse_args(["--preflight-only", "--scenario", "qwen35_9b_base_fuse_false"])
+
+    assert args.preflight_only is True
+    assert args.scenario == ["qwen35_9b_base_fuse_false"]
+
+
+def test_validation_matrix_version_tuple_handles_suffixes():
+    namespace = _load_validation_matrix_script()
+
+    assert namespace["_version_tuple"]("5.5.0") == (5, 5, 0)
+    assert namespace["_version_tuple"]("2.8.0+cu128") == (2, 8, 0)
+
+
+def test_workflow_yamls_keep_default_quant_generic():
+    for path in (WORKFLOW_9B_FULL, WORKFLOW_MOE_FULL):
+        cfg = _load_yaml(path)
+        assert cfg["quant"] == {
+            "algorithm": "autoround",
+            "output_format": "gptqmodel_hf",
+            "artifact_format": "gptqmodel_hf",
+            "bits": 4,
+            "group_size": 64,
+            "calibration": {
+                "dataset": "wikitext",
+                "split": "train",
+                "nsamples": 128,
+                "seqlen": 2048,
+            },
+            "runtime": {
+                "batch_size": 1,
+                "trust_remote_code": True,
+            },
+        }
+        assert cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+
+
+def test_spec_decode_workflow_yamls_are_file_based():
+    mtp_9b = _load_yaml(WORKFLOW_9B_MTP)["export"]["model"]
+    dflash_9b = _load_yaml(WORKFLOW_9B_DFLASH)["export"]["model"]
+    mtp_moe = _load_yaml(WORKFLOW_MOE_MTP)["export"]["model"]
+    dflash_moe = _load_yaml(WORKFLOW_MOE_DFLASH)["export"]["model"]
+
+    assert mtp_9b["spec_decode_mode"] == "mtp"
+    assert mtp_9b["hf_model"] == "weights/Qwen3.5-9B"
+    assert dflash_9b["dflash_config"]["hf_model"] == "weights/Qwen3.5-9B-DFlash"
+    assert dflash_9b["output_hidden_state_indices"] == [1, 8, 15, 22, 29]
+
+    assert mtp_moe["spec_decode_mode"] == "mtp"
+    assert mtp_moe["hf_model"] == "weights/Qwen3.6-35B-A3B"
+    assert dflash_moe["dflash_config"]["hf_model"] == "weights/Qwen3.6-35B-A3B-DFlash"
+    assert dflash_moe["output_hidden_state_indices"] == [1, 10, 19, 28, 37]
 
 
 def test_force_delete_refuses_project_root(monkeypatch):

@@ -319,6 +319,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     CONFIG_CLS = XHQwen3_5ModelConfig
     BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_qwen3_5_hf_compatible_model)
     transformers_min_version = "5.5.0"
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.qwen3_5.workflow:Qwen35Workflow"
 
     def __init__(self, config: XHQwen3_5ModelConfig):
         super().__init__(config)

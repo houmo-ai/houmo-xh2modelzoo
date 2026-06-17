@@ -21,11 +21,18 @@ from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
     build_spec_draft_quant_scheme,
 )
 from xhmodel_merak.xh_llm.types import CacheList, KVCacheWithLinearConfig
+from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 from xhquant.api import Config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MERAK_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+DFLASH_WORKFLOW_CONFIGS = [
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml",
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_dflash.yaml",
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml",
+]
 
 
 def _load_merak_export_script():
@@ -59,6 +66,26 @@ def test_qwen3_5_config_preserves_mtp_head_k_controls():
     assert cfg.mtp_head_k == 81920
     assert cfg.reranked_repo_dir == "weights/qwen-reranked-K81920"
     assert cfg.force_rerank is True
+
+
+@pytest.mark.parametrize("config_path", DFLASH_WORKFLOW_CONFIGS, ids=lambda p: p.stem)
+def test_qwen3_5_dflash_workflow_resolves_target_model_dir_from_export_hf_model(config_path, tmp_path):
+    workflow_config = WorkflowConfig.from_file(str(config_path))
+    raw_dflash_cfg = workflow_config.export["model"]["dflash_config"]
+
+    assert raw_dflash_cfg["target_model_dir"] is None
+
+    override_hf_model = tmp_path / "override_qwen3_5_hf"
+    override_hf_model.mkdir()
+    export_cfg = workflow_config.build_export_dict(str(override_hf_model))
+
+    assert export_cfg["model"]["hf_model"] == str(override_hf_model)
+    assert export_cfg["model"]["dflash_config"]["target_model_dir"] is None
+
+    cfg = AutoLLMConfig.from_pretrained(Config(export_cfg).model)
+
+    assert cfg.hf_model == str(override_hf_model)
+    assert cfg.dflash_config.target_model_dir == str(override_hf_model)
 
 
 @pytest.mark.parametrize("mode", ["mtp", "dflash"])
@@ -855,37 +882,40 @@ def test_qwen3_5_moe_wraped_post_reenforces_split_conv_cache_wrap_cfg():
     assert "_enforce_split_conv_cache_wrap_cfg(language_model, self.wrap_cfg)" in source
 
 
-def test_qwen3_5_moe_122b_gptq_config_loads_expected_fields():
+def test_qwen3_5_moe_workflow_full_config_loads_expected_fields():
     config_path = (
         REPO_ROOT
-        / "configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b"
-        / "qwen3_5_moe_122b_a10b_instruct_hf_gptq_xh2a_w4a8_2k.py"
+        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
+        / "qwen3_6_35b_a3b_full.yaml"
     )
 
     cfg = Config.fromfile(str(config_path))
 
-    assert cfg.model.model_name == "xh2_Qwen3.5-122B-A10B-GPTQ_w4a8_256_2k"
-    assert cfg.model.hf_model.endswith("Qwen3.5-122B-A10B-gptq-attn8-expert4-expertDown5-shared8-base4-64g_060920")
-    assert cfg.model.chip_arch == "XH2a"
-    assert cfg.model.quant_scheme.quant_type == "w4a8h0_ssfp"
-    assert cfg.model.quant_scheme.nodes.lm_head.quant_type == "w8a8h1_sefp"
+    assert cfg.export.model.model_name == "xh2_Qwen3.6-35B-A3B_full_256_2k"
+    assert cfg.export.model.hf_model.endswith("Qwen3.6-35B-A3B")
+    assert cfg.export.model.chip_arch == "XH2a"
+    assert cfg.quant.algorithm == "autoround"
+    assert cfg.quant.artifact_format == "gptqmodel_hf"
+    assert cfg.quant.group_size == 64
+    assert cfg.export.model.quant_scheme.quant_type == "w8a8h1_sefp"
+    assert cfg.export.model.quant_scheme.nodes.lm_head.quant_type == "w8a8h1_sefp"
 
 
-def test_qwen3_5_moe_122b_spec_mtp_gptq_config_loads_expected_fields(monkeypatch):
+def test_qwen3_5_moe_workflow_mtp_config_loads_expected_fields(monkeypatch):
     config_path = (
         REPO_ROOT
-        / "configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b"
-        / "qwen3_5_moe_122b_a10b_instruct_spec_mtp_hf_gptq_xh2a_2k.py"
+        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
+        / "qwen3_6_35b_a3b_full_mtp.yaml"
     )
 
     cfg = Config.fromfile(str(config_path))
     monkeypatch.setattr(Path, "exists", lambda self: True)
-    model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
+    model_cfg = AutoLLMConfig.from_pretrained(cfg.export.model)
 
-    assert model_cfg.model_name == "xh2_Qwen3.5-122B-A10B_spec_mtp_w4a8_256_2k"
+    assert model_cfg.model_name == "xh2_Qwen3.6-35B-A3B_full_mtp_256_2k"
     assert model_cfg.chip_arch == "XH2a"
     assert model_cfg.spec_decode_mode == "mtp"
-    assert model_cfg.quant_scheme.quant_type == "w4a8h0_ssfp"
+    assert model_cfg.quant_scheme.quant_type == "w8a8h1_sefp"
     assert model_cfg.mtp_config.hidden_size == 2048
     assert model_cfg.mtp_config.input_sequence_length == 1
     assert model_cfg.mtp_config.use_cache is True

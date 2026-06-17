@@ -112,7 +112,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs_merak/xh2a/llm_models/qwen3_5/4b/qwen3_5_4b_instruct_xh2a_2k.py",
+        required=True,
+        help="Qwen3.5 model config path. Legacy xh2a Python config defaults were removed; pass an explicit compatible config or use Qwen35Workflow.",
     )
     parser.add_argument(
         "--eval-type",

@@ -1,0 +1,26 @@
+quant:
+  algorithm: autoround
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  calibration:
+    dataset: wikitext
+    split: train
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 1
+    trust_remote_code: true
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Qwen3_5MoeForConditionalGeneration_visual
+    hf_model: weights/Qwen3.6-35B-A3B
+    model_name: xh2_Qwen3.6-35B-A3B_visual_only_896
+    max_size_w: 896
+    max_size_h: 896
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    fuse_gdr_ops: false

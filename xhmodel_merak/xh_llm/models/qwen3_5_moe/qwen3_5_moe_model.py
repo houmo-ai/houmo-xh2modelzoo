@@ -238,6 +238,7 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
     HMONNXINFERENCE_CLS = XHQwen3_5MoeHMONNXModel
     CONFIG_CLS = XHQwen3_5MoeModelConfig
     BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_qwen3_5_moe_hf_compatible_model)
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.qwen3_5.workflow:Qwen35Workflow"
 
     def __init__(self, config: XHQwen3_5MoeModelConfig):
         super().__init__(config)

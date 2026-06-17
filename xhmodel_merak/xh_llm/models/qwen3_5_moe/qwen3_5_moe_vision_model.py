@@ -76,6 +76,7 @@ class XHQwen3_5MoeVisionModel(XHQwen3_5VisionModel):  # noqa: N801
 
     META_CLS = VisualModelMeta
     CONFIG_CLS = XHQwen3_5Moe_VisualConfig
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.qwen3_5.workflow:Qwen35Workflow"
 
     def __init__(self, config: XHQwen3_5Moe_VisualConfig):
         super().__init__(config)

@@ -140,7 +140,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_visual_xh2a_2k.py",
+        required=True,
+        help="Qwen3.5 visual model config path. Legacy xh2a Python config defaults were removed; pass an explicit compatible config or use Qwen35Workflow.",
     )
     parser.add_argument("--model", type=str)
     parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)

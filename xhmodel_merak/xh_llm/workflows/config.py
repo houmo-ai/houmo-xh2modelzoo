@@ -71,7 +71,7 @@ class WorkflowConfig:
         data = copy.deepcopy(self.data)
         for path, value in overrides.items():
             self._set_existing_path(data, path, value)
-        
+
         p = Path(self.source)
         override_source = str(p.with_stem(p.stem + "_override"))
         self._validate_workflow_data(data, override_source)
@@ -82,6 +82,13 @@ class WorkflowConfig:
         for path, value in overrides.items():
             if not isinstance(path, str) or not path:
                 raise ValueError(f"Override path must be a non-empty string, got: {path!r}")
+            # Top-level workflow sections may be replaced as a whole, e.g.
+            # {"quant": None} for base export or {"quant": {...}} for an
+            # externally quantized HF model.  Dotted paths keep strict
+            # existing-key validation so typos such as export.model.foo are
+            # still rejected.
+            if "." not in path and path in {"quant", "export"}:
+                continue
             existing_value = self._get_existing_path(self.data, path)
             self._validate_override_value(existing_value, value, path)
 
