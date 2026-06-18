@@ -17,8 +17,9 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-
+import copy
 import json
+import re
 import shutil
 from datetime import datetime
 from functools import cached_property
@@ -639,6 +640,33 @@ class BaseLLMModel(XHBaseModel):
         export_data.str_datetime = str_datetime
         return export_data
 
+    @staticmethod
+    def xh1_hmonnx_compatible(input_names: list[str]):
+        input_names = copy.deepcopy(input_names)
+        input_names_mapping = {
+            "inputs_embeds": "input_1",
+            "past_seq_length": "valid_length",
+            "current_input_length": "current_length",
+        }
+        for idx in range(len(input_names)):
+            in_name = input_names[idx]
+            if in_name in input_names_mapping:
+                input_names[idx] = input_names_mapping[in_name]
+            else:
+                # 匹配past_key_cache_后面跟数字的字符串
+                kcache_pattern = r"^past_key_cache_\d+$"  # \d+表示匹配一个或多个数字
+                kcache_match = re.match(kcache_pattern, in_name)
+                if kcache_match:
+                    kcache_idx = kcache_match.group(0).split("_")[-1]
+                    input_names[idx] = "model_layers_{}_self_attn_kcache_input".format(kcache_idx)
+                else:
+                    vcache_pattern = r"^past_value_cache_\d+$"  # \d+表示匹配一个或多个数字
+                    vcache_match = re.match(vcache_pattern, in_name)
+                    if vcache_match:
+                        vcache_idx = vcache_match.group(0).split("_")[-1]
+                        input_names[idx] = "model_layers_{}_self_attn_vcache_input".format(vcache_idx)
+        return input_names
+
     @log_function_call()
     def _export_hmonnx(self, exported_info: ExportData):
         meta_info = exported_info.meta
@@ -682,7 +710,9 @@ class BaseLLMModel(XHBaseModel):
             prefill_dir.mkdir(parents=True, exist_ok=True)
             # 导出的文件格式必须是 hmquant_{model_name}_{prefill/decode}_with_act.onnx
             prefill_hmonnx_file = str(prefill_dir / f"{export_model_name}_prefill.onnx")
-            export_cfg = self.get_export_cfg()
+            export_cfg = copy.deepcopy(self.get_export_cfg())
+            if "input_names" in export_cfg or hasattr(export_cfg, "input_names"):
+                export_cfg["input_names"] = self.xh1_hmonnx_compatible(export_cfg["input_names"])
             prefill_hmonnx_file = to_export_hmonnx_v2(
                 prefill_exported_model, inputs, str(prefill_hmonnx_file), export_cfg, normalize_onnx_name=True
             )
@@ -692,9 +722,9 @@ class BaseLLMModel(XHBaseModel):
             logger.info(f"Exporting Decode for {model_name} model .........")
             self.set_decode()
             data_processor = self.get_data_preprocessor()
-            for k, v in getattr(self, '_decode_wrap_cfg_overrides', {}).items():
+            for k, v in getattr(self, "_decode_wrap_cfg_overrides", {}).items():
                 self.wrap_cfg[k] = v
-            self.set_input_sequence_length(getattr(self, '_decode_input_sequence_length', 1))
+            self.set_input_sequence_length(getattr(self, "_decode_input_sequence_length", 1))
             dummy_input = self.get_dummy_inputs()
             inputs = data_processor(dummy_input)
             inputs = unfold_args(inputs)
@@ -704,7 +734,9 @@ class BaseLLMModel(XHBaseModel):
             decode_dir = output_dir_path / "decode"
             decode_dir.mkdir(parents=True, exist_ok=True)
             decode_hmonnx_file = str(decode_dir / f"{export_model_name}_decode.onnx")
-            export_cfg = self.get_export_cfg()
+            export_cfg = copy.deepcopy(self.get_export_cfg())
+            if "input_names" in export_cfg or hasattr(export_cfg, "input_names"):
+                export_cfg["input_names"] = self.xh1_hmonnx_compatible(export_cfg["input_names"])
             decode_hmonnx_file = to_export_hmonnx_v2(
                 decode_exported_model, inputs, str(decode_hmonnx_file), export_cfg, normalize_onnx_name=True
             )
