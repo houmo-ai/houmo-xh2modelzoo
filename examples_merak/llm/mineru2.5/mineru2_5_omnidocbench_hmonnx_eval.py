@@ -103,9 +103,16 @@ def build_hmonnx_client(args):
             buckets=visual_router.buckets,
             fallback_bucket=visual_router.fallback_bucket,
             patch_size=visual_router.patch_size,
-            spatial_merge_size=int(manifest["spatial_merge_size"]),
-            logger=logger,
             max_upscale=args.static_vit_max_upscale,
+            score_mode=args.static_vit_score_mode,
+            alpha_down=args.static_vit_alpha_down,
+            beta_up=args.static_vit_beta_up,
+            gamma_pad=args.static_vit_gamma_pad,
+            ref_area=args.static_vit_ref_area,
+            allow_content_fallback_bucket=args.allow_content_fallback_bucket,
+            logger=logger,
+            add_hm_pixel_values=True,
+            log_prefix="MinerU static visual bucket",
         ),
         image_analysis=args.image_analysis,
         sampling_params=hmonnx_generate._build_sampling_params(max_new_tokens),
@@ -255,7 +262,23 @@ def parse_args():
     parser.add_argument("--include-ignored", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=4096)
     parser.add_argument("--layout-image-size", type=int, default=1036)
-    parser.add_argument("--static-vit-max-upscale", type=float, default=2.0)
+    parser.add_argument("--static-vit-max-upscale", type=float, default=2.5)
+    parser.add_argument(
+        "--static-vit-score-mode",
+        type=str,
+        default="fit_padding",
+        choices=["fit_padding", "ratio"],
+        help="Static visual bucket routing score. ratio is disabled because tests showed poor stability; use fit_padding.",
+    )
+    parser.add_argument("--static-vit-alpha-down", type=float, default=10.0)
+    parser.add_argument("--static-vit-beta-up", type=float, default=1.0)
+    parser.add_argument("--static-vit-gamma-pad", type=float, default=3.0)
+    parser.add_argument("--static-vit-ref-area", type=float, default=448 * 448)
+    parser.add_argument(
+        "--allow-content-fallback-bucket",
+        action="store_true",
+        help="Allow non-layout content crops to route to the square fallback bucket.",
+    )
     parser.add_argument("--image-analysis", action="store_true")
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--golden", action="store_true")

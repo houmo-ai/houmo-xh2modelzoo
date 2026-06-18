@@ -13,7 +13,6 @@ regression. They are not the official OmniDocBench metrics.
 import argparse
 import copy
 import gc
-import importlib.util
 import json
 import math
 import re
@@ -25,9 +24,16 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image
-from qwen_vl_utils.vision_process import SPATIAL_MERGE_SIZE, smart_resize
 from tqdm import tqdm
-from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+
+from static_vit_utils import (
+    DEFAULT_VISUAL_BUCKETS_CONFIG,
+    StaticBucketProcessorAdapter,
+    describe_static_vit,
+    load_python_config,
+    parse_bucket,
+    validate_static_buckets,
+)
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -55,12 +61,6 @@ DEFAULT_CONTENT_CATEGORIES = [
 ]
 
 PAGE_ATTR_KEYS = ["data_source", "language", "layout"]
-
-DEFAULT_VISUAL_BUCKETS_CONFIG = (
-    "configs_merak/xh2a/llm_models/mineru2.5/1_2b/"
-    "mineru2_5_visual_buckets_1_2b_xh2a.py"
-)
-
 
 def load_omnidocbench(annotation_path: Path) -> list[dict]:
     with open(annotation_path, "r", encoding="utf-8") as f:
@@ -269,167 +269,35 @@ def load_native_model(args):
     return model, processor
 
 
-class StaticBucketProcessorAdapter:
-    """Simulate static visual buckets while keeping the native HF model."""
-
-    def __init__(
-        self,
-        processor,
-        buckets: list[tuple[int, int]],
-        fallback_bucket: tuple[int, int],
-        patch_size: int,
-        max_upscale: float = 2.0,
-    ) -> None:
-        self.processor = processor
-        self.buckets = sorted(set(buckets), key=lambda item: (item[0] * item[1], item[0], item[1]))
-        self.fallback_bucket = fallback_bucket
-        self.patch_size = patch_size
-        self.patch_factor = patch_size * SPATIAL_MERGE_SIZE
-        self.max_upscale = max_upscale
-        self.bucket_counts: Counter[tuple[int, int]] = Counter()
-        self.fallback_count = 0
-
-    def __getattr__(self, name):
-        return getattr(self.processor, name)
-
-    def apply_chat_template(self, conversation, chat_template=None, **kwargs):
-        return Qwen2VLProcessor.apply_chat_template(
-            self.processor,
-            conversation,
-            chat_template=chat_template,
-            **kwargs,
-        )
-
-    def __call__(self, *args, **kwargs):
-        expected_buckets = None
-        images = kwargs.get("images")
-        if images is not None:
-            kwargs["images"], expected_buckets = self._bucket_images(images)
-        model_inputs = self.processor(*args, **kwargs)
-        if expected_buckets:
-            self._validate_image_grid(model_inputs, expected_buckets)
-        return model_inputs
-
-    def _bucket_images(self, images):
-        single_image = isinstance(images, Image.Image)
-        image_list = [images] if single_image else list(images)
-        bucketed_images = []
-        expected_buckets = []
-        for image in image_list:
-            if not isinstance(image, Image.Image):
-                bucketed_images.append(image)
-                continue
-            bucketed_image, bucket, native_size, render_size, score = self._bucket_image(image)
-            bucketed_images.append(bucketed_image)
-            expected_buckets.append(bucket)
-            self.bucket_counts[bucket] += 1
-            if bucket == self.fallback_bucket:
-                self.fallback_count += 1
-            print(
-                f"[static-vit] native={native_size}, bucket={bucket}, render={render_size}, "
-                f"score={score:.4f}",
-                flush=True,
-            )
-        return (bucketed_images[0] if single_image else bucketed_images), expected_buckets
-
-    def _bucket_image(
-        self,
-        image: Image.Image,
-    ) -> tuple[Image.Image, tuple[int, int], tuple[int, int], tuple[int, int], float]:
-        image = image.convert("RGB")
-        native_h, native_w = smart_resize(image.height, image.width, factor=self.patch_factor)
-        bucket, score = self._select_bucket(native_h, native_w)
-        native_resized = image.resize((native_w, native_h), Image.Resampling.BICUBIC)
-        bucketed, render_size = self._letterbox(native_resized, bucket)
-        return bucketed, bucket, (native_h, native_w), render_size, score
-
-    def _select_bucket(self, native_h: int, native_w: int) -> tuple[tuple[int, int], float]:
-        scored = [(self._bucket_score(native_h, native_w, bucket), bucket) for bucket in self.buckets]
-        score, bucket = min(scored, key=lambda item: (item[0], item[1][0] * item[1][1], item[1]))
-        return bucket, score
-
-    def _bucket_score(self, native_h: int, native_w: int, bucket: tuple[int, int]) -> float:
-        bucket_h, bucket_w = bucket
-        native_ratio = native_w / native_h
-        bucket_ratio = bucket_w / bucket_h
-        aspect_cost = abs(math.log(native_ratio / bucket_ratio))
-        scale = min(bucket_h / native_h, bucket_w / native_w)
-        effective_scale = min(scale, self.max_upscale)
-        render_h = max(1, min(bucket_h, round(native_h * effective_scale)))
-        render_w = max(1, min(bucket_w, round(native_w * effective_scale)))
-        padding_cost = 1.0 - (render_h * render_w) / (bucket_h * bucket_w)
-        downscale_cost = max(0.0, -math.log(scale))
-        return 2.0 * aspect_cost + 0.8 * downscale_cost + 0.2 * padding_cost
-
-    def _letterbox(self, image: Image.Image, bucket: tuple[int, int]) -> tuple[Image.Image, tuple[int, int]]:
-        bucket_h, bucket_w = bucket
-        scale = min(bucket_h / image.height, bucket_w / image.width)
-        scale = min(scale, self.max_upscale)
-        render_w = max(1, min(bucket_w, round(image.width * scale)))
-        render_h = max(1, min(bucket_h, round(image.height * scale)))
-        if (render_w, render_h) != image.size:
-            image = image.resize((render_w, render_h), Image.Resampling.BICUBIC)
-        canvas = Image.new("RGB", (bucket_w, bucket_h), (255, 255, 255))
-        canvas.paste(image, ((bucket_w - image.width) // 2, (bucket_h - image.height) // 2))
-        return canvas, (render_h, render_w)
-
-    def _validate_image_grid(self, model_inputs, expected_buckets: list[tuple[int, int]]) -> None:
-        image_grid_thw = model_inputs.get("image_grid_thw")
-        if image_grid_thw is None:
-            raise RuntimeError("Expected image_grid_thw after static bucket preprocessing.")
-        if image_grid_thw.shape[0] != len(expected_buckets):
-            raise RuntimeError(
-                f"image_grid_thw count {image_grid_thw.shape[0]} does not match bucket count {len(expected_buckets)}."
-            )
-        for idx, bucket in enumerate(expected_buckets):
-            expected_h = bucket[0] // self.patch_size
-            expected_w = bucket[1] // self.patch_size
-            actual_h = int(image_grid_thw[idx, 1].item())
-            actual_w = int(image_grid_thw[idx, 2].item())
-            if (actual_h, actual_w) != (expected_h, expected_w):
-                raise RuntimeError(
-                    f"Static bucket grid mismatch: bucket={bucket}, "
-                    f"expected grid={(expected_h, expected_w)}, actual grid={(actual_h, actual_w)}"
-                )
-
-
-def _load_python_config(path: Path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load config from {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _parse_bucket(bucket) -> tuple[int, int]:
-    if isinstance(bucket, dict):
-        return int(bucket["max_size_h"]), int(bucket["max_size_w"])
-    return int(bucket[0]), int(bucket[1])
-
-
 def build_static_bucket_processor(args, processor, model) -> StaticBucketProcessorAdapter:
-    cfg = _load_python_config(Path(args.static_visual_buckets_config))
+    cfg = load_python_config(Path(args.static_visual_buckets_config))
     if args.static_vit_max_upscale <= 0:
         raise ValueError("--static-vit-max-upscale must be positive.")
+    if args.static_vit_ref_area <= 0:
+        raise ValueError("--static-vit-ref-area must be positive.")
     fallback_bucket = (int(args.layout_image_size), int(args.layout_image_size))
-    buckets = [_parse_bucket(bucket) for bucket in getattr(cfg, "visual_buckets")]
+    buckets = [parse_bucket(bucket) for bucket in getattr(cfg, "visual_buckets")]
     if fallback_bucket not in buckets:
         buckets.append(fallback_bucket)
     patch_size = int(getattr(getattr(model.config, "vision_config", None), "patch_size", 14))
-    factor = patch_size * SPATIAL_MERGE_SIZE
-    for bucket in buckets:
-        if bucket[0] % factor != 0 or bucket[1] % factor != 0:
-            raise ValueError(f"Static visual bucket {bucket} must be divisible by {factor}")
+    validate_static_buckets(buckets, patch_size)
     print(f"Static ViT simulation buckets: {sorted(set(buckets), key=lambda x: (x[0] * x[1], x[0], x[1]))}")
     print(f"Static ViT simulation fallback bucket: {fallback_bucket}")
-    return StaticBucketProcessorAdapter(
+    adapter = StaticBucketProcessorAdapter(
         processor,
         buckets,
         fallback_bucket,
         patch_size,
         max_upscale=args.static_vit_max_upscale,
+        score_mode=args.static_vit_score_mode,
+        alpha_down=args.static_vit_alpha_down,
+        beta_up=args.static_vit_beta_up,
+        gamma_pad=args.static_vit_gamma_pad,
+        ref_area=args.static_vit_ref_area,
+        allow_content_fallback_bucket=args.allow_content_fallback_bucket,
     )
+    print(describe_static_vit(adapter))
+    return adapter
 
 
 def compute_scores(results: list[dict]) -> dict:
@@ -543,8 +411,44 @@ def parse_args():
     parser.add_argument(
         "--static-vit-max-upscale",
         type=float,
-        default=2.0,
+        default=2.5,
         help="Maximum content upscale ratio before centering on a static visual bucket.",
+    )
+    parser.add_argument(
+        "--static-vit-score-mode",
+        type=str,
+        default="fit_padding",
+        choices=["fit_padding", "ratio"],
+        help="Static visual bucket routing score. ratio is disabled because tests showed poor stability; use fit_padding.",
+    )
+    parser.add_argument(
+        "--static-vit-alpha-down",
+        type=float,
+        default=10.0,
+        help="Downscale penalty weight for --static-vit-score-mode fit_padding.",
+    )
+    parser.add_argument(
+        "--static-vit-beta-up",
+        type=float,
+        default=1.0,
+        help="Upscale penalty weight for --static-vit-score-mode fit_padding.",
+    )
+    parser.add_argument(
+        "--static-vit-gamma-pad",
+        type=float,
+        default=3.0,
+        help="Padding penalty weight for --static-vit-score-mode fit_padding.",
+    )
+    parser.add_argument(
+        "--static-vit-ref-area",
+        type=float,
+        default=448 * 448,
+        help="Reference area used to normalize padding pixels for --static-vit-score-mode fit_padding.",
+    )
+    parser.add_argument(
+        "--allow-content-fallback-bucket",
+        action="store_true",
+        help="Allow non-layout content crops to route to the square fallback bucket.",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--save-every", type=int, default=1)

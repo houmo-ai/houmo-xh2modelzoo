@@ -1,8 +1,16 @@
-# MinerU2.5 XH/HMONNX 示例说明
+# MinerU2.5 XH/HMONNX 使用说明
 
-本目录包含 MinerU2.5-Pro 在 XH/HMONNX 路径上的调试、导出、推理和评估脚本。
+本目录提供 MinerU2.5-Pro 的原始 HF 推理、XH/HMONNX 导出、HMONNX 推理，以及 OmniDocBench 回归评估脚本。
 
-默认使用的原始 HF 模型路径：
+推荐优先使用新的 workflow 接口：
+
+```bash
+python examples_merak/llm/mineru2.5/mineru2_5_workflow.py
+```
+
+该入口封装了量化和 HMONNX 导出流程，适合作为后续部署流程的主入口。其它脚本主要用于单步调试、对齐验证和评估。
+
+默认原始 HF 模型路径：
 
 ```bash
 /data02/datasets/MinerU2.5-Pro-2604-1.2B
@@ -12,113 +20,181 @@
 
 ```bash
 cd /data01/home/chuyuan.wei/code/xh2modelzoo
-python ...
+conda run -n xh2modelzoo python ...
 ```
 
-## 脚本说明
+## 脚本总览
 
-| 文件 | 作用 |
-| --- | --- |
-| `debug_scripts/mineru2_5_native_generate.py` | 最小原始 HF 冒烟测试，直接用 `MinerUClient.two_step_extract` 识别 `houmo_logo.jpg`。 |
-| `debug_scripts/mineru2_5_xh_generate.py` | 构建 XH PyTorch 模型和多个静态 `XHQwen2VLVisualModel`，通过静态 ViT bucket 路由接入 `MinerUClient`。 |
-| `mineru2_5_xh_export_hmonnx.py` | 导出共享 LLM HMONNX、默认 visual HMONNX，以及多个静态 visual bucket HMONNX，并写出 `mineru_visual_buckets.json`。 |
-| `mineru2_5_xh_hmonnx_generate.py` | 使用导出的 HMONNX 模型对单张图片进行 MinerU 推理，运行时根据 `mineru_visual_buckets.json` 切换静态 ViT。 |
-| `mineru2_5_omnidocbench_hf_eval.py` | 评估原始 HF MinerU2.5-Pro 在 OmniDocBench 上的抽样结果，也支持 static ViT 模拟模式。 |
-| `mineru2_5_omnidocbench_hmonnx_eval.py` | 评估 HMONNX 模型在同一组 OmniDocBench 样本上的结果，核心推理逻辑复用 `mineru2_5_xh_hmonnx_generate.py`。 |
+| 文件 | 作用 | 典型用法 |
+| --- | --- | --- |
+| `mineru2_5_workflow.py` | 推荐入口；调用 `XHMinerU25HMONNXWorkflow` 完成量化和 HMONNX 导出。 | 端到端生成可部署 HMONNX 产物。 |
+| `mineru2_5_xh_export_hmonnx.py` | 手动导出共享 LLM HMONNX、默认 visual HMONNX、额外静态 ViT bucket，并生成 `mineru_visual_buckets.json`。 | 需要细粒度控制导出参数时使用。 |
+| `mineru2_5_xh_hmonnx_generate.py` | 使用 HMONNX 模型对单张图片执行 MinerU 两阶段识别。 | HMONNX 单图冒烟测试。 |
+| `mineru2_5_omnidocbench_hf_eval.py` | 原始 HF 模型的 OmniDocBench 抽样评估；也支持 HF + static ViT 模拟。 | 建立 HF dynamic/static 精度基线。 |
+| `mineru2_5_omnidocbench_hmonnx_eval.py` | HMONNX 模型的 OmniDocBench 抽样评估，推理逻辑复用 `mineru2_5_xh_hmonnx_generate.py`。 | 验证 HMONNX 与 HF/static baseline 的一致性。 |
+| `mineru2_5_hf_static_vit_generate.py` | 原始 HF 模型单图推理，但在 processor 前模拟静态 ViT bucket。 | 快速验证静态 ViT 路由和预处理。 |
+| `static_vit_utils.py` | 公共静态 ViT bucket 路由和图片预处理逻辑。 | 被 HF/XH/HMONNX 脚本复用，不建议单独运行。 |
+| `debug_scripts/mineru2_5_native_generate.py` | 最小原始 HF 单图冒烟测试，不启用静态 ViT。 | 检查原生 MinerUClient 是否可用。 |
+| `debug_scripts/mineru2_5_xh_generate.py` | XH PyTorch 模型 + 多静态 `XHQwen2VLVisualModel` 的单图调试入口。 | HMONNX 导出前验证 XH PyTorch 路径。 |
 
 相关配置：
 
 ```bash
 configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py
 configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py
+configs_merak/workflows/xh2a/llm_models/mineru2_5/mineru2_5_pro_xh2a_4k.yaml
 ```
 
-## 静态 ViT Bucket 设计
+## 静态 ViT 策略
 
-MinerU 的 layout 阶段会把整页 resize 到固定大小，默认是 `1036x1036`。
+MinerU2.5 的识别流程分两阶段：
 
-但 content 阶段不是从这张 `1036x1036` 图上裁剪，而是把 layout 输出的归一化 bbox 映射回原始页面图片，再从原图裁剪 block。因此 content crop 的宽度可能明显超过 1036。例如 PPT 页面中常见：
+1. layout 阶段：整页图像固定输入，当前使用 `1036x1036`。
+2. content 阶段：根据 layout bbox 回到原图裁剪 block，crop 尺寸会随文本块、表格、公式、标题变化。
+
+为了满足 NPU 静态图部署，content 阶段不再使用任意动态 ViT 尺寸，而是在有限个静态 bucket 中路由。
+
+当前推荐组合：
 
 ```text
-112x1736
-168x1624
-252x1680
-364x2044
+layout bucket: 1036x1036
+content buckets: 140x392, 168x1792, 392x2044, 560x560, 1036x392
+routing: fit_padding
+content fallback to 1036x1036: disabled by default
+batch size: 1
 ```
 
-为了满足 NPU 静态图部署，当前方案使用有限个静态 visual bucket。默认 `1036x1036` visual 来自完整 VLM 导出，额外 bucket 定义在：
+`ratio` 策略已经禁用。传入 `--static-vit-score-mode ratio` 会直接报错，因为 100 条回归显示该策略在缩减 bucket 后精度不稳定。
 
-```bash
-configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py
-```
+### fit_padding 路由
 
-当前额外 bucket：
-
-```python
-140x392, 196x560, 280x784, 392x1036,
-112x1792, 168x1792, 252x1792, 392x2044,
-560x560, 1036x392
-```
-
-所有尺寸都是 28 的倍数，以满足 Qwen2-VL patch/merge 对齐。
-
-### 路由和预处理策略
-
-当前脚本不再使用简单的“能 fit 就 fit，否则 fallback 到 1036x1036”的策略，而是对所有 bucket 打分：
+对原始 crop `h x w` 和候选 bucket `H x W`：
 
 ```text
-score = 2.0 * aspect_cost + 0.8 * downscale_cost + 0.2 * padding_cost
+s_fit = min(W / w, H / h)
+s = min(s_fit, s_up_max)
+new_h = round(h * s)
+new_w = round(w * s)
+pad_pixels = H * W - new_h * new_w
 ```
 
-推理时的预处理流程：
+默认参数：
 
 ```text
-PIL crop
--> Qwen smart_resize 得到 native 尺寸
--> 根据比例/缩放/padding score 选择 bucket
--> 等比缩放到 bucket 内，默认最多放大 2 倍
+s_up_max = 2.5
+alpha_down = 10.0
+beta_up = 1.0
+gamma_pad = 3.0
+ref_area = 448 * 448
+```
+
+评分函数：
+
+```text
+downscale_penalty = max(0.0, 1.0 / s - 1.0) ** 2
+upscale_penalty = max(0.0, s - 1.0) ** 2
+padding_penalty = pad_pixels / ref_area
+
+score = (
+    alpha_down * downscale_penalty
+    + beta_up * upscale_penalty
+    + gamma_pad * padding_penalty
+)
+```
+
+预处理流程：
+
+```text
+原始 PIL crop
+-> 直接基于原始 h/w 对 bucket 打分
+-> 选择 score 最小的 bucket
+-> 等比 resize 到 bucket 内
 -> 白底居中补齐到 bucket 尺寸
 -> processor
--> 校验 image_grid_thw 是否等于 bucket / patch_size
+-> 校验 image_grid_thw == bucket / patch_size
 ```
 
-该逻辑不拉伸、不裁剪，只做等比缩放和白底补齐。
+该逻辑不做非等比拉伸，不裁剪内容。
 
-相关参数：
-
-```bash
---static-vit-max-upscale 2.0
-```
-
-## 原始 HF 冒烟测试
+## 推荐入口：workflow
 
 运行：
 
 ```bash
-python \
+conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_workflow.py
+```
+
+该脚本会：
+
+1. 加载 `XHMinerU25HMONNXWorkflow`。
+2. 基于 HF 模型和 workflow yaml 执行量化。
+3. 基于量化结果导出 HMONNX。
+4. 生成 LLM prefill/decode、visual HMONNX 和 MinerU 静态 ViT manifest。
+
+默认配置在脚本顶部常量中：
+
+```python
+HF_MODEL_DIR = "/data02/datasets/MinerU2.5-Pro-2604-1.2B"
+CONFIG_PATH = "./configs_merak/workflows/xh2a/llm_models/mineru2_5/mineru2_5_pro_xh2a_4k.yaml"
+QUANT_OUTPUT_DIR = "..."
+EXPORT_OUTPUT_DIR = "..."
+```
+
+按需修改 `QUANT_OUTPUT_DIR`、`EXPORT_OUTPUT_DIR` 或 `CONFIG_OVERRIDES` 后再运行。
+
+## 手动导出 HMONNX
+
+当需要绕开 workflow、单独调试导出参数时使用：
+
+```bash
+conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_xh_export_hmonnx.py \
+  --config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py \
+  --visual-buckets-config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py \
+  --force
+```
+
+导出产物应至少包含：
+
+```text
+golden_meta_info.json
+mineru_visual_buckets.json
+prefill/*.onnx
+decode/*.onnx
+visual 或 visual_1036x1036/*.onnx
+额外 visual bucket *.onnx
+```
+
+`mineru_visual_buckets.json` 是 MinerU 专用 manifest，记录每个静态 visual bucket 的尺寸和 HMONNX 路径，不修改通用 HMONNX metadata schema。
+
+## 单图推理
+
+### 原始 HF
+
+```bash
+conda run -n xh2modelzoo python \
   examples_merak/llm/mineru2.5/debug_scripts/mineru2_5_native_generate.py
 ```
 
-默认输入：
+用途：确认原始 HF 模型和 `MinerUClient.two_step_extract` 可用。
+
+### 原始 HF + 静态 ViT 模拟
 
 ```bash
-data/images/houmo_logo.jpg
+conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_hf_static_vit_generate.py \
+  --image-path data/images/houmo_logo.jpg \
+  --max-new-tokens 128 \
+  --no-tqdm
 ```
 
-该脚本直接加载：
+用途：在不使用 XH/HMONNX 的情况下，验证静态 ViT bucket 路由和图片预处理是否符合预期。
 
-```python
-Qwen2VLForConditionalGeneration.from_pretrained(...)
-AutoProcessor.from_pretrained(...)
-MinerUClient(...).two_step_extract(...)
-```
-
-## XH PyTorch 静态 ViT 推理
-
-运行：
+### XH PyTorch 静态 ViT
 
 ```bash
-python \
+conda run -n xh2modelzoo python \
   examples_merak/llm/mineru2.5/debug_scripts/mineru2_5_xh_generate.py \
   --config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py \
   --visual-buckets-config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py \
@@ -127,78 +203,14 @@ python \
   --no-tqdm
 ```
 
-该脚本会：
+用途：构建 XH PyTorch 模型和多个静态 `XHQwen2VLVisualModel`，确认导出 HMONNX 前的 XH PyTorch 路径可用。
 
-1. 根据 LLM config 构建一份共享 XH LLM/VLM。
-2. 根据 visual bucket config 构建多个 `XHQwen2VLVisualModel`。
-3. 包装成 `MinerUClient` 需要的 HF 风格 `generate()` 接口。
-4. 对 layout/content 阶段的图片按 ratio score 路由到静态 ViT bucket。
-
-常用参数：
+### HMONNX
 
 ```bash
---eval-type wrap
---layout-image-size 1036
---static-vit-max-upscale 2.0
---image-analysis
-```
+EXPORT_DIR=/path/to/exported_mineru2_5_hmonnx
 
-## HMONNX 导出
-
-导出共享 LLM HMONNX 和所有静态 visual bucket：
-
-```bash
-python \
-  examples_merak/llm/mineru2.5/mineru2_5_xh_export_hmonnx.py \
-  --config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_llm_1_2b_xh2a_4k.py \
-  --visual-buckets-config configs_merak/xh2a/llm_models/mineru2.5/1_2b/mineru2_5_visual_buckets_1_2b_xh2a.py \
-  --force
-```
-
-导出目录位于：
-
-```bash
-work_dirs/mineru2_5_llm_1_2b_xh2a_4k/
-```
-
-当前已经验证过的最新导出目录：
-
-```bash
-work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
-```
-
-关键文件：
-
-```bash
-golden_meta_info.json
-mineru_visual_buckets.json
-prefill/*.onnx
-decode/*.onnx
-visual/*.onnx
-visual_buckets/<HxW>/*.onnx
-```
-
-`mineru_visual_buckets.json` 是 MinerU 专用 manifest，用于记录每个静态 visual bucket 的尺寸和 HMONNX 路径，不修改通用 HMONNX metadata schema。
-
-常用参数：
-
-```bash
---skip-existing-visual-buckets
---context-length 4096
---prefill-chunk-length 256
---quant-type w8a8h1_sefp
-```
-
-如果修改了 `mineru2_5_visual_buckets_1_2b_xh2a.py`，需要重新导出 HMONNX 和 `mineru_visual_buckets.json`。
-
-## HMONNX 单图推理
-
-运行：
-
-```bash
-EXPORT_DIR=work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
-
-python \
+conda run -n xh2modelzoo python \
   examples_merak/llm/mineru2.5/mineru2_5_xh_hmonnx_generate.py \
   --config ${EXPORT_DIR}/golden_meta_info.json \
   --visual-buckets-manifest ${EXPORT_DIR}/mineru_visual_buckets.json \
@@ -207,52 +219,143 @@ python \
   --no-tqdm
 ```
 
-该脚本会：
+用途：加载 HMONNX LLM 和所有 manifest 中声明的 visual bucket，按 `image_grid_thw` 在推理时切换静态 ViT。
 
-1. 加载共享 HMONNX LLM、默认 visual、额外 bucket visual。
-2. 使用和 HF static 模拟一致的 ratio bucket 预处理。
-3. 每次 `generate()` 前根据 `image_grid_thw` 切换 `hmonnx_model.visual`。
-4. 使用 chunk prefill 支持超过单个 prefill chunk 的输入，只要总长度不超过 context length。
+`houmo_logo.jpg` 期望输出：
 
-## OmniDocBench 数据集
+```python
+[
+  {"type": "image", "bbox": [0.152, 0.121, 0.862, 0.533], "content": None},
+  {"type": "title", "bbox": [0.156, 0.573, 0.801, 0.81], "content": "后摩智能\nHOU MO.AI"}
+]
+```
 
-评估脚本使用 OmniDocBench：
+## OmniDocBench 数据下载和复现
 
-```bash
+评估脚本使用 Hugging Face 数据集：
+
+```text
 opendatalab/OmniDocBench
 ```
 
-本地目录：
+为了复现同一批 100 条测试，固定数据集 revision 和确定性抽样策略：
 
-```bash
-work_dirs/mineru2_5_omnidocbench_data
+```text
+dataset_revision = d386947f7fc3bafdcd756c8485845a2f43a19875
+sample_strategy = image_path_evenly_spaced
+sample_size = 100
 ```
 
-标注文件：
+只要数据集 revision、抽样策略、样本数量一致，就会得到相同的 100 条样本 manifest。建议固定一个本地数据目录和输出目录：
 
 ```bash
-work_dirs/mineru2_5_omnidocbench_data/OmniDocBench.json
+DATA_DIR=/path/to/OmniDocBench
+OUT_DIR=/path/to/mineru2_5_hf_dynamic_100
+DATASET_REVISION=d386947f7fc3bafdcd756c8485845a2f43a19875
 ```
-
-当前工作区中的 `OmniDocBench.json` 约 41 MB。
 
 下载标注文件：
+
+```bash
+hf download \
+  opendatalab/OmniDocBench \
+  OmniDocBench.json \
+  --repo-type dataset \
+  --revision ${DATASET_REVISION} \
+  --local-dir ${DATA_DIR}
+```
+
+如果没有 `hf` 命令，可以使用：
 
 ```bash
 huggingface-cli download \
   opendatalab/OmniDocBench \
   OmniDocBench.json \
   --repo-type dataset \
-  --local-dir work_dirs/mineru2_5_omnidocbench_data
+  --revision ${DATASET_REVISION} \
+  --local-dir ${DATA_DIR}
 ```
 
-图片下载说明：
+生成固定 100 条 manifest，并按同一 revision 下载这 100 条图片：
 
-- `mineru2_5_omnidocbench_hf_eval.py` 默认会通过 `hf_hub_download` 下载缺失的抽样图片。
-- `mineru2_5_omnidocbench_hmonnx_eval.py` 不负责下载图片，因此建议先跑 HF eval，或确保样本图片已经存在。
-- 如果图片已存在，可以给 HF eval 加 `--no-download-missing`。
+```bash
+python - <<'PY'
+import json
+import math
+import os
+from pathlib import Path
 
-## OmniDocBench 评估方法
+from huggingface_hub import hf_hub_download
+
+data_dir = Path(os.environ["DATA_DIR"])
+out_dir = Path(os.environ["OUT_DIR"])
+revision = os.environ["DATASET_REVISION"]
+out_dir.mkdir(parents=True, exist_ok=True)
+
+with open(data_dir / "OmniDocBench.json", "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+indexed = list(enumerate(data))
+indexed.sort(key=lambda item: item[1].get("page_info", {}).get("image_path", ""))
+sample_size = 100
+positions = [math.floor(i * (len(indexed) - 1) / (sample_size - 1)) for i in range(sample_size)]
+selected = [indexed[pos] for pos in positions]
+
+manifest = []
+for rank, (json_index, record) in enumerate(selected):
+    image_path = record["page_info"]["image_path"]
+    if "/" not in image_path:
+        image_path = f"images/{image_path}"
+    page_info = record.get("page_info", {})
+    manifest.append(
+        {
+            "sample_rank": rank,
+            "json_index": json_index,
+            "image_path": image_path,
+            "page_number": page_info.get("page_number"),
+            "width": page_info.get("width"),
+            "height": page_info.get("height"),
+            "page_attribute": page_info.get("page_attribute", {}),
+        }
+    )
+    hf_hub_download(
+        "opendatalab/OmniDocBench",
+        repo_type="dataset",
+        filename=image_path,
+        revision=revision,
+        local_dir=str(data_dir),
+    )
+
+manifest_path = out_dir / "omnidocbench_sample_manifest.json"
+with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, ensure_ascii=False, indent=2)
+print(f"saved sample manifest: {manifest_path}")
+PY
+```
+
+后续所有 100 条评估都复用同一个 manifest：
+
+```bash
+SAMPLE_MANIFEST=${OUT_DIR}/omnidocbench_sample_manifest.json
+```
+
+运行 HF dynamic baseline：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
+  --dataset-dir ${DATA_DIR} \
+  --sample-manifest ${SAMPLE_MANIFEST} \
+  --output-dir ${OUT_DIR} \
+  --sample-size 100 \
+  --dtype float16 \
+  --no-download-missing \
+  --no-tqdm
+```
+
+评估脚本本身也支持缺图时自动下载，但严格复现时建议使用上面的固定 revision 下载步骤，然后评估时加 `--no-download-missing`。
+
+## OmniDocBench 评估
 
 这里的评估是 MinerU 抽取链路的回归测试，不是 OmniDocBench 官方指标。
 
@@ -268,132 +371,92 @@ image
 
 指标：
 
-- `edit_similarity`：归一化后用 `difflib.SequenceMatcher` 计算相似度。
-- `char_precision`、`char_recall`、`char_f1`：归一化后的字符 multiset overlap。
-- `avg_time`：每页 `two_step_extract` 的平均耗时。
+| 指标 | 含义 |
+| --- | --- |
+| `edit_similarity` | 归一化文本后，用 `difflib.SequenceMatcher` 计算相似度。 |
+| `char_precision` | 字符 multiset overlap precision。 |
+| `char_recall` | 字符 multiset overlap recall。 |
+| `char_f1` | 字符级 F1。 |
+| `avg_time` | 每页 `two_step_extract` 平均耗时。 |
 
-默认参与评估的类别包括：
-
-```text
-title, text_block, list_group, reference, figure_caption,
-table, table_caption, equation_isolated, equation_semantic,
-header, footer, page_number, code_txt, ...
-```
-
-## 固定 10 条回归样本
-
-当前 HMONNX 回归使用以下 manifest 中的前 10 条：
+### HF dynamic 评估
 
 ```bash
-work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json
-```
-
-具体样本：
-
-| rank | json_index | image | page | size | source | layout |
-| ---: | ---: | --- | ---: | --- | --- | --- |
-| 0 | 1286 | `PPT_1001115_eng_page_003.png` | 3 | 1500x2000 | PPT2PDF | single_column |
-| 1 | 1357 | `PPT_8076_MEYER_Chapter_2_-_Language_Change_page_021.png` | 21 | 1500x2000 | PPT2PDF | single_column |
-| 2 | 1342 | `PPT_Catalysis.ppt_page_016.png` | 16 | 1500x2000 | PPT2PDF | single_column |
-| 3 | 1353 | `PPT_MMAT5390Lecture1_page_024.png` | 24 | 1500x2000 | PPT2PDF | single_column |
-| 4 | 1338 | `PPT_all655920_page_003.png` | 3 | 1500x2000 | PPT2PDF | single_column |
-| 5 | 1292 | `PPT_english-studies-s6-on-the-road-resource-3_page_002.png` | 2 | 1500x2000 | PPT2PDF | other_layout |
-| 6 | 1319 | `PPT_lecture1_page_022.png` | 22 | 1500x2667 | PPT2PDF | single_column |
-| 7 | 1436 | `book_en_A.Course.in.Abstract.Harmonic.Analysis.-.Gerald.B.Folland.0849384907_page_119.png` | 119 | 1731x1039 | book | single_column |
-| 8 | 1444 | `book_en_国外数学教材-数论-Melvyn B. Nathanson—Elementary Methods in Number Theory_0092.png` | 92 | 1734x1253 | book | single_column |
-| 9 | 1456 | `book_en_搬书匠-3246-Electronics Cookbook-2017-英文版_page_193.png` | 193 | 1838x1400 | book | single_column |
-
-## 原始 HF 评估
-
-评估原始 HF dynamic ViT：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python \
+CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
   examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
-  --sample-manifest work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json \
-  --sample-size 10 \
-  --output-dir work_dirs/mineru2_5_omnidocbench_hf_hmonnx10_float16 \
+  --dataset-dir ${DATA_DIR} \
+  --sample-manifest ${SAMPLE_MANIFEST} \
+  --sample-size 100 \
+  --output-dir /path/to/hf_dynamic_100 \
   --dtype float16 \
-  --no-tqdm
-```
-
-评估原始 HF 模型 + static ViT 模拟：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python \
-  examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
-  --sample-manifest work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json \
-  --sample-size 10 \
-  --output-dir work_dirs/mineru2_5_omnidocbench_hf_staticvit_ratio_hmonnx10_float16_gpu0 \
-  --dtype float16 \
-  --simulate-static-vit \
-  --static-vit-max-upscale 2.0 \
   --no-download-missing \
   --no-tqdm
 ```
 
-## HMONNX 评估
-
-评估最新 HMONNX：
+### HF static ViT 模拟评估
 
 ```bash
-EXPORT_DIR=work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
-
-CUDA_VISIBLE_DEVICES=0 python \
-  examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hmonnx_eval.py \
-  --config ${EXPORT_DIR}/golden_meta_info.json \
-  --visual-buckets-manifest ${EXPORT_DIR}/mineru_visual_buckets.json \
-  --hf-sample-manifest work_dirs/mineru2_5_omnidocbench_hmonnx_extract/omnidocbench_hmonnx_sample_manifest.json \
-  --sample-count 10 \
-  --output-dir work_dirs/mineru2_5_omnidocbench_hmonnx_ratio_20260604_extract \
+CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hf_eval.py \
+  --dataset-dir ${DATA_DIR} \
+  --sample-manifest ${SAMPLE_MANIFEST} \
+  --sample-size 100 \
+  --output-dir /path/to/hf_static_fitpadding_100 \
+  --dtype float16 \
+  --simulate-static-vit \
+  --no-download-missing \
   --no-tqdm
 ```
 
-输出文件：
+### HMONNX 评估
 
 ```bash
-omnidocbench_hmonnx_sample_manifest.json
-omnidocbench_hmonnx_results.json
-omnidocbench_hmonnx_scores.json
+EXPORT_DIR=/path/to/exported_mineru2_5_hmonnx
+
+CUDA_VISIBLE_DEVICES=0 conda run -n xh2modelzoo python \
+  examples_merak/llm/mineru2.5/mineru2_5_omnidocbench_hmonnx_eval.py \
+  --config ${EXPORT_DIR}/golden_meta_info.json \
+  --visual-buckets-manifest ${EXPORT_DIR}/mineru_visual_buckets.json \
+  --dataset-dir ${DATA_DIR} \
+  --hf-sample-manifest ${SAMPLE_MANIFEST} \
+  --sample-count 100 \
+  --output-dir /path/to/hmonnx_100 \
+  --no-tqdm
 ```
 
-## 最新精度结果
+## 当前 100 条评估结果
 
-最新已验证的 HMONNX 导出目录：
+以下结果均使用同一份 `image_path_evenly_spaced` 100 条样本。
 
-```bash
-work_dirs/mineru2_5_llm_1_2b_xh2a_4k/hmquant_xh2_mineru2_5_pro_1_2b_w8a8_256_4k_1036x1036_20260604
-```
-
-固定 10 条样本上的结果：
-
-| run | edit_similarity | char_precision | char_recall | char_f1 | avg_time |
+| 配置 | edit_similarity | char_precision | char_recall | char_f1 | avg_time |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 原始 HF dynamic fp16 | 0.6272 | 0.9383 | 0.9351 | 0.9344 | 13.91s |
-| 原始 HF + static ViT ratio 模拟 | 0.6340 | 0.9390 | 0.9230 | 0.9267 | 14.64s |
-| 最新 HMONNX ratio buckets | 0.6354 | 0.9401 | 0.9230 | 0.9272 | 183.57s |
+| HF dynamic ViT fp16 | 0.7420 | 0.9307 | 0.9424 | 0.9256 | 45.55s |
+| HF dynamic ViT bf16 | 0.7422 | 0.9309 | 0.9420 | 0.9255 | 37.24s |
+| 10 bucket fit_padding | 0.7429 | 0.9307 | 0.9425 | 0.9266 | 39.19s |
+| 5 bucket fit_padding | 0.7387 | 0.9311 | 0.9408 | 0.9256 | 37.52s |
 
-逐条 `char_f1`：
+结论：
 
-| rank | HF static ratio | HMONNX ratio |
-| ---: | ---: | ---: |
-| 0 | 0.9695 | 0.9695 |
-| 1 | 0.9688 | 0.9688 |
-| 2 | 0.7328 | 0.7328 |
-| 3 | 0.9631 | 0.9631 |
-| 4 | 0.9961 | 0.9961 |
-| 5 | 1.0000 | 1.0000 |
-| 6 | 0.8039 | 0.8039 |
-| 7 | 0.9126 | 0.9126 |
-| 8 | 0.9251 | 0.9306 |
-| 9 | 0.9949 | 0.9949 |
+- fp16 和 bf16 dynamic 精度基本一致。
+- `fit_padding` 静态 ViT 在 5 个 content bucket 下仍能保持接近 HF dynamic 的 `char_f1`。
+- `ratio` 策略已禁用，不再作为推荐或可选评估方案。
 
-当前 HMONNX 结果已经基本对齐 HF static ratio 模拟。HMONNX 和 HF dynamic 之间剩余差异主要来自静态 ViT bucket 化和量化/运行时差异，而不是长横条 fallback 问题。
+## 已验证的 HMONNX 单图结果
 
-## 复现注意事项
+使用 workflow export 产物测试 `data/images/houmo_logo.jpg`：
 
-- 建议显式设置 `CUDA_VISIBLE_DEVICES=0` 或其他空闲 GPU，避免 `device_map=auto` 把模型放到繁忙 GPU。
-- 当前 MinerU 推理强制/默认 batch size 为 1，避免一次 `generate()` 中混入不同 visual bucket。
-- `hmonnx_generate` 和 `hmonnx_eval` 只能路由到 `mineru_visual_buckets.json` 中已经导出的 bucket。
-- 修改 visual bucket config 后，需要重新运行 `mineru2_5_xh_export_hmonnx.py`。
-- 静态 bucket 预处理逻辑只在 MinerU2.5 示例脚本层实现，不修改通用 Qwen2-VL 模型代码。
+```text
+layout bucket: 1036x1036
+title crop bucket: 140x392
+output: 后摩智能\nHOU MO.AI
+```
+
+该测试说明当前 HMONNX generate 脚本可以正确读取 workflow 导出的 `mineru_visual_buckets.json`，并按最新版 `fit_padding` 路由执行两阶段识别。
+
+## 注意事项
+
+- HMONNX 推理只能路由到 `mineru_visual_buckets.json` 中已经导出的 bucket。
+- 修改 visual bucket config 后，需要重新导出 HMONNX。
+- 当前 MinerU 推理默认 batch size 为 1，避免一次 `generate()` 中混入不同 visual bucket。
+- `content` 阶段默认禁止路由到 `1036x1036`；不要打开 `--allow-content-fallback-bucket`，除非是在做对照实验。
+- 静态 ViT 预处理逻辑只在 MinerU2.5 示例脚本层实现，不修改通用 Qwen2-VL 模型代码。
