@@ -248,12 +248,12 @@ def run_scenario(
     quick_test_max_new_tokens: int,
     prompt: str,
 ) -> None:
-    from xhmodel_merak.xh_llm.models.qwen3_5 import (
-        Qwen35Workflow,
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (
         find_hmonnx_meta_file,
         print_quick_test_result,
         quick_test_hmonnx,
     )
+    from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
     scenario_root = output_root / scenario.name
     quant_output_dir = scenario_root / "quant"
@@ -270,7 +270,7 @@ def run_scenario(
         _remove_output_dir_if_needed(scenario_root, force)
         scenario_root.mkdir(parents=True, exist_ok=True)
 
-        workflow = Qwen35Workflow.from_config(
+        workflow = AutoLLMWorkflow.from_config(
             hf_model_dir=scenario.hf_model_dir,
             config_path=scenario.config_path,
             seed=seed,

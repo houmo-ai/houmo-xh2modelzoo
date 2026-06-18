@@ -82,13 +82,14 @@ class WorkflowConfig:
         for path, value in overrides.items():
             if not isinstance(path, str) or not path:
                 raise ValueError(f"Override path must be a non-empty string, got: {path!r}")
-            # Top-level workflow sections may be replaced as a whole, e.g.
-            # {"quant": None} for base export or {"quant": {...}} for an
-            # externally quantized HF model.  Dotted paths keep strict
-            # existing-key validation so typos such as export.model.foo are
-            # still rejected.
-            if "." not in path and path in {"quant", "export"}:
+            # Top-level quant may be replaced as a whole, e.g. {"quant": None}
+            # for base export or {"quant": {...}} for an externally quantized
+            # HF model. Other overrides keep strict existing-key validation so
+            # typos such as export.model.foo are still rejected.
+            if path == "quant":
                 continue
+            if path == "export":
+                raise ValueError("Top-level export override is not allowed; use dotted export.* paths")
             existing_value = self._get_existing_path(self.data, path)
             self._validate_override_value(existing_value, value, path)
 

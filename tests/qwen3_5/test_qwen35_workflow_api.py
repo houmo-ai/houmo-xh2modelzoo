@@ -90,6 +90,17 @@ def test_qwen35_workflow_config_accepts_base_and_existing_hf_quant_overrides(qwe
     assert overridden.quant == existing_hf
 
 
+def test_workflow_config_rejects_top_level_export_override(qwen35_modules):
+    WorkflowConfig, _ = qwen35_modules
+    base = WorkflowConfig.from_file(str(QWEN35_CONFIG_ROOTS[0] / "9b/qwen3_5_9b_full.yaml"))
+
+    dotted = base.with_overrides({"export.model.fuse_gdr_ops": True})
+    assert dotted.export["model"]["fuse_gdr_ops"] is True
+
+    with pytest.raises(ValueError, match="Top-level export override is not allowed"):
+        base.with_overrides({"export": {"model": {"fuse_gdr_ops": True}}})
+
+
 def test_qwen35_quant_null_requires_explicit_override(qwen35_modules, tmp_path: Path):
     _, Qwen35Workflow = qwen35_modules
     config_path = tmp_path / "bad_quant_null.yaml"
@@ -118,8 +129,6 @@ export:
     )
     assert result.skipped is True
     assert result.hf_model_dir == os.path.abspath("weights/Qwen3.5-9B")
-    assert result.algorithm is None
-    assert result.effective_config_file == str(config_path.with_stem("bad_quant_null_override"))
 
 
 def test_qwen35_quant_rejects_non_64_group_size(qwen35_modules, tmp_path: Path):
@@ -163,8 +172,6 @@ def test_qwen35_existing_hf_quant_returns_normalized_quant_result(qwen35_modules
     assert result.skipped is False
     assert result.hf_model_dir == os.path.abspath("weights/Qwen3.5-9B")
     assert result.quanted_model_dir == os.path.abspath("weights/Qwen3.5-9B-mode1-llm-only")
-    assert result.algorithm == "autoround"
-    assert result.effective_config_file == str(config_path.with_stem("qwen3_5_9b_full_override"))
 
 
 def test_qwen35_autoround_quant_uses_yaml_calibration_runtime_and_stable_export_format(
@@ -212,8 +219,6 @@ def test_qwen35_autoround_quant_uses_yaml_calibration_runtime_and_stable_export_
     assert result.hf_model_dir == os.path.abspath("weights/Qwen3.5-9B")
     assert result.quanted_model_dir == expected_save_path
     assert result.skipped is False
-    assert result.algorithm == "autoround"
-    assert result.effective_config_file == str(config_path)
 
 
 def test_qwen35_autoround_quant_matches_dense_llm_only_script_contract(
@@ -360,7 +365,7 @@ def test_qwen35_workflow_yaml_filenames_are_topology_only():
     assert offenders == []
 
 
-def test_qwen35_public_api_imports_with_lightweight_stubs(monkeypatch: pytest.MonkeyPatch):
+def test_qwen35_package_root_does_not_eager_import_workflow_helpers(monkeypatch: pytest.MonkeyPatch):
     _install_lightweight_xh_llm_packages(monkeypatch)
     package_name = "xhmodel_merak.xh_llm.models.qwen3_5"
     sys.modules.pop(package_name, None)
@@ -381,6 +386,18 @@ def test_qwen35_public_api_imports_with_lightweight_stubs(monkeypatch: pytest.Mo
     module = importlib.import_module(package_name)
 
     for name in (
+        "Qwen3_5ForConditionalGeneration",
+        "XHQwen3_5Model",
+        "XHQwen3_5ModelConfig",
+        "XHQwen3_5_HMONNXModel",
+        "XHQwen3_5VisionModel",
+        "XHQwen3_5_VisualConfig",
+    ):
+        assert hasattr(module, name)
+        assert name in module.__all__
+
+    for name in (
+        "Qwen35Workflow",
         "list_recommended_configs",
         "get_default_quant_config",
         "get_default_export_config",
@@ -394,8 +411,30 @@ def test_qwen35_public_api_imports_with_lightweight_stubs(monkeypatch: pytest.Mo
         "quant",
         "export",
     ):
-        assert callable(getattr(module, name))
-        assert name in module.__all__
+        assert not hasattr(module, name)
+        assert name not in module.__all__
+
+
+def test_qwen35_workflow_api_imports_with_lightweight_stubs(monkeypatch: pytest.MonkeyPatch):
+    _install_lightweight_xh_llm_packages(monkeypatch)
+    api = importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_5.workflow_api")
+
+    for name in (
+        "list_recommended_configs",
+        "get_default_quant_config",
+        "get_default_export_config",
+        "get_default_workflow_config",
+        "get_model_docs",
+        "get_recommended_config_path",
+        "get_quant_config_help",
+        "get_export_config_help",
+        "dump_quant_config_template",
+        "dump_export_config_template",
+        "quant",
+        "export",
+    ):
+        assert callable(getattr(api, name))
+        assert name in api.__all__
 
 
 def test_qwen35_default_config_helpers_return_recommended_yaml(

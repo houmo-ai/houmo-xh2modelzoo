@@ -61,7 +61,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 skipped=True,
-                effective_config_file=workflow_config.source,
             )
 
         self._validate_group_size(quant_cfg)
@@ -75,8 +74,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 quanted_model_dir=self._normalize_path(existing_hf_model_dir),
-                algorithm=str(quant_cfg.get("source_algorithm") or algorithm),
-                effective_config_file=workflow_config.source,
             )
 
         if algorithm == "autoround" and artifact_format == "gptqmodel_hf":
@@ -85,8 +82,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
                 device=device,
                 quant_cfg=quant_cfg,
             )
-            result.algorithm = algorithm
-            result.effective_config_file = workflow_config.source
             return result
 
         raise NotImplementedError(

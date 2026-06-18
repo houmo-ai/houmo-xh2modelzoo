@@ -15,7 +15,7 @@
 ## 2. 公共 API
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5 import (
+from xhmodel_merak.xh_llm.models.qwen3_5.workflow_api import (
     export,
     get_default_export_config,
     get_default_quant_config,
@@ -26,21 +26,19 @@ from xhmodel_merak.xh_llm.models.qwen3_5 import (
     list_recommended_configs,
     quant,
 )
+from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 ```
 
 推荐集成方式：
 
 ```python
-quant_result = quant(
+workflow = AutoLLMWorkflow.from_config(
     hf_model_dir="weights/Qwen3.5-9B",
     config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
-    output_dir="work_dirs/qwen35_9b_quant",
-    device="cuda:0",
 )
+quant_result = workflow.quant(output_dir="work_dirs/qwen35_9b_quant", device="cuda:0")
 
-export_result = export(
-    hf_model_dir="weights/Qwen3.5-9B",
-    config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
+export_result = workflow.export(
     quant_result=quant_result,
     output_dir="work_dirs/qwen35_9b_export",
     device="cuda:0",
@@ -148,8 +146,6 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/*.yaml
 | --- | --- |
 | `hf_model_dir` | 原始 HF 模型路径 |
 | `quanted_model_dir` | 量化后 HF/GPTQModel 目录 |
-| `algorithm` | 实际算法，默认 `autoround` |
-| `effective_config_file` | 生效 workflow YAML；带 override 时为 `*_override` |
 | `skipped` | base 验证时为 True |
 
 ### 6.2 使用外部已量化模型

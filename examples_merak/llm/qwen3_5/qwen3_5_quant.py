@@ -56,10 +56,10 @@ def _build_quant_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
 
 
 def main(args: argparse.Namespace) -> None:
-    from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow
+    from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
     _remove_output_dir_if_needed(args.output_dir, args.force)
-    workflow = Qwen35Workflow.from_config(
+    workflow = AutoLLMWorkflow.from_config(
         hf_model_dir=args.hf_model_dir,
         config_path=args.config,
         seed=args.seed,

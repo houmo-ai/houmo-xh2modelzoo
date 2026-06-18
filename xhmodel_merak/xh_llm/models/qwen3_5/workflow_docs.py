@@ -146,7 +146,7 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
     "existing_hf.source_algorithm": {
         "type": "str",
         "default": "autoround",
-        "description": "说明外部权重来源算法；结果写入 QuantResult.algorithm 方便上游记录。",
+        "description": "说明外部权重来源算法，供配置和日志记录使用。",
     },
 }
 
@@ -271,7 +271,8 @@ _EXPORT_CONFIG_HELP: dict[str, Any] = {
 
 _MODEL_DOCS: dict[str, Any] = {
     "name": "Qwen3.5 / Qwen3.6 Merak HMONNX workflow",
-    "api_import": "from xhmodel_merak.xh_llm.models.qwen3_5 import quant, export",
+    "api_import": "from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow",
+    "helper_api_import": "from xhmodel_merak.xh_llm.models.qwen3_5.workflow_api import quant, export",
     "recommended_config_api": [
         "list_recommended_configs()",
         "get_default_quant_config()",

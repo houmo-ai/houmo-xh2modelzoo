@@ -17,7 +17,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow, print_quick_test_result, quick_test_hmonnx  # noqa: E402
+from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (  # noqa: E402
+    print_quick_test_result,
+    quick_test_hmonnx,
+)
+from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow  # noqa: E402
 
 
 HF_MODEL_DIR = "weights/Qwen3.5-9B"
@@ -60,7 +64,7 @@ def main() -> None:
     _remove_output_dir_if_needed(QUANT_OUTPUT_DIR, FORCE_OVERWRITE)
     _remove_output_dir_if_needed(EXPORT_OUTPUT_DIR, FORCE_OVERWRITE)
 
-    workflow = Qwen35Workflow.from_config(
+    workflow = AutoLLMWorkflow.from_config(
         hf_model_dir=HF_MODEL_DIR,
         config_path=CONFIG_PATH,
         seed=SEED,

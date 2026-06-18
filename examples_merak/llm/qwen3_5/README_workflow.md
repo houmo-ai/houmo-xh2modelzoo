@@ -1,11 +1,11 @@
 # Qwen3.5 / Qwen3.6 Merak workflow README
 
-Use `Qwen35Workflow` for dense Qwen3.5/Qwen3.6 and Qwen3.6 MoE exports.  The public API is intentionally small: quantization only receives paths/device/overrides, and export consumes the returned `QuantResult`.  Model topology, AutoRound/GPTQModel settings, visual tower size, MTP/DFlash, and GDR fuse are YAML config or override fields.
+Use `AutoLLMWorkflow.from_config()` for dense Qwen3.5/Qwen3.6 and Qwen3.6 MoE exports.  The public API is intentionally small: quantization only receives paths/device/overrides, and export consumes the returned `QuantResult`.  Model topology, AutoRound/GPTQModel settings, visual tower size, MTP/DFlash, and GDR fuse are YAML config or override fields.
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5 import Qwen35Workflow
+from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
-workflow = Qwen35Workflow.from_config(hf_model_dir, config_path, seed=1024, debug=False)
+workflow = AutoLLMWorkflow.from_config(hf_model_dir, config_path, seed=1024, debug=False)
 quant_result = workflow.quant(output_dir, device, config_overrides=None)
 export_result = workflow.export(quant_result, output_dir, device, config_overrides=None)
 ```
@@ -20,7 +20,7 @@ Upstream integrations should read defaults and help from the model package inste
 per-model tables:
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5 import (
+from xhmodel_merak.xh_llm.models.qwen3_5.workflow_api import (
     get_default_export_config,
     get_default_quant_config,
     get_default_workflow_config,
@@ -186,7 +186,7 @@ config_overrides = {
 
 ## Export overrides
 
-`export()` always consumes the `QuantResult` from `quant()`.  Do not expose variant/profile/mode/base/quant as public parameters; select a YAML and use explicit overrides only when needed.
+`export()` consumes the `QuantResult` from `quant()`.  Do not expose variant/profile/mode/base/quant as public parameters; select a YAML and use explicit overrides only when needed.
 
 `fuse_gdr_ops` remains config/override-only:
 
@@ -220,7 +220,7 @@ or visual exports, and automatically switches to MTP/DFlash speculative decoding
 when the meta contains `spec_decode.mode`.
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5 import quick_test_hmonnx
+from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import quick_test_hmonnx
 
 quick_result = quick_test_hmonnx(
     export_result,
@@ -268,10 +268,10 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_spec_decode_test.py \
 
 For programmatic integrations, call the lower-level helpers directly:
 
-- `find_hmonnx_meta_file(export_result_or_path)`
-- `hmonnx_generate(meta_file=..., prompt=...)`
-- `spec_decode_generate(meta_file=..., prompt=...)`
-- `quick_test_hmonnx(export_result_or_meta_file, prompt=...)`
+- `workflow_runtime.find_hmonnx_meta_file(export_result_or_path)`
+- `workflow_runtime.hmonnx_generate(meta_file=..., prompt=...)`
+- `workflow_runtime.spec_decode_generate(meta_file=..., prompt=...)`
+- `workflow_runtime.quick_test_hmonnx(export_result_or_meta_file, prompt=...)`
 
 ## Runtime validation matrix
 
@@ -319,4 +319,4 @@ Matrix:
 | `qwen36_35b_a3b_existing_hf_fuse_false` | `weights/Qwen3.6-35B-A3B` | `weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400` | `false` |
 | `qwen36_35b_a3b_existing_hf_fuse_true` | `weights/Qwen3.6-35B-A3B` | `weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400` | `true` |
 
-Legacy Python config entrypoints and generation helpers remain supported. New workflow integrations should use `Qwen35Workflow` with workflow YAMLs.
+Legacy Python config entrypoints and generation helpers remain supported. New workflow integrations should use `AutoLLMWorkflow.from_config()` with workflow YAMLs.

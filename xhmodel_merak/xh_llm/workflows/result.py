@@ -9,8 +9,6 @@ class QuantResult:
     quanted_model_dir: str | None = None  # 量化模型路径
     # 产物是否为量化权重文件，这种情况无法直接加载量化模型到内存中。一般情况下使用默认值即可
     is_quant_weight_format: bool = False
-    algorithm: str | None = None  # 实际量化算法；未量化/未知时为None
-    effective_config_file: str | None = None  # 生成该量化结果时生效的workflow配置文件
 
 
 @dataclass

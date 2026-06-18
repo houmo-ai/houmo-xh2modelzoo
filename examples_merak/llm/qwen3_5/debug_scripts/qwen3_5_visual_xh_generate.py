@@ -141,7 +141,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         required=True,
-        help="Qwen3.5 visual model config path. Legacy xh2a Python config defaults were removed; pass an explicit compatible config or use Qwen35Workflow.",
+        help="Qwen3.5 visual model config path. Legacy xh2a Python config defaults were removed; pass an explicit compatible config or use AutoLLMWorkflow.",
     )
     parser.add_argument("--model", type=str)
     parser.add_argument("--eval-type", type=str, default="wrap", choices=eval_types)
