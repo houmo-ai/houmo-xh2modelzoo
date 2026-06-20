@@ -50,6 +50,21 @@ def _resolve_path(base_dir: Path, path_str: str) -> Path:
     return path
 
 
+def _resolve_user_config_path(path_str: str, *, field: str) -> Path:
+    expanded = os.path.expanduser(os.path.expandvars(str(path_str or "")))
+    if not expanded:
+        raise ValueError(f"{field} must be provided for HMONNX backend")
+    if "$" in expanded:
+        raise FileNotFoundError(
+            f"{field}={path_str!r} contains an unresolved environment variable. "
+            "Set the variable or pass export_meta_info explicitly."
+        )
+    path = Path(expanded).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"{field} does not exist: {path}")
+    return path
+
+
 def _normalize_onnx_model_type(onnx_model_type: str) -> str:
     aliases = {
         "": "LLMWithMaskONNXModel",
@@ -340,6 +355,7 @@ class EvalBackend(ABC):
 # Float (HuggingFace) backend
 # ---------------------------------------------------------------------------
 
+
 class FloatBackend(EvalBackend):
     """Official HuggingFace float-point backend."""
 
@@ -396,6 +412,7 @@ class FloatBackend(EvalBackend):
 
         if is_gemma4:
             from transformers import Gemma4ForConditionalGeneration
+
             load_kwargs["experts_implementation"] = experts_implementation
             self.model = Gemma4ForConditionalGeneration.from_pretrained(
                 hf_model_dir, **load_kwargs
@@ -455,6 +472,97 @@ class FloatBackend(EvalBackend):
         return output_text
 
 
+class GPTQModelBackend(EvalBackend):
+    """GPTQModel quantized-HF backend.
+
+    GPTQModel owns model-family specific load hooks.  This matters for Gemma4
+    MoE checkpoints whose quantized experts are saved as split
+    ``experts.<id>.gate/up/down_proj`` modules: GPTQModel's Gemma4 definition
+    constructs the matching expert container before qweight loading, while a
+    vanilla HuggingFace load still expects fused ``gate_up_proj`` tensors.
+    """
+
+    backend_type = "gptqmodel"
+
+    def __init__(
+        self,
+        hf_model_dir: str,
+        processor_class: str = "AutoTokenizer",
+        device: str = "cuda:0",
+        device_map: str | None = None,
+        disable_thinking: bool = True,
+    ) -> None:
+        try:
+            from gptqmodel import GPTQModel
+        except ImportError as exc:
+            raise ImportError(
+                "GPTQModelBackend requires the gptqmodel package. "
+                "Install/provide GPTQModel, or use backend='float'/'hmonnx'."
+            ) from exc
+        from transformers import AutoTokenizer
+
+        self.disable_thinking = disable_thinking
+
+        if processor_class == "AutoProcessor":
+            from transformers import AutoProcessor
+
+            try:
+                self.processor = AutoProcessor.from_pretrained(
+                    hf_model_dir,
+                    trust_remote_code=True,
+                )
+                self.tokenizer = getattr(self.processor, "tokenizer", None)
+            except Exception:
+                self.processor = None
+                self.tokenizer = None
+            if self.tokenizer is None:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    hf_model_dir,
+                    trust_remote_code=True,
+                )
+                self.processor = self.tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                hf_model_dir,
+                trust_remote_code=True,
+            )
+            self.processor = self.tokenizer
+
+        load_kwargs: dict[str, Any] = {"trust_remote_code": True}
+        if device_map and device_map not in {"", "none", "None"}:
+            load_kwargs["device_map"] = device_map
+        elif device:
+            load_kwargs["device"] = device
+
+        self.gptq_model = GPTQModel.load(hf_model_dir, **load_kwargs)
+        self.model = self.gptq_model.model
+        self.model.eval()
+        logger.info(
+            "Loaded GPTQModel backend: %s device=%s device_map=%s",
+            hf_model_dir,
+            device,
+            device_map,
+        )
+
+    def generate(self, messages: Sequence[Dict[str, Any]], max_tokens: int) -> str:
+        messages = _normalize_messages_with_markdown_images(messages)
+        device = _get_model_device(self.model)
+        inputs = apply_chat_template(self.processor, messages, disable_thinking=self.disable_thinking)
+        inputs.pop("_prompt", "")
+        inputs = _to_device(inputs, device)
+
+        with torch.inference_mode():
+            generation = self.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=False,
+                temperature=0.0,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        input_len = inputs["input_ids"].shape[-1]
+        return self.tokenizer.decode(generation[0][input_len:], skip_special_tokens=True)
+
+
 # ---------------------------------------------------------------------------
 # HMONNX backend
 # ---------------------------------------------------------------------------
@@ -488,13 +596,20 @@ class HMONNXBackend(EvalBackend):
         self._merak_runtime_meta_path: Optional[Path] = None
         self._merak_runtime_meta: Optional[dict[str, Any]] = None
         self._merak_prefill_chunk_length: Optional[int] = None
-        self._vision_meta_path = Path(vision_export_meta_info_path).resolve() if vision_export_meta_info_path else None
+        self._vision_meta_path = (
+            _resolve_user_config_path(
+                vision_export_meta_info_path,
+                field="vision_export_meta_info",
+            )
+            if vision_export_meta_info_path
+            else None
+        )
         self._vision_meta: Optional[dict[str, Any]] = None
         if self._vision_meta_path:
             with open(self._vision_meta_path, "r", encoding="utf-8") as f:
                 self._vision_meta = json.load(f)
 
-        meta_path = Path(export_meta_info_path).resolve()
+        meta_path = _resolve_user_config_path(export_meta_info_path, field="export_meta_info")
         self.meta_path = meta_path
         model_dir = meta_path.parent
         with open(meta_path, "r", encoding="utf-8") as f:
@@ -646,13 +761,17 @@ class HMONNXBackend(EvalBackend):
         if self._merak_runtime_meta is None:
             return None
 
-        candidates: list[int] = []
         model_config = self._merak_runtime_meta.get("model_config", {})
         if isinstance(model_config, dict):
             context_length = model_config.get("context_max_length")
             if isinstance(context_length, int) and context_length > 0:
-                candidates.append(context_length)
+                # Gemma4 slice-window exports keep full-context prefill input.
+                # The smaller sliding KV cache shape is the post-prefill cache
+                # backing store (sliding_window + input_sequence_length), not a
+                # prompt-length limit.  Prefer the explicit model context.
+                return context_length
 
+        candidates: list[int] = []
         kv_cache = self._merak_runtime_meta.get("kv_cache", {})
         if isinstance(kv_cache, dict):
             kv_cache_shape = kv_cache.get("kv_cache_shape")
@@ -665,7 +784,7 @@ class HMONNXBackend(EvalBackend):
                 if isinstance(shape, list) and len(shape) >= 3:
                     candidates.append(int(shape[2]))
 
-        return min(candidates) if candidates else None
+        return max(candidates) if candidates else None
 
     def _infer_merak_prefill_chunk_length(self) -> Optional[int]:
         if self._merak_runtime_meta is None:
@@ -683,10 +802,10 @@ class HMONNXBackend(EvalBackend):
     def _merak_max_prefill_tokens(self) -> Optional[int]:
         if self.max_context_tokens is None:
             return None
-        max_prefill_tokens = self.max_context_tokens - 1
-        if self._merak_prefill_chunk_length is not None and self._merak_prefill_chunk_length > 1:
-            max_prefill_tokens = min(max_prefill_tokens, self.max_context_tokens - self._merak_prefill_chunk_length)
-        return max(1, max_prefill_tokens)
+        # prefill_chunk_length is the exported chunk size, not reserved decode
+        # space.  Keep prompt truncation aligned with context_max_length;
+        # _effective_merak_max_new_tokens clips generation budget separately.
+        return max(1, self.max_context_tokens - 1)
 
     def _effective_merak_max_new_tokens(self, input_length: int, requested_max_tokens: int) -> int:
         if self.max_context_tokens is None:
@@ -1373,6 +1492,14 @@ def create_backend(
             dtype=backend_cfg.dtype,
             device_map=backend_cfg.device_map,
             experts_implementation=backend_cfg.experts_implementation,
+            disable_thinking=model_config.disable_thinking,
+        )
+    elif backend_type == "gptqmodel":
+        return GPTQModelBackend(
+            hf_model_dir=model_config.hf_model_dir,
+            processor_class=model_config.processor_class,
+            device=backend_cfg.extra_args.get("device", "cuda:0"),
+            device_map=backend_cfg.device_map,
             disable_thinking=model_config.disable_thinking,
         )
     elif backend_type == "hmonnx":

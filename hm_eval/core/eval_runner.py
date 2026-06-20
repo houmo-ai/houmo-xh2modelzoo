@@ -12,6 +12,48 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _patch_modelscope_datasets_compat(dataset_hub: str) -> None:
+    """Bridge modelscope against newer datasets releases without pinning deps.
+
+    Some modelscope versions still import datasets.load.ALL_ALLOWED_EXTENSIONS,
+    while datasets>=4 exposes the same value as _ALL_ALLOWED_EXTENSIONS.  The
+    alias must exist before modelscope.msdatasets is imported by evalscope's
+    dataset loader.
+    """
+    if str(dataset_hub).lower() != "modelscope":
+        return
+
+    try:
+        import datasets.load as datasets_load
+    except Exception:
+        return
+
+    if hasattr(datasets_load, "ALL_ALLOWED_EXTENSIONS"):
+        return
+    allowed = getattr(datasets_load, "_ALL_ALLOWED_EXTENSIONS", None)
+    if allowed is not None:
+        setattr(datasets_load, "ALL_ALLOWED_EXTENSIONS", allowed)
+
+    try:
+        import modelscope
+    except Exception:
+        return
+
+    try:
+        getattr(modelscope, "MsDataset")
+        return
+    except AttributeError:
+        class _UnavailableMsDataset:
+            @staticmethod
+            def load(*args, **kwargs):
+                raise RuntimeError(
+                    "ModelScope MsDataset is unavailable with this datasets "
+                    "version; hm_eval uses dataset_hub='huggingface' by default."
+                )
+
+        setattr(modelscope, "MsDataset", _UnavailableMsDataset)
+
+
 def run_evaluation(
     backend: Any,
     model_display_name: str,
@@ -23,6 +65,7 @@ def run_evaluation(
     timeout: int = 1800,
     seed: int = 42,
     use_cache_dir: Optional[str] = None,
+    dataset_hub: str = "huggingface",
     log_callback: Any = None,
 ) -> Dict[str, Any]:
     """Run evalscope evaluation with the given backend and datasets.
@@ -37,11 +80,16 @@ def run_evaluation(
         max_tokens: Max tokens per generation.
         timeout: Timeout per dataset evaluation in seconds.
         seed: Random seed.
+        dataset_hub: Dataset hub backend passed to evalscope. Defaults to
+            HuggingFace to avoid ModelScope/datasets version skew in current
+            Gemma4 validation environments.
         log_callback: Optional callable(str) for streaming log messages.
 
     Returns:
         Dict with evaluation results and metadata.
     """
+    _patch_modelscope_datasets_compat(dataset_hub)
+
     from evalscope import TaskConfig, run_task
     from evalscope.api.messages import ChatMessage
     from evalscope.api.model import GenerateConfig, ModelAPI, ModelOutput
@@ -160,6 +208,7 @@ def run_evaluation(
             "eval_batch_size": 1,
             "seed": seed,
             "generation_config": generate_cfg,
+            "dataset_hub": dataset_hub,
         }
 
         if use_cache_dir:

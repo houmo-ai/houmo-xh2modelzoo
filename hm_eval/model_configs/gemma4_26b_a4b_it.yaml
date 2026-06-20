@@ -1,13 +1,14 @@
-# Gemma-4-26B-A4B-it 评测配置
+# Gemma-4-26B-A4B-it 评测配置（统一 Gemma4 series Merak workflow）
 config_id: gemma4_26b_a4b_it
 display_name: Gemma-4-26B-A4B-it
-model_family: gemma4_moe
+model_family: gemma4_series
 architecture: Gemma4ForConditionalGeneration
 hf_model_dir: /data01/datasets/gemma-4-26B-A4B-it
 processor_class: AutoProcessor
 transformers_version: "5.5.0"
 
 recommended_datasets:
+  - ceval
   - cmmmu
   - mmmu
   - mmlu_pro
@@ -22,6 +23,10 @@ recommended_datasets:
   - bbh
   - truthfulqa
 
+normalize_choice_range: A-D
+disable_thinking: true
+max_tokens: 32
+
 backends:
   float:
     type: float
@@ -34,9 +39,12 @@ backends:
 
   hmonnx:
     type: hmonnx
-    onnx_model_type: llm_with_mask
-    export_script: examples_merak/llm/gemma4_moe/gemma4_moe_with_mask_xh_export_hmonnx.py
+    onnx_model_type: xhmodel_merak
+    export_script: examples_merak/llm/gemma4_series/gemma4_workflow_demo.py
+    export_config: configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml
     export_configs:
-      - configs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_with_mask_26b_a4b_it_xh2a_w8a8_256_2k.py
-      - configs_merak/xh2a/llm_models/gemma4_moe/26b_a4b_it/gemma4_moe_with_mask_26b_a4b_it_xh2a_w4a8_256_2k.py
+      - configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml
+    export_meta_info: ${HM_EVAL_GEMMA4_26B_A4B_HMONNX_META}
+    sliding_window: true
+    kv_cache_heterogeneous: true
     extra_args: {}

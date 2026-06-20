@@ -1,13 +1,14 @@
-# Gemma-4-31B-it 评测配置
+# Gemma-4-31B-it 评测配置（统一 Gemma4 series Merak workflow）
 config_id: gemma4_31b_it
 display_name: Gemma-4-31B-it
-model_family: gemma4
+model_family: gemma4_series
 architecture: Gemma4ForConditionalGeneration
-hf_model_dir: /data01/datasets/gemma-4-31b-it
+hf_model_dir: /data01/datasets/gemma-4-31B-it
 processor_class: AutoProcessor
 transformers_version: "5.5.0"
 
 recommended_datasets:
+  - ceval
   - cmmmu
   - mmmu
   - mmlu_pro
@@ -22,6 +23,10 @@ recommended_datasets:
   - bbh
   - truthfulqa
 
+normalize_choice_range: A-D
+disable_thinking: true
+max_tokens: 32
+
 backends:
   float:
     type: float
@@ -34,7 +39,12 @@ backends:
 
   hmonnx:
     type: hmonnx
-    onnx_model_type: llm_with_mask
-    export_script: examples_merak/llm/gemma4/gemma4_xh_export_hmonnx.py
-    export_meta_info: /data01/home/chenzx/project/xh2modelzoo/work_dirs/gemma4_31b_it_xh2a_w4a8_autoround_2k/hmquant_xh2_gemma4_31b_it_w4a8_autoround_256_4k_20260531/golden_meta_info.json
+    onnx_model_type: xhmodel_merak
+    export_script: examples_merak/llm/gemma4_series/gemma4_workflow_demo.py
+    export_config: configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml
+    export_configs:
+      - configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml
+    export_meta_info: ${HM_EVAL_GEMMA4_31B_HMONNX_META}
+    sliding_window: true
+    kv_cache_heterogeneous: true
     extra_args: {}

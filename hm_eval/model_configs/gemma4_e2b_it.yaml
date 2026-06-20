@@ -36,5 +36,5 @@ backends:
     type: hmonnx
     onnx_model_type: llm_with_mask
     export_script: examples_merak/llm/gemma4_e/gemma4_e_xh_export_hmonnx.py
-    export_meta_info: /data01/home/chenzx/project/xh2modelzoo/work_dirs/gemma4_e2b_it/hmquant_xh2_gemma-4-e2b-it_w8a8_256_2k_20260515/golden_meta_info.json
+    export_meta_info: ${HM_EVAL_GEMMA4_E2B_HMONNX_META}
     extra_args: {}

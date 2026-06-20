@@ -18,8 +18,8 @@ _DEFAULT_MODEL_ROOT = Path("/data01/datasets")
 
 @dataclass
 class BackendConfig:
-    """Configuration for a single backend (float or hmonnx)."""
-    type: str = ""  # "float" or "hmonnx"
+    """Configuration for a single backend."""
+    type: str = ""  # "float", "gptqmodel", or "hmonnx"
     dtype: str = "bfloat16"
     device_map: str = "auto"
     # float-specific

@@ -479,7 +479,7 @@ class DatasetRegistry:
 
         if few_shot_num is not None:
             args["few_shot_num"] = few_shot_num
-        elif meta and meta.default_few_shot > 0:
+        elif meta is not None:
             args["few_shot_num"] = meta.default_few_shot
 
         if args:

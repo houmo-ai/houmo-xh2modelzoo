@@ -101,7 +101,8 @@ DATASET_SYSTEM_MESSAGES: dict[str, str] = {
 
 def get_system_message(dataset_name: str) -> Optional[str]:
     """Return the system message for a given dataset."""
-    base_name = dataset_name.split("_")[0] if "_" not in {"ceval", "cmmlu", "mmlu_pro"} else dataset_name
+    exact_names = {"ceval", "cmmlu", "mmlu_pro"}
+    base_name = dataset_name if dataset_name in exact_names else dataset_name.split("_")[0]
     for key in [dataset_name, base_name]:
         if key in DATASET_SYSTEM_MESSAGES:
             return DATASET_SYSTEM_MESSAGES[key]
@@ -116,13 +117,14 @@ def rewrite_messages_for_dataset(
     messages: list[dict[str, str]],
     dataset_name: str,
 ) -> list[dict[str, str]]:
-    """Rewrite messages for specific datasets (e.g. shorten mmlu_pro prompts)."""
-    if dataset_name != "mmlu_pro":
+    """Rewrite messages for datasets that need stricter answer-only prompts."""
+    if dataset_name not in {"ceval", "cmmlu", "mmlu_pro"}:
         return messages
+
     rewritten: list[dict[str, str]] = []
     for message in messages:
         content = message.get("content", "")
-        if isinstance(content, str):
+        if isinstance(content, str) and dataset_name == "mmlu_pro":
             content = content.replace(
                 "Think step by step before answering.",
                 "Do not explain. Return only the final answer.",
@@ -132,6 +134,10 @@ def rewrite_messages_for_dataset(
                 "'ANSWER: [LETTER]' (without quotes) where [LETTER] is one of A,B,C,D,E,F,G,H,I,J.",
                 "Return exactly one line in the format: Answer: A",
             )
+        elif isinstance(content, str) and dataset_name in {"ceval", "cmmlu"}:
+            strict_suffix = "请不要解释，不要列步骤，只输出一行：答案：A/B/C/D。"
+            if strict_suffix not in content:
+                content = f"{content.rstrip()}\n\n{strict_suffix}"
         rewritten.append({**message, "content": content})
     return rewritten
 
