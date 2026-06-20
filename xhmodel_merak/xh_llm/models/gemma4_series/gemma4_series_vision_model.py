@@ -17,10 +17,9 @@ from xhquant.api import to_frontend_graph
 
 from ...base_vision_model import BaseVisionModel
 from ...llm_data_processor import BaseVisualProcessor
-from ...builder import register_llm_model
 from ...types import VisualModelMeta
-from .gemma4_processor import XHGemma4Processor
-from .xh_gemma4_config import XHGemma4VisualConfig
+from .gemma4_series_processor import XHGemma4Processor
+from .xh_gemma4_series_config import XHGemma4SeriesVisualConfig
 
 
 def _replace_rmsnorm(module: nn.Module) -> None:
@@ -97,15 +96,14 @@ def _make_vision_attn_traceable(attn: nn.Module) -> None:
         n_q = self.config.num_attention_heads
         n_kv = self.config.num_key_value_heads
         hd = self.head_dim
-        cos, sin = position_embeddings
 
         q = self.q_proj(hidden_states).view(bsz, seq, n_q, hd)
         q = self.q_norm(q)
-        q = self._fused_multidim_rope(q, cos, sin).transpose(1, 2)
+        q = self._fused_multidim_rope(q, position_embeddings).transpose(1, 2)
 
         k = self.k_proj(hidden_states).view(bsz, seq, n_kv, hd)
         k = self.k_norm(k)
-        k = self._fused_multidim_rope(k, cos, sin).transpose(1, 2)
+        k = self._fused_multidim_rope(k, position_embeddings).transpose(1, 2)
 
         v = self.v_proj(hidden_states).view(bsz, seq, n_kv, hd)
         v = self.v_norm(v)
@@ -141,81 +139,115 @@ class _FusedMultidimRope(nn.Module):
         self.split_size = head_dim // ndim
         self.rope = xhnn.Rope()
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        # x: [B, S, n_heads, head_dim]; cos/sin: [B, S, head_dim] (concat over ndim spatial dims)
-        x_parts = torch.split(x, self.split_size, dim=-1)
-        cos_parts = torch.split(cos, self.split_size, dim=-1)
-        sin_parts = torch.split(sin, self.split_size, dim=-1)
-        y_parts = []
-        for k in range(self.ndim):
-            c = cos_parts[k].unsqueeze(2)  # [B, S, 1, half_hd] — xhnn.Rope requires rank 4
-            s = sin_parts[k].unsqueeze(2)
-            y_parts.append(self.rope(x_parts[k], c, s))
-        return torch.cat(y_parts, dim=-1)
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos_sin_parts: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        # x: [B, S, n_heads, head_dim]. cos/sin parts are prepared once as
+        # [B, S, 1, half_hd], avoiding per-block split/unsqueeze on position ids.
+        cos_x, cos_y, sin_x, sin_y = cos_sin_parts
+        x_x, x_y = torch.split(x, self.split_size, dim=-1)
+        y_x = self.rope(x_x, cos_x, sin_x)
+        y_y = self.rope(x_y, cos_y, sin_y)
+        return torch.cat((y_x, y_y), dim=-1)
 
 
 class Gemma4VisualAdapter(nn.Module):
     """Trace-friendly adapter wrapping the Gemma4 vision tower + embed_vision.
 
-    Avoids two trace-unsafe operations:
+    Exported visual graph follows HF's padded Gemma4 input contract:
 
-    1. ``create_bidirectional_mask`` in transformers 5.5 (trace failure) — replaced by
-       manually iterating encoder layers with ``attention_mask=None``.
-    2. ``Gemma4VisionPooler._avg_pool_by_positions`` which uses ``F.one_hot`` and
-       integer division (``NonZero`` / ``one_hot`` not supported in frontend graph) —
-       replaced by a pre-computed constant pooling weight matrix stored as a buffer.
+    * ``pixel_values``: [1, 2520, 768], padded at the tail.
+    * ``pixel_position_ids``: [1, 2520, 2], NPU-safe positions where padding
+      rows are [0, 0] instead of HF's [-1, -1].
+    * ``pooling_matrix``: [1, 280, 2520], host-generated average-pooling
+      matrix for the position-aware 3x3 pool, pre-transposed for MatMul.
+    * ``attention_mask``: [1, 1, 1, 2520], additive key mask.
 
-    ``pooler_weights`` is ``(B, output_length, num_patches)`` (pre-transposed) and
-    ``num_image_tokens`` is the count of pooled tokens.  Both are deterministic for a
-    fixed image size and are computed once during ``init_wrap_model``.
-
-    Only *real* (non-padding) patches are fed to the adapter.  For a 224×224 image
-    this gives 2304 patches and 256 pooled tokens — no padding handling required.
+    Position embeddings are gathered from HF's x/y embedding table online.
+    RoPE cos/sin are gathered from constant precomputed tables by
+    ``pixel_position_ids``. This keeps ``Cos`` / ``Sin`` out of the ONNX graph
+    without adding rope tensors as runtime inputs. Pooling uses a host-built
+    matrix multiplication instead of runtime gather/reduce.
     """
 
     def __init__(
         self,
         vision_tower: nn.Module,
         embed_vision: nn.Module,
-        pooler_weights: torch.Tensor,
         num_image_tokens: int,
-        rope_cos: torch.Tensor,
-        rope_sin: torch.Tensor,
-        pos_embed: torch.Tensor,
-        position_ids: torch.Tensor | None = None,
+        position_embedding_table: torch.Tensor,
+        rope_cos_table: torch.Tensor,
+        rope_sin_table: torch.Tensor,
     ):
         super().__init__()
         self.vision_tower = vision_tower
         self.embed_vision = embed_vision
         self.num_image_tokens = num_image_tokens
         self.num_layers = vision_tower.encoder.config.num_hidden_layers
-        self.register_buffer("pooler_weights", pooler_weights)
-        self.register_buffer("rope_cos", rope_cos)
-        self.register_buffer("rope_sin", rope_sin)
-        self.register_buffer("pos_embed", pos_embed)
-        if position_ids is not None:
-            self.register_buffer("position_ids", position_ids)
-        else:
-            self.position_ids = None
+        self.pooling_kernel_area = int(vision_tower.config.pooling_kernel_size) ** 2
+        self.hidden_size = int(vision_tower.config.hidden_size)
+        self.register_buffer("position_embedding_x", position_embedding_table[0].contiguous())
+        self.register_buffer("position_embedding_y", position_embedding_table[1].contiguous())
+        self.register_buffer("rope_cos_table", rope_cos_table)
+        self.register_buffer("rope_sin_table", rope_sin_table)
 
-    def forward(self, pixel_values: torch.Tensor):
+    def _position_embeddings(self, pixel_position_ids: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        pos = pixel_position_ids.long()
+        pos_x = F.embedding(pos[..., 0], self.position_embedding_x.to(dtype))
+        pos_y = F.embedding(pos[..., 1], self.position_embedding_y.to(dtype))
+        return pos_x + pos_y
+
+    def _pool_by_matrix(self, hidden_states: torch.Tensor, pooling_matrix: torch.Tensor) -> torch.Tensor:
+        pooling_matrix = pooling_matrix.to(hidden_states.dtype)
+        pooled = torch.matmul(pooling_matrix, hidden_states.float())
+        return pooled.to(hidden_states.dtype)
+
+    def _rope_embeddings(
+        self,
+        pixel_position_ids: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pos = pixel_position_ids.long()
+        cos_table = self.rope_cos_table.to(dtype)
+        sin_table = self.rope_sin_table.to(dtype)
+        cos_x = F.embedding(pos[..., 0], cos_table)
+        cos_y = F.embedding(pos[..., 1], cos_table)
+        sin_x = F.embedding(pos[..., 0], sin_table)
+        sin_y = F.embedding(pos[..., 1], sin_table)
+        return (
+            cos_x.unsqueeze(2),
+            cos_y.unsqueeze(2),
+            sin_x.unsqueeze(2),
+            sin_y.unsqueeze(2),
+        )
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        pooling_matrix: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ):
         vt = self.vision_tower
         pe = vt.patch_embedder
 
         pixel_values_norm = 2 * (pixel_values - 0.5)
         hidden_states = pe.input_proj(pixel_values_norm.to(pe.input_proj.weight.dtype))
-        hidden_states = hidden_states + self.pos_embed.to(hidden_states.dtype)
+        hidden_states = hidden_states + self._position_embeddings(pixel_position_ids, hidden_states.dtype)
 
-        rope_cos_sin = (self.rope_cos.to(hidden_states.dtype), self.rope_sin.to(hidden_states.dtype))
+        rope_cos_sin = self._rope_embeddings(pixel_position_ids, hidden_states.dtype)
+        attention_mask = attention_mask.to(hidden_states.dtype)
         for layer in vt.encoder.layers[: self.num_layers]:
             hidden_states = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=attention_mask,
                 position_embeddings=rope_cos_sin,
-                position_ids=self.position_ids,
+                position_ids=pixel_position_ids,
             )
 
-        pooled = (self.pooler_weights @ hidden_states.float()).to(hidden_states.dtype)
+        pooled = self._pool_by_matrix(hidden_states, pooling_matrix)
         pooled = pooled * vt.pooler.root_hidden_size
 
         if vt.config.standardize:
@@ -229,24 +261,28 @@ def _set_vision_attn_impl(adapter: Gemma4VisualAdapter, impl: str):  # noqa: ARG
 
 
 class _Gemma4VisualProcessor(BaseVisualProcessor):
-    """Preprocessor that passes pixel_values to the vision graph."""
+    """Preprocessor that passes padded Gemma4 vision tensors to the graph."""
 
     def forward(self, data: dict) -> tuple[torch.Tensor, ...]:
-        return (data["image"],)
+        return (
+            data["image"],
+            data["pixel_position_ids"],
+            data["pooling_matrix"],
+            data["attention_mask"],
+        )
 
 
-@register_llm_model("Gemma4ForConditionalGeneration_visual", master=False)
-class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
+class XHGemma4SeriesVisionModel(BaseVisionModel):
     transformers_min_version = "5.5.0"
     HF_MODEL_CLS = XHGemma4ForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
     META_CLS = VisualModelMeta
-    CONFIG_CLS = XHGemma4VisualConfig
+    CONFIG_CLS = XHGemma4SeriesVisualConfig
 
-    def __init__(self, config: XHGemma4VisualConfig):
+    def __init__(self, config: XHGemma4SeriesVisualConfig):
         super().__init__(config)
         gemma4_config = AutoConfig.from_pretrained(self.hf_model_dir, trust_remote_code=True)
-        self.config = cast(XHGemma4VisualConfig, self.config)
+        self.config = cast(XHGemma4SeriesVisualConfig, self.config)
         if self.config.model_type is None:
             self.config.model_type = "Gemma4ForConditionalGeneration_visual"
         if hasattr(gemma4_config, "vision_config") and gemma4_config.vision_config is not None:
@@ -269,9 +305,37 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
     def _to_fronted(self, wrap_model):
         dummy_inputs = self._get_dummy_inputs()
         pixel_values = dummy_inputs["pixel_values"].float().cpu()
-        return to_frontend_graph(wrap_model.float().cpu(), "TorchFX", [pixel_values])
+        pixel_position_ids = dummy_inputs["pixel_position_ids"].long().cpu()
+        pooling_matrix = dummy_inputs["pooling_matrix"].float().cpu()
+        attention_mask = dummy_inputs["attention_mask"].float().cpu()
+        return to_frontend_graph(
+            wrap_model.float().cpu(),
+            "TorchFX",
+            [pixel_values, pixel_position_ids, pooling_matrix, attention_mask],
+        )
 
     def _get_dummy_inputs(self) -> Any:
+        processor = self.get_tf_processor()
+        if getattr(self.config, "input_modality", "image") == "video":
+            frames = [Image.new("RGB", (224, 224), color="white") for _ in range(32)]
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video", "video": frames},
+                        {"type": "text", "text": "Describe this video."},
+                    ],
+                }
+            ]
+            inputs = processor.apply_chat_template(messages)
+            return {
+                "pixel_values": inputs["pixel_values_videos"][:, 0],
+                "pixel_position_ids": inputs["video_pixel_position_ids"][:, 0],
+                "pooling_matrix": inputs["video_pooling_matrix"][:, 0],
+                "attention_mask": inputs["video_visual_attention_mask"][:, 0],
+                "image_soft_token_count": inputs["video_soft_token_count"][:, 0],
+            }
+
         messages = [
             {
                 "role": "user",
@@ -281,86 +345,64 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
                 ],
             }
         ]
-        processor = self.get_tf_processor()
         inputs = processor.apply_chat_template(messages)
-        pv = inputs["pixel_values"]        # (1, total_patches, patch_dim)
-        pid = inputs["image_position_ids"]  # (1, total_patches, 2) or (total_patches, 2)
-        if pid.dim() == 2:
-            pid = pid.unsqueeze(0)
-        # Strip padding patches (position_ids == -1) — keep only real patches
-        is_real = ~(pid == -1).all(dim=-1)  # (1, total_patches)
-        n_real = int(is_real[0].sum().item())
         return {
-            "pixel_values": pv[:, :n_real, :],
-            "image_position_ids": pid[:, :n_real, :],
+            "pixel_values": inputs["pixel_values"],
+            "pixel_position_ids": inputs["pixel_position_ids"],
+            "pooling_matrix": inputs["pooling_matrix"],
+            "attention_mask": inputs["visual_attention_mask"],
+            "image_soft_token_count": inputs["image_soft_token_count"],
         }
 
     def get_dummy_inputs(self) -> Any:
         dummy = self._get_dummy_inputs()
-        return {"image": dummy["pixel_values"]}
+        return {
+            "image": dummy["pixel_values"],
+            "pixel_position_ids": dummy["pixel_position_ids"],
+            "pooling_matrix": dummy["pooling_matrix"],
+            "attention_mask": dummy["attention_mask"],
+        }
+
+
+    @staticmethod
+    def _build_rope_table(vision_tower: nn.Module, *, kind: str) -> torch.Tensor:
+        inv_freq = vision_tower.encoder.rotary_emb.inv_freq.detach().float().cpu()
+        max_positions = int(vision_tower.patch_embedder.position_embedding_table.shape[1])
+        positions = torch.arange(max_positions, dtype=torch.float32).unsqueeze(1)
+        freqs = positions * inv_freq.unsqueeze(0)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        table = emb.cos() if kind == "cos" else emb.sin()
+        attention_scaling = float(getattr(vision_tower.encoder.rotary_emb, "attention_scaling", 1.0))
+        return table * attention_scaling
 
     def init_wrap_model(self, hf_model: XHGemma4ForConditionalGeneration = None):
-        dummy = self._get_dummy_inputs()
-        pid = dummy["image_position_ids"]  # (1, num_real_patches, 2), no padding
-        k = self.config.pooling_kernel_size
-        k2 = k * k
-        num_patches = pid.shape[1]
-        output_length = num_patches // k2
-        num_image_tokens = output_length  # all pooled tokens are valid
-
-        # Pre-compute pooler weight matrix (no padding — every row is real)
-        # Pre-transpose to (B, output_length, num_patches) so forward is a single matmul
-        max_x = pid[..., 0].max(dim=-1, keepdim=True)[0] + 1
-        kernel_idxs = torch.div(pid, k, rounding_mode="floor")
-        kernel_idxs = kernel_idxs[..., 0] + (max_x // k) * kernel_idxs[..., 1]
-        pooler_weights = F.one_hot(kernel_idxs.long(), output_length).float() / k2
-        pooler_weights = pooler_weights.transpose(1, 2)
-
         vt = hf_model.model.vision_tower
         embed_vision = hf_model.model.embed_vision
-
-        with torch.no_grad():
-            pid_cpu = pid.cpu()
-            rope_cfg = vt.config
-            head_dim = getattr(rope_cfg, "head_dim", None) or rope_cfg.hidden_size // rope_cfg.num_attention_heads
-            spatial_dim = head_dim // 2
-            rope_theta = rope_cfg.rope_parameters["rope_theta"]
-            inv_freq = 1.0 / (
-                rope_theta
-                ** (torch.arange(0, spatial_dim, 2, dtype=torch.float) / spatial_dim)
-            )
-            inv_freq_expanded = inv_freq[None, :, None]
-            all_cos, all_sin = [], []
-            for dim_i in range(2):
-                dim_pos = pid_cpu[:, :, dim_i].float()
-                freqs = (inv_freq_expanded @ dim_pos[:, None, :]).transpose(1, 2)
-                emb = torch.cat((freqs, freqs), dim=-1)
-                all_cos.append(emb.cos())
-                all_sin.append(emb.sin())
-            rope_cos = torch.cat(all_cos, dim=-1).to(dtype=torch.bfloat16)
-            rope_sin = torch.cat(all_sin, dim=-1).to(dtype=torch.bfloat16)
-
-        pe = vt.patch_embedder
-        with torch.no_grad():
-            no_padding = torch.zeros(1, num_patches, dtype=torch.bool)
-            pos_embed = pe._position_embeddings(pid_cpu, no_padding).to(dtype=torch.bfloat16)
+        num_image_tokens = int(self.config.image_seq_length)
 
         visual = Gemma4VisualAdapter(
             vt,
             embed_vision,
-            pooler_weights=pooler_weights,
             num_image_tokens=num_image_tokens,
-            rope_cos=rope_cos,
-            rope_sin=rope_sin,
-            pos_embed=pos_embed,
-            position_ids=pid,
+            position_embedding_table=vt.patch_embedder.position_embedding_table.detach().cpu(),
+            rope_cos_table=self._build_rope_table(vt, kind="cos"),
+            rope_sin_table=self._build_rope_table(vt, kind="sin"),
         )
         _replace_rmsnorm(visual.vision_tower)
+        _replace_rmsnorm(visual.embed_vision)
         for layer in visual.vision_tower.encoder.layers:
             _make_vision_attn_traceable(layer.self_attn)
         return super().init_wrap_model(visual)
 
     def get_tf_processor(self):
+        if getattr(self.config, "input_modality", "image") == "video":
+            return XHGemma4Processor.from_pretrained(
+                self.hf_model_dir,
+                trust_remote_code=True,
+                video_max_patches=self.config.max_patches,
+                video_image_seq_length=self.config.image_seq_length,
+                video_pooling_kernel_size=self.config.pooling_kernel_size,
+            )
         return XHGemma4Processor.from_pretrained(self.hf_model_dir, trust_remote_code=True)
 
     def forward(self, *args, **kwargs):
@@ -374,7 +416,10 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
         return super().get_hf_model(hf_model_dir, quant_weight, **kwargs)
 
     def get_export_cfg(self) -> dict[str, list[str]]:
-        return {"input_names": ["pixel_values"], "output_names": ["image_embeds"]}
+        return {
+            "input_names": ["pixel_values", "pixel_position_ids", "pooling_matrix", "attention_mask"],
+            "output_names": ["image_embeds"],
+        }
 
     def export_hmonnx(self, output_dir: str) -> VisualModelMeta:
         meta_info = self.create_export_metadata(output_dir)
@@ -384,9 +429,21 @@ class XHGemma4VisionModel(BaseVisionModel):  # noqa: N801
 
     def create_export_metadata(self, output_dir: str) -> VisualModelMeta:
         meta_info = cast(VisualModelMeta, self.get_export_metadata_cls()())
-        meta_info.image_size_w = 224
-        meta_info.image_size_h = 224
+        meta_info.image_size_w = 0
+        meta_info.image_size_h = 0
         meta_info.patch_size = self.config.patch_size
-        # 224×224 → 768×768 → 48×48 = 2304 real patches → 256 pooled tokens
-        meta_info.num_image_tokens = 256
+        meta_info.max_patches = self.config.max_patches
+        meta_info.num_image_tokens = self.config.image_seq_length
+        meta_info.pooling_kernel_size = self.config.pooling_kernel_size
+        meta_info.input_modality = self.config.input_modality
         return meta_info
+
+
+XHGemma4VisionModel = XHGemma4SeriesVisionModel
+
+
+__all__ = [
+    "Gemma4VisualAdapter",
+    "XHGemma4SeriesVisionModel",
+    "XHGemma4VisionModel",
+]

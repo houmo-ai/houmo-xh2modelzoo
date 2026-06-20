@@ -198,13 +198,9 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         if self._llm_prefill:
             self.prefill_model.to(device=self.device)
             out = self.prefill_model(*args)
-            if self.enable_golden:
-                self.prefill_model.update_step()
         else:
             self.decode_model.to(device=self.device)
             out = self.decode_model(*args)
-            if self.enable_golden:
-                self.decode_model.update_step()
         if isinstance(out, (tuple, list)) and len(out) == 1:
             out = out[0]
         return out

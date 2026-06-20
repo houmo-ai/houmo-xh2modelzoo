@@ -1,0 +1,462 @@
+"""Unified public Gemma4 Series LLM model class."""
+
+from __future__ import annotations
+
+import copy
+import gc
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
+
+import torch
+import torch.nn as nn
+from transformers import AutoModelForImageTextToText
+from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration
+
+from xhmodel_merak.xh_llm.builder import register_llm_model
+from xhmodel_merak.xh_llm.types import ExportData, KVCacheConfig, LLMModelState, ModelSwitcher
+from xhmodel_merak.xh_llm.vision_llm_model import VisionLLMModel
+from xhquant.utils import get_xhquant_logger, log_function_call
+
+from .data_preprocess import (
+    Gemma4DataPreprocess,
+    Gemma4MoeDataPreprocess,
+    Gemma4PerLayerInputEmbedding,
+)
+from .llm_text import (
+    Gemma4KVCacheMixin,
+    _Gemma4DecodeNoFullMaskBridge,
+    _copy_model_shared_params,
+    _gemma4_cache_seq_len_for_layer,
+    _make_text_export_bridge_if_needed,
+    build_gemma4_hf_compatible_model,
+)
+from .gemma4_series_audio_model import XHGemma4SeriesAudioModel
+from .gemma4_series_hmonnx_inference import XHGemma4SeriesHMONNXModel
+from .gemma4_series_vision_model import XHGemma4SeriesVisionModel
+from .xh_gemma4_series_config import Gemma4SeriesModelMeta, XHGemma4SeriesModelConfig
+
+
+@register_llm_model("Gemma4ForConditionalGeneration", force=True)
+class XHGemma4SeriesModel(VisionLLMModel):
+    """Single public Gemma4 entry for E4B, 31B dense, and 26B-A4B MoE.
+
+    Public owner for shared Gemma4 construction. Implementation details are
+    being migrated into this package phase-by-phase while preserving the
+    verified export behavior.
+    """
+
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.gemma4_series.workflow:XHGemma4SeriesHMONNXWorkflow"
+    transformers_min_version = "5.5.0"
+    HF_MODEL_CLS = Gemma4ForConditionalGeneration
+    HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
+    META_CLS = Gemma4SeriesModelMeta
+    HMONNXINFERENCE_CLS = XHGemma4SeriesHMONNXModel
+    CONFIG_CLS = XHGemma4SeriesModelConfig
+    BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_gemma4_hf_compatible_model)
+
+    @classmethod
+    def from_pretrained(cls, config: XHGemma4SeriesModelConfig):
+        # Keep the public model type anchored in gemma4_series.  The inherited
+        # legacy class used to return a private gemma4_moe subclass for 26B-A4B,
+        # which made the public registration look unified while construction
+        # still escaped this package.
+        return cls(config)
+
+    def __init__(self, config: XHGemma4SeriesModelConfig):
+        # Intentionally bypass the legacy XHGemma4Model.__init__ because it
+        # constructs visual/audio submodels from gemma4/gemma4e.  The series
+        # package owns those children so later audio/video/PLE changes have one
+        # implementation site.
+        VisionLLMModel.__init__(self, config)
+        self.config = cast(XHGemma4SeriesModelConfig, self.config)
+        self.visual = (
+            XHGemma4SeriesVisionModel(config.visual_config)
+            if config.visual_config is not None
+            else None
+        )
+        self.video_visual = (
+            XHGemma4SeriesVisionModel(config.video_visual_config)
+            if config.video_visual_config is not None
+            else None
+        )
+        self.audio = (
+            XHGemma4SeriesAudioModel(config.audio_config)
+            if config.audio_config is not None
+            else None
+        )
+        self.per_layer_input_embedding: Gemma4PerLayerInputEmbedding | None = None
+        self._kvcache_config = KVCacheConfig()
+        self._kvcache_config.use_cache = self.config.use_cache
+        self._kvcache_mixin = Gemma4KVCacheMixin(self.kvcache_config)
+
+    @VisionLLMModel.work_dir.setter
+    def work_dir(self, work_dir: str):
+        self.config.work_dir = work_dir
+        if self.visual is not None:
+            self.visual.work_dir = str(Path(work_dir) / "visual")
+        if self.video_visual is not None:
+            self.video_visual.work_dir = str(Path(work_dir) / "video_visual")
+        if self.audio is not None:
+            self.audio.work_dir = str(Path(work_dir) / "audio")
+
+    def get_tf_processor(self):
+        if self.visual is not None:
+            processor = self.visual.get_tf_processor()
+        elif self.video_visual is not None:
+            processor = self.video_visual.get_tf_processor()
+        else:
+            processor = super().get_tf_processor()
+        if self.video_visual is not None:
+            processor.video_max_patches = self.video_visual.config.max_patches
+            processor.video_image_seq_length = self.video_visual.config.image_seq_length
+            processor.video_pooling_kernel_size = self.video_visual.config.pooling_kernel_size
+        if self.audio is not None:
+            processor.config.sampling_rate = self.audio.config.sampling_rate
+            processor.config.audio_feature_length = self.audio.config.input_feature_length
+        return processor
+
+    def _get_language_model(self, hf_model: Any) -> Any:
+        if hasattr(hf_model, "language_model"):
+            return hf_model.language_model
+        return hf_model.model.language_model
+
+    @classmethod
+    def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        # Keep Gemma4 Series on the Merak quantized-HF loading path.  GPTQModel
+        # Gemma4 MoE checkpoints are not safe to load through Transformers/
+        # optimum directly: GPTQModel may split/fill MoE expert weights and the
+        # base Merak path already owns the required torch-backend load + dequant
+        # conversion.  This mirrors the legacy gemma4_moe loader instead of
+        # inventing a second quantized load path here.
+        kwargs.setdefault("trust_remote_code", True)
+        kwargs.setdefault("attn_implementation", "eager")
+        kwargs.setdefault("device_map", "cpu")
+        kwargs.setdefault("dtype", torch.bfloat16)
+        return super().get_hf_model(hf_model_dir, quant_weight=quant_weight, **kwargs)
+
+    @classmethod
+    def _postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, **kwargs) -> nn.Module:
+        native_hf_model.quantization_method = None  # type: ignore[attr-defined]
+        native_hf_model._is_hf_initialized = False  # type: ignore[attr-defined]
+        if hasattr(native_hf_model.config, "quantization_config"):
+            native_hf_model.config.quantization_config = None
+        if getattr(native_hf_model.config, "tie_word_embeddings", False):
+            native_hf_model.config.torchscript = True
+            native_hf_model.tie_weights()
+            native_hf_model.config.tie_word_embeddings = False
+            native_hf_model.config.torchscript = False
+        return native_hf_model.eval()
+
+    @classmethod
+    def get_empty_hf_model(cls, hf_model_dir, **kwargs) -> Any:
+        # GPTQModel registers a split-expert Gemma4NaiveExperts implementation
+        # in-process for MoE quant checkpoints.  It intentionally exposes
+        # per-expert Linear modules instead of HF's packed gate_up_proj/down_proj
+        # Parameters.  During HMONNX compatible generate we only need an empty
+        # facade model; however Transformers still walks _init_weights even
+        # under no_init/init_empty_weights.  Guard just this empty-model
+        # construction so the GPTQModel split-expert class is not initialized
+        # through HF's packed-expert branch.
+        from transformers.models.gemma4 import modeling_gemma4
+
+        original_init_weights = modeling_gemma4.Gemma4PreTrainedModel._init_weights
+
+        def _guard_gptqmodel_split_expert_init(self, module):
+            if (
+                module.__class__.__name__ == "Gemma4NaiveExperts"
+                and hasattr(module, "experts")
+                and not hasattr(module, "gate_up_proj")
+                and not hasattr(module, "down_proj")
+            ):
+                return
+            return original_init_weights(self, module)
+
+        modeling_gemma4.Gemma4PreTrainedModel._init_weights = _guard_gptqmodel_split_expert_init
+        try:
+            return super().get_empty_hf_model(hf_model_dir, **kwargs)
+        finally:
+            modeling_gemma4.Gemma4PreTrainedModel._init_weights = original_init_weights
+
+    def _wraped_pre(self, hf_model: Gemma4ForConditionalGeneration):
+        model = getattr(hf_model, "model", None)
+        if model is None:
+            return hf_model
+        for name in ["vision_tower", "embed_vision", "audio_tower", "embed_audio"]:
+            if hasattr(model, name):
+                delattr(model, name)
+        return hf_model
+
+    def init_wrap_model(self, hf_model: Gemma4ForConditionalGeneration) -> object:
+        from ._llm_model_impl import register_wrap_modules
+
+        register_wrap_modules()
+        hf_model = _make_text_export_bridge_if_needed(hf_model, self.config.num_logits_to_keep)
+        return super().init_wrap_model(hf_model)
+
+    def _wraped_post(self, hf_model: Gemma4ForConditionalGeneration):
+        self.config.image_token_id = getattr(hf_model.config, "image_token_id", None)
+        self.config.video_token_id = getattr(hf_model.config, "video_token_id", None)
+        self.config.audio_token_id = getattr(hf_model.config, "audio_token_id", None)
+        self.config.boi_token_id = getattr(hf_model.config, "boi_token_id", None)
+        self.config.eoi_token_id = getattr(hf_model.config, "eoi_token_id", None)
+
+        hf_model = self._wrap_model
+        llm_model = self._get_language_model(hf_model)
+        # Deep-copy embedding on CPU to avoid GPU OOM for large vocab models.
+        orig_embed = llm_model.get_input_embeddings()
+        orig_device = orig_embed.weight.device
+        embed_copy = copy.deepcopy(orig_embed.cpu())
+        orig_embed.to(orig_device)
+        if hasattr(embed_copy, "embed_scale"):
+            embed_copy.weight.data = (embed_copy.weight.float() * embed_copy.embed_scale).to(embed_copy.weight.dtype)
+        self.embed_tokens = nn.Embedding(
+            embed_copy.num_embeddings,
+            embed_copy.embedding_dim,
+            _weight=embed_copy.weight,
+        ).to(orig_device)
+        self.pad_token_id = int(getattr(llm_model.config, "pad_token_id", 0) or 0)
+        self.sliding_window = int(getattr(llm_model.config, "sliding_window", 1024))
+        self.layer_types = list(getattr(llm_model.config, "layer_types", []))
+        if getattr(llm_model.config, "hidden_size_per_layer_input", 0):
+            self.per_layer_input_embedding = Gemma4PerLayerInputEmbedding.from_language_model(llm_model)
+
+        layer_kv_shapes: list[list[int]] = []
+        for layer_idx, layer in enumerate(llm_model.layers):
+            attn = layer.self_attn
+            if getattr(attn, "is_kv_shared_layer", False):
+                continue
+            num_key_value_heads = attn.k_proj.out_features // attn.head_dim
+            layer_type = self.layer_types[layer_idx] if layer_idx < len(self.layer_types) else None
+            cache_seq_len = _gemma4_cache_seq_len_for_layer(
+                layer_type=layer_type,
+                context_max_length=self.config.context_max_length,
+                sliding_window=self.sliding_window,
+                input_seq_len=self.config.prefill_chunk_length,
+                sliding_kv_cache_input_mode=getattr(
+                    self.config, "sliding_kv_cache_input_mode", "slice_window"
+                ),
+            )
+            layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
+        self._kvcache_mixin.set_layer_kv_shapes(layer_kv_shapes)
+
+    def _get_data_preprocessor(self):
+        common_kwargs = dict(
+            token_embedding=self.embed_tokens,
+            input_sequence_length=self.wrap_cfg.input_sequence_length,
+            context_length=self.config.context_max_length,
+            past_key_caches=self.past_key_caches,
+            past_value_caches=self.past_value_caches,
+            pad_token_id=self.pad_token_id,
+            image_token_id=self.config.image_token_id or -1,
+            audio_token_id=self.config.audio_token_id or -1,
+            video_token_id=self.config.video_token_id or -1,
+            bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
+            emit_full_attention_mask=(
+                bool(getattr(self.config, "bidirectional_vision_attention", False))
+                and not self.is_decode()
+            ),
+        )
+        if getattr(self.config, "enable_moe_block", False):
+            return Gemma4MoeDataPreprocess(
+                **common_kwargs,
+                sliding_window_cfg={
+                    "sliding_window": self.config.sliding_window,
+                    "local_attention_window_size": self.config.local_attention_window_size,
+                    "global_attention_window_size": self.config.global_attention_window_size,
+                    "has_local_attention": self.config.has_local_attention,
+                    "has_global_attention": self.config.has_global_attention,
+                },
+            )
+        return Gemma4DataPreprocess(
+            **common_kwargs,
+            per_layer_input_embedding=self.per_layer_input_embedding,
+            sliding_window=self.sliding_window,
+        )
+
+    def get_data_preprocessor(self):
+        # The Gemma4 series preprocessor shape is phase-dependent:
+        #   * 31B/26B prefill emits full_attention_mask + sliding_attention_mask
+        #     for visual bidirectional attention.
+        #   * decode intentionally drops full_attention_mask and only feeds the
+        #     sliding mask to _Gemma4DecodeNoFullMaskBridge.
+        #
+        # BaseModel caches the preprocessor, which can leave decode tracing with
+        # the prefill input contract (one extra mask input). Recreate the
+        # lightweight processor whenever callers ask, so it captures the current
+        # prefill/decode phase and current KV cache objects.
+        self._data_processor = None
+        return super().get_data_preprocessor()
+
+    def _set_device(self, device: torch.device | str | None):
+        super()._set_device(device)
+        if self.visual is not None:
+            self.visual.to(device)
+        if self.video_visual is not None:
+            self.video_visual.to(device)
+        if self.audio is not None:
+            self.audio.to(device)
+        if self.per_layer_input_embedding is not None:
+            self.per_layer_input_embedding.to(device)
+
+    def _to_fronted(self, wrap_model):
+        self.set_prefill()
+        prefill_wrap_model = wrap_model
+        decode_wrap_model = _copy_model_shared_params(wrap_model)
+        if getattr(self.config, "bidirectional_vision_attention", False):
+            decode_wrap_model = _Gemma4DecodeNoFullMaskBridge(
+                decode_wrap_model,
+                num_logits_to_keep=self.config.num_logits_to_keep,
+                language_model_keeps_last_logit=(int(self.config.num_logits_to_keep or 0) == 1),
+                language_model_returns_tensor=True,
+            )
+        self._wrap_model = wrap_model
+        prefill_frontend_model = super()._to_fronted(prefill_wrap_model)
+
+        self._wrap_model = decode_wrap_model
+        self.set_decode()
+        decode_frontend_model = super()._to_fronted(decode_wrap_model)
+        self._frontend_model = prefill_frontend_model
+        self._wrap_model = prefill_frontend_model
+        self.set_prefill()
+        return ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
+
+    def _to_quanted(self, frontend_model, state):
+        decode_fronted_model = frontend_model.decode
+        prefill_fronted_model = frontend_model.prefill
+
+        self.set_prefill()
+        # Let the xhquant pipeline own device placement.  Pre-moving the full
+        # 31B prefill graph to CUDA leaves only a few MB free on an 80GB card
+        # and can OOM inside graph_module_guard while adding input/output
+        # quant points.  Qwen3.5's Merak path uses the same base pipeline
+        # without an eager .cuda() here.
+        prefill_quanted_model = super()._to_quanted(prefill_fronted_model, state, infer_shape=False)
+
+        prefill_quanted_model.cpu()
+        prefill_fronted_model.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        decode_fronted_model.cpu()
+        torch.cuda.empty_cache()
+
+        self.set_decode()
+        decode_quanted_model = super()._to_quanted(decode_fronted_model, state, infer_shape=False)
+        self.set_prefill()
+        return ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
+
+    def get_export_cfg(self) -> dict[str, list[str]]:
+        input_names = [
+            "inputs_embeds",
+            "past_seq_length",
+            "current_input_length",
+        ]
+        is_decode = not bool(getattr(self, "_llm_prefill", True))
+        if getattr(self.config, "bidirectional_vision_attention", False) and not is_decode:
+            input_names.append("full_attention_mask")
+        input_names.append("sliding_attention_mask")
+        if self.per_layer_input_embedding is not None or getattr(self.config, "hidden_size_per_layer_input", 0):
+            # E4B PLE belongs with the text payload, immediately before KV caches.
+            input_names.append("per_layer_inputs")
+        export_cfg = {
+            "input_names": input_names,
+            "output_names": ["logits"],
+        }
+        for layer_idx in range(self.kvcache_config.num_layers):
+            export_cfg["input_names"].append(f"past_key_cache_{layer_idx}")
+        for layer_idx in range(self.kvcache_config.num_layers):
+            export_cfg["input_names"].append(f"past_value_cache_{layer_idx}")
+        return export_cfg
+
+    def _extra_export_metadata(self, output_dir: str, meta_info):
+        meta_info.variant = getattr(self.config, "variant", None)
+        meta_info.capabilities = dict(getattr(self.config, "capabilities", {}) or {})
+        meta_info.layer_types = self.layer_types
+        meta_info.layer_kv_shapes = self._kvcache_mixin.layer_kv_shapes
+        meta_info.sliding_window = self.sliding_window
+        meta_info.sliding_kv_cache_input_mode = getattr(
+            self.config, "sliding_kv_cache_input_mode", "slice_window"
+        )
+        if self.per_layer_input_embedding is not None:
+            artifact_path = Path(output_dir) / "per_layer_input_embedding.pt"
+            self.per_layer_input_embedding.save_artifact(artifact_path)
+            meta_info.per_layer_input_embedding = artifact_path.relative_to(output_dir).as_posix()
+        return meta_info
+
+    def get_export_info(self, output_dir) -> ExportData:
+        str_datetime = datetime.now().strftime("%Y%m%d")
+        model_name = self.config.model_name.lower()
+        output_dir = Path(output_dir) / f"hmquant_{model_name}_{str_datetime}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        meta_info = self.create_export_metadata(output_dir)
+        export_data = ExportData()
+        export_data.exported_dir = str(output_dir)
+        export_data.meta = meta_info
+        export_data.model_name = f"hmquant_{model_name}_{str_datetime}"
+        export_data.str_datetime = str_datetime
+        return export_data
+
+    @log_function_call()
+    def export_hmonnx(self, output_dir: str):
+        logger = get_xhquant_logger()
+        self.work_dir = str(output_dir)
+        if self._state != LLMModelState.QUANTED_ALIGNED:
+            self.to_quanted_aligned()
+        self._quanted_model.prefill.fixed()
+        self._quanted_model.decode.fixed()
+        if self.visual is not None:
+            if self.visual.quanted_model is None:
+                self.visual.to_quanted_aligned()
+            self.visual.quanted_model.fixed()
+        if self.video_visual is not None:
+            if self.video_visual.quanted_model is None:
+                self.video_visual.to_quanted_aligned()
+            self.video_visual.quanted_model.fixed()
+        if self.audio is not None:
+            if self.audio.quanted_model is None:
+                self.audio.to_quanted_aligned()
+            self.audio.quanted_model.fixed()
+        exported_info = self.get_export_info(output_dir)
+        meta_info = cast(Gemma4SeriesModelMeta, exported_info.meta)
+        if self.visual is not None:
+            visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
+            visual_meta = self.visual.export_hmonnx(visual_output_dir)
+            visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+            if getattr(visual_meta, "onnx", None):
+                visual_meta.onnx = str(Path(visual_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
+            meta_info.visual_config = visual_meta
+        if self.video_visual is not None:
+            video_visual_output_dir = str(Path(exported_info.exported_dir) / "video_visual")
+            video_visual_meta = self.video_visual.export_hmonnx(video_visual_output_dir)
+            video_visual_meta.hmonnx = str(
+                Path(video_visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix()
+            )
+            if getattr(video_visual_meta, "onnx", None):
+                video_visual_meta.onnx = str(
+                    Path(video_visual_meta.onnx).relative_to(exported_info.exported_dir).as_posix()
+                )
+            meta_info.video_visual_config = video_visual_meta
+        if self.audio is not None:
+            audio_output_dir = str(Path(exported_info.exported_dir) / "audio")
+            audio_meta = self.audio.export_hmonnx(audio_output_dir)
+            audio_meta.hmonnx = str(Path(audio_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+            if getattr(audio_meta, "onnx", None):
+                audio_meta.onnx = str(Path(audio_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
+            meta_info.audio_config = audio_meta
+        self._export_hmonnx(exported_info)
+        json.dump(
+            meta_info.to_dict(),
+            open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"),
+            indent=4,
+        )
+        logger.info(f"Exporting completed! Exported model is saved at: {exported_info.exported_dir}")
+        return meta_info
+
+
+# Compatibility export name for callers that have not renamed imports yet.
+XHGemma4Model = XHGemma4SeriesModel
+
+
+__all__ = ["XHGemma4Model", "XHGemma4SeriesModel", "build_gemma4_hf_compatible_model"]

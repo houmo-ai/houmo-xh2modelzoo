@@ -1,0 +1,636 @@
+from __future__ import annotations
+
+import copy
+from typing import Any, Optional, Union
+
+import torch
+import torch.nn as nn
+from transformers.cache_utils import Cache
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4ForConditionalGeneration as XHGemma4ForConditionalGeneration,
+)
+
+from xhquant import nn as xhnn
+from xhquant.utils.registry import _DMRegistryCls
+
+from ...kv_cache_mixin import KVCacheMixin
+from ...text_llm_hf_compatible import TextLLMHFCompatible
+from ...types import KVCacheConfig
+from .data_preprocess import Gemma4DataPreprocess
+
+def _copy_model_shared_params(model: nn.Module) -> nn.Module:
+    """Deep-copy model structure while sharing every tensor object with the original."""
+
+    def _share_tensors(obj: Any, memo: dict[int, Any], seen: set[int]) -> None:
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+
+        if isinstance(obj, nn.Parameter):
+            memo.setdefault(obj_id, nn.Parameter(obj.data, requires_grad=obj.requires_grad))
+            return
+        if torch.is_tensor(obj):
+            memo.setdefault(obj_id, obj)
+            return
+        if isinstance(obj, nn.Module):
+            for value in obj.__dict__.values():
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                _share_tensors(key, memo, seen)
+                _share_tensors(value, memo, seen)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                _share_tensors(item, memo, seen)
+
+    memo: dict[int, Any] = {}
+    _share_tensors(model, memo, set())
+    return copy.deepcopy(model, memo)
+
+
+def _gemma4_cache_seq_len_for_layer(
+    *,
+    layer_type: str | None,
+    context_max_length: int,
+    sliding_window: int,
+    input_seq_len: int,
+    sliding_kv_cache_input_mode: str = "slice_window",
+) -> int:
+    """Return the static cache input length for a Gemma4 layer.
+
+    ``legacy_full`` preserves the original full-context backing tensor used
+    before compiler/runtime support for sliced sliding-layer KV inputs.
+    ``slice_window`` exports sliding layers with only
+    ``sliding_window + input_seq_len`` entries, aligned to 16.
+    """
+
+    if layer_type == "sliding_attention" and sliding_window > 0:
+        mode = str(sliding_kv_cache_input_mode or "slice_window").lower()
+        if mode == "slice_window":
+            return Gemma4DataPreprocess._aligned(int(sliding_window) + int(input_seq_len), 16)
+        if mode == "legacy_full":
+            sliding_output_len = Gemma4DataPreprocess._aligned(sliding_window + input_seq_len - 1, 16)
+            max_prefill_past = max(0, int(context_max_length) - int(input_seq_len))
+            max_prefill_start = max(0, max_prefill_past - int(sliding_window) + 1)
+            return max(int(context_max_length), max_prefill_start + sliding_output_len)
+        raise ValueError(
+            "Unsupported Gemma4 sliding_kv_cache_input_mode: "
+            f"{sliding_kv_cache_input_mode!r}"
+        )
+    return int(context_max_length)
+
+
+class Gemma4KVCacheMixin(KVCacheMixin):
+    def __init__(self, kv_cache_config: KVCacheConfig):
+        super().__init__(kv_cache_config)
+        self.layer_kv_shapes: list[list[int]] = []
+
+    def set_layer_kv_shapes(self, layer_kv_shapes: list[list[int]]):
+        self.layer_kv_shapes = layer_kv_shapes
+        self.kvcache_config.num_layers = len(layer_kv_shapes)
+        if layer_kv_shapes:
+            self.kvcache_config.kv_cache_shape = layer_kv_shapes[0]
+
+    def prepare_kv_cache(self, dtype=torch.float16):
+        if not self.use_cache:
+            return
+        self.past_key_caches.clear()
+        self.past_value_caches.clear()
+        for shape in self.layer_kv_shapes:
+            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(shape, dtype=dtype)))
+            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(shape, dtype=dtype)))
+
+
+class _Gemma4TextExportBridgeBase(nn.Module):
+    def __init__(
+        self,
+        hf_model: XHGemma4ForConditionalGeneration,
+        num_logits_to_keep: int | None = 0,
+        *,
+        language_model_keeps_last_logit: bool = False,
+        language_model_returns_tensor: bool = False,
+    ):
+        super().__init__()
+        self.config = hf_model.config
+        self.language_model = hf_model.model.language_model
+        self.lm_head = hf_model.lm_head
+        self.num_logits_to_keep = int(num_logits_to_keep or 0)
+        self.language_model_returns_tensor = bool(language_model_returns_tensor)
+        # Real Gemma4 text graphs perform the valid-token gather inside
+        # _Gemma4TextModel so FX tracing sees a fixed graph without Python
+        # shape checks.  Unit-test dummy language models can still exercise
+        # the bridge-local DynamicSlice path by leaving this flag false.
+        self.valid_logits_slice = (
+            xhnn.DynamicSlice([1], [1], [1])
+            if self.num_logits_to_keep == 1 and not language_model_keeps_last_logit
+            else None
+        )
+
+    def get_input_embeddings(self):
+        return self.language_model.get_input_embeddings()
+
+    def _run(
+        self,
+        *,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        full_attention_mask,
+        sliding_attention_mask,
+        past_key_cache,
+        past_value_cache,
+        per_layer_inputs=None,
+    ):
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=full_attention_mask,
+            sliding_attention_mask=sliding_attention_mask,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            per_layer_inputs=per_layer_inputs,
+        )
+        if self.language_model_returns_tensor:
+            hidden_states = outputs
+        else:
+            hidden_states = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs
+        if self.valid_logits_slice is not None:
+            hidden_states = self.valid_logits_slice(hidden_states, current_input_length - 1)
+        logits = self.lm_head(hidden_states)
+        final_logit_softcapping = getattr(self.config.text_config, "final_logit_softcapping", None)
+        if final_logit_softcapping is not None:
+            logits = logits / final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * final_logit_softcapping
+        return logits
+
+
+class _Gemma4DecodeNoFullMaskBridge(_Gemma4TextExportBridgeBase):
+    """Decode graph adapter for 31B/26B visual-bidirectional variants.
+
+    Visual soft tokens only appear during prefill.  Decode therefore does not
+    need the context-length full-attention mask input; full-attention layers
+    fall back to their internal causal softmax path when ``None`` is passed.
+    """
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        sliding_attention_mask,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=sliding_attention_mask,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+        )
+
+
+class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
+    """Text-only export bridge for E4B PLE.
+
+    ``per_layer_inputs`` contains scaled ``embed_tokens_per_layer`` lookup
+    output.  E4B does not export a separate full-attention mask; its full
+    layers use MaskedSoftmax while the explicit input remains the sliding mask.
+    """
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        sliding_attention_mask,
+        per_layer_inputs,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=sliding_attention_mask,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            per_layer_inputs=per_layer_inputs,
+        )
+
+
+def _make_text_export_bridge_if_needed(hf_model: XHGemma4ForConditionalGeneration, num_logits_to_keep: int | None = 0):
+    text_config = hf_model.config.get_text_config()
+    if getattr(text_config, "hidden_size_per_layer_input", 0):
+        return _Gemma4TextExportBridgePLE(
+            hf_model,
+            num_logits_to_keep=num_logits_to_keep,
+            language_model_keeps_last_logit=(int(num_logits_to_keep or 0) == 1),
+            language_model_returns_tensor=True,
+        )
+    return hf_model
+
+
+class _Gemma4HFCompatible(TextLLMHFCompatible):
+    """HF-compatible wrapper for Gemma4. Redirects forward() to our HMONNX/quanted model
+    while keeping the HF generate() loop happy."""
+
+    def _setup(self: XHGemma4ForConditionalGeneration, text_llm_model: "XHGemma4Model"):
+        model = super()._setup(text_llm_model)
+        if model is not None:
+            for attr in ("model",):
+                if hasattr(model, attr):
+                    delattr(model, attr)
+            if hasattr(model, "lm_head"):
+                delattr(model, "lm_head")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        self._gemma4_pixel_values = None
+        self._gemma4_pixel_position_ids = None
+        self._gemma4_image_position_ids = None
+        self._gemma4_pooling_matrix = None
+        self._gemma4_visual_attention_mask = None
+        self._gemma4_image_soft_token_count = None
+        self._gemma4_pixel_values_videos = None
+        self._gemma4_video_position_ids = None
+        self._gemma4_video_pixel_position_ids = None
+        self._gemma4_video_pooling_matrix = None
+        self._gemma4_video_visual_attention_mask = None
+        self._gemma4_video_soft_token_count = None
+        self._gemma4_input_features = None
+        self._gemma4_input_features_mask = None
+        self._gemma4_audio_attention_mask = None
+        self._gemma4_mm_token_type_ids = None
+        return model
+
+    @staticmethod
+    def _flatten_features(features: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if features is None:
+            return None
+        if features.ndim == 2:
+            return features
+        return features.reshape(-1, features.shape[-1])
+
+    @staticmethod
+    def _split_features_by_chunk(
+        input_ids: torch.Tensor,
+        *,
+        token_id: int,
+        features: Optional[torch.Tensor],
+        chunk_size: int,
+    ) -> list[Optional[torch.Tensor]]:
+        steps = (input_ids.shape[1] + chunk_size - 1) // chunk_size
+        if token_id < 0 or features is None:
+            return [None] * steps
+        flat_features = _Gemma4HFCompatible._flatten_features(features)
+        assert flat_features is not None
+        total_token_count = int((input_ids == token_id).sum().item())
+        if total_token_count != flat_features.shape[0]:
+            raise ValueError(
+                f"Feature count does not match token count for token id {token_id}: "
+                f"{flat_features.shape[0]} vs {total_token_count}"
+            )
+        chunks: list[Optional[torch.Tensor]] = []
+        cursor = 0
+        for step in range(steps):
+            start = step * chunk_size
+            end = min((step + 1) * chunk_size, input_ids.shape[1])
+            count = int((input_ids[:, start:end] == token_id).sum().item())
+            chunks.append(flat_features[cursor : cursor + count] if count else None)
+            cursor += count
+        return chunks
+
+    def _run_padded_visual(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        pooling_matrix: torch.Tensor,
+        visual_attention_mask: torch.Tensor,
+        soft_token_count: Optional[torch.Tensor | list | tuple | int],
+        visual_model: Any | None = None,
+    ) -> torch.Tensor:
+        visual = visual_model or self._llm_model.visual
+        pixel_values = pixel_values.reshape(-1, pixel_values.shape[-2], pixel_values.shape[-1])
+        pixel_position_ids = pixel_position_ids.reshape(-1, pixel_position_ids.shape[-2], pixel_position_ids.shape[-1])
+        pooling_matrix = pooling_matrix.reshape(-1, pooling_matrix.shape[-2], pooling_matrix.shape[-1])
+        visual_attention_mask = visual_attention_mask.reshape(
+            -1,
+            visual_attention_mask.shape[-3],
+            visual_attention_mask.shape[-2],
+            visual_attention_mask.shape[-1],
+        )
+        if soft_token_count is None:
+            soft_counts = [None] * pixel_values.shape[0]
+        elif torch.is_tensor(soft_token_count):
+            soft_counts = [int(v.item()) for v in soft_token_count.flatten()]
+        elif isinstance(soft_token_count, (list, tuple)):
+            soft_counts = [int(v.item()) if torch.is_tensor(v) else int(v) for v in soft_token_count]
+        else:
+            soft_counts = [int(soft_token_count)]
+        if len(soft_counts) == 1 and pixel_values.shape[0] > 1:
+            soft_counts = soft_counts * pixel_values.shape[0]
+
+        outputs = []
+        for idx in range(pixel_values.shape[0]):
+            embeds = visual.forward(
+                pixel_values[idx : idx + 1].to(dtype=visual.dtype, device=visual.device),
+                pixel_position_ids[idx : idx + 1].to(dtype=torch.int32, device=visual.device),
+                pooling_matrix[idx : idx + 1].to(dtype=visual.dtype, device=visual.device),
+                visual_attention_mask[idx : idx + 1].to(device=visual.device),
+            )
+            if isinstance(embeds, (tuple, list)):
+                embeds = embeds[0]
+            embeds = embeds.to(device=self._llm_model.device, dtype=self._llm_model.dtype)
+            if embeds.dim() == 3 and embeds.shape[0] == 1:
+                embeds = embeds[0]
+            count = soft_counts[idx] if idx < len(soft_counts) else None
+            if count is not None:
+                embeds = embeds[:count]
+            outputs.append(embeds)
+        return torch.cat(outputs, dim=0) if outputs else torch.empty(0, device=self._llm_model.device)
+
+    def _run_audio(
+        self,
+        input_features: torch.Tensor,
+        input_features_mask: torch.Tensor | None,
+        audio_attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if getattr(self._llm_model, "audio", None) is None:
+            raise ValueError("Gemma4 audio inputs were provided, but this preset has no public audio submodel.")
+        audio = self._llm_model.audio
+        audio_args = [
+            input_features.to(dtype=audio.dtype, device=audio.device),
+            input_features_mask.to(device=audio.device) if input_features_mask is not None else None,
+        ]
+        if audio_attention_mask is not None:
+            audio_args.append(audio_attention_mask.to(device=audio.device))
+        outputs = audio.forward(*audio_args)
+        if isinstance(outputs, (tuple, list)):
+            audio_embeds = outputs[0]
+            audio_mask = outputs[1] if len(outputs) > 1 else None
+        else:
+            audio_embeds = outputs
+            audio_mask = None
+        audio_embeds = audio_embeds.to(device=self._llm_model.device, dtype=self._llm_model.dtype)
+        if audio_mask is not None:
+            audio_mask = audio_mask.to(device=audio_embeds.device).bool()
+            return audio_embeds[audio_mask]
+        return audio_embeds.reshape(-1, audio_embeds.shape[-1])
+
+    def _run_llm_from_processed(self, data_input):
+        processed = list(data_input)
+        past_key_caches = processed[-2]
+        past_value_caches = processed[-1]
+        model_args = processed[:-2] + list(past_key_caches) + list(past_value_caches)
+        logits = self._llm_model.forward(*model_args)
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]
+        return logits
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        # Retrieve vision args stored by generate()
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is None:
+            pixel_values = self._gemma4_pixel_values
+        pixel_position_ids = kwargs.pop("pixel_position_ids", None)
+        if pixel_position_ids is None:
+            pixel_position_ids = self._gemma4_pixel_position_ids
+        image_position_ids = kwargs.pop("image_position_ids", None)
+        if image_position_ids is None:
+            image_position_ids = self._gemma4_image_position_ids
+        pooling_matrix = kwargs.pop("pooling_matrix", None)
+        if pooling_matrix is None:
+            pooling_matrix = self._gemma4_pooling_matrix
+        visual_attention_mask = kwargs.pop("visual_attention_mask", None)
+        if visual_attention_mask is None:
+            visual_attention_mask = self._gemma4_visual_attention_mask
+        image_soft_token_count = kwargs.pop("image_soft_token_count", None)
+        if image_soft_token_count is None:
+            image_soft_token_count = kwargs.pop("num_soft_tokens_per_image", None)
+        if image_soft_token_count is None:
+            image_soft_token_count = self._gemma4_image_soft_token_count
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        if pixel_values_videos is None:
+            pixel_values_videos = self._gemma4_pixel_values_videos
+        video_position_ids = kwargs.pop("video_position_ids", None)
+        if video_position_ids is None:
+            video_position_ids = self._gemma4_video_position_ids
+        video_pixel_position_ids = kwargs.pop("video_pixel_position_ids", None)
+        if video_pixel_position_ids is None:
+            video_pixel_position_ids = self._gemma4_video_pixel_position_ids
+        video_pooling_matrix = kwargs.pop("video_pooling_matrix", None)
+        if video_pooling_matrix is None:
+            video_pooling_matrix = self._gemma4_video_pooling_matrix
+        video_visual_attention_mask = kwargs.pop("video_visual_attention_mask", None)
+        if video_visual_attention_mask is None:
+            video_visual_attention_mask = self._gemma4_video_visual_attention_mask
+        video_soft_token_count = kwargs.pop("video_soft_token_count", None)
+        if video_soft_token_count is None:
+            video_soft_token_count = self._gemma4_video_soft_token_count
+        input_features = kwargs.pop("input_features", None)
+        if input_features is None:
+            input_features = self._gemma4_input_features
+        input_features_mask = kwargs.pop("input_features_mask", None)
+        if input_features_mask is None:
+            input_features_mask = self._gemma4_input_features_mask
+        audio_attention_mask = kwargs.pop("audio_attention_mask", None)
+        if audio_attention_mask is None:
+            audio_attention_mask = self._gemma4_audio_attention_mask
+        mm_token_type_ids = kwargs.pop("mm_token_type_ids", None)
+        if mm_token_type_ids is None:
+            mm_token_type_ids = self._gemma4_mm_token_type_ids
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings()(input_ids)
+
+        # Vision: run visual model on first call (prefill) only
+        image_embeds = None
+        video_embeds = None
+        audio_embeds = None
+        if pixel_values is not None:
+            if pixel_position_ids is None and image_position_ids is not None:
+                if image_position_ids.dim() == 2:
+                    image_position_ids = image_position_ids.unsqueeze(0)
+                pixel_position_ids = image_position_ids.clone()
+                pixel_position_ids[(pixel_position_ids == -1).all(dim=-1)] = 0
+            if pixel_position_ids is None or pooling_matrix is None or visual_attention_mask is None:
+                raise ValueError(
+                    "Gemma4 padded visual inference requires pixel_position_ids, "
+                    "pooling_matrix and visual_attention_mask with pixel_values."
+                )
+            image_embeds = self._run_padded_visual(
+                pixel_values,
+                pixel_position_ids,
+                pooling_matrix,
+                visual_attention_mask,
+                image_soft_token_count,
+            )
+            # Offload visual model to free GPU memory for text prefill
+            self._llm_model.visual.to("cpu")
+            torch.cuda.empty_cache()
+            # Clear so vision is not re-run on decode steps
+            self._gemma4_pixel_values = None
+            self._gemma4_pixel_position_ids = None
+            self._gemma4_image_position_ids = None
+            self._gemma4_pooling_matrix = None
+            self._gemma4_visual_attention_mask = None
+            self._gemma4_image_soft_token_count = None
+
+        if pixel_values_videos is not None:
+            if video_pixel_position_ids is None and video_position_ids is not None:
+                video_pixel_position_ids = video_position_ids.clone()
+                video_pixel_position_ids[(video_pixel_position_ids == -1).all(dim=-1)] = 0
+            if video_pixel_position_ids is None or video_pooling_matrix is None or video_visual_attention_mask is None:
+                raise ValueError(
+                    "Gemma4 padded video inference requires video_pixel_position_ids, "
+                    "video_pooling_matrix and video_visual_attention_mask with pixel_values_videos."
+                )
+            video_embeds = self._run_padded_visual(
+                pixel_values_videos,
+                video_pixel_position_ids,
+                video_pooling_matrix,
+                video_visual_attention_mask,
+                video_soft_token_count,
+                getattr(self._llm_model, "video_visual", None) or self._llm_model.visual,
+            )
+            (getattr(self._llm_model, "video_visual", None) or self._llm_model.visual).to("cpu")
+            torch.cuda.empty_cache()
+            self._gemma4_pixel_values_videos = None
+            self._gemma4_video_position_ids = None
+            self._gemma4_video_pixel_position_ids = None
+            self._gemma4_video_pooling_matrix = None
+            self._gemma4_video_visual_attention_mask = None
+            self._gemma4_video_soft_token_count = None
+
+        if input_features is not None:
+            audio_embeds = self._run_audio(input_features, input_features_mask, audio_attention_mask)
+            if getattr(self._llm_model, "audio", None) is not None:
+                self._llm_model.audio.to("cpu")
+            torch.cuda.empty_cache()
+            self._gemma4_input_features = None
+            self._gemma4_input_features_mask = None
+            self._gemma4_audio_attention_mask = None
+
+        seq_length = inputs_embeds.shape[1]
+        data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
+        device = inputs_embeds.device
+        chunk_len = data_processor.input_sequence_length
+
+        if seq_length <= chunk_len:
+            # --- Single-chunk path (original) ---
+            data_batch = {
+                "input_ids": input_ids,
+                "image_embeds": image_embeds,
+                "video_embeds": video_embeds,
+                "audio_embeds": audio_embeds,
+                "past_seq_length": self._past_seq_length,
+                "mm_token_type_ids": mm_token_type_ids,
+            }
+            data_input = data_processor(data_batch)
+            logits = self._run_llm_from_processed(data_input)
+            if logits.dim() == 3 and logits.shape[1] > seq_length:
+                logits = logits[:, :seq_length, :]
+        else:
+            # --- Multi-chunk prefill; route every chunk through the same data
+            # preprocessor so PLE and multimodal token replacement stay correct.
+            if mm_token_type_ids is None:
+                mm_full = torch.zeros(seq_length, dtype=torch.long, device=device)
+            else:
+                mm_full = mm_token_type_ids.to(device).flatten()[:seq_length]
+
+            steps = (seq_length + chunk_len - 1) // chunk_len
+            running_past_seq = self._past_seq_length
+            image_chunks = self._split_features_by_chunk(
+                input_ids, token_id=data_processor.image_token_id, features=image_embeds, chunk_size=chunk_len
+            )
+            video_chunks = self._split_features_by_chunk(
+                input_ids, token_id=data_processor.video_token_id, features=video_embeds, chunk_size=chunk_len
+            )
+            audio_chunks = self._split_features_by_chunk(
+                input_ids, token_id=data_processor.audio_token_id, features=audio_embeds, chunk_size=chunk_len
+            )
+
+            outputs_logits = []
+            for i in range(steps):
+                start = i * chunk_len
+                end = min((i + 1) * chunk_len, seq_length)
+                sub_current_len = min(end, seq_length) - start
+                data_batch = {
+                    "input_ids": input_ids[:, start:end],
+                    "image_embeds": image_chunks[i],
+                    "video_embeds": video_chunks[i],
+                    "audio_embeds": audio_chunks[i],
+                    "past_seq_length": running_past_seq,
+                    "mm_token_type_ids": mm_full[start:end].unsqueeze(0),
+                }
+                chunk_logits = self._run_llm_from_processed(data_processor(data_batch))
+                outputs_logits.append(chunk_logits)
+                running_past_seq += sub_current_len
+
+            # Use last chunk's logits, trimmed to valid length
+            last_valid = min(chunk_len, seq_length - (steps - 1) * chunk_len)
+            logits = outputs_logits[-1][:, :last_valid, :]
+
+        return CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=past_key_values,
+        )
+
+    def generate(self, *args, **kwargs):
+        # Extract Gemma4-specific kwargs before HF's generate validates them
+        self._gemma4_pixel_values = kwargs.pop("pixel_values", None)
+        self._gemma4_pixel_position_ids = kwargs.pop("pixel_position_ids", None)
+        self._gemma4_image_position_ids = kwargs.pop("image_position_ids", None)
+        self._gemma4_pooling_matrix = kwargs.pop("pooling_matrix", None)
+        self._gemma4_visual_attention_mask = kwargs.pop("visual_attention_mask", None)
+        self._gemma4_image_soft_token_count = kwargs.pop("image_soft_token_count", None)
+        if self._gemma4_image_soft_token_count is None:
+            self._gemma4_image_soft_token_count = kwargs.pop("num_soft_tokens_per_image", None)
+        self._gemma4_pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        self._gemma4_video_position_ids = kwargs.pop("video_position_ids", None)
+        self._gemma4_video_pixel_position_ids = kwargs.pop("video_pixel_position_ids", None)
+        self._gemma4_video_pooling_matrix = kwargs.pop("video_pooling_matrix", None)
+        self._gemma4_video_visual_attention_mask = kwargs.pop("video_visual_attention_mask", None)
+        self._gemma4_video_soft_token_count = kwargs.pop("video_soft_token_count", None)
+        self._gemma4_input_features = kwargs.pop("input_features", None)
+        self._gemma4_input_features_mask = kwargs.pop("input_features_mask", None)
+        self._gemma4_audio_attention_mask = kwargs.pop("audio_attention_mask", None)
+        self._gemma4_mm_token_type_ids = kwargs.pop("mm_token_type_ids", None)
+        return super().generate(*args, **kwargs)
+
+    def set_experts_implementation(self, *args, **kwargs):
+        """No-op: Gemma4 has no MoE experts; prevents HF generate crash."""
+
+
+def build_gemma4_hf_compatible_model(
+    hf_model: XHGemma4ForConditionalGeneration,
+    xh_model: "XHGemma4Model",
+):
+    llm_compatible_modules = _DMRegistryCls("XHCompatible")
+    hf_model_cls = type(hf_model)
+    if hf_model_cls not in llm_compatible_modules:
+        llm_compatible_modules.register_module({hf_model_cls: hf_model_cls.__name__}, _Gemma4HFCompatible)
+    return llm_compatible_modules.convert(hf_model, text_llm_model=xh_model)

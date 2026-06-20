@@ -1,4 +1,5 @@
 import importlib
+import sys
 from typing import Optional, Type
 
 from xhquant.api import get_xhquant_logger
@@ -48,10 +49,36 @@ def get_model_class(cfg: BaseLLMModelConfig | dict) -> type[BaseLLMModel]:
         raise ValueError(f"Unsupported chip architecture: {chip_arch}")
     if model_type not in register:
         auto_load_library_for_model(model_type)
+    elif _registered_model_needs_mapped_module(model_type, register.get(model_type)):
+        auto_load_library_for_model(model_type)
+        if model_type in register and _registered_model_needs_mapped_module(model_type, register.get(model_type)):
+            _reload_mapped_library_for_model(model_type)
     if model_type not in register:
         raise ValueError(f"Unsupported model type: {model_type} for chip architecture: {chip_arch}")
 
     return register.get(model_type)
+
+
+def _registered_model_needs_mapped_module(model_type: str, model_cls: type[BaseLLMModel]) -> bool:
+    module_name = MODEL_TYPE_MAPPING_MODULES.get(model_type)
+    if not module_name:
+        return False
+    expected_fragment = f".models.{module_name}."
+    return expected_fragment not in getattr(model_cls, "__module__", "")
+
+
+def _reload_mapped_library_for_model(model_type: str) -> None:
+    module_name = MODEL_TYPE_MAPPING_MODULES.get(model_type)
+    if module_name is None:
+        return
+    full_module_name = f"{__package__}.models.{module_name}"
+    module = sys.modules.get(full_module_name)
+    if module is not None:
+        importlib.reload(module)
+        if model_type == "Gemma4ForConditionalGeneration":
+            series_model = getattr(module, "XHGemma4SeriesModel", None)
+            if series_model is not None:
+                XH_LLM_MODELS.register_module(model_type, force=True, module=series_model)
 
 
 def get_config_class(cfg: BaseLLMModelConfig | dict) -> type[BaseLLMModelConfig]:

@@ -13,9 +13,10 @@ def is_register_llm_model_call(node: ast.AST) -> bool:
     return False
 
 
-def extract_register_llm_model_args(decorator: ast.Call) -> tuple[str | None, bool]:
+def extract_register_llm_model_args(decorator: ast.Call) -> tuple[str | None, bool, bool]:
     name = None
     master = True
+    force = False
 
     if decorator.args:
         first_arg = decorator.args[0]
@@ -29,8 +30,11 @@ def extract_register_llm_model_args(decorator: ast.Call) -> tuple[str | None, bo
         elif keyword.arg == "master":
             if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
                 master = keyword.value.value
+        elif keyword.arg == "force":
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool):
+                force = keyword.value.value
 
-    return name, master
+    return name, master, force
 
 
 def parse_register_llm_models(py_file: Path) -> list[dict[str, object]]:
@@ -47,7 +51,7 @@ def parse_register_llm_models(py_file: Path) -> list[dict[str, object]]:
         for decorator in node.decorator_list:
             if not is_register_llm_model_call(decorator):
                 continue
-            name, master = extract_register_llm_model_args(decorator)
+            name, master, force = extract_register_llm_model_args(decorator)
             if name is None:
                 continue
             results.append(
@@ -56,6 +60,7 @@ def parse_register_llm_models(py_file: Path) -> list[dict[str, object]]:
                     "model_type": name,
                     "module_name": module_name,
                     "master": master,
+                    "force": force,
                     "lineno": getattr(decorator, "lineno", None),
                     "py_file": py_file,
                 }
@@ -70,8 +75,15 @@ def get_support_all_model_types():
     for py_file in sorted(models_dir.rglob("*.py")):
         results += parse_register_llm_models(py_file)
 
-    model_types = {result["model_type"]: result["module_name"] for result in results}
-    return OrderedDict(model_types)
+    model_types = OrderedDict()
+    model_forced = {}
+    for result in results:
+        model_type = result["model_type"]
+        force = bool(result.get("force"))
+        if model_type not in model_types or force or not model_forced.get(model_type, False):
+            model_types[model_type] = result["module_name"]
+            model_forced[model_type] = force
+    return model_types
 
 
 def get_support_master_model_types():
@@ -80,5 +92,14 @@ def get_support_master_model_types():
     for py_file in sorted(models_dir.rglob("*.py")):
         results += parse_register_llm_models(py_file)
 
-    model_types = {result["model_type"]: result["module_name"] for result in results if result["master"]}
-    return OrderedDict(model_types)
+    model_types = OrderedDict()
+    model_forced = {}
+    for result in results:
+        if not result["master"]:
+            continue
+        model_type = result["model_type"]
+        force = bool(result.get("force"))
+        if model_type not in model_types or force or not model_forced.get(model_type, False):
+            model_types[model_type] = result["module_name"]
+            model_forced[model_type] = force
+    return model_types
