@@ -65,6 +65,57 @@ python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
   --preset 26b-a4b --dry-run
 ```
 
+
+## 一键导出四个推荐 HMONNX
+
+推荐入口是“复用当前最优量化 HF 权重 → 8192 context / 256 prefill → dump 全模块 golden”。
+先把四个量化权重目录通过环境变量传入，然后一条命令并行导出四个模型；每张卡只跑一个任务。
+
+```bash
+cat > /tmp/export_gemma4_best_hmonnx.sh <<'BASH'
+set -euo pipefail
+
+ROOT="${GEMMA4_EXPORT_ROOT:-./work_dirs/qtl384_gemma4_best_exports_$(date +%Y%m%d_%H%M%S)}"
+CTX="${GEMMA4_CONTEXT_MAX_LENGTH:-8192}"
+PREFILL="${GEMMA4_PREFILL_CHUNK_LENGTH:-256}"
+
+# 必填：指向已量化 HF 权重目录。
+: "${GEMMA4_E2B_AUTOROUND_HF:?set GEMMA4_E2B_AUTOROUND_HF}"
+: "${GEMMA4_E4B_GPTQMODEL_HF:?set GEMMA4_E4B_GPTQMODEL_HF}"
+: "${GEMMA4_26B_A4B_AUTOROUND_HF:?set GEMMA4_26B_A4B_AUTOROUND_HF}"
+: "${GEMMA4_31B_AUTOROUND_HF:?set GEMMA4_31B_AUTOROUND_HF}"
+
+run_one() {
+  local gpu="$1" preset="$2" hf_dir="$3" slug="$4"
+  mkdir -p "$ROOT/$slug"
+  echo "[$(date '+%F %T')] start $slug on GPU $gpu" | tee "$ROOT/$slug/run.log"
+  CUDA_VISIBLE_DEVICES="$gpu" python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
+    --preset "$preset" \
+    --action existing-hf \
+    --existing-hf-model-dir "$hf_dir" \
+    --work-dir "$ROOT/$slug" \
+    --context-max-length "$CTX" \
+    --prefill-chunk-length "$PREFILL" \
+    --sliding-kv-cache-input-mode slice_window \
+    --golden \
+    --force 2>&1 | tee -a "$ROOT/$slug/run.log"
+}
+
+run_one 0 e2b     "$GEMMA4_E2B_AUTOROUND_HF"      e2b_autoround &
+run_one 1 e4b     "$GEMMA4_E4B_GPTQMODEL_HF"      e4b_gptqmodel &
+run_one 2 26b-a4b "$GEMMA4_26B_A4B_AUTOROUND_HF"  26b_a4b_autoround &
+run_one 3 31b     "$GEMMA4_31B_AUTOROUND_HF"      31b_autoround &
+wait
+
+echo "export root: $ROOT"
+find "$ROOT" -name golden_meta_info.json -print | sort
+BASH
+
+bash /tmp/export_gemma4_best_hmonnx.sh
+```
+
+如果要换 GPU，把脚本里的 `run_one 0/1/2/3 ...` 改成空闲卡号即可；如果只想重导出一个模型，直接使用下面单模型命令。
+
 ## 复用最优量化 HF 目录导出 HMONNX
 
 示例：E4B GPTQModel，8192 context，256 prefill，并为所有模块 dump golden。
