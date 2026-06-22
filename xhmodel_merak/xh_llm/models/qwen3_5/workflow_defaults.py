@@ -41,7 +41,6 @@ QUANT_CONFIG_TEMPLATE: dict[str, Any] = {
     "existing_hf": {
         "algorithm": "existing_hf",
         "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
         "existing_hf_model_dir": "weights/<existing-gptqmodel-hf-dir>",
     },
 }

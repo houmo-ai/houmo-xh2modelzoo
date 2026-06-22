@@ -48,7 +48,6 @@ def _build_quant_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
             "quant": {
                 "algorithm": "existing_hf",
                 "artifact_format": "gptqmodel_hf",
-                "source_algorithm": args.source_algorithm,
                 "existing_hf_model_dir": args.existing_hf_model_dir,
             }
         }
@@ -91,11 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--existing-hf-model-dir",
         default="",
         help="Reuse an already quantized HF/GPTQModel directory instead of running AutoRound",
-    )
-    parser.add_argument(
-        "--source-algorithm",
-        default="autoround",
-        help="Algorithm label for --existing-hf-model-dir QuantResult metadata",
     )
     return parser
 

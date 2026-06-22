@@ -168,7 +168,6 @@ config_overrides = {
     "quant": {
         "algorithm": "existing_hf",
         "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
         "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
     }
 }
@@ -178,11 +177,76 @@ config_overrides = {
     "quant": {
         "algorithm": "existing_hf",
         "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
         "existing_hf_model_dir": "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400",
     }
 }
 ```
+
+### Quant + export CLI
+
+Use `qwen3_5_quant_export.py` when upstream wants one command that reads a
+workflow YAML, runs quantization, then exports HMONNX.  If an external quantized
+HF/GPTQModel directory already exists, pass it with `--existing-hf-model-dir`;
+the command will skip real quantization and export that directory directly.
+
+```bash
+# Real 9B quant -> export.
+CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.5-9B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_5_9b_quant \
+  --export-output-dir work_dirs/qwen3_5_9b_export \
+  --device cuda:0 \
+  --force
+
+CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.6-35B-A3B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_6_35b_a3b_quant \
+  --export-output-dir work_dirs/qwen3_6_35b_a3b_export \
+  --device cuda:0 \
+  --force
+
+# Existing quant HF -> export only.
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.5-9B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --existing-hf-model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --export-output-dir work_dirs/qwen3_5_9b_export \
+  --device cuda:0 \
+  --force
+
+# Existing quant HF -> export only.
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/SGGM-VL-27B-R3.6 \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full.yaml \
+  --existing-hf-model-dir weights/SGGM-VL-27B-R3.6-mode1-llm-only-W4G64 \
+  --export-output-dir work_dirs/SGGM-VL-27b_export \
+  --device cuda:0 \
+  --force
+
+# Base HF -> export only.
+python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.5-9B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --base \
+  --export-output-dir work_dirs/qwen3_5_9b_base_export \
+  --device cuda:0 \
+  --force
+
+python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.5-27B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --base \
+  --export-output-dir work_dirs/qwen3_5_9b_base_export \
+  --device cuda:0 \
+  --force
+
+```
+
+Run-specific export tweaks stay as dotted config overrides, for example
+`--override export.model.fuse_gdr_ops=true`.  The CLI intentionally does not
+expose quant internals such as bits, group size, dataset, or MoE bit routing.
 
 ## Export overrides
 
@@ -214,10 +278,10 @@ quant -> export -> dump_golden -> quick_test_hmonnx
 
 ## Quick HMONNX conversation and SpecDecode metrics
 
-Use `quick_test_hmonnx()` after export to run a fast runtime check.  It finds the
+Use the top-level `qwen3_5_xh_hmonnx_generate.py` demo or `quick_test_hmonnx()` after export to run a fast runtime check.  It finds the
 exported `hmquant*/golden_meta_info.json`, runs normal HMONNX generate for full
 or visual exports, and automatically switches to MTP/DFlash speculative decoding
-when the meta contains `spec_decode.mode`.
+when the meta contains `spec_decode.mode`; the same demo script therefore supports normal, MTP, and DFlash HMONNX outputs.
 
 ```python
 from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import quick_test_hmonnx
@@ -259,7 +323,7 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
 For MTP/DFlash acceptance-rate checks, run the spec-decode wrapper:
 
 ```bash
-python examples_merak/llm/qwen3_5/qwen3_5_xh_spec_decode_test.py \
+python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
   --config work_dirs/qwen3_5_validation_matrix/qwen35_9b_mtp_existing_hf/export/hmquant*/golden_meta_info.json \
   --prompt "写一首关于 AI 的诗" \
   --max-new-tokens 128 \
@@ -275,31 +339,31 @@ For programmatic integrations, call the lower-level helpers directly:
 
 ## Runtime validation matrix
 
-Use `qwen3_5_validation_matrix.py` for the requested first-pass verification matrix.  It runs 9B and 35B-A3B with base HF weights and existing external HF/GPTQModel quant artifacts, each with `fuse_gdr_ops=false` and `fuse_gdr_ops=true`.  This does not add public workflow parameters; each case is just a YAML plus explicit `config_overrides`.
+Use `debug_scripts/qwen3_5_validation_matrix.py` for the requested first-pass verification matrix.  It runs 9B and 35B-A3B with base HF weights and existing external HF/GPTQModel quant artifacts, each with `fuse_gdr_ops=false` and `fuse_gdr_ops=true`.  This does not add public workflow parameters; each case is just a YAML plus explicit `config_overrides`.
 
 ```bash
 # Check dependencies, YAMLs, base weights, and external quant artifacts first.
 conda activate xhquant_55
-python examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py --preflight-only
+python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py --preflight-only
 
 # Run the full 8-case matrix.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py --force
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py --force
 
 # Run one case without golden generation.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py \
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
   --scenario qwen35_9b_existing_hf_fuse_false \
   --skip-golden \
   --force
 
 # Run one case and write quick_test_result.json with output and accept_rate.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py \
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
   --scenario qwen35_9b_mtp_existing_hf \
   --quick-test \
   --quick-test-max-new-tokens 64 \
   --force
 
 # Reuse an already exported scenario and only run quick_test_hmonnx.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py \
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
   --scenario qwen35_9b_mtp_existing_hf \
   --skip-export \
   --quick-test \

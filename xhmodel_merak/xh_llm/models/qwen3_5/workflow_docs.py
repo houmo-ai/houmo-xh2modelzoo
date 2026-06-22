@@ -143,11 +143,6 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
         "default": "weights/<existing-gptqmodel-hf-dir>",
         "description": "外部量化产物目录，例如 9B mode1 或 35B-A3B autoround/gptqmodel 结果。",
     },
-    "existing_hf.source_algorithm": {
-        "type": "str",
-        "default": "autoround",
-        "description": "说明外部权重来源算法，供配置和日志记录使用。",
-    },
 }
 
 _EXPORT_FIELD_HELP: dict[str, dict[str, Any]] = {
