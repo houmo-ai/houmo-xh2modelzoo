@@ -1,6 +1,6 @@
 # Qwen3.5 / Qwen3.5-MoE Merak export
 
-`qwen3_5_xh_export_hmonnx.py` 是 dense 与 MoE 的统一 Merak HMONNX 导出入口。导出形态只由 `configs_merak/...` 配置文件决定；脚本不再接受模型结构、量化、MTP/DFlash 等模型参数。
+`debug_scripts/qwen3_5_xh_export_hmonnx.py` 是 dense 与 MoE 的调试/兼容导出入口。导出形态只由 `configs_merak/...` 配置文件决定；脚本不再接受模型结构、量化、MTP/DFlash 等模型参数。
 
 ## 环境
 
@@ -25,11 +25,11 @@ conda activate xhquant_55
 ## 导出 HMONNX
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py \
   --config configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_xh2a_2k.py \
   --force
 
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py \
   --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_spec_mtp_xh2a_2k.py \
   --force
 ```
@@ -47,7 +47,7 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
 
 - `--golden` 会在 demo 推理时保存 golden 输出。
 - dense 与 MoE 都使用同一个 demo 入口；如果 meta 支持视觉分支且图片存在，则走图文输入，否则回退到纯文本输入。
-- PPL 烟测使用 `examples_merak/llm/qwen3_5/qwen3_5_xh_ppl_eval.py`。
+- PPL 烟测使用 `examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_ppl_eval.py`。
 
 ## Spec decode / GDR fuse 验证矩阵
 
@@ -112,7 +112,7 @@ model = dict(
 注意事项：
 
 - `--golden` demo 为了保存 golden artifact，会把生成长度压到很短；它只能证明 HMONNX 推理链路可执行，不适合判断回答语义质量。
-- MTP / DFlash 的接收率不由 `qwen3_5_xh_hmonnx_generate.py` 默认输出；需要使用 `examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py` 读取导出后的 `golden_meta_info.json` 单独评估。
+- MTP / DFlash 的接收率不由 `qwen3_5_xh_hmonnx_generate.py` 默认输出；需要使用 `examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py` 读取导出后的 `golden_meta_info.json` 单独评估。
 - 代表性 9B `fuse1_split1` 文本 spec decode smoke：
   - MTP：`accepted=10 / draft_tokens=36`，接收率约 `27.78%`，`avg_accepted_per_round=1.11`。
   - DFlash：`accepted=5 / draft_tokens=117`，接收率约 `4.27%`，`avg_accepted_per_round=0.38`。

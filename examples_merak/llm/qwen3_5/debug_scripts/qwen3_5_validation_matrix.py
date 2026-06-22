@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -57,8 +57,7 @@ def existing_hf_quant_override(existing_hf_model_dir: str) -> dict[str, Any]:
         "quant": {
             "algorithm": "existing_hf",
             "artifact_format": "gptqmodel_hf",
-            "source_algorithm": "autoround",
-            "existing_hf_model_dir": existing_hf_model_dir,
+                "existing_hf_model_dir": existing_hf_model_dir,
         }
     }
 

@@ -26,7 +26,7 @@ from xhquant.api import Config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MERAK_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+MERAK_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py"
 DFLASH_WORKFLOW_CONFIGS = [
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml",
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_dflash.yaml",

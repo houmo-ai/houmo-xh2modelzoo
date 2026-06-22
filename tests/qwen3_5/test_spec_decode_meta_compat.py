@@ -16,7 +16,7 @@ MERAK_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model
 SPEC_TEST = REPO_ROOT / "examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_test.py"
 SPEC_BENCH = REPO_ROOT / "examples/llm/qwen3_5/qwen3_5_xh2a_spec_decode_bench.py"
 CONFIG_FILE = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
-LAYOUT_VALIDATOR = REPO_ROOT / "examples_merak/llm/qwen3_5/validate_hm_release_layout.py"
+LAYOUT_VALIDATOR = REPO_ROOT / "examples_merak/llm/qwen3_5/debug_scripts/validate_hm_release_layout.py"
 
 SPEC_DECODE_DIRS = {
     "mtp_draft_prefill",

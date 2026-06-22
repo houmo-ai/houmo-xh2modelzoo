@@ -82,7 +82,6 @@ def test_qwen35_workflow_config_accepts_base_and_existing_hf_quant_overrides(qwe
     existing_hf = {
         "algorithm": "existing_hf",
         "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
         "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
     }
     overridden = base.with_overrides({"quant": existing_hf})
@@ -163,8 +162,7 @@ def test_qwen35_existing_hf_quant_returns_normalized_quant_result(qwen35_modules
             "quant": {
                 "algorithm": "existing_hf",
                 "artifact_format": "gptqmodel_hf",
-                "source_algorithm": "autoround",
-                "existing_hf_model_dir": existing_rel,
+                        "existing_hf_model_dir": existing_rel,
             }
         },
     )

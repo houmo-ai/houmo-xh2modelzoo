@@ -77,6 +77,9 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             )
 
         if algorithm == "autoround" and artifact_format == "gptqmodel_hf":
+            # Validate config-only layer routing before importing optional AutoRound,
+            # so YAML/override errors are reported even in lightweight CI envs.
+            self._build_autoround_layer_config(quant_cfg, int(quant_cfg.get("group_size", 64)))
             result = self._quant_autoround_gptqmodel_hf(
                 output_dir=output_dir,
                 device=device,

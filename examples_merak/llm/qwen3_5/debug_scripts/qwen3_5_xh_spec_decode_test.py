@@ -4,7 +4,7 @@ The implementation lives in ``workflow_runtime.spec_decode_generate`` so the
 same API is used by demos, validation matrix, and this CLI.
 
 Example:
-    python examples_merak/llm/qwen3_5/qwen3_5_xh_spec_decode_test.py \
+    python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
         --config work_dirs/qwen3_5_9b_spec_mtp_xh2a_2k/.../golden_meta_info.json \
         --max-new-tokens 40 \
         --min-output-tokens 32
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

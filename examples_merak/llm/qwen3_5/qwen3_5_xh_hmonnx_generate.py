@@ -1,4 +1,10 @@
-"""Qwen3.5/Qwen3.6 HMONNX generate CLI backed by workflow_runtime."""
+"""Qwen3.5/Qwen3.6 HMONNX demo CLI.
+
+The demo accepts an exported ``golden_meta_info.json`` or export directory and
+delegates to ``workflow_runtime.hmonnx_generate``.  Normal full/visual exports,
+MTP, and DFlash are selected from the HMONNX meta information rather than by
+extra public flags.
+"""
 
 from __future__ import annotations
 
@@ -7,21 +13,13 @@ import os
 import sys
 from pathlib import Path
 
-import torch
-
-from xhquant.utils import TimeProfiler
-from xhquant.utils.memory_tracker import MemoryTracker
-
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (  # noqa: E402
-    hmonnx_generate,
-    print_quick_test_result,
-)
-
+_DEBUG_SCRIPTS_DIR = Path(__file__).resolve().parent / "debug_scripts"
+if str(_DEBUG_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_DEBUG_SCRIPTS_DIR))
 
 try:
     from validate_hm_release_layout import ensure_step_artifact_links
@@ -38,6 +36,8 @@ def _resolve_export_dir(config: str) -> Path:
 
 def _parse_device_arg(device_arg: str) -> str | list[int]:
     if device_arg is None:
+        import torch
+
         if torch.cuda.is_available():
             return list(range(torch.cuda.device_count()))
         else:
@@ -106,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(args: argparse.Namespace) -> None:
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (
+        hmonnx_generate,
+        print_quick_test_result,
+    )
+    from xhquant.utils import TimeProfiler
+    from xhquant.utils.memory_tracker import MemoryTracker
+
     devices = _parse_device_arg(args.device)
     gpu_ids = [device for device in devices if device != "cpu"]
 

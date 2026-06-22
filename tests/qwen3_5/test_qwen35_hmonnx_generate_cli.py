@@ -7,9 +7,13 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GENERATE_PATH = REPO_ROOT / "examples_merak" / "llm" / "qwen3_5" / "qwen3_5_xh_hmonnx_generate.py"
+GENERATE_PATH = (
+    REPO_ROOT / "examples_merak" / "llm" / "qwen3_5" / "qwen3_5_xh_hmonnx_generate.py"
+)
 
 
 def _install_stub(monkeypatch, name: str, attrs: dict | None = None) -> types.ModuleType:
@@ -17,7 +21,10 @@ def _install_stub(monkeypatch, name: str, attrs: dict | None = None) -> types.Mo
     for index in range(1, len(parts) + 1):
         sub = ".".join(parts[:index])
         if sub not in sys.modules:
-            monkeypatch.setitem(sys.modules, sub, types.ModuleType(sub))
+            module = types.ModuleType(sub)
+            if index < len(parts):
+                module.__path__ = []
+            monkeypatch.setitem(sys.modules, sub, module)
     module = sys.modules[name]
     if attrs:
         for key, value in attrs.items():
@@ -35,6 +42,14 @@ def _load_generate_module(monkeypatch):
         {
             "AutoLLMHONNXModel": object,
             "LLMInferenceContextManager": object,
+        },
+    )
+    _install_stub(
+        monkeypatch,
+        "xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime",
+        {
+            "hmonnx_generate": lambda *args, **kwargs: None,
+            "print_quick_test_result": lambda *args, **kwargs: None,
         },
     )
     _install_stub(
@@ -62,43 +77,28 @@ def _load_generate_module(monkeypatch):
     return module
 
 
-def test_default_image_path_is_none(monkeypatch):
+def test_default_image_path_keeps_demo_image(monkeypatch):
     module = _load_generate_module(monkeypatch)
     parser = module.build_parser()
 
     args = parser.parse_args(["--config", "meta.json"])
 
-    assert args.image_path is None
+    assert args.image_path == "./data/images/demo_qwen3_vl.jpeg"
+    assert args.prompt == "Describe this image."
+    assert args.max_new_tokens == 1024
 
 
-def test_resolve_prompt_reads_file(monkeypatch, tmp_path):
-    module = _load_generate_module(monkeypatch)
-    prompt_file = tmp_path / "prompt.txt"
-    prompt_file.write_text("  hello\n", encoding="utf-8")
-
-    assert module._resolve_prompt(str(prompt_file)) == "hello"
-
-
-def test_resolve_prompt_keeps_literal_when_file_missing(monkeypatch, tmp_path):
-    module = _load_generate_module(monkeypatch)
-    prompt = str(tmp_path / "missing prompt.txt")
-
-    assert module._resolve_prompt(prompt) == prompt
-
-
-def test_resolve_image_path_requires_existing_file(monkeypatch, tmp_path):
-    module = _load_generate_module(monkeypatch)
-    image_path = tmp_path / "image.jpg"
-    image_path.write_bytes(b"x")
-
-    assert module._resolve_image_path(str(image_path)) == str(image_path)
-    assert module._resolve_image_path(str(tmp_path / "missing.jpg")) is None
-    assert module._resolve_image_path(None) is None
-
-
-def test_supports_multimodal_inputs_requires_callable_processor(monkeypatch):
+def test_parse_device_arg_handles_cpu_and_gpu_lists(monkeypatch):
     module = _load_generate_module(monkeypatch)
 
-    assert module._supports_multimodal_inputs(types.SimpleNamespace(get_tf_processor=lambda: object())) is True
-    assert module._supports_multimodal_inputs(types.SimpleNamespace(get_tf_processor=None)) is False
-    assert module._supports_multimodal_inputs(types.SimpleNamespace()) is False
+    assert module._parse_device_arg("cpu") == ["cpu"]
+    assert module._parse_device_arg("0") == [0]
+    assert module._parse_device_arg("cuda:0,1,1") == [0, 1]
+
+
+@pytest.mark.parametrize("device_arg", ["", "cpu,0", "cuda:abc"])
+def test_parse_device_arg_rejects_invalid_values(monkeypatch, device_arg):
+    module = _load_generate_module(monkeypatch)
+
+    with pytest.raises(ValueError):
+        module._parse_device_arg(device_arg)

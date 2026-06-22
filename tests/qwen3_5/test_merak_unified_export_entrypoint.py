@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import runpy
 import sys
 import types
@@ -12,9 +13,10 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py"
+EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py"
 QUANT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_quant.py"
-VALIDATION_MATRIX_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_validation_matrix.py"
+QUANT_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/qwen3_5_quant_export.py"
+VALIDATION_MATRIX_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py"
 REMOVED_MOE_EXAMPLE_DIR = REPO_ROOT / "examples_merak/llm/qwen3_5_moe"
 README = REPO_ROOT / "examples_merak/llm/qwen3_5/README.md"
 README_WORKFLOW = REPO_ROOT / "examples_merak/llm/qwen3_5/README_workflow.md"
@@ -78,6 +80,10 @@ def _load_validation_matrix_script():
 
 def _load_quant_script():
     return runpy.run_path(str(QUANT_SCRIPT), run_name="qwen3_5_quant_test")
+
+
+def _load_quant_export_script():
+    return runpy.run_path(str(QUANT_EXPORT_SCRIPT), run_name="qwen3_5_quant_export_test")
 
 
 def test_unified_export_script_parses(monkeypatch):
@@ -190,10 +196,135 @@ def test_quant_script_builds_only_explicit_source_overrides():
         "quant": {
             "algorithm": "existing_hf",
             "artifact_format": "gptqmodel_hf",
-            "source_algorithm": "autoround",
             "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
         }
     }
+
+
+def test_quant_export_script_exposes_config_driven_cli():
+    namespace = _load_quant_export_script()
+    parser = namespace["build_parser"]()
+    option_strings = {opt for action in parser._actions for opt in action.option_strings}
+
+    assert {
+        "--hf-model-dir",
+        "--config",
+        "--quant-output-dir",
+        "--export-output-dir",
+        "--device",
+        "--quant-device",
+        "--export-device",
+        "--force",
+        "--base",
+        "--existing-hf-model-dir",
+        "--override",
+        "--dump-golden",
+    } <= option_strings
+    assert "--source-algorithm" not in option_strings
+    for forbidden in ("--bits", "--group-size", "--dataset", "--iters", "--nsamples"):
+        assert forbidden not in option_strings
+
+
+def test_quant_export_script_builds_existing_hf_overrides_without_metadata():
+    namespace = _load_quant_export_script()
+    parser = namespace["build_parser"]()
+    args = parser.parse_args(
+        [
+            "--hf-model-dir",
+            "weights/Qwen3.5-9B",
+            "--config",
+            str(WORKFLOW_9B_FULL),
+            "--export-output-dir",
+            "work_dirs/qwen35_export",
+            "--existing-hf-model-dir",
+            "weights/Qwen3.5-9B-mode1-llm-only",
+            "--override",
+            "export.model.fuse_gdr_ops=true",
+        ]
+    )
+
+    assert namespace["_resolve_quant_output_dir"](args).endswith("_workflow_existing_or_base_quant_placeholder")
+    assert namespace["_build_quant_overrides"](args) == {
+        "quant": {
+            "algorithm": "existing_hf",
+            "artifact_format": "gptqmodel_hf",
+            "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
+        }
+    }
+    assert namespace["_parse_dotted_overrides"](args.override) == {"export.model.fuse_gdr_ops": True}
+
+
+def test_quant_export_script_main_runs_quant_then_export(monkeypatch, capsys):
+    namespace = _load_quant_export_script()
+    parser = namespace["build_parser"]()
+    calls = {}
+
+    class FakeQuantResult:
+        def __init__(self):
+            self.hf_model_dir = "weights/Qwen3.5-9B"
+            self.skipped = False
+            self.quanted_model_dir = "weights/Qwen3.5-9B-mode1-llm-only"
+            self.is_quant_weight_format = False
+
+    class FakeExportResult:
+        def __init__(self):
+            self.work_dir = "work_dirs/qwen35_export"
+            self.config_file = "work_dirs/qwen35_export/qwen3_5_9b_full.yaml"
+            self.meta = None
+
+    class FakeWorkflow:
+        def quant(self, *, output_dir, device, config_overrides):
+            calls["quant"] = (output_dir, device, config_overrides)
+            return FakeQuantResult()
+
+        def export(self, *, quant_result, output_dir, device, config_overrides):
+            calls["export"] = (quant_result, output_dir, device, config_overrides)
+            return FakeExportResult()
+
+    class FakeAutoLLMWorkflow:
+        @classmethod
+        def from_config(cls, *, hf_model_dir, config_path, seed, debug):
+            calls["from_config"] = (hf_model_dir, config_path, seed, debug)
+            return FakeWorkflow()
+
+    fake_workflows = types.ModuleType("xhmodel_merak.xh_llm.workflows")
+    fake_workflows.AutoLLMWorkflow = FakeAutoLLMWorkflow
+    monkeypatch.setitem(sys.modules, "xhmodel_merak.xh_llm.workflows", fake_workflows)
+
+    args = parser.parse_args(
+        [
+            "--hf-model-dir",
+            "weights/Qwen3.5-9B",
+            "--config",
+            str(WORKFLOW_9B_FULL),
+            "--export-output-dir",
+            "work_dirs/qwen35_export",
+            "--existing-hf-model-dir",
+            "weights/Qwen3.5-9B-mode1-llm-only",
+            "--device",
+            "cuda:0",
+        ]
+    )
+
+    namespace["main"](args)
+
+    expected_overrides = {
+        "quant": {
+            "algorithm": "existing_hf",
+            "artifact_format": "gptqmodel_hf",
+            "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
+        }
+    }
+    assert calls["from_config"] == ("weights/Qwen3.5-9B", str(WORKFLOW_9B_FULL), 1024, False)
+    assert calls["quant"] == (
+        "work_dirs/qwen35_export/_workflow_existing_or_base_quant_placeholder",
+        "cuda:0",
+        expected_overrides,
+    )
+    assert calls["export"][1:] == ("work_dirs/qwen35_export", "cuda:0", expected_overrides)
+    output = json.loads(capsys.readouterr().out)
+    assert output["quant_result"]["quanted_model_dir"] == "weights/Qwen3.5-9B-mode1-llm-only"
+    assert output["export_result"]["work_dir"] == "work_dirs/qwen35_export"
 
 
 def test_legacy_moe_example_directory_is_not_part_of_new_workflow_docs():
@@ -261,7 +392,6 @@ def test_validation_matrix_covers_requested_runtime_cases():
         "quant": {
             "algorithm": "existing_hf",
             "artifact_format": "gptqmodel_hf",
-            "source_algorithm": "autoround",
             "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
         },
         "export.model.fuse_gdr_ops": False,
@@ -283,8 +413,7 @@ def test_validation_matrix_preflight_checks_paths_without_importing_runtime_modu
             "quant": {
                 "algorithm": "existing_hf",
                 "artifact_format": "gptqmodel_hf",
-                "source_algorithm": "autoround",
-                "existing_hf_model_dir": "missing/quant",
+            "existing_hf_model_dir": "missing/quant",
             }
         },
         fuse_gdr_ops=False,
