@@ -72,8 +72,6 @@ def quantize_with_autoround_mode1(
     return QuantResult(
         hf_model_dir=hf_model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
-        algorithm=algorithm,
-        effective_config_file=effective_config_file,
     )
 
 
@@ -268,8 +266,6 @@ def quantize_with_gptqmodel_recipe(
     return QuantResult(
         hf_model_dir=hf_model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
-        algorithm=f"gptqmodel:{recipe_kwargs['method']}",
-        effective_config_file=effective_config_file,
     )
 
 

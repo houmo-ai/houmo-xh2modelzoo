@@ -311,7 +311,6 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 skipped=True,
-                effective_config_file=workflow_config.source,
             )
 
         algorithm = str(quant_cfg.get("algorithm") or "gptqmodel").lower()
@@ -333,8 +332,6 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 quanted_model_dir=existing_hf_model_dir,
-                algorithm=str(quant_cfg.get("source_algorithm") or algorithm),
-                effective_config_file=workflow_config.source,
             )
 
         method = str(quant_cfg.get("method") or "").lower().replace("-", "_")
