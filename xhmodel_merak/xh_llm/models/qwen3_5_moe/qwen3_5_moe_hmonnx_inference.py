@@ -11,6 +11,13 @@ from ..qwen3_5.split_conv_cache_utils import _regroup_flat_split_conv_cache
 from .data_preprocess import Qwen3_5_DataPreprocess
 
 
+def _model_config_prefill_recurrent_state_uses_cache(model_config) -> bool:
+    explicit = getattr(model_config, "prefill_recurrent_state_uses_cache", None)
+    if explicit is not None:
+        return bool(explicit)
+    return bool(getattr(model_config, "fuse_gdr_ops", False))
+
+
 class VisualHMONNXModel(HMONNXModel):
     def forward(self, *args):
         out = super().forward(*args)
@@ -101,8 +108,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
         prefill_recurrent_state_uses_cache = (
-            getattr(self, "_llm_prefill", True)
-            and self._prefill_recurrent_state_uses_cache()
+            getattr(self, "_llm_prefill", True) and self._prefill_recurrent_state_uses_cache()
         )
         recurrent_state_out_per_step = 0 if prefill_recurrent_state_uses_cache else len(past_recurrent_states)
         conv_cache_out_count = conv_cache_out_per_step * verify_steps
