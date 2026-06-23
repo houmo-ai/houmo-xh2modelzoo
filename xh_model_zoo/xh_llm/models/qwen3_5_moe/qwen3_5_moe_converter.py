@@ -220,6 +220,400 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         except Exception:
             return False
 
+    @staticmethod
+    def _register_gptqmodel_qwen3_5_moe() -> None:
+        """Register Qwen3.5-MoE with GPTQModel when the installed package does not know it.
+
+        GPTQModel falls back to BaseQModel for unknown ``model_type`` values.  BaseQModel
+        uses AutoModelForCausalLM and tries to construct the multimodal
+        Qwen3_5MoeConfig as a text config, which fails because text fields such as
+        ``vocab_size`` live under ``text_config``.  The checkpoint keys also use the
+        multimodal prefix ``model.language_model.layers``.  This local definition combines
+        the Qwen3-VL loader/prefix with the Qwen3-MoE expert module tree.
+        """
+        try:
+            from gptqmodel.models import auto as gptq_auto  # type: ignore
+            from gptqmodel.models.base import BaseQModel  # type: ignore
+            from transformers import AutoModelForImageTextToText
+        except ImportError:
+            return
+
+        if gptq_auto.MODEL_MAP.get("qwen3_5_moe") is not None:
+            return
+
+        class Qwen3_5MoeQModel(BaseQModel):  # noqa: N801
+            loader = AutoModelForImageTextToText
+            layer_modules_strict = False
+            dynamic_expert_index = "num_experts"
+            pre_lm_head_norm_module = "model.language_model.norm"
+
+            module_tree = [
+                "model",
+                "language_model",
+                "layers",
+                "#",
+                {
+                    "input_layernorm": ("input_layernorm:!",),
+                    "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+                    "linear_attn": ("in_proj_qkv:0", "in_proj_z:0", "out_proj:1"),
+                    "post_attention_layernorm": ("post_attention_layernorm:!",),
+                    "mlp": {
+                        "gate": ("gate:!",),
+                        "shared_expert_gate": ("shared_expert_gate:!",),
+                        "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                        "experts": {
+                            "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                        },
+                    },
+                },
+            ]
+
+        supported_models = gptq_auto.SUPPORTED_MODELS
+        if isinstance(supported_models, set):
+            supported_models.add("qwen3_5_moe")
+        elif "qwen3_5_moe" not in supported_models:
+            supported_models.append("qwen3_5_moe")
+        gptq_auto.MODEL_MAP["qwen3_5_moe"] = Qwen3_5MoeQModel
+
+    @staticmethod
+    def _set_quant_weight_buffer(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
+        if name in module._buffers:
+            module._buffers[name] = tensor
+        else:
+            module.register_buffer(name, tensor, persistent=False)
+
+    @staticmethod
+    def _unpack_gptqmodel_qweight(
+        qweight: torch.Tensor,
+        qzeros: torch.Tensor,
+        g_idx: torch.Tensor,
+        expected_shape: tuple[int, int],
+    ) -> torch.Tensor:
+        """Unpack GPTQModel qweight to XH2a's signed per-element quant_weight layout."""
+        out_features, in_features = expected_shape
+        if qweight.ndim != 2 or qzeros.ndim != 2:
+            raise ValueError(f"Expected 2D qweight/qzeros, got {tuple(qweight.shape)} and {tuple(qzeros.shape)}")
+        if qweight.shape[1] < out_features:
+            raise ValueError(f"qweight output dim {qweight.shape[1]} is smaller than expected {out_features}")
+        if in_features % qweight.shape[0] != 0:
+            raise ValueError(f"Cannot infer GPTQ pack factor from qweight={tuple(qweight.shape)}, expected={expected_shape}")
+
+        pack_factor = in_features // qweight.shape[0]
+        if pack_factor not in {4, 8, 16}:
+            raise ValueError(f"Unsupported GPTQ pack factor {pack_factor} for qweight={tuple(qweight.shape)}")
+        bits = 32 // pack_factor
+        maxq = (1 << bits) - 1
+        shifts = torch.arange(0, 32, bits, dtype=torch.int32, device=qweight.device)
+
+        zeros = torch.bitwise_and(
+            torch.bitwise_right_shift(qzeros.to(torch.int32).unsqueeze(2).expand(-1, -1, pack_factor), shifts),
+            maxq,
+        ).reshape(qzeros.shape[0], qzeros.shape[1] * pack_factor)
+        if zeros.shape[1] < out_features:
+            raise ValueError(f"qzeros output dim {zeros.shape[1]} is smaller than expected {out_features}")
+
+        unpacked = torch.bitwise_and(
+            torch.bitwise_right_shift(qweight.to(torch.int32).unsqueeze(1).expand(-1, pack_factor, -1), shifts.view(1, -1, 1)),
+            maxq,
+        ).reshape(qweight.shape[0] * pack_factor, qweight.shape[1])
+        unpacked = unpacked[:in_features, :out_features]
+
+        g_idx = g_idx.to(torch.long)[:in_features]
+        if g_idx.numel() != in_features:
+            raise ValueError(f"g_idx length {g_idx.numel()} does not match expected in_features {in_features}")
+        quant_weight = (unpacked - zeros[g_idx, :out_features]).t().contiguous()
+        if tuple(quant_weight.shape) != expected_shape:
+            raise ValueError(f"Unpacked quant_weight shape {tuple(quant_weight.shape)} != expected {expected_shape}")
+
+        min_val = -(1 << (bits - 1))
+        max_val = (1 << (bits - 1)) - 1
+        if quant_weight.min() < min_val or quant_weight.max() > max_val:
+            raise ValueError(
+                f"Unpacked GPTQ quant_weight outside signed {bits}-bit range: "
+                f"min={int(quant_weight.min())}, max={int(quant_weight.max())}"
+            )
+        return quant_weight.to(torch.int8)
+
+    @staticmethod
+    def _dequantize_gptqmodel_weight(
+        quant_weight: torch.Tensor,
+        scales: torch.Tensor,
+        g_idx: torch.Tensor,
+        expected_shape: tuple[int, int],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Reconstruct fp weights from GPTQModel per-element qweight and group scales."""
+        out_features, in_features = expected_shape
+        if scales.ndim != 2:
+            raise ValueError(f"Expected 2D GPTQ scales, got {tuple(scales.shape)}")
+        if scales.shape[1] < out_features:
+            raise ValueError(f"scales output dim {scales.shape[1]} is smaller than expected {out_features}")
+
+        g_idx = g_idx.to(torch.long)[:in_features]
+        if g_idx.numel() != in_features:
+            raise ValueError(f"g_idx length {g_idx.numel()} does not match expected in_features {in_features}")
+        if int(g_idx.max()) >= scales.shape[0] or int(g_idx.min()) < 0:
+            raise ValueError(
+                f"g_idx range [{int(g_idx.min())}, {int(g_idx.max())}] is outside scales groups {scales.shape[0]}"
+            )
+
+        dequant_weight = quant_weight.float() * scales[g_idx, :out_features].t().float()
+        if tuple(dequant_weight.shape) != expected_shape:
+            raise ValueError(f"Dequantized weight shape {tuple(dequant_weight.shape)} != expected {expected_shape}")
+        return dequant_weight.to(dtype=dtype).contiguous()
+
+    @staticmethod
+    def _packed_expert_weight_shape(experts: nn.Module, expert_idx: int, linear_name: str) -> tuple[int, int]:
+        if linear_name in {"gate_proj", "up_proj"}:
+            intermediate_dim = int(experts.intermediate_dim)
+            hidden_dim = int(experts.gate_up_proj.shape[-1])
+            return (intermediate_dim, hidden_dim)
+        return tuple(int(dim) for dim in experts.down_proj[expert_idx].shape)
+
+    @staticmethod
+    def _restore_gptqmodel_expert_quant_weights(
+        hf_model_dir: str,
+        native_model: nn.Module,
+        logger=None,
+        layer_spec: Optional[str] = None,
+    ) -> int:
+        """Restore expert qweight tensors that GPTQModel leaves as unused checkpoint keys.
+
+        Qwen3.5-MoE stores HF experts as packed ``experts.gate_up_proj`` and
+        ``experts.down_proj`` parameters, while GPTQModel checkpoint keys are
+        defused per expert/per projection.  GPTQModel dequantizes attention and
+        shared-expert linears, but those packed routed-expert qweights are not
+        attached to the model.  Keep them as explicit quant_weight buffers so
+        XH2a W4 expert export uses the original GPTQ quantized weights instead
+        of recalibrating from dequantized fp16 weights.
+        """
+        try:
+            from safetensors.torch import safe_open
+        except ImportError:
+            if logger is not None:
+                logger.warning("safetensors is not available; cannot restore GPTQ expert quant_weights.")
+            return 0
+
+        model_dir = Path(hf_model_dir)
+        safetensors_files = sorted(model_dir.glob("model*.safetensors"))
+        if not safetensors_files:
+            if logger is not None:
+                logger.warning(f"No model*.safetensors files found in {model_dir}; cannot restore expert quant_weights.")
+            return 0
+
+        text_model = _get_text_model(native_model)
+        num_layers = int(getattr(text_model.config, "num_hidden_layers"))
+        num_experts = int(getattr(text_model.config, "num_experts"))
+        restore_layers = Qwen3_5MoeConverterXH2a._parse_restore_layer_spec(layer_spec, num_layers)
+        packed_qweights: Dict[int, Dict[str, Dict[int, torch.Tensor]]] = {
+            layer_idx: {"gate_proj": {}, "up_proj": {}, "down_proj": {}}
+            for layer_idx in restore_layers
+        }
+        packed_dequant_weights: Dict[int, Dict[str, Dict[int, torch.Tensor]]] = {
+            layer_idx: {"gate_proj": {}, "up_proj": {}, "down_proj": {}}
+            for layer_idx in restore_layers
+        }
+        modulelist_restored = 0
+        unpack_failures = 0
+        prefixes = ("model.language_model.layers.", "model.layers.")
+
+        for safetensors_file in safetensors_files:
+            try:
+                safetensors_reader = safe_open(str(safetensors_file), framework="pt", device="cpu")
+            except Exception as exc:
+                if logger is not None:
+                    logger.warning(f"Failed to load safetensors {safetensors_file}: {exc}")
+                continue
+
+            with safetensors_reader:
+                for key in safetensors_reader.keys():
+                    if not key.endswith(".qweight"):
+                        continue
+                    prefix = next((item for item in prefixes if key.startswith(item)), None)
+                    if prefix is None:
+                        continue
+                    parts = key[len(prefix):].split(".")
+                    if len(parts) != 6 or parts[1:3] != ["mlp", "experts"]:
+                        continue
+                    try:
+                        layer_idx = int(parts[0])
+                        expert_idx = int(parts[3])
+                    except ValueError:
+                        continue
+                    linear_name = parts[4]
+                    if (
+                        layer_idx < 0
+                        or layer_idx >= num_layers
+                        or layer_idx not in restore_layers
+                        or expert_idx < 0
+                        or expert_idx >= num_experts
+                        or linear_name not in {"gate_proj", "up_proj", "down_proj"}
+                    ):
+                        continue
+
+                    experts = text_model.layers[layer_idx].mlp.experts
+                    key_prefix = key[: -len(".qweight")]
+                    qzeros_key = f"{key_prefix}.qzeros"
+                    scales_key = f"{key_prefix}.scales"
+                    g_idx_key = f"{key_prefix}.g_idx"
+                    if qzeros_key not in safetensors_reader.keys() or g_idx_key not in safetensors_reader.keys():
+                        unpack_failures += 1
+                        continue
+                    qweight = safetensors_reader.get_tensor(key)
+                    qzeros = safetensors_reader.get_tensor(qzeros_key)
+                    g_idx = safetensors_reader.get_tensor(g_idx_key)
+                    scales = safetensors_reader.get_tensor(scales_key) if scales_key in safetensors_reader.keys() else None
+                    if hasattr(experts, "gate_up_proj") and hasattr(experts, "down_proj"):
+                        expected_shape = Qwen3_5MoeConverterXH2a._packed_expert_weight_shape(
+                            experts, expert_idx, linear_name
+                        )
+                        try:
+                            tensor = Qwen3_5MoeConverterXH2a._unpack_gptqmodel_qweight(
+                                qweight, qzeros, g_idx, expected_shape
+                            )
+                        except Exception as exc:
+                            unpack_failures += 1
+                            if logger is not None and unpack_failures <= 5:
+                                logger.warning(f"Failed to unpack GPTQ expert qweight {key}: {exc}")
+                            continue
+                        packed_qweights[layer_idx][linear_name][expert_idx] = tensor
+                        if scales is not None:
+                            try:
+                                packed_dequant_weights[layer_idx][linear_name][expert_idx] = (
+                                    Qwen3_5MoeConverterXH2a._dequantize_gptqmodel_weight(
+                                        tensor,
+                                        scales,
+                                        g_idx,
+                                        expected_shape,
+                                        experts.gate_up_proj.dtype,
+                                    )
+                                )
+                            except Exception as exc:
+                                unpack_failures += 1
+                                if logger is not None and unpack_failures <= 5:
+                                    logger.warning(f"Failed to dequantize GPTQ expert weight {key}: {exc}")
+                        continue
+
+                    try:
+                        expert = (
+                            experts[expert_idx]
+                            if hasattr(experts, "__getitem__")
+                            else experts.get_submodule(str(expert_idx))
+                        )
+                        linear = getattr(expert, linear_name)
+                    except Exception:
+                        continue
+                    if isinstance(linear, nn.Linear):
+                        try:
+                            tensor = Qwen3_5MoeConverterXH2a._unpack_gptqmodel_qweight(
+                                qweight,
+                                qzeros,
+                                g_idx,
+                                tuple(int(dim) for dim in linear.weight.shape),
+                            )
+                        except Exception as exc:
+                            unpack_failures += 1
+                            if logger is not None and unpack_failures <= 5:
+                                logger.warning(f"Failed to unpack GPTQ expert qweight {key}: {exc}")
+                            continue
+                        Qwen3_5MoeConverterXH2a._set_quant_weight_buffer(
+                            linear,
+                            "quant_weight",
+                            tensor.to(device=linear.weight.device),
+                        )
+                        if scales is not None:
+                            try:
+                                linear.weight.data.copy_(
+                                    Qwen3_5MoeConverterXH2a._dequantize_gptqmodel_weight(
+                                        tensor,
+                                        scales,
+                                        g_idx,
+                                        tuple(int(dim) for dim in linear.weight.shape),
+                                        linear.weight.dtype,
+                                    ).to(device=linear.weight.device)
+                                )
+                            except Exception as exc:
+                                unpack_failures += 1
+                                if logger is not None and unpack_failures <= 5:
+                                    logger.warning(f"Failed to restore GPTQ expert fp weight {key}: {exc}")
+                        modulelist_restored += 1
+
+        packed_restored = 0
+        packed_fp_restored = 0
+        for layer_idx, layer_qweights in packed_qweights.items():
+            experts = text_model.layers[layer_idx].mlp.experts
+            if not (hasattr(experts, "gate_up_proj") and hasattr(experts, "down_proj")):
+                continue
+            for linear_name in ("gate_proj", "up_proj", "down_proj"):
+                per_expert = layer_qweights[linear_name]
+                if len(per_expert) != num_experts:
+                    continue
+                stacked = torch.stack(
+                    [per_expert[expert_idx] for expert_idx in range(num_experts)],
+                    dim=0,
+                ).contiguous()
+                Qwen3_5MoeConverterXH2a._set_quant_weight_buffer(
+                    experts,
+                    f"{linear_name}_quant_weight",
+                    stacked.to(device=experts.gate_up_proj.device),
+                )
+                packed_restored += num_experts
+
+            layer_fp_weights = packed_dequant_weights[layer_idx]
+            if all(len(layer_fp_weights[name]) == num_experts for name in ("gate_proj", "up_proj", "down_proj")):
+                gate_weight = torch.stack(
+                    [layer_fp_weights["gate_proj"][expert_idx] for expert_idx in range(num_experts)],
+                    dim=0,
+                )
+                up_weight = torch.stack(
+                    [layer_fp_weights["up_proj"][expert_idx] for expert_idx in range(num_experts)],
+                    dim=0,
+                )
+                down_weight = torch.stack(
+                    [layer_fp_weights["down_proj"][expert_idx] for expert_idx in range(num_experts)],
+                    dim=0,
+                )
+                experts.gate_up_proj.data.copy_(
+                    torch.cat([gate_weight, up_weight], dim=1)
+                    .to(device=experts.gate_up_proj.device, dtype=experts.gate_up_proj.dtype)
+                )
+                experts.down_proj.data.copy_(
+                    down_weight.to(device=experts.down_proj.device, dtype=experts.down_proj.dtype)
+                )
+                packed_fp_restored += num_experts * 3
+
+        restored = modulelist_restored + packed_restored
+        if logger is not None:
+            logger.info(
+                "Restored GPTQ expert quant_weight tensors: "
+                f"modulelist={modulelist_restored}, packed={packed_restored}, "
+                f"total={restored}, fp_weights={packed_fp_restored}, unpack_failures={unpack_failures}"
+            )
+        return restored
+
+    @staticmethod
+    def _parse_restore_layer_spec(layer_spec: Optional[str], num_layers: int) -> set[int]:
+        if layer_spec is None:
+            return set(range(num_layers))
+        spec = str(layer_spec).strip().lower()
+        if not spec or spec in {"all", "*"}:
+            return set(range(num_layers))
+        layers: set[int] = set()
+        for raw_part in spec.split(","):
+            part = raw_part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_s, end_s = part.split("-", 1)
+                start, end = int(start_s), int(end_s)
+                layers.update(range(start, end + 1))
+            else:
+                layers.add(int(part))
+        invalid = sorted(layer for layer in layers if layer < 0 or layer >= num_layers)
+        if invalid:
+            raise ValueError(f"gptq_restore_expert_layer_spec has out-of-range layer ids: {invalid}")
+        return layers
+
     def load_hf_model(self, hf_model_dir: str, **kwargs):
         logger = get_root_logger()
 
@@ -232,6 +626,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 from gptqmodel import BACKEND, GPTQModel  # type: ignore
 
                 logger.info(f"Detected gptqmodel checkpoint; using GPTQModel.load() for dequantization: {hf_model_dir}")
+                self._register_gptqmodel_qwen3_5_moe()
                 torch_dtype = kwargs.get("torch_dtype", torch.float16)
                 # BACKEND.TORCH ensures all packed linears become TorchQuantLinear, which
                 # the base ``_dequantize_gptq_hf_model`` already knows how to dequantize.
@@ -251,6 +646,14 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 native_model = self._dequantize_gptq_hf_model(native_model)
                 if hasattr(native_model, "config"):
                     native_model.config.quantization_config = None
+                restore_layer_spec = getattr(self.config, "gptq_restore_expert_layer_spec", None)
+                if restore_layer_spec is not None:
+                    self._restore_gptqmodel_expert_quant_weights(
+                        hf_model_dir,
+                        native_model,
+                        logger,
+                        layer_spec=restore_layer_spec,
+                    )
             except ImportError:
                 logger.warning("gptqmodel not available; falling back to AutoModelForCausalLM")
                 native_model = AutoModelForCausalLM.from_pretrained(
@@ -369,13 +772,15 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
 
         qwen3_5_moe_register_wrap_modules()
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
-        output_post_norm_hidden = spec_decode_mode == "mtp"
-        output_hidden_state_indices = None
+        output_post_norm_hidden = bool(getattr(self.config, "output_post_norm_hidden", False))
+        output_hidden_state_indices = getattr(self.config, "output_hidden_state_indices", None)
         if spec_decode_mode == "dflash":
             dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
             if not dflash_model_dir:
                 raise ValueError("dflash_model_dir is required when spec_decode_mode='dflash'")
             output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
+        elif spec_decode_mode == "mtp":
+            output_post_norm_hidden = True
         wrap_cfg = Config(
             dict(
                 batch_size=self.config.batch_size,
@@ -794,18 +1199,20 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             else:
                 output_names_base.append(f"recurrent_state_out_{layer_idx}")
 
-        # Spec decode: post_norm_hidden appended last so existing cache-update
+        # Diagnostic/spec hidden output is appended last so existing cache-update
         # indexing in Qwen3_5MoeInference._forward() is unaffected.
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
         num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
         verify_length = num_draft_tokens + 1
-        output_hidden_state_indices = None
+        output_hidden_state_indices = getattr(self.config, "output_hidden_state_indices", None)
         if spec_decode_mode == "dflash":
             dflash_model_dir = getattr(self.config, "dflash_model_dir", None)
             if not dflash_model_dir:
                 raise ValueError("dflash_model_dir is required when spec_decode_mode='dflash'")
             output_hidden_state_indices = _load_dflash_target_layer_ids(dflash_model_dir)
-        output_post_norm_hidden = spec_decode_mode == "mtp"
+        output_post_norm_hidden = bool(getattr(self.config, "output_post_norm_hidden", False))
+        if spec_decode_mode == "mtp":
+            output_post_norm_hidden = True
         extra_hidden_output_name = None
         if output_hidden_state_indices is not None:
             extra_hidden_output_name = "target_hidden"
@@ -871,40 +1278,44 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         # directly into the shared module tree). We deepcopy wraped_model for
         # prefill so the original remains clean for decode re-trace.
         quant_config = self._build_quant_config(wraped_model)
-        wraped_model_prefill = copy.deepcopy(wraped_model)
-        if spec_decode_mode:
-            wrap_cfg_prefill = copy.deepcopy(wrap_cfg)
-            wrap_cfg_prefill.num_logits_to_keep = 0
-
-            def _apply_prefill_update_cfg(module):
-                if hasattr(module, "_update_cfg"):
-                    module._update_cfg(wrap_cfg_prefill)
-
-            wraped_model_prefill.apply(_apply_prefill_update_cfg)
-        quanted_prefill_model = convert_fx_model_to_quanted_model(
-            wraped_model_prefill,
-            inputs,
-            target_device,
-            quant_config=quant_config,
-        )
-
         prefix = f"{model_name}-{target_device}-{context_length // 1024}k-{quant_type}"
-        prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
-        prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
-        meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
-        logger.info("********************* start export prefill model *********************")
-        convert_quanted_model_to_hmonnx(
-            quanted_prefill_model,
-            inputs,
-            str(prefill_onnx_file),
-            BaseConverter.xh1_hmonnx_compatible(input_names),
-            prefill_output_names,
-        )
-        patched_adds = _patch_hmonnx_standard_add_ops(prefill_onnx_file)
-        if patched_adds:
-            logger.info(f"Patched {patched_adds} standard Add node(s) to XH2a domain in {prefill_onnx_file}")
-        logger.info(f"Export Prefill model to {prefill_onnx_file}")
-        del quanted_prefill_model, wraped_model_prefill
+        if getattr(self.config, "export_prefill", True):
+            wraped_model_prefill = copy.deepcopy(wraped_model)
+            if spec_decode_mode:
+                wrap_cfg_prefill = copy.deepcopy(wrap_cfg)
+                wrap_cfg_prefill.num_logits_to_keep = 0
+
+                def _apply_prefill_update_cfg(module):
+                    if hasattr(module, "_update_cfg"):
+                        module._update_cfg(wrap_cfg_prefill)
+
+                wraped_model_prefill.apply(_apply_prefill_update_cfg)
+            quanted_prefill_model = convert_fx_model_to_quanted_model(
+                wraped_model_prefill,
+                inputs,
+                target_device,
+                quant_config=quant_config,
+            )
+
+            prefill_onnx_file = work_dir / "hmonnx" / "prefill" / f"{prefix}_prefill.onnx"
+            prefill_onnx_file.parent.mkdir(exist_ok=True, parents=True)
+            meta_info["prefill_onnx"] = str(prefill_onnx_file.relative_to(work_dir))
+            logger.info("********************* start export prefill model *********************")
+            convert_quanted_model_to_hmonnx(
+                quanted_prefill_model,
+                inputs,
+                str(prefill_onnx_file),
+                BaseConverter.xh1_hmonnx_compatible(input_names),
+                prefill_output_names,
+            )
+            patched_adds = _patch_hmonnx_standard_add_ops(prefill_onnx_file)
+            if patched_adds:
+                logger.info(f"Patched {patched_adds} standard Add node(s) to XH2a domain in {prefill_onnx_file}")
+            logger.info(f"Export Prefill model to {prefill_onnx_file}")
+            del quanted_prefill_model, wraped_model_prefill
+        else:
+            meta_info["prefill_onnx"] = None
+            logger.info("********************* skip prefill export by config.export_prefill=False *********************")
 
         # ── DECODE quantisation & export ─────────────────────────────────────
         # Re-trace from clean wraped_model after updating to decode mode so that
