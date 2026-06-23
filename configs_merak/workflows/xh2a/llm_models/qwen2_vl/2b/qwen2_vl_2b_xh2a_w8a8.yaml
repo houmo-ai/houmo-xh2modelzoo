@@ -8,16 +8,16 @@ export:
     # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
     hf_model: null
     
-    model_name: xh2_qwen2-vl-2b_w8a8_256_4k
-    context_max_length: 4096
+    model_name: xh2_qwen2-vl-2b_w8a8_256_2k
+    context_max_length: 2048
     prefill_chunk_length: 256
     use_cache: true
     num_logits_to_keep: 1
     quant_scheme:
-      quant_type: w8a8h0_sefp
+      quant_type: w8a8h1_sefp
       nodes:
         lm_head:
-          quant_type: w8a8h0_sefp
+          quant_type: w8a8h1_sefp
       ops:
         MatMul:
           act_scheme:
@@ -30,13 +30,13 @@ export:
       max_size_w: 448
       max_size_h: 448
       quant_scheme:
-        quant_type: w8a8h0_sefp
+        quant_type: w8a8h1_sefp
         ops:
           MatMul:
             act_scheme:
               bits: 16
               fp_mode: sefp
-          act_schema_2:
-            bits: 16
-            fp_mode: sefp
+            act_schema_2:
+              bits: 16
+              fp_mode: sefp
     only_first_block: false

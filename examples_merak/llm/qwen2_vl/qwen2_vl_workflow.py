@@ -1,71 +1,124 @@
+import argparse
 import shutil
 from pathlib import Path
-from typing import Any
 
 
-
-HF_MODEL_DIR = "/data02/datasets/Qwen2-VL-2B-Instruct"
-CONFIG_PATH = "./configs_merak/workflows/xh2a/llm_models/qwen2_vl/2b/qwen2_vl_2b_xh2a_4k.yaml"
-QUANT_OUTPUT_DIR = "./work_dirs/qwen2_vl_workflow_quant_overrides"
-EXPORT_OUTPUT_DIR = "./work_dirs/qwen2_vl_workflow_export_overrides"
-DEVICE = "cuda"
-SEED = 1024
-DEBUG = False
-FORCE_OVERWRITE = True
-IMAGE_PATH = "./data/images/qwen2_vl_demo.jpeg"
-PROMPT = "描述这张图片"
-
-# CONFIG_OVERRIDES: dict[str, Any] | None = None
-CONFIG_OVERRIDES = {
-    "export.model.context_max_length": 8192,
-    "export.model.prefill_chunk_length": 512,
-    "export.model.chip_arch": "XH2a",
-}
+def _remove_output_dir_if_needed(output_dir: str, force: bool) -> None:
+    path = Path(output_dir)
+    if force and path.exists():
+        shutil.rmtree(path)
 
 
-def _remove_output_dir_if_needed(output_dir: Path, force: bool) -> None:
-    p = Path(output_dir)
-    if not force or not p.exists():
-        return
-    shutil.rmtree(p)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Qwen2-VL Merak quant/export workflow.",
+    )
+    parser.add_argument(
+        "--model-dir",
+        required=True,
+        help="HF model directory.",
+    )
+    parser.add_argument(
+        "--config-path",
+        required=True,
+        help="Workflow YAML path, choose one in configs_merak/workflows/xh2a/llm_models/qwen2_vl",
+    )
+    parser.add_argument(
+        "--export-from-quanted-model",
+        action="store_true",
+        help="if --model-dir is a quanted model, set this param to True",
+    )
+    parser.add_argument(
+        "--quant-output-dir",
+        default="work_dirs/qwen2-vl_quant",
+        help="Quantization output directory. Default: work_dirs/qwen2-vl_quant",
+    )
+    parser.add_argument(
+        "--export-output-dir",
+        default="work_dirs/qwen2-vl_export",
+        help="Export output directory. Default: work_dirs/qwen2-vl_export",
+    )
+    parser.add_argument(
+        "--dump-golden",
+        action="store_true",
+        help="Dump golden data after export.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="Device for quant/export/golden/quick test. Default: cuda",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove existing export output directories before running.",
+    )
+    parser.add_argument(
+        "--max-size-h",
+        type=int,
+        default=None,
+        help="ViT input height, set this param to override config.yaml",
+    )
+    parser.add_argument(
+        "--max-size-w",
+        type=int,
+        default=None,
+        help="ViT input width, set this param to override config.yaml",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
+
+    # 初始化工作流
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
-    _remove_output_dir_if_needed(QUANT_OUTPUT_DIR, FORCE_OVERWRITE)
-    _remove_output_dir_if_needed(EXPORT_OUTPUT_DIR, FORCE_OVERWRITE)
-
     workflow = AutoLLMWorkflow.from_config(
-        hf_model_dir=HF_MODEL_DIR,
-        config_path=CONFIG_PATH,
-        seed=SEED,
-        debug=DEBUG,
+        hf_model_dir=args.model_dir,
+        config_path=args.config_path,
     )
 
-    quant_result = workflow.quant(
-        output_dir=QUANT_OUTPUT_DIR,
-        device=DEVICE,
-        config_overrides=CONFIG_OVERRIDES,
-    )
+    # quant
+    if args.export_from_quanted_model:
+        quant_result = workflow.quant(
+            output_dir=args.quant_output_dir,
+            device=args.device,
+            # 从已量化的 HF 模型导出，需要跳过量化阶段
+            config_overrides={"quant": None},
+        )
+    else:
+        quant_result = workflow.quant(
+            output_dir=args.quant_output_dir,
+            device=args.device,
+        )
+    print(f"quant_result: {quant_result}")
+
+    # export
+    _remove_output_dir_if_needed(args.export_output_dir, args.overwrite)
+    # 可覆盖config.yaml中已有字段
+    config_overrides = {}
+    if args.max_size_h:
+        config_overrides["export.model.visual_config.max_size_h"] = args.max_size_h
+    if args.max_size_w:
+        config_overrides["export.model.visual_config.max_size_w"] = args.max_size_w
     export_result = workflow.export(
         quant_result=quant_result,
-        output_dir=EXPORT_OUTPUT_DIR,
-        device=DEVICE,
-        config_overrides=CONFIG_OVERRIDES,
+        output_dir=args.export_output_dir,
+        device=args.device,
+        config_overrides=config_overrides,
     )
-
-    workflow.dump_golden(
-        export_result=export_result,
-        device=DEVICE,
-        input_messages={
-            "image": IMAGE_PATH,
-            "text": PROMPT,
-        },
-    )
-
-    print(f"quant_result: {quant_result}")
     print(f"export_result: {export_result}")
+
+    if args.dump_golden:
+        workflow.dump_golden(
+            export_result=export_result,
+            device=args.device,
+            input_messages={
+                "image": "./data/images/qwen2_vl_demo.jpeg",
+                "text": "描述这张图片",
+            },
+        )
 
 
 if __name__ == "__main__":
