@@ -37,6 +37,7 @@ WORKFLOW_27B_VISUAL_448 = (
 WORKFLOW_27B_VISUAL_896 = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_896.yaml"
 )
+WORKFLOW_27B_MTP = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_mtp.yaml"
 
 
 def _install_stub_modules(monkeypatch):
@@ -501,6 +502,30 @@ def test_spec_decode_workflow_yamls_are_file_based():
     assert mtp_moe["hf_model"] == "weights/Qwen3.6-35B-A3B"
     assert dflash_moe["dflash_config"]["hf_model"] == "weights/Qwen3.6-35B-A3B-DFlash"
     assert dflash_moe["output_hidden_state_indices"] == [1, 10, 19, 28, 37]
+
+
+def test_mtp_workflow_yamls_match_qwen35_hf_attention_shapes():
+    expected_shapes = {
+        WORKFLOW_9B_MTP: {
+            "hidden_size": 4096,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        },
+        WORKFLOW_27B_MTP: {
+            "hidden_size": 5120,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        },
+        WORKFLOW_MOE_MTP: {
+            "hidden_size": 2048,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+        },
+    }
+
+    for workflow_path, expected in expected_shapes.items():
+        mtp_config = _load_yaml(workflow_path)["export"]["model"]["mtp_config"]
+        assert {key: mtp_config[key] for key in expected} == expected
 
 
 def test_force_delete_refuses_project_root(monkeypatch):
