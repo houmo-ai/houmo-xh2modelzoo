@@ -1,5 +1,5 @@
 quant:
-  bits: 4
+  bits: 8
 
 export:
   model:
@@ -9,25 +9,15 @@ export:
     # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
     hf_model: null
 
-    model_name: xh2_qwen3-1.7b_w4a8_256_2k
+    model_name: xh2_qwen3-1.7b_w8a8_256_2k
     context_max_length: 2048
     prefill_chunk_length: 256
     use_cache: true
     num_logits_to_keep: 1
     quant_scheme:
-      w_scheme:
-        bits: 4
-        fp_mode: ssfp
-      act_scheme:
-        bits: 8
-        fp_mode: sefp
+      quant_type: w8a8h1_sefp
       nodes:
         lm_head:
-          w_scheme:
-            bits: 8
-            fp_mode: sefp
-          act_scheme:
-            bits: 8
-            fp_mode: sefp
+          quant_type: w8a8h1_sefp
       ops: {}
     only_first_block: false
