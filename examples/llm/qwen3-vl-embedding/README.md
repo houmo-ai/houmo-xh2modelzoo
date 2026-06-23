@@ -8,6 +8,12 @@ Qwen3-VL-Embedding 多模态文本/图像 embedding 模型的原始推理 + HMON
 /data01/home/she.gao/.cache/huggingface/hub/models--Qwen--Qwen3-VL-Embedding-2B/snapshots/9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda
 ```
 
+本地模型路径（8B，ModelScope）：
+
+```
+/data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B
+```
+
 ## 环境依赖
 
 实测验证环境（conda env `xhquant`）：
@@ -52,6 +58,7 @@ Qwen3VLForConditionalGeneration (HF architecture)
 | `qwen3_vl_embedding_xh2a_export_hmonnx.py` | 用 `Qwen3_VLEmbeddingConverterXH2a` 导出 backbone（visual + language）到 XH2a/HMONNX。 |
 | `qwen3_vl_embedding_xh2a_demo.py` | 用 `Qwen3VLONNXModel.embed_texts()` 跑 HMONNX 文本 embedding，输出相似度矩阵。 |
 | `qwen3_vl_embedding_eval_flickr30k_hmonnx_aligned.py` | Flickr30K 上跑 **HMONNX** 的 text↔image 检索（含 vision tower），输出 Recall@1/5/10 + MRR@10 + nDCG@10。 |
+| `qwen3_vl_embedding_eval_flickr30k_hmonnx_multigpu.py` | HMONNX 多 GPU data-parallel 评测脚本；每张 GPU 独立跑一个 embedding shard，最后合并计算检索指标。 |
 | `qwen3_vl_embedding_eval_flickr30k.py` | Flickr30K 上跑 **HF BF16 baseline** 的同口径检索指标，作为对比基准。 |
 | `eval_flickr30k_float_448.py` | 消融实验：**浮点**模型但 image 侧强制走固定方形 `--image-size`（默认 448）预处理，用于拆分「分辨率/padding 损失」与「量化损失」。 |
 
@@ -97,6 +104,20 @@ python examples/llm/qwen3-vl-embedding/qwen3_vl_embedding_xh2a_demo.py \
   --hf_model /data01/home/she.gao/.cache/huggingface/hub/models--Qwen--Qwen3-VL-Embedding-2B/snapshots/9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda \
   --text "A dog playing in the park" "A cat sitting on a chair"
 ```
+
+8B HMONNX demo 也可以复用同一个脚本，但必须显式传 `--model_type 8B`，否则默认按 2B 的 28 层 KV cache 构建；8B 是 36 层。当前 8B 导出使用 `input_sequence_length=256`、`cache_len=2048`，与 demo 默认值匹配。
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> \
+PYTHONPATH=/data01/home/she.gao/xh2modelzoo_new \
+python examples/llm/qwen3-vl-embedding/qwen3_vl_embedding_xh2a_demo.py \
+  --model_dir work_dirs/Qwen3-VL-Embedding-8B-XH2a-2k-w8a8h1_sefp \
+  --hf_model /data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B \
+  --model_type 8B \
+  --text "A dog playing in the park" "A cat sitting on a chair"
+```
+
+8B demo 输出 embedding 维度应为 `4096`；2B 是 `2048`。
 
 ## 4) 精度数据集 (Flickr30K 标准检索指标)
 
@@ -190,3 +211,120 @@ CUDA_VISIBLE_DEVICES=<free_gpu> python examples/llm/qwen3-vl-embedding/eval_flic
    - **text→image 对分辨率敏感**：448 太小暴跌 -31 点，提到 896 几乎恢复 baseline（仅 -2.9）。
    - **image→text 对方形 padding 敏感**：448/896 都掉到 ~76%（灰边 + 长宽比失真），只有动态无 padding 才 94.8% —— 提分辨率（896）无改善，说明是 padding 而非分辨率。
 3. **优化方向**：① vision 导出尺寸提到 896×896（text→image R@1 预期 54.9% → ~75%）；② 改保长宽比预处理、去掉方形灰边 pad（image→text 预期 → ~95%）；③ 量化不动。
+
+## 7) 8B 实测结果（Flickr30K 946 图 / 4730 caption）
+
+8B 模型路径：
+
+```
+/data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B
+```
+
+8B HMONNX 导出产物：
+
+```
+work_dirs/Qwen3-VL-Embedding-8B-XH2a-2k-w8a8h1_sefp/
+```
+
+包含 `meta.json`、`token_embedding.pt`、vision/prefill/decode HMONNX 及对应 external data；golden 已生成：
+
+```
+golden/Qwen3-VL-Embedding-8B-XH2a-w8a8h1_sefp_vision
+golden/Qwen3-VL-Embedding-8B-XH2a-w8a8h1_sefp-llm-prefill
+golden/Qwen3-VL-Embedding-8B-XH2a-w8a8h1_sefp-llm-decode
+```
+
+### 7.1 浮点 baseline
+
+非固定窗口（HF 原生动态分辨率）：
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> python examples/llm/qwen3-vl-embedding/qwen3_vl_embedding_eval_flickr30k.py \
+  --model-dir /data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B \
+  --dataset-dir /data01/home/she.gao/.cache/flickr30k \
+  --text-batch-size 16 \
+  --image-batch-size 4 \
+  --report work_dirs/flickr30k_float_dynamic_8B_full_eval.json
+```
+
+固定窗口 448x448 方形 pad：
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> python examples/llm/qwen3-vl-embedding/eval_flickr30k_float_448.py \
+  --model-dir /data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B \
+  --dataset-dir /data01/home/she.gao/.cache/flickr30k \
+  --image-size 448 \
+  --text-batch-size 16 \
+  --image-batch-size 4 \
+  --report work_dirs/flickr30k_float_448_8B_full_eval.json
+```
+
+| 配置 | 方向 | Recall@1 | Recall@5 | Recall@10 | MRR@10 | nDCG@10 |
+|---|---|---:|---:|---:|---:|---:|
+| 8B 浮点动态分辨率 | text→image | 79.98% | 94.88% | 97.23% | 86.33% | 89.02% |
+| 8B 浮点动态分辨率 | image→text | 94.71% | 99.68% | 99.89% | 96.87% | 88.75% |
+| 8B 浮点 @448 方形 pad | text→image | 78.75% | 93.72% | 96.85% | 85.33% | 88.15% |
+| 8B 浮点 @448 方形 pad | image→text | 93.87% | 99.37% | 99.89% | 96.24% | 87.75% |
+
+### 7.2 HMONNX 固定窗口 @448
+
+HMONNX 的 8B 导出配置固定视觉窗口为 448x448：
+
+```json
+"visual": {
+  "image_max_size_h": 448,
+  "image_max_size_w": 448,
+  "image_max_size_t": 2,
+  "temporal_patch_size": 2,
+  "patch_size": 16
+}
+```
+
+单卡脚本可直接评测；8B 全量耗时较长，实测使用多 GPU data-parallel 脚本：
+
+```bash
+PYTHONPATH=/data01/home/she.gao/xh2modelzoo_new TOKENIZERS_PARALLELISM=false \
+python examples/llm/qwen3-vl-embedding/qwen3_vl_embedding_eval_flickr30k_hmonnx_multigpu.py \
+  --hmonnx-config work_dirs/Qwen3-VL-Embedding-8B-XH2a-2k-w8a8h1_sefp/meta.json \
+  --hf-model /data01/home/she.gao/.cache/modelscope/hub/models/Qwen/Qwen3-VL-Embedding-8B \
+  --dataset-dir /data01/home/she.gao/.cache/flickr30k \
+  --model-type 8B \
+  --gpus 2,3,6,7 \
+  --report work_dirs/flickr30k_hmonnx_8B_multigpu_full_eval.json \
+  --run-dir work_dirs/hmonnx_8B_multigpu_full
+```
+
+> 这里是纯推理 data parallel，不是训练 DDP：每个 worker 独立构建 HMONNX runtime，分别计算 captions/images shard，最后合并 embedding 后计算指标。
+
+8B HMONNX@448 全量结果：
+
+| 方向 | Recall@1 | Recall@5 | Recall@10 | MRR@10 | nDCG@10 |
+|---|---:|---:|---:|---:|---:|
+| text→image | 79.26% | 94.38% | 97.02% | 85.75% | 88.52% |
+| image→text | 94.61% | 99.37% | 99.89% | 96.70% | 88.12% |
+
+### 7.3 8B 固定窗口量化差异
+
+8B 固定窗口口径下，HMONNX@448 相对浮点@448 没有精度下降，R@1 略高。
+
+| 方向 | 指标 | 浮点@448 | HMONNX@448 | 差值 |
+|---|---|---:|---:|---:|
+| text→image | Recall@1 | 78.75% | 79.26% | +0.51 |
+| text→image | Recall@5 | 93.72% | 94.38% | +0.66 |
+| text→image | Recall@10 | 96.85% | 97.02% | +0.17 |
+| text→image | MRR@10 | 85.33% | 85.75% | +0.42 |
+| text→image | nDCG@10 | 88.15% | 88.52% | +0.37 |
+| image→text | Recall@1 | 93.87% | 94.61% | +0.74 |
+| image→text | Recall@5 | 99.37% | 99.37% | +0.00 |
+| image→text | Recall@10 | 99.89% | 99.89% | +0.00 |
+| image→text | MRR@10 | 96.24% | 96.70% | +0.46 |
+| image→text | nDCG@10 | 87.75% | 88.12% | +0.37 |
+
+报告文件：
+
+| 报告 | 路径 |
+|---|---|
+| 8B 浮点动态分辨率 | `work_dirs/flickr30k_float_dynamic_8B_full_eval.json` |
+| 8B 浮点 @448 方形 pad | `work_dirs/flickr30k_float_448_8B_full_eval.json` |
+| 8B HMONNX @448 多 GPU 全量 | `work_dirs/flickr30k_hmonnx_8B_multigpu_full_eval.json` |
+
