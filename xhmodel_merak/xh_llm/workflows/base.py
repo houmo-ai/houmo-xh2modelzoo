@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import WorkflowConfig
+from .naming import resolve_auto_model_name
 from .result import ExportResult, QuantResult
 from .utils import same_abs_path
 
@@ -57,9 +58,14 @@ class BaseHMONNXWorkflow:
         if quant_result is None:
             raise ValueError("quant_result can't be None")
 
-        workflow_config = self.workflow_config.with_overrides(config_overrides)
         export_hf_model_dir = self._resolve_export_hf_model_dir(quant_result)
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        workflow_config = self._prepare_export_workflow_config(
+            workflow_config,
+            export_hf_model_dir=export_hf_model_dir,
+        )
         export_cfg = workflow_config.build_export_dict(export_hf_model_dir)
+        export_cfg.pop("naming", None)
 
         work_dir_path = Path(output_dir)
         if work_dir_path.exists():
@@ -101,6 +107,14 @@ class BaseHMONNXWorkflow:
         with TimeProfiler("convert", logger), MemoryTracker(device, "convert2hmonnx", logger):
             meta = xh_model.export_hmonnx(str(work_dir_path))
         return ExportResult(work_dir=str(work_dir_path), config_file=config_file, meta=meta)
+
+    def _prepare_export_workflow_config(
+        self,
+        workflow_config: WorkflowConfig,
+        *,
+        export_hf_model_dir: str | None = None,
+    ) -> WorkflowConfig:
+        return resolve_auto_model_name(workflow_config, hf_model_dir=export_hf_model_dir)
 
     def dump_golden(
         self,
