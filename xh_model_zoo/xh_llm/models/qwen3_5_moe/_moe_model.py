@@ -1370,6 +1370,16 @@ class _Qwen3_5MoeSparseMoeBlock(DynamicModule):
             self.moeblock.expert_down_proj_weight = nn.Parameter(down_proj_weight)
             self.moeblock.expert_down_proj_bias = None
 
+            gate_quant_weight = getattr(experts, "gate_proj_quant_weight", None)
+            up_quant_weight = getattr(experts, "up_proj_quant_weight", None)
+            down_quant_weight = getattr(experts, "down_proj_quant_weight", None)
+            if gate_quant_weight is not None:
+                self.moeblock.expert_gate_proj_quant_weight = gate_quant_weight.data.to(self.device).contiguous()
+            if up_quant_weight is not None:
+                self.moeblock.expert_up_proj_quant_weight = up_quant_weight.data.to(self.device).contiguous()
+            if down_quant_weight is not None:
+                self.moeblock.expert_down_proj_quant_weight = down_quant_weight.data.to(self.device).contiguous()
+
             # Release original packed experts to free memory
             del self.experts
         elif (

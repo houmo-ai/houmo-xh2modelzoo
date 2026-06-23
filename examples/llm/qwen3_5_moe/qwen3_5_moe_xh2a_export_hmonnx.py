@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from transformers import AutoConfig
 
 from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen3_5_moe import Qwen3_5MoeConvertConfig
@@ -92,6 +93,31 @@ def _validate_offline_rope_required_for_fp16_limit(args):
 
 def _get_default_device() -> torch.device:
     return torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
+
+def _parse_hidden_state_indices(spec: Optional[str], hf_model_path: str) -> Optional[List[int]]:
+    if spec is None:
+        return None
+    spec = str(spec).strip().lower()
+    if not spec or spec in {"none", "false"}:
+        return None
+    if spec in {"all", "*"}:
+        hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+        text_config = getattr(hf_config, "text_config", hf_config)
+        return list(range(int(text_config.num_hidden_layers)))
+
+    indices = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            indices.update(range(start, end + 1))
+        else:
+            indices.add(int(part))
+    return sorted(indices)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1198,6 +1224,7 @@ def main(args):
         spec_decode_mode = None
         args.spec_decode_mode = None
     num_draft_tokens = args.num_draft_tokens
+    output_hidden_state_indices = _parse_hidden_state_indices(args.output_hidden_state_indices, hf_model_path)
     _validate_offline_rope_required_for_fp16_limit(args)
 
     config = Qwen3_5MoeConvertConfig(
@@ -1221,6 +1248,10 @@ def main(args):
         normalize_force_fp32=getattr(args, "normalize_force_fp32", False),
         use_manual_depthwise_conv1d=getattr(args, "use_manual_depthwise_conv1d", False),
         fuse_gdr_ops=getattr(args, "fuse_gdr_ops", False),
+        output_hidden_state_indices=output_hidden_state_indices,
+        gptq_restore_expert_layer_spec=args.gptq_restore_expert_layers
+        or args.output_hidden_state_indices,
+        export_prefill=not getattr(args, "skip_prefill_export", False),
     )
 
     if args.draft_only:
@@ -1255,6 +1286,8 @@ def main(args):
     logger.info(f"quant_weight: {args.quant_weight}")
     logger.info(f"spec_decode_mode: {spec_decode_mode}")
     logger.info(f"spec_draft_head_weight_bits: {args.spec_draft_head_weight_bits}")
+    logger.info(f"output_hidden_state_indices: {output_hidden_state_indices}")
+    logger.info(f"export_prefill: {not getattr(args, 'skip_prefill_export', False)}")
     logger.info(f"output: {work_dir}")
 
     if args.draft_only:
@@ -1360,6 +1393,31 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num-logits-to-keep", type=int, default=1, help="How many final logit positions to keep (1 = last only)"
+    )
+    parser.add_argument(
+        "--output-hidden-state-indices",
+        "--output_hidden_state_indices",
+        dest="output_hidden_state_indices",
+        type=str,
+        default=None,
+        help=(
+            "Diagnostic only: comma/range layer ids, or 'all', for exporting concatenated per-layer "
+            "hidden states as an extra HMONNX output."
+        ),
+    )
+    parser.add_argument(
+        "--skip-prefill-export",
+        action="store_true",
+        help="Diagnostic only: export the decode graph/meta but skip the large prefill graph.",
+    )
+    parser.add_argument(
+        "--gptq-restore-expert-layers",
+        type=str,
+        default=None,
+        help=(
+            "Diagnostic only: layer ids/ranges, or 'all', for restoring packed GPTQ routed expert "
+            "fp/qweight tensors before export. Defaults to --output-hidden-state-indices when set."
+        ),
     )
     parser.add_argument(
         "--linear-attention-mode",
