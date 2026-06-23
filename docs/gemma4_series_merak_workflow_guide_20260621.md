@@ -24,10 +24,25 @@ Gemma4ForConditionalGeneration
 
 | 模型 | 推荐权重 | 量化 HF 目录环境变量 | 说明 |
 |---|---|---|---|
-| E2B | AutoRound | `GEMMA4_E2B_AUTOROUND_HF` | 当前 HMONNX 精度优于 GPTQModel |
+| E2B | AutoRound | `GEMMA4_E2B_AUTOROUND_HF` | 当前 HMONNX/weight-only 精度优于 GPTQModel |
 | E4B | GPTQModel | `GEMMA4_E4B_GPTQMODEL_HF` | 当前 GPTQModel 稳定优于 AutoRound |
-| 26B-A4B | AutoRound | `GEMMA4_26B_A4B_AUTOROUND_HF` | MoE 权重必须走 GPTQModel/Merak loader 读取 split experts |
-| 31B | AutoRound | `GEMMA4_31B_AUTOROUND_HF` | 当前 CEval/HMONNX 对比最优 |
+| 26B-A4B | GPTQModel | `GEMMA4_26B_A4B_GPTQMODEL_HF` | MoE 权重必须走 GPTQModel/Merak loader 读取 split experts |
+| 31B | GPTQModel | `GEMMA4_31B_GPTQMODEL_HF` | 当前 full-only HMONNX 对比优于 AutoRound |
+
+CEval 精度摘要（数据源：
+`work_dirs/qtl384_gemma4_ceval_maxtok512_live_summary.md`，更新时间
+`2026-06-23 00:09:49 CST`；CEval full `--limit 0` 共 1346 samples，
+`--max-tokens 512`）：
+
+| 模型 | FP | GPTQ weight-only | AutoRound weight-only | GPTQ HMONNX | AutoRound HMONNX | 推荐 |
+|---|---:|---:|---:|---:|---:|---|
+| E2B | 0.3143 | 0.2860 | 0.3247 | 0.2897 (390/1346) | 0.3276 (441/1346) | AutoRound |
+| E4B | 0.5743 | 0.5468 | 0.5520 | 0.5505 (741/1346) | 0.5364 (722/1346) | GPTQModel |
+| 26B-A4B | 0.7325 | 0.7229 | 0.7162 | 0.7214 (971/1346) | 0.7273 (979/1346) | GPTQModel |
+| 31B | 0.8024 | 0.7883 | 0.7734 | 0.8118 (full-only, RUN) | 0.8023 (full-only, RUN) | GPTQModel |
+
+31B 的 full-only 与 split-merged 评测存在重复/去重口径差异；这里记录用于
+推荐选型的 full-only 汇总数，详细路径和中间状态见 work_dirs summary。
 
 导出合同：
 
@@ -42,10 +57,51 @@ Gemma4ForConditionalGeneration
 | golden | 每个子模块都要有 HM-style golden：`visual`、`video_visual`、`audio`、`prefill`、`decode` |
 | video ViT | 必须单独导出 `video_visual`，不允许 pad 到 image ViT 的 2520 patch 图上 |
 
-> 注意：本轮已产出的 8192 HMONNX 目录名里仍可能含 `_2k`，这是历史命名
-> 问题；判断真实 context 以 `golden_meta_info.json` 里的
-> `model_config.context_max_length` 为准。后续新导出已修正为按 context suffix
-> 命名。
+### 1.1 自动 `model_name` 命名
+
+Gemma4 Series 的 YAML 默认使用 `model_name: auto`，由 workflow 在导出前
+统一生成最终 HMONNX 目录名，避免 GPTQModel / AutoRound / base 或不同
+context 长度互相覆盖。
+
+```yaml
+export:
+  naming:
+    family: gemma4
+    variant: e4b        # e2b / e4b / 31b / 26b_a4b
+    profile: full
+  model:
+    model_name: auto
+```
+
+命名格式：
+
+```text
+<chip>_<family>_<variant>_<profile>_<method>_w<bits>a<act_bits>_<prefill>_<context>_mpe<mpe>
+```
+
+其中：
+
+- `method` 来自量化配置的 `method` 字段：`gptq`、`autoround`；base
+  export 自动写成 `base`。
+- `bits` 来自 weight-only 量化 bit，`act_bits` 来自 `quant_scheme` 中的
+  activation bit；`h1_sefp` 不写入目录名，只保留在 `quant_scheme.quant_type`
+  内部。
+- `prefill` 是 `prefill_chunk_length` / `input_sequence_length`。
+- `context` 是本次导出实际 `context_max_length`，例如 2048 -> `2k`、
+  8192 -> `8k`。
+- `mpe` 表示最大位置编码长度，直接从 HF `config.json` 读取
+  `max_position_embeddings`；Gemma4 读取路径是
+  `text_config.max_position_embeddings`。workflow YAML 不再新增
+  `max_pe_length` 之类配置。
+
+示例：
+
+```text
+xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
+xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
+```
+
+当前 HF config 中 E2B/E4B 为 `mpe128k`，31B/26B-A4B 为 `mpe256k`。
 
 ## 2. 四个模型结构与功能对比
 
@@ -94,20 +150,25 @@ Gemma4ForConditionalGeneration
 
 ### 2.3 配置文件差异
 
-| 模型 | HF checkpoint | Workflow YAML | 默认量化 | 默认校准 |
-|---|---|---|---|---|
-| E2B | `/data01/datasets/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` | GPTQModel，可切 AutoRound | `gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl` |
-| E4B | `/data01/datasets/gemma-4-E4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml` | GPTQModel | 同上 |
-| 31B | `/data01/datasets/gemma-4-31B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml` | GPTQModel，可切 AutoRound | 同上 |
-| 26B-A4B | `/data01/datasets/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` | GPTQModel，可切 AutoRound MoE mode1 | `gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl` |
+| 模型 | HF checkpoint | GPTQModel YAML | AutoRound YAML | MPE | 默认校准 |
+|---|---|---|---|---|---|
+| E2B | `/data01/datasets/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml` | `mpe128k` | GPTQModel: `gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl`；AutoRound: `NeelNanda/pile-10k` |
+| E4B | `/data01/datasets/gemma-4-E4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_autoround.yaml` | `mpe128k` | 同上 |
+| 31B | `/data01/datasets/gemma-4-31B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml` | `mpe256k` | 同上 |
+| 26B-A4B | `/data01/datasets/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml` | `mpe256k` | GPTQModel: `gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl`；AutoRound: `NeelNanda/pile-10k` |
 
 四份 YAML 共同点：
 
 ```yaml
 export:
+  naming:
+    family: gemma4
+    variant: e4b                  # 各 YAML 分别写 e2b/e4b/31b/26b_a4b
+    profile: full
   model:
     model_type: Gemma4ForConditionalGeneration
-    context_max_length: 2048        # 正式 8192 导出用 CLI override
+    model_name: auto
+    context_max_length: 2048      # 正式 8192 导出用 CLI override
     prefill_chunk_length: 256
     sliding_kv_cache_input_mode: slice_window
     quant_scheme:
@@ -162,8 +223,8 @@ hmquant_<model_name>_<date>/
 work_dirs/qtl384_gemma4_exports_8192_20260620/
   e2b_autoround/.../golden_meta_info.json
   e4b_gptqmodel/.../golden_meta_info.json
-  26b_a4b_autoround/.../golden_meta_info.json
-  31b_autoround/.../golden_meta_info.json
+  26b_a4b_gptqmodel/.../golden_meta_info.json
+  31b_gptqmodel/.../golden_meta_info.json
 ```
 
 打包文件：
@@ -459,8 +520,8 @@ Visual bidirectional attention 处理：
 ```bash
 export GEMMA4_E2B_AUTOROUND_HF=/path/to/gemma-4-E2B-it-autoround
 export GEMMA4_E4B_GPTQMODEL_HF=/path/to/gemma-4-E4B-it-gptqmodel
-export GEMMA4_26B_A4B_AUTOROUND_HF=/path/to/gemma-4-26B-A4B-it-autoround
-export GEMMA4_31B_AUTOROUND_HF=/path/to/gemma-4-31B-it-autoround
+export GEMMA4_26B_A4B_GPTQMODEL_HF=/path/to/gemma-4-26B-A4B-it-gptqmodel
+export GEMMA4_31B_GPTQMODEL_HF=/path/to/gemma-4-31B-it-gptqmodel
 ```
 
 E2B AutoRound：
@@ -493,14 +554,14 @@ CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --force
 ```
 
-26B-A4B AutoRound：
+26B-A4B GPTQModel：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
   --preset 26b-a4b \
   --action existing-hf \
-  --existing-hf-model-dir "$GEMMA4_26B_A4B_AUTOROUND_HF" \
-  --work-dir ./work_dirs/qtl384_gemma4_best_exports/26b_a4b_autoround \
+  --existing-hf-model-dir "$GEMMA4_26B_A4B_GPTQMODEL_HF" \
+  --work-dir ./work_dirs/qtl384_gemma4_best_exports/26b_a4b_gptqmodel \
   --context-max-length 8192 \
   --prefill-chunk-length 256 \
   --sliding-kv-cache-input-mode slice_window \
@@ -508,14 +569,14 @@ CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --force
 ```
 
-31B AutoRound：
+31B GPTQModel：
 
 ```bash
 CUDA_VISIBLE_DEVICES=3 python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
   --preset 31b \
   --action existing-hf \
-  --existing-hf-model-dir "$GEMMA4_31B_AUTOROUND_HF" \
-  --work-dir ./work_dirs/qtl384_gemma4_best_exports/31b_autoround \
+  --existing-hf-model-dir "$GEMMA4_31B_GPTQMODEL_HF" \
+  --work-dir ./work_dirs/qtl384_gemma4_best_exports/31b_gptqmodel \
   --context-max-length 8192 \
   --prefill-chunk-length 256 \
   --sliding-kv-cache-input-mode slice_window \
@@ -537,9 +598,9 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --force
 ```
 
-GPTQModel 默认配置：W4、group size 64、symmetric、no rotation、
-`artifact_format=gptqmodel_hf`。Dense 使用 IVSG 校准；26B-A4B 使用 EBSS
-校准和 MoE routing bypass。
+GPTQModel 默认配置来自各模型 `*_full.yaml`：W4、group size 64、
+symmetric、no rotation、`artifact_format=gptqmodel_hf`。Dense 使用 IVSG
+校准；26B-A4B 使用 EBSS 校准和 MoE routing bypass。
 
 ### 8.3 AutoRound mode1 量化
 
@@ -550,8 +611,34 @@ third_party/auto-round/scripts_gemma4
 third_party/auto-round/scripts_gemma4_moe
 ```
 
-接口上仍通过 `Gemma4SeriesWorkflow.quant(...)` 进入。推荐只在需要复现实验或
-重新产出 AutoRound 权重时使用；常规重导出直接走 `existing-hf`。
+接口上仍通过 `Gemma4SeriesWorkflow.quant(...)` 进入。仓库已提供四份
+AutoRound YAML，语义是 `algorithm: gptqmodel` + `method: autoround`，产物
+仍保存为 GPTQModel HF 格式，校准数据集对齐真实脚本用法：
+`calibration.dataset: NeelNanda/pile-10k`，不是 jsonl 文件。
+
+```text
+configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml
+configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_autoround.yaml
+configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml
+configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml
+```
+
+示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
+  --config-path configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml \
+  --action quant-export \
+  --work-dir ./work_dirs/gemma4_series_quant_export/e2b_autoround \
+  --context-max-length 8192 \
+  --prefill-chunk-length 256 \
+  --sliding-kv-cache-input-mode slice_window \
+  --golden \
+  --force
+```
+
+推荐只在需要复现实验或重新产出 AutoRound 权重时使用；常规重导出直接走
+`existing-hf`。
 
 ### 8.4 Base export
 

@@ -39,6 +39,7 @@ DEFAULT_DENSE_CALIBRATION_JSONL = (
 DEFAULT_MOE_CALIBRATION_JSONL = (
     "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
 )
+DEFAULT_AUTOROUND_DATASET = "NeelNanda/pile-10k"
 
 
 def quantize_with_autoround_mode1(
@@ -140,7 +141,7 @@ def build_autoround_mode1_command(
             _resolve_calibration_value(
                 calibration_cfg.get(
                     "dataset",
-                    calibration_cfg.get("jsonl", quant_cfg.get("dataset", DEFAULT_DENSE_CALIBRATION_JSONL)),
+                    calibration_cfg.get("jsonl", quant_cfg.get("dataset", DEFAULT_AUTOROUND_DATASET)),
                 )
             )
         ),
@@ -210,7 +211,7 @@ def _build_autoround_moe_mode1_command(
         "--dataset",
         str(
             _resolve_calibration_value(
-                calibration_cfg.get("dataset", calibration_cfg.get("jsonl", DEFAULT_MOE_CALIBRATION_JSONL))
+                calibration_cfg.get("dataset", calibration_cfg.get("jsonl", DEFAULT_AUTOROUND_DATASET))
             )
         ),
         "--seed",
@@ -471,8 +472,7 @@ def _preflight_autoround_command_inputs(command: list[str]) -> None:
         dataset,
         field="quant.calibration.dataset/jsonl",
         hint=(
-            "Install/provide GPTQModel with its Gemma4 calibration resources, "
-            "override quant.calibration.jsonl with a readable JSONL file, or provide "
+            "Provide a readable local calibration path, or provide "
             "a supported AutoRound dataset name."
         ),
         only_if_path_like=True,

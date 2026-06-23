@@ -1,6 +1,5 @@
 import copy
 import os
-import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +19,11 @@ from .export_plan import (
     Gemma4SeriesExportPlan,
     build_gemma4_series_export_plan,
 )
-from .quant_adapter import DEFAULT_DENSE_CALIBRATION_JSONL, DEFAULT_MOE_CALIBRATION_JSONL
+from .quant_adapter import (
+    DEFAULT_AUTOROUND_DATASET,
+    DEFAULT_DENSE_CALIBRATION_JSONL,
+    DEFAULT_MOE_CALIBRATION_JSONL,
+)
 
 
 _GEMMA4_MODEL_CLS_NAMES = {
@@ -48,6 +51,7 @@ _GEMMA4_TOP_LEVEL_MODEL_TYPES = {
 }
 _GEMMA4_GOLDEN_MIN_TEXT_TOKENS = 1025
 _GEMMA4_RECOMMENDED_CONFIGS = {
+    "e2b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml",
     "e4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml",
     "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml",
     "26b-a4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml",
@@ -85,7 +89,7 @@ _GEMMA4_QUANT_TEMPLATE: dict[str, Any] = {
     },
 }
 _GEMMA4_AUTOROUND_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
-    "algorithm": "autoround",
+    "algorithm": "gptqmodel",
     "method": "autoround",
     "preset": "mode1",
     "rotation": None,
@@ -98,10 +102,9 @@ _GEMMA4_AUTOROUND_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
     "seed": 42,
     "format": "auto_gptq",
     "calibration": {
-        "jsonl": DEFAULT_DENSE_CALIBRATION_JSONL,
-        "text_key": "text",
+        "dataset": DEFAULT_AUTOROUND_DATASET,
         "nsamples": 128,
-        "seqlen": 512,
+        "seqlen": 2048,
     },
     "runtime": {
         "batch_size": 8,
@@ -109,7 +112,7 @@ _GEMMA4_AUTOROUND_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
     },
 }
 _GEMMA4_AUTOROUND_MOE_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
-    "algorithm": "autoround",
+    "algorithm": "gptqmodel",
     "method": "autoround",
     "preset": "mode1",
     "rotation": None,
@@ -122,10 +125,9 @@ _GEMMA4_AUTOROUND_MOE_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
     "seed": 42,
     "format": "auto_gptq",
     "calibration": {
-        "jsonl": DEFAULT_MOE_CALIBRATION_JSONL,
-        "text_key": "text",
+        "dataset": DEFAULT_AUTOROUND_DATASET,
         "nsamples": 128,
-        "seqlen": 512,
+        "seqlen": 2048,
     },
     "runtime": {
         "batch_size": 8,
@@ -141,7 +143,7 @@ _GEMMA4_EXPORT_MODEL_TEMPLATE: dict[str, Any] = {
     "chip_arch": "XH2a",
     "model_type": "Gemma4ForConditionalGeneration",
     "hf_model": None,
-    "model_name": "xh2_gemma4_full_256_2k",
+    "model_name": "auto",
     "context_max_length": REQUIRED_CONTEXT_MAX_LENGTH,
     "prefill_chunk_length": REQUIRED_INPUT_SEQUENCE_LENGTH,
     "use_cache": True,
@@ -177,6 +179,11 @@ _GEMMA4_EXPORT_MODEL_TEMPLATE: dict[str, Any] = {
     },
     "only_first_block": False,
 }
+_GEMMA4_EXPORT_NAMING_TEMPLATE: dict[str, Any] = {
+    "family": "gemma4",
+    "variant": "e4b",
+    "profile": "full",
+}
 
 
 def list_recommended_configs() -> dict[str, str]:
@@ -192,8 +199,9 @@ def get_quant_config_help() -> str:
         f"Dense defaults use IVSG calibration JSONL ({DEFAULT_DENSE_CALIBRATION_JSONL}); "
         f"26B-A4B MoE defaults use EBSS calibration JSONL ({DEFAULT_MOE_CALIBRATION_JSONL}) "
         "and routing bypass so every expert receives calibration activations. "
-        "Dense 31B/E4B checkpoints can alternatively use algorithm='autoround', preset='mode1', "
-        "which wraps third_party/auto-round/scripts_gemma4 LLM-only W4G64 no-rotation quantization; "
+        "Dense E2B/E4B/31B checkpoints can alternatively use algorithm='gptqmodel', method='autoround', preset='mode1', "
+        "which wraps third_party/auto-round/scripts_gemma4 LLM-only W4G64 no-rotation quantization "
+        f"with dataset={DEFAULT_AUTOROUND_DATASET!r}; "
         "26B-A4B with the same preset wraps scripts_gemma4_moe/quantize_moe.py. "
         "Use config_overrides={'quant': None} only for explicit base-model validation, or replace "
         "the quant block with {'algorithm': 'existing_hf', 'artifact_format': 'gptqmodel_hf', "
@@ -236,7 +244,15 @@ def dump_autoround_moe_mode1_quant_config_template(path: str | os.PathLike[str])
 
 
 def dump_export_config_template(path: str | os.PathLike[str]) -> str:
-    return _dump_yaml(path, {"export": {"model": copy.deepcopy(_GEMMA4_EXPORT_MODEL_TEMPLATE)}})
+    return _dump_yaml(
+        path,
+        {
+            "export": {
+                "naming": copy.deepcopy(_GEMMA4_EXPORT_NAMING_TEMPLATE),
+                "model": copy.deepcopy(_GEMMA4_EXPORT_MODEL_TEMPLATE),
+            }
+        },
+    )
 
 
 def quant(
@@ -358,8 +374,8 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         raise NotImplementedError(
             "Gemma4SeriesWorkflow.quant supports quant=None, "
             "quant.algorithm='existing_hf', or "
-            "quant.algorithm='gptqmodel' (legacy 'gptq' maps to method; method='autoround' maps "
-            "to dense mode1), or quant.algorithm='autoround' "
+            "quant.algorithm='gptqmodel' with method='gptq' or method='autoround', "
+            "or legacy quant.algorithm='gptq'/'autoround', "
             "with artifact_format/output_format='gptqmodel_hf'. "
             f"Got algorithm={algorithm!r}, artifact_format={artifact_format!r}."
         )
@@ -371,7 +387,6 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
-        config_overrides = self._with_context_aware_model_name_override(config_overrides)
         self._validate_export_model(config_overrides)
         return super().export(
             quant_result=quant_result,
@@ -772,77 +787,6 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             hf_model_dir=self.hf_model_dir,
             export_model_cfg=model_cfg,
         )
-
-    def _with_context_aware_model_name_override(
-        self,
-        config_overrides: Mapping[str, Any] | None,
-    ) -> Mapping[str, Any] | None:
-        """Keep generated artifact names aligned with the final context size.
-
-        The recommended Gemma4 YAMLs default to 2048 context and therefore use
-        ``*_256_2k`` names.  CLI/workflow callers can override
-        ``export.model.context_max_length`` to 8192 without also overriding
-        ``model_name``; if we leave the YAML name untouched, the exported
-        directory is semantically correct but misleadingly named ``*_2k``.
-
-        Respect an explicit model_name override.  Otherwise rewrite the final
-        ``_<prefill>_<context>`` suffix from the resolved export config.
-        """
-
-        if self._has_explicit_model_name_override(config_overrides):
-            return config_overrides
-
-        workflow_config = self.workflow_config.with_overrides(config_overrides)
-        model_cfg = workflow_config.export.get("model")
-        if not isinstance(model_cfg, Mapping):
-            return config_overrides
-
-        current_name = str(model_cfg.get("model_name") or "")
-        resolved_name = self._resolve_context_aware_model_name(model_cfg)
-        if not resolved_name or resolved_name == current_name:
-            return config_overrides
-
-        merged_overrides: dict[str, Any] = copy.deepcopy(dict(config_overrides or {}))
-        if isinstance(merged_overrides.get("export"), Mapping):
-            export_override = copy.deepcopy(merged_overrides["export"])
-            model_override = copy.deepcopy(export_override.get("model") or {})
-            if not isinstance(model_override, dict):
-                return config_overrides
-            model_override["model_name"] = resolved_name
-            export_override["model"] = model_override
-            merged_overrides["export"] = export_override
-        else:
-            merged_overrides["export.model.model_name"] = resolved_name
-        return merged_overrides
-
-    @staticmethod
-    def _has_explicit_model_name_override(config_overrides: Mapping[str, Any] | None) -> bool:
-        if not config_overrides:
-            return False
-        if "export.model.model_name" in config_overrides:
-            return True
-        export_override = config_overrides.get("export")
-        if not isinstance(export_override, Mapping):
-            return False
-        model_override = export_override.get("model")
-        return isinstance(model_override, Mapping) and "model_name" in model_override
-
-    @staticmethod
-    def _resolve_context_aware_model_name(model_cfg: Mapping[str, Any]) -> str:
-        current_name = str(model_cfg.get("model_name") or "")
-        if not current_name:
-            return current_name
-        input_sequence_length = int(model_cfg.get("prefill_chunk_length") or REQUIRED_INPUT_SEQUENCE_LENGTH)
-        context_max_length = int(model_cfg.get("context_max_length") or REQUIRED_CONTEXT_MAX_LENGTH)
-        context_suffix = Gemma4SeriesWorkflow._format_context_suffix(context_max_length)
-        target_suffix = f"_{input_sequence_length}_{context_suffix}"
-        return re.sub(r"_\d+_(?:\d+k|\d+)$", target_suffix, current_name)
-
-    @staticmethod
-    def _format_context_suffix(context_max_length: int) -> str:
-        if context_max_length > 0 and context_max_length % 1024 == 0:
-            return f"{context_max_length // 1024}k"
-        return str(context_max_length)
 
     def _workflow_config_for_quant(self, config_overrides: Mapping[str, Any] | None) -> WorkflowConfig:
         """Apply quant overrides as a quant-stage choice, not as a strict path patch.

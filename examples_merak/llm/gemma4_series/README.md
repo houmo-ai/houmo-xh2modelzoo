@@ -41,14 +41,70 @@ sliding_kv_cache_input_mode: slice_window
 
 正式 QTL-384 集成导出请用 `--context-max-length 8192` 覆盖 YAML 默认值。
 
+## 自动 model_name 命名规范
+
+Gemma4 Series workflow YAML 统一写：
+
+```yaml
+export:
+  naming:
+    family: gemma4
+    variant: e4b      # e2b / e4b / 31b / 26b_a4b
+    profile: full
+  model:
+    model_name: auto
+```
+
+导出前 workflow 会自动解析成：
+
+```text
+xh2_gemma4_<variant>_<profile>_<gptq|autoround|base>_w<bits>a<act_bits>_<prefill>_<context>_mpe<max_position_embeddings>
+```
+
+示例：
+
+```text
+xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
+xh2_gemma4_31b_full_autoround_w4a8_256_2k_mpe256k
+```
+
+说明：
+
+- `mpe` 表示 HF config 里的 `max_position_embeddings`，由
+  `hf_model/config.json` 自动读取，不要在 workflow YAML 里新增
+  `max_pe_length`。
+- E2B/E4B 当前是 `mpe128k`；31B/26B-A4B 当前是 `mpe256k`。
+- `context_max_length` 被 CLI 覆盖为 8192 时，`256_2k` 会自动变成
+  `256_8k`，MPE 后缀保持模型配置值。
+- `h1_sefp` 只保留在 `quant_scheme.quant_type`，不进入目录名。
+
 ## 当前推荐最优权重
+
+当前按最新 CEval 结果和 MoE 加载稳定性选择：E2B 用 AutoRound，其余模型
+优先用 GPTQModel。
 
 | preset | 推荐量化 | 环境变量 |
 | --- | --- | --- |
 | `e2b` | AutoRound | `GEMMA4_E2B_AUTOROUND_HF` |
 | `e4b` | GPTQModel | `GEMMA4_E4B_GPTQMODEL_HF` |
-| `26b-a4b` | AutoRound | `GEMMA4_26B_A4B_AUTOROUND_HF` |
-| `31b` | AutoRound | `GEMMA4_31B_AUTOROUND_HF` |
+| `26b-a4b` | GPTQModel | `GEMMA4_26B_A4B_GPTQMODEL_HF` |
+| `31b` | GPTQModel | `GEMMA4_31B_GPTQMODEL_HF` |
+
+## CEval 精度摘要
+
+数据源：`work_dirs/qtl384_gemma4_ceval_maxtok512_live_summary.md`，更新时间
+`2026-06-23 00:09:49 CST`。CEval full 使用 `--limit 0`，共 1346 samples；
+`--max-tokens 512`，避免长答案被截断。
+
+| preset | FP | GPTQ weight-only | AutoRound weight-only | GPTQ HMONNX | AutoRound HMONNX | 当前推荐 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `e2b` | 0.3143 | 0.2860 | 0.3247 | 0.2897 (390/1346) | 0.3276 (441/1346) | AutoRound |
+| `e4b` | 0.5743 | 0.5468 | 0.5520 | 0.5505 (741/1346) | 0.5364 (722/1346) | GPTQModel |
+| `26b-a4b` | 0.7325 | 0.7229 | 0.7162 | 0.7214 (971/1346) | 0.7273 (979/1346) | GPTQModel |
+| `31b` | 0.8024 | 0.7883 | 0.7734 | 0.8118 (full-only, RUN) | 0.8023 (full-only, RUN) | GPTQModel |
+
+说明：31B 的 full-only 与 split-merged 评测会有重复/去重口径差异；README
+只保留用于选型的汇总数，详细路径和中间状态见上面的 work_dirs summary。
 
 ## 轻量解析验证
 
@@ -67,13 +123,14 @@ python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
 
 ## 一键从头量化、导出、dump golden、跑 demo
 
-当前重型任务脚本就是下面这套：从原始 HF checkpoint 出发，生成 GPTQModel / AutoRound
-两套 workflow config，按“单 GPU 单任务”调度 4 个模型 × 2 种量化，然后对每个产物跑
+当前重型任务脚本就是下面这套：从原始 HF checkpoint 出发，直接使用
+checked-in GPTQModel / AutoRound workflow YAML，按“单 GPU 单任务”调度
+4 个模型 × 2 种量化，然后对每个产物跑
 text / image / video demo；E2B/E4B 额外跑 audio demo。导出规格固定为
 `context_max_length=8192`、`prefill_chunk_length=256`、`slice_window` KV cache、`--golden`。
 
 > 如果只想跑当前最优组合，把 `TASKS` 改成：
-> `('e2b','autoround'), ('e4b','gptq'), ('26b-a4b','autoround'), ('31b','autoround')`。
+> `('e2b','autoround'), ('e4b','gptq'), ('26b-a4b','gptq'), ('31b','gptq')`。
 
 ```bash
 cat > /tmp/run_gemma4_quant_export_demo.py <<'PY'
@@ -86,8 +143,6 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
-
-import yaml
 
 REPO = Path('/data01/home/yujy/work/xh2modelzoo')
 GPTQMODEL_REPO = REPO.parent / 'gptqmodel'
@@ -105,44 +160,15 @@ TASKS = [
     ('26b-a4b', 'gptq'), ('26b-a4b', 'autoround'),
 ]
 
-PRESET_CONFIGS = {
-    'e2b': REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml',
-    'e4b': REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml',
-    '31b': REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml',
-    '26b-a4b': REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml',
-}
-
-DENSE_AUTOROUND_QUANT = {
-    'algorithm': 'autoround',
-    'method': 'autoround',
-    'preset': 'mode1',
-    'rotation': None,
-    'artifact_format': 'gptqmodel_hf',
-    'output_format': 'gptqmodel_hf',
-    'bits': 4,
-    'group_size': 64,
-    'sym': True,
-    'iters': 200,
-    'seed': 42,
-    'format': 'auto_gptq',
-    'calibration': {
-        'jsonl': 'gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl',
-        'text_key': 'text',
-        'nsamples': 128,
-        'seqlen': 512,
-    },
-    'runtime': {'batch_size': 8, 'trust_remote_code': True},
-}
-MOE_AUTOROUND_QUANT = {
-    **DENSE_AUTOROUND_QUANT,
-    'calibration': {
-        'jsonl': 'gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl',
-        'text_key': 'text',
-        'nsamples': 128,
-        'seqlen': 512,
-    },
-    'runtime': {'batch_size': 8, 'dtype': 'bfloat16', 'trust_remote_code': True},
-    'validation': {'prompt': '你是谁', 'max_new_tokens': 128},
+CONFIGS = {
+    ('e2b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml',
+    ('e2b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml',
+    ('e4b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml',
+    ('e4b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_autoround.yaml',
+    ('31b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml',
+    ('31b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml',
+    ('26b-a4b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml',
+    ('26b-a4b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml',
 }
 
 LONG_PROMPT = (REPO / 'work_dirs/qtl384_gemma4_exports_8192_20260620/long_prompt.txt').read_text(encoding='utf-8')
@@ -159,11 +185,9 @@ def write_configs() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     manifest = []
     for model, algo in TASKS:
-        data = yaml.safe_load(PRESET_CONFIGS[model].read_text(encoding='utf-8'))
-        if algo == 'autoround':
-            data['quant'] = MOE_AUTOROUND_QUANT if model == '26b-a4b' else DENSE_AUTOROUND_QUANT
+        source_cfg = CONFIGS[(model, algo)]
         cfg = CONFIG_DIR / f'{model}_{algo}.yaml'
-        cfg.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding='utf-8')
+        cfg.write_text(source_cfg.read_text(encoding='utf-8'), encoding='utf-8')
         manifest.append({'model': model, 'algorithm': algo, 'config': str(cfg.relative_to(REPO))})
     (ROOT / 'manifest_configs.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
 
