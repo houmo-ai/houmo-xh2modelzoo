@@ -1,36 +1,3 @@
-# Copyright 2025 HOUMO AI
-#
-# File: qwen3_5_moe_xh2a_export_hmonnx.py
-# Description:
-#   Export script: Qwen3.5-MoE LLM -> prefill/decode HMONNX via LLMConverter.
-#
-# Usage (float weights):
-#   python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
-#       --model /data01/nfs_shared/Qwen3.5-35B-A3B \
-#       --context-length 2048 --input-sequence-length 256 \
-#       --quant-type w8a8h0_ssfp
-#
-# Usage (GPTQModel weights):
-#   python examples/llm/qwen3_5_moe/qwen3_5_moe_xh2a_export_hmonnx.py \
-#       --model /data01/nfs_shared/Qwen3.5-35B-A3B \
-#       --quant-weight /data01/home/huxing/gptqmodel/work_dirs/Qwen35_35B_A3B_attn4_e4_se4_0324 \
-#       --quant-type w4a8h0_ssfp \
-#       --context-length 2048 --input-sequence-length 256
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
 import argparse
 import json
 import logging
@@ -43,25 +10,22 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import onnx
 import torch
 import torch.nn as nn
-from transformers import AutoConfig
+from safetensors import safe_open
 
+from xh_model_zoo.utils.memory_tracker import MemoryTracker
+from xh_model_zoo.utils.time_profiler import TimeProfiler
 from xh_model_zoo.xh_llm import LLMConverter
-from xh_model_zoo.xh_llm.models.qwen3_5_moe import Qwen3_5MoeConvertConfig
-from xh_model_zoo.xh_llm.models.qwen3_5_moe.qwen3_5_moe_converter import Qwen3_5MoeConverterXH2a
+from xh_model_zoo.xh_llm.models.qwen3_5_moe_prune import Qwen3_5MoePruneConvertConfig
+from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init
 
-
-from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init  # isort:skip
-from xh_model_zoo.utils.memory_tracker import MemoryTracker  # isort:skip
-from xh_model_zoo.utils.time_profiler import TimeProfiler  # isort:skip
-
-# The large continue-batch graphs generate thousands of benign Slice-collapse
-# info messages from onnxscript.  Keep export logs focused on actionable stages
-# and tracebacks.
+# Suppress noisy onnxscript logs during golden/export
 logging.getLogger("onnxscript.rewriter.rules.common._collapse_slices").setLevel(logging.WARNING)
 logging.getLogger("onnxscript.optimizer._constant_folding").setLevel(logging.WARNING)
 logging.getLogger("onnx_ir.passes.common.initializer_deduplication").setLevel(logging.WARNING)
+
 
 FP16_MAX_FINITE_POSITION = 65504
 
@@ -91,46 +55,176 @@ def _validate_offline_rope_required_for_fp16_limit(args):
     )
 
 
+_NORM_WEIGHT_SUFFIXES = (
+    "pre_feedforward_layernorm_2.weight",
+    "post_attention_layernorm.weight",
+    "pre_feedforward_layernorm.weight",
+    "input_layernorm.weight",
+)
+
+
+def _load_weight_map(hf_model_dir: Path) -> Dict[str, str]:
+    index_path = hf_model_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        with index_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return {str(key): str(value) for key, value in payload["weight_map"].items()}
+
+    weight_map: Dict[str, str] = {}
+    for weight_file in sorted(hf_model_dir.glob("*.safetensors")):
+        with safe_open(weight_file, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                weight_map[key] = weight_file.name
+    if not weight_map:
+        raise FileNotFoundError(f"No safetensors checkpoint found under {hf_model_dir}")
+    return weight_map
+
+
+def _load_checkpoint_tensor(hf_model_dir: Path, weight_map: Dict[str, str], key: str) -> torch.Tensor:
+    with safe_open(hf_model_dir / weight_map[key], framework="pt", device="cpu") as f:
+        return f.get_tensor(key)
+
+
+def _find_fused_moe_layer_keys(weight_map: Dict[str, str]):
+    layer_keys = []
+    pattern = re.compile(r"^(?P<prefix>.*layers\.(?P<layer_idx>\d+)\.)mlp\.experts\.gate_up_proj(?:\.weight)?$")
+    for gate_up_key in weight_map:
+        match = pattern.match(gate_up_key)
+        if match is None:
+            continue
+
+        layer_idx = int(match.group("layer_idx"))
+        prefix = match.group("prefix")
+        down_key = f"{prefix}mlp.experts.down_proj"
+        if down_key not in weight_map:
+            down_key = f"{down_key}.weight"
+        if down_key not in weight_map:
+            raise KeyError(f"Unable to find down_proj for layer {layer_idx} from {gate_up_key}")
+
+        gamma_key = None
+        for suffix in _NORM_WEIGHT_SUFFIXES:
+            candidate = f"{prefix}{suffix}"
+            if candidate in weight_map:
+                gamma_key = candidate
+                break
+        if gamma_key is None:
+            raise KeyError(f"Unable to find norm gamma weight for layer {layer_idx}")
+
+        layer_keys.append((layer_idx, gamma_key, gate_up_key, down_key))
+    if not layer_keys:
+        raise RuntimeError("No fused Qwen3.5-MoE expert weights found in checkpoint")
+    return sorted(layer_keys)
+
+
+def _resolve_s_scalar_device(device: str) -> str:
+    if device != "auto":
+        return device
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _compute_expert_slanc_exact(
+    gamma: torch.Tensor,
+    gate_proj_weight: torch.Tensor,
+    up_proj_weight: torch.Tensor,
+    down_proj_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    e_weight = up_proj_weight.transpose(0, 1).contiguous()
+    b_weight = gate_proj_weight.transpose(0, 1).contiguous()
+    g_weight = down_proj_weight.transpose(0, 1).contiguous()
+
+    norm_gamma_e = torch.norm(gamma[:, None] * e_weight, p="fro")
+    norm_gamma_b = torch.norm(gamma[:, None] * b_weight, p="fro")
+    bg = b_weight @ g_weight
+    eg = e_weight @ g_weight
+    a_e = torch.norm(gamma[:, None] * (norm_gamma_e * bg), p="fro")
+    a_b = torch.norm(gamma[:, None] * (norm_gamma_b * eg), p="fro")
+    return torch.sqrt(a_e * a_b + eps)
+
+
+@torch.no_grad()
+def _build_s_scalar_for_layer(
+    gamma: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+    compute_device: str,
+    eps: float,
+) -> torch.Tensor:
+    gamma = gamma.to(device=compute_device, dtype=torch.float32)
+    raw_scores = []
+    for expert_idx in range(gate_up_proj.shape[0]):
+        gate_up_weight = gate_up_proj[expert_idx].to(device=compute_device, dtype=torch.float32)
+        gate_proj_weight, up_proj_weight = gate_up_weight.chunk(2, dim=0)
+        down_proj_weight = down_proj[expert_idx].to(device=compute_device, dtype=torch.float32)
+        raw_scores.append(
+            _compute_expert_slanc_exact(
+                gamma,
+                gate_proj_weight,
+                up_proj_weight,
+                down_proj_weight,
+                eps,
+            ).cpu()
+        )
+        del gate_up_weight, gate_proj_weight, up_proj_weight, down_proj_weight
+
+    raw = torch.stack(raw_scores).float()
+    return raw / (raw.mean() + eps)
+
+
+def _build_method1_s_scalars(hf_model_dir: Path, compute_device: str, eps: float, logger):
+    weight_map = _load_weight_map(hf_model_dir)
+    layer_keys = _find_fused_moe_layer_keys(weight_map)
+    s_scalars = {}
+    for layer_idx, gamma_key, gate_up_key, down_key in layer_keys:
+        logger.info(f"Computing method1 s_scalar for layer {layer_idx}: {gate_up_key}")
+        gamma = _load_checkpoint_tensor(hf_model_dir, weight_map, gamma_key)
+        gate_up_proj = _load_checkpoint_tensor(hf_model_dir, weight_map, gate_up_key)
+        down_proj = _load_checkpoint_tensor(hf_model_dir, weight_map, down_key)
+        s_scalars[str(layer_idx)] = _build_s_scalar_for_layer(
+            gamma,
+            gate_up_proj,
+            down_proj,
+            compute_device,
+            eps,
+        )
+        del gamma, gate_up_proj, down_proj
+        if compute_device.startswith("cuda"):
+            torch.cuda.empty_cache()
+    return s_scalars
+
+
+def _resolve_s_scalar_path(args, hf_model_dir: Path, work_dir: Path, logger):
+    if args.s_scalar_path is not None:
+        return args.s_scalar_path
+    if not args.auto_s_scalar:
+        return None
+
+    s_scalar_path = Path(args.s_scalar_output) if args.s_scalar_output else work_dir / "method1_s_scalar.pt"
+    if s_scalar_path.exists() and not args.overwrite_s_scalar:
+        logger.info(f"Reuse existing method1 s_scalar: {s_scalar_path}")
+        return str(s_scalar_path)
+
+    s_scalar_path.parent.mkdir(exist_ok=True, parents=True)
+    compute_device = _resolve_s_scalar_device(args.s_scalar_compute_device)
+    logger.info(f"Computing method1 s_scalar on {compute_device}, output={s_scalar_path}")
+    s_scalars = _build_method1_s_scalars(hf_model_dir, compute_device, args.s_scalar_eps, logger)
+    torch.save(s_scalars, s_scalar_path)
+    logger.info(f"Saved method1 s_scalar for {len(s_scalars)} layers to {s_scalar_path}")
+    return str(s_scalar_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Golden / release helpers (verbatim from qwen3_5_moe_xh2a_export_hmonnx.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _get_default_device() -> torch.device:
     return torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
-
-def _parse_hidden_state_indices(spec: Optional[str], hf_model_path: str) -> Optional[List[int]]:
-    if spec is None:
-        return None
-    spec = str(spec).strip().lower()
-    if not spec or spec in {"none", "false"}:
-        return None
-    if spec in {"all", "*"}:
-        hf_config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
-        text_config = getattr(hf_config, "text_config", hf_config)
-        return list(range(int(text_config.num_hidden_layers)))
-
-    indices = set()
-    for raw_part in spec.split(","):
-        part = raw_part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start_s, end_s = part.split("-", 1)
-            start, end = int(start_s), int(end_s)
-            indices.update(range(start, end + 1))
-        else:
-            indices.add(int(part))
-    return sorted(indices)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HM 模型版本发布命名规则 helpers (verbatim copy from dense script —
-# kept self-contained per project rule "复制粘贴更安全，不要去改 dense 的导入结构")
-# ─────────────────────────────────────────────────────────────────────────────
 
 _PURE_FIXED_POINT_WMIX_RE = re.compile(r"^w\d+a\d+$")
 
 
 def _normalize_wmix_amix(value: str) -> str:
-    """Per HM 命名规则: pure ``w<bits>a<bits>`` is preserved; everything else
-    (sub-mode tags like ``h0_ssfp``, underscores like ``w4_a8``, mixed) → ``wmix_amix``."""
     if value is None:
         return "wmix_amix"
     s = str(value).strip().lower()
@@ -142,17 +236,10 @@ def _normalize_wmix_amix(value: str) -> str:
 
 
 def _detect_release_wmix_amix(hf_model_dir: str) -> str:
-    """Always return the conservative ``wmix_amix`` for MoE.
-
-    MoE quant schemes (e.g. ``w8a8h0_sefp``, ``w4a8h0_ssfp``) carry sub-mode
-    tags that are not legal under the release naming rule, so we normalise
-    to ``wmix_amix`` and let the user override via ``--release-wmix-amix``.
-    """
     return "wmix_amix"
 
 
 def _resolve_token_embedding_path(work_dir: Path) -> Optional[Path]:
-    """Look up embedding file. Prefer ``quant_embedding.pt``, fall back to ``token_embedding.pt``."""
     for name in ("quant_embedding.pt", "token_embedding.pt"):
         candidate = work_dir / name
         if candidate.exists():
@@ -161,27 +248,15 @@ def _resolve_token_embedding_path(work_dir: Path) -> Optional[Path]:
 
 
 def _build_release_prefix_moe(args, hf_model_path: str) -> str:
-    """Build the release prefix for MoE per HM 模型版本发布命名规则.
-
-    Layout: ``hmquant_<xh_version>_<modelscope_name>_<wmix_amix>_<prefill>_<context>_<date>``
-    All-lowercase. ``xh_version`` must be one of ``xh1``/``xh2``.
-    """
     xh_version = (getattr(args, "release_xh_version", None) or "xh2").strip().lower()
     if xh_version not in {"xh1", "xh2"}:
-        raise ValueError(
-            f"release_xh_version must be one of 'xh1' / 'xh2', got: {xh_version!r}"
-        )
+        raise ValueError(f"release_xh_version must be one of 'xh1' / 'xh2', got: {xh_version!r}")
 
     modelscope_name = getattr(args, "release_modelscope_name", None)
     if not modelscope_name:
         modelscope_name = Path(hf_model_path).name
     modelscope_name = (
-        str(modelscope_name)
-        .strip()
-        .lower()
-        .replace(".", "_")
-        .replace("-", "_")
-        .replace(" ", "_")
+        str(modelscope_name).strip().lower().replace(".", "_").replace("-", "_").replace(" ", "_")
     )
 
     wmix_amix_raw = getattr(args, "release_wmix_amix", None) or _detect_release_wmix_amix(hf_model_path)
@@ -189,10 +264,7 @@ def _build_release_prefix_moe(args, hf_model_path: str) -> str:
 
     prefill_len = int(args.input_sequence_length)
     ctx_len = int(args.context_length)
-    if ctx_len % 1024 == 0:
-        ctx_str = f"{ctx_len // 1024}k"
-    else:
-        ctx_str = str(ctx_len)
+    ctx_str = f"{ctx_len // 1024}k" if ctx_len % 1024 == 0 else str(ctx_len)
 
     date_str = getattr(args, "release_date", None)
     if not date_str:
@@ -205,13 +277,6 @@ def _build_release_prefix_moe(args, hf_model_path: str) -> str:
 def _save_onnx_with_renamed_external_data(
     src_onnx: Path, dst_onnx: Path, new_external_data_name: str, logger
 ) -> None:
-    """Resave an ONNX file under a new external-data filename so the protobuf
-    reference inside the model matches the renamed sidecar.
-
-    Drops any stale destination external_data file first to avoid mismatches.
-    """
-    import onnx
-
     dst_onnx.parent.mkdir(parents=True, exist_ok=True)
     stale = dst_onnx.parent / new_external_data_name
     if stale.exists() or stale.is_symlink():
@@ -238,28 +303,19 @@ def _save_onnx_with_renamed_external_data(
 
 
 def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: str, logger) -> None:
-    """Rename golden .npy files and with_act/ dir inside step_0 to short format.
-
-    Fu Shengguo naming rule:
-      hmquant_{model_name}_{io_name}_{direction}.npy
-      e.g. hmquant_qwen3_5_9b_conv_cache_out_0_output.npy
-
-    HMONNX golden files use tensor names (e.g. xh2a_prefill_conv_cache_out_0_output)
-    as the filename prefix, NOT the release_prefix. The tensor name in the golden file
-    embeds the mode/role (e.g. xh2a_prefill), which must be stripped.
-    """
     if role is None:
         return
     step0_dir = golden_dir / "step_0"
     if not step0_dir.is_dir():
         return
 
-    # Extract model_name from release_prefix = "hmquant_{backend}_{model_name}_{rest}"
     prefix_stripped = release_prefix.split("_", 2)[-1]
     segments = prefix_stripped.split("_")
-    scheme_keywords = {"xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
-                       "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
-                       "ssfp", "sefp", "fp16", "fp32", "gptq"}
+    scheme_keywords = {
+        "xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
+        "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
+        "ssfp", "sefp", "fp16", "fp32", "gptq",
+    }
     model_parts = []
     for seg in segments:
         if seg.lower() in scheme_keywords:
@@ -268,7 +324,6 @@ def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: 
     model_name = "_".join(model_parts)
     short_prefix = f"hmquant_{model_name}"
 
-    # Role tokens that appear in golden file tensor names between model and io_name.
     role_tokens = [
         "prefill", "decode",
         "draft_prefill", "draft_decode",
@@ -326,23 +381,16 @@ def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: 
 
 
 def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -> None:
-    """Inside ``step_0/`` create *relative* symlinks back to the named ONNX
-    and its external_data sidecar at ``golden_dir`` root.
-
-    Fu Shengguo's naming rule: step_0 symlink name uses only the model-name portion
-    (e.g. hmquant_qwen3_5_9b_with_act.onnx), while the actual outer ONNX file
-    at golden_dir root keeps the full release_prefix.
-    """
     step0_dir = golden_dir / "step_0"
     step0_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extract model_name from release_prefix = "hmquant_{backend}_{model_name}_{rest}"
-    # e.g. "hmquant_xh2_qwen3_5_9b_wmix_amix_256_2k_20260526" -> "qwen3_5_9b"
     prefix_stripped = release_prefix.split("_", 2)[-1]
     segments = prefix_stripped.split("_")
-    scheme_keywords = {"xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
-                       "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
-                       "ssfp", "sefp", "fp16", "fp32", "gptq"}
+    scheme_keywords = {
+        "xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
+        "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
+        "ssfp", "sefp", "fp16", "fp32", "gptq",
+    }
     model_parts = []
     for seg in segments:
         if seg.lower() in scheme_keywords:
@@ -350,13 +398,10 @@ def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -
         model_parts.append(seg)
     model_name = "_".join(model_parts)
 
-    # ONNX short name (Fu Shengguo rule); external_data keeps full name to avoid runtime risk
     onnx_short = f"hmquant_{model_name}_with_act.onnx"
     onnx_actual = f"{release_prefix}_with_act.onnx"
-    # external_data symlink: keep full release_prefix (do NOT shorten)
     ext_actual = f"{release_prefix}_external_data"
 
-    # ONNX symlink: short name -> actual
     src = golden_dir / onnx_actual
     if src.exists():
         link = step0_dir / onnx_short
@@ -372,7 +417,6 @@ def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -
             logger.warning(f"Symlink failed ({exc}); falling back to copy {src} -> {link}")
             shutil.copy2(src, link)
 
-    # external_data symlink: full name -> full name (no shortening)
     src = golden_dir / ext_actual
     if src.exists():
         link = step0_dir / ext_actual
@@ -390,7 +434,6 @@ def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -
 
 
 def _copy_release_root_assets(args, release_dir: Path, release_prefix: str, work_dir: Path, logger) -> None:
-    """Drop the export script and convert log into release_dir root per HM 命名规则."""
     release_dir.mkdir(parents=True, exist_ok=True)
     script_src = Path(__file__).resolve()
     script_dst = release_dir / f"{release_prefix}_hmonnx.py"
@@ -543,7 +586,6 @@ def _infer_inputs_embeds_name(session) -> str:
 
 def _create_golden_session(onnx_file: str, golden_dir: Path, device: torch.device, logger):
     from xhquant.xhonnxruntime.hmonnx_inference import HMONNXGoldenInference
-
     golden_dir.mkdir(exist_ok=True, parents=True)
     session = HMONNXGoldenInference(onnx_file)
     session.exec_device = device
@@ -779,7 +821,6 @@ def _generate_golden(
 
     prefill_onnx_path = Path(prefill_onnx_file)
     decode_onnx_path = Path(decode_onnx_file)
-    # Fu Shengguo naming rule: ONNX file is hmquant_{prefix}_with_act.onnx (no role suffix)
     named_prefill_onnx = prefill_dir / f"{release_prefix}_with_act.onnx"
     named_decode_onnx = decode_dir / f"{release_prefix}_with_act.onnx"
 
@@ -788,7 +829,6 @@ def _generate_golden(
         shutil.copy2(token_embedding_file, quant_embedding_file)
         logger.info(f"Copied quant_embedding.pt to {quant_embedding_file}")
 
-    # HM 模型版本发布命名规则: bundle hf_config/ (config.json, tokenizer*, etc.) into release_dir
     hf_config_src = work_dir / "hf_config"
     hf_config_dst = release_dir / "hf_config"
     if hf_config_src.exists() and not hf_config_dst.exists():
@@ -991,7 +1031,6 @@ def _generate_golden(
     _create_step0_onnx_symlinks(prefill_dir, release_prefix, logger)
     _create_step0_onnx_symlinks(decode_dir, release_prefix, logger)
 
-    # Li Wanyu: flat draft release dirs, e.g. mtp_draft_prefill/ and mtp_draft_decode/.
     draft_golden_paths: Dict[str, Path] = {}
     if draft_onnx_files and spec_decode_mode in ("mtp", "dflash"):
         if spec_decode_mode == "mtp":
@@ -1073,7 +1112,6 @@ def _generate_golden(
     with (release_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
         json.dump(golden_meta, fout, ensure_ascii=False, indent=2)
 
-    # ── HM 模型版本发布命名规则: drop hmonnx.py + debug logs at release_dir root ──
     _copy_release_root_assets(args, release_dir, release_prefix, work_dir, logger)
 
     logger.info(f"Golden generation done. Release dir: {release_dir}")
@@ -1212,17 +1250,6 @@ def _run_golden(work_dir: Path, args, logger) -> Optional[Path]:
     )
 
 
-def _build_draft_only_default_work_dir(
-    existing_work_dir: Path, spec_decode_mode: str, draft_head_weight_bits: int
-) -> Path:
-    existing_work_dir = existing_work_dir.resolve()
-    suffix = f"draft_{spec_decode_mode}_w{draft_head_weight_bits}"
-    base = existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}")
-    if not base.exists() and base.resolve() != existing_work_dir:
-        return base
-    return existing_work_dir.with_name(f"{existing_work_dir.name}-{suffix}-{time.strftime('%Y%m%d%H%M%S')}")
-
-
 def main(args):
     hf_model_path = osp.normpath(osp.abspath(args.model))
     model_name = Path(hf_model_path).name
@@ -1230,90 +1257,49 @@ def main(args):
     quant_type = args.quant_type
     quant_scheme = QuantScheme(target_device=target_device, quant_type=quant_type)
 
-    spec_decode_mode = args.spec_decode_mode or None
-    if spec_decode_mode == "none":
-        spec_decode_mode = None
-        args.spec_decode_mode = None
-    num_draft_tokens = args.num_draft_tokens
-    output_hidden_state_indices = _parse_hidden_state_indices(args.output_hidden_state_indices, hf_model_path)
     _validate_offline_rope_required_for_fp16_limit(args)
 
-    config = Qwen3_5MoeConvertConfig(
-        batch_size=args.batch_size,
-        context_length=args.context_length,
-        input_sequence_length=args.input_sequence_length,
-        max_layers=args.num_blocks,
-        max_pe_length=args.max_pe_length,
-        support_long_context_over_fp16_limit=getattr(
-            args, "support_long_context_over_fp16_limit", True
-        ),
-        quant_scheme=quant_scheme,
-        quant_weight=args.quant_weight,
-        num_logits_to_keep=args.num_logits_to_keep,
-        linear_attention_mode=args.linear_attention_mode,
-        linear_chunk_size=args.linear_chunk_size,
-        spec_decode_mode=spec_decode_mode,
-        num_draft_tokens=num_draft_tokens,
-        dflash_model_dir=args.dflash_model_dir,
-        spec_draft_head_weight_bits=args.spec_draft_head_weight_bits,
-        split_conv_cache=args.split_conv_cache,
-        normalize_force_fp32=getattr(args, "normalize_force_fp32", False),
-        use_manual_depthwise_conv1d=getattr(args, "use_manual_depthwise_conv1d", False),
-        fuse_gdr_ops=getattr(args, "fuse_gdr_ops", False),
-        output_hidden_state_indices=output_hidden_state_indices,
-        gptq_restore_expert_layer_spec=args.gptq_restore_expert_layers
-        or args.output_hidden_state_indices,
-        export_prefill=not getattr(args, "skip_prefill_export", False),
-    )
-
-    if args.draft_only:
-        if args.existing_work_dir is None:
-            raise ValueError("--draft-only requires --existing-work-dir")
-        if spec_decode_mode not in {"mtp", "dflash"}:
-            raise ValueError("--draft-only requires --spec-decode-mode to be one of {'mtp', 'dflash'}")
-        if args.work_dir:
-            work_dir = Path(args.work_dir)
-        else:
-            work_dir = _build_draft_only_default_work_dir(
-                Path(args.existing_work_dir),
-                spec_decode_mode,
-                int(args.spec_draft_head_weight_bits),
-            )
-        if work_dir.resolve() == Path(args.existing_work_dir).resolve():
-            raise ValueError("--draft-only --work-dir must not overwrite --existing-work-dir")
-    elif args.work_dir:
+    if args.work_dir:
         work_dir = Path(args.work_dir)
     else:
         prefix = f"{model_name}-{target_device}-{args.context_length // 1024}k-{quant_type}"
         if args.quant_weight:
             prefix += "-gptq"
-        if spec_decode_mode:
-            prefix += f"-spec_{spec_decode_mode}"
         work_dir = Path("work_dirs") / prefix
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / "convert.log"
     xhquant_init(log_file, debug=args.debug)
     logger = get_root_logger()
+
+    s_scalar_path = _resolve_s_scalar_path(args, Path(hf_model_path), work_dir, logger)
+
+    config = Qwen3_5MoePruneConvertConfig(
+        batch_size=args.batch_size,
+        context_length=args.context_length,
+        input_sequence_length=args.input_sequence_length,
+        max_layers=args.num_blocks,
+        max_pe_length=args.max_pe_length,
+        support_long_context_over_fp16_limit=getattr(args, "support_long_context_over_fp16_limit", True),
+        quant_scheme=quant_scheme,
+        quant_weight=args.quant_weight,
+        num_logits_to_keep=args.num_logits_to_keep,
+        linear_attention_mode=args.linear_attention_mode,
+        linear_chunk_size=args.linear_chunk_size,
+        split_conv_cache=args.split_conv_cache,
+        normalize_force_fp32=getattr(args, "normalize_force_fp32", False),
+        use_manual_depthwise_conv1d=getattr(args, "use_manual_depthwise_conv1d", False),
+        fuse_gdr_ops=getattr(args, "fuse_gdr_ops", False),
+        mix_search=args.mix_search,
+        threshold=args.threshold,
+        s_scalar_path=s_scalar_path,
+    )
+
     logger.info(f"model: {hf_model_path}")
     logger.info(f"quant_weight: {args.quant_weight}")
-    logger.info(f"spec_decode_mode: {spec_decode_mode}")
-    logger.info(f"spec_draft_head_weight_bits: {args.spec_draft_head_weight_bits}")
-    logger.info(f"output_hidden_state_indices: {output_hidden_state_indices}")
-    logger.info(f"export_prefill: {not getattr(args, 'skip_prefill_export', False)}")
+    logger.info(f"s_scalar_path: {s_scalar_path}")
     logger.info(f"output: {work_dir}")
 
-    if args.draft_only:
-        with TimeProfiler("draft-only convert", logger), MemoryTracker("cuda:0", "draft-only convert", logger):
-            Qwen3_5MoeConverterXH2a(config).export_draft_only(
-                hf_model_path,
-                args.existing_work_dir,
-                str(work_dir),
-            )
-        logger.info(f"Done. Draft-only artifacts in: {work_dir}")
-        return
-
-    # Detect architecture from config.json automatically
-    architecture = args.architecture  # may be None → auto-detect
+    architecture = args.architecture
 
     with TimeProfiler("convert", logger), MemoryTracker("cuda:0", "convert", logger):
         LLMConverter.from_pretrained(hf_model_path, architecture, config, str(work_dir))
@@ -1330,7 +1316,7 @@ def main(args):
 def main_golden_only(args):
     _validate_offline_rope_required_for_fp16_limit(args)
 
-    if args.existing_work_dir:
+    if getattr(args, "existing_work_dir", None):
         work_dir = Path(args.existing_work_dir)
     elif args.work_dir:
         work_dir = Path(args.work_dir)
@@ -1358,30 +1344,19 @@ def main_golden_only(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Export Qwen3.5-MoE to prefill/decode HMONNX",
+        description="Export pruned Qwen3.5-MoE to prefill/decode HMONNX",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--model", type=str, default="weights/Qwen3.5-35B-A3B", help="HuggingFace model directory"
-    )
-    parser.add_argument(
-        "--architecture",
-        type=str,
-        default=None,
-        help="Architecture string (auto-detected if None). "
-        "Use 'Qwen3_5MoeForConditionalGeneration' or 'Qwen3_5MoeForCausalLM'",
-    )
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--model", type=str, default="/data01/datasets/Qwen3.6-35B-A3B")
+    parser.add_argument("--work-dir", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size for export model inputs")
+    parser.add_argument("--context-length", type=int, default=2048)
+    parser.add_argument("--input-sequence-length", type=int, default=256)
     parser.add_argument(
-        "--num-blocks",
-        dest="num_blocks",
-        type=int,
-        default=None,
-        help="Export only the first N decoder layers/blocks (None = all blocks).",
+        "--max-pe-length", "--max_pe_length", dest="max_pe_length", type=int, default=262144,
+        help="RoPE cache length; 256K is required for long context over fp16 position limit"
     )
-    parser.add_argument("--context-length", type=int, default=2048, help="Maximum context length (kv cache size)")
-    parser.add_argument("--max-pe-length", "--max_pe_length", dest="max_pe_length", type=int, default=262144, help="RoPE cache length; 256K is required for long context over fp16 position limit")
-    parser.add_argument("--input-sequence-length", type=int, default=256, help="Prefill chunk size")
     parser.set_defaults(support_long_context_over_fp16_limit=True)
     long_context_group = parser.add_mutually_exclusive_group()
     long_context_group.add_argument(
@@ -1400,154 +1375,43 @@ if __name__ == "__main__":
         action="store_false",
         help="Disable offline RoPE cache support; invalid for 256K long-context exports.",
     )
-    parser.add_argument("--quant-type", type=str, default="w8a8h0_sefp", help="Quantisation type string")
-    parser.add_argument("--quant-weight", type=str, default=None, help="Path to GPTQModel quantised weights (optional)")
-    parser.add_argument(
-        "--work-dir",
-        "--work_dir",
-        dest="work_dir",
-        type=str,
-        default=None,
-        help="Output work directory. Defaults to the standard export prefix, or a non-overwriting draft-only sibling.",
-    )
-    parser.add_argument(
-        "--num-logits-to-keep", type=int, default=1, help="How many final logit positions to keep (1 = last only)"
-    )
-    parser.add_argument(
-        "--output-hidden-state-indices",
-        "--output_hidden_state_indices",
-        dest="output_hidden_state_indices",
-        type=str,
-        default=None,
-        help=(
-            "Diagnostic only: comma/range layer ids, or 'all', for exporting concatenated per-layer "
-            "hidden states as an extra HMONNX output."
-        ),
-    )
-    parser.add_argument(
-        "--skip-prefill-export",
-        action="store_true",
-        help="Diagnostic only: export the decode graph/meta but skip the large prefill graph.",
-    )
-    parser.add_argument(
-        "--gptq-restore-expert-layers",
-        type=str,
-        default=None,
-        help=(
-            "Diagnostic only: layer ids/ranges, or 'all', for restoring packed GPTQ routed expert "
-            "fp/qweight tensors before export. Defaults to --output-hidden-state-indices when set."
-        ),
-    )
-    parser.add_argument(
-        "--linear-attention-mode",
-        type=str,
-        default="auto",
-        choices=["auto", "chunk", "recurrent"],
-        help="Linear attention computation mode",
-    )
-    parser.add_argument("--linear-chunk-size", type=int, default=64, help="Chunk size for linear attention")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
-        "--draft-only",
-        "--draft_only",
-        dest="draft_only",
-        action="store_true",
-        help="Reuse target artifacts from --existing-work-dir and export only MTP/DFlash draft ONNX/meta.",
-    )
-    parser.add_argument(
-        "--existing-work-dir",
-        "--existing_work_dir",
-        dest="existing_work_dir",
-        type=str,
-        default=None,
-        help="Existing target export work_dir containing meta.json for --draft-only.",
-    )
-    # Speculative decoding
-    parser.add_argument(
-        "--spec-decode-mode",
-        "--spec_decode_mode",
-        dest="spec_decode_mode",
-        type=str,
-        default=None,
-        choices=["none", "mtp", "dflash"],
-        help="Speculative decoding mode.  'mtp' exports MTP draft graphs; "
-        "'dflash' exports DFlash context/decode draft graphs.",
-    )
-    parser.add_argument(
-        "--dflash-model-dir",
-        "--dflash_model_dir",
-        dest="dflash_model_dir",
-        type=str,
-        default=None,
-        help="Path to DFlash draft model dir (required for --spec-decode-mode dflash)",
-    )
-    parser.add_argument(
-        "--num-draft-tokens",
-        "--num_draft_tokens",
-        dest="num_draft_tokens",
-        type=int,
-        default=4,
-        help=(
-            "Number of draft tokens per spec-decode round (verify_length = N + 1). "
-            "For DFlash the draft decode input length is also verify_length."
-        ),
-    )
-    parser.add_argument(
-        "--spec-draft-head-weight-bits",
-        "--spec_draft_head_weight_bits",
-        dest="spec_draft_head_weight_bits",
-        type=int,
-        default=4,
-        choices=[4, 8],
-        help="Weight bits for MTP/DFlash draft lm_head. Default uses w4 head; set 8 to keep previous w8 head.",
-    )
+    parser.add_argument("--quant-type", default="w4a8h0_ssfp")
+    parser.add_argument("--num_logits_to_keep", type=int, default=1)
+    parser.add_argument("--quant-weight", type=str, default=None)
+    parser.add_argument("--mix_search", type=str, default=None)
+    parser.add_argument("--linear-attention-mode", type=str, default="auto")
+    parser.add_argument("--linear-chunk-size", type=int, default=64)
     parser.set_defaults(split_conv_cache=True)
+    parser.add_argument("--split-conv-cache", dest="split_conv_cache", action="store_true")
+    parser.add_argument("--no-split-conv-cache", dest="split_conv_cache", action="store_false")
+    parser.add_argument("--normalize-force-fp32", dest="normalize_force_fp32", action="store_true", default=False)
     parser.add_argument(
-        "--split-conv-cache",
-        "--split_conv_cache",
-        dest="split_conv_cache",
-        action="store_true",
-        help=(
-            "Split linear attention conv_cache into 3 separate tensors (q, k, v). "
-            "This is the default export format."
-        ),
-    )
-    parser.add_argument(
-        "--no-split-conv-cache",
-        "--no_split_conv_cache",
-        dest="split_conv_cache",
-        action="store_false",
-        help="Use the legacy merged single-tensor conv_cache format.",
-    )
-    parser.add_argument(
-        "--normalize-force-fp32",
-        "--normalize_force_fp32",
-        dest="normalize_force_fp32",
-        action="store_true",
-        default=False,
-        help="Force fp32 accumulation in Normalize operator.",
-    )
-    parser.add_argument(
-        "--use_manual_depthwise_conv1d",
         "--use-manual-depthwise-conv1d",
         dest="use_manual_depthwise_conv1d",
         action="store_true",
         default=False,
-        help=(
-            "QTL-341: fall back to the slice/mul/add manual depthwise conv1d "
-            "unroll (legacy path). Default False routes the conv tail through "
-            "the self.conv1d_* nn.Conv1d module so hmonnx export emits a clean "
-            "Conv op."
-        ),
     )
+    parser.add_argument("--fuse-gdr-ops", dest="fuse_gdr_ops", action="store_true", default=False)
     parser.add_argument(
-        "--fuse-gdr-ops",
-        "--fuse_gdr_ops",
-        dest="fuse_gdr_ops",
-        action="store_true",
-        default=False,
-        help="Enable fused GDR ops when supported. Default False.",
+        "--num-blocks",
+        dest="num_blocks",
+        type=int,
+        default=None,
+        help="Number of decoder blocks to export. Default exports all blocks.",
     )
+    parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--s-scalar-path", type=str, default=None)
+    parser.add_argument("--auto-s-scalar", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--s-scalar-output", type=str, default=None)
+    parser.add_argument("--s-scalar-compute-device", type=str, default="auto")
+    parser.add_argument("--s-scalar-eps", type=float, default=1e-8)
+    parser.add_argument("--overwrite-s-scalar", action="store_true")
+    parser.add_argument(
+        "--architecture",
+        type=str,
+        default="Qwen3_5MoeForConditionalGeneration_prune",
+    )
+    # ── Golden validation ──
     parser.add_argument("--golden", action="store_true", help="Generate HMONNX golden after export")
     parser.add_argument(
         "--golden-only",
@@ -1555,6 +1419,14 @@ if __name__ == "__main__":
         dest="golden_only",
         action="store_true",
         help="Skip export and only generate golden from existing work_dir ONNX files",
+    )
+    parser.add_argument(
+        "--existing-work-dir",
+        "--existing_work_dir",
+        dest="existing_work_dir",
+        type=str,
+        default=None,
+        help="Path to existing work_dir for --golden-only.",
     )
     # ── HM 模型版本发布命名规则 ──
     parser.add_argument(
@@ -1601,8 +1473,6 @@ if __name__ == "__main__":
         help="Zip the release directory after golden generation.",
     )
     args = parser.parse_args()
-    if args.spec_decode_mode == "none":
-        args.spec_decode_mode = None
     if getattr(args, "golden_only", False):
         main_golden_only(args)
     else:

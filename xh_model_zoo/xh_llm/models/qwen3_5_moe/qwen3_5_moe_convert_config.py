@@ -30,6 +30,7 @@ class Qwen3_5MoeConvertConfig(LLMConvertConfig):
     num_logits_to_keep: Optional[int] = 1
     linear_attention_mode: str = "auto"
     linear_chunk_size: int = 64
+    max_layers: Optional[int] = None
     enable_rope: bool = True
     max_pe_length: int = 262144
     support_long_context_over_fp16_limit: bool = True

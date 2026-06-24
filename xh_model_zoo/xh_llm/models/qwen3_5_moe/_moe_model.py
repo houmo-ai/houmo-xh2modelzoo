@@ -101,6 +101,36 @@ def _split_single_batch_outputs(value, batch_size: int):
     return value
 
 
+def _materialize_cache_arg(cache, num_inputs: int):
+    if num_inputs <= 0:
+        return None
+    if cache is None:
+        return None
+    return [cache[idx] for idx in range(num_inputs)]
+
+
+def _materialize_text_cache_args(
+    language_model,
+    past_key_cache,
+    past_value_cache,
+    past_conv_cache,
+    past_recurrent_state,
+):
+    batch_size = int(getattr(language_model, "batch_size", 1))
+    full_attention_inputs = language_model.num_full_attention_layers * max(batch_size, 1)
+    linear_attention_inputs = language_model.num_linear_attention_layers * max(batch_size, 1)
+    conv_inputs = linear_attention_inputs
+    if getattr(language_model, "split_conv_cache", False):
+        conv_inputs *= 3
+
+    return (
+        _materialize_cache_arg(past_key_cache, full_attention_inputs),
+        _materialize_cache_arg(past_value_cache, full_attention_inputs),
+        _materialize_cache_arg(past_conv_cache, conv_inputs),
+        _materialize_cache_arg(past_recurrent_state, linear_attention_inputs),
+    )
+
+
 def _single_batch_cache_items(value, batch_size: int):
     """Return cache tensors as one item per exported batch.
 
@@ -1074,9 +1104,11 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
             conv_has_bias = self.conv1d.bias is not None
             conv_device = self.conv1d.weight.device
             conv_dtype = self.conv1d.weight.dtype
+            if conv_dtype == torch.bfloat16:
+                conv_dtype = torch.float16
 
             q_cw, k_cw, v_cw = _split_linear_qkv_tensor(
-                self.conv1d.weight.detach().clone(), self.key_dim, self.value_dim, dim=0,
+                self.conv1d.weight.detach().clone().to(conv_dtype), self.key_dim, self.value_dim, dim=0,
             )
             self.conv1d_q = nn.Conv1d(
                 self.key_dim, self.key_dim, bias=conv_has_bias,
@@ -1099,13 +1131,15 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):
 
             if conv_has_bias:
                 q_cb, k_cb, v_cb = _split_linear_qkv_tensor(
-                    self.conv1d.bias.detach().clone(), self.key_dim, self.value_dim, dim=0,
+                    self.conv1d.bias.detach().clone().to(conv_dtype), self.key_dim, self.value_dim, dim=0,
                 )
                 self.conv1d_q.bias.data.copy_(q_cb)
                 self.conv1d_k.bias.data.copy_(k_cb)
                 self.conv1d_v.bias.data.copy_(v_cb)
 
             del self.conv1d
+        elif not self.split_conv_cache and self.conv1d.weight.dtype == torch.bfloat16:
+            self.conv1d = self.conv1d.to(torch.float16)
 
         # Pre-compute head dimensions for TorchFX tracing compatibility
         self.chunk_num_heads = self.num_v_heads
@@ -1477,6 +1511,13 @@ class _Qwen3_5MoeTextModel(DynamicModule):
     def _setup(self, cfg):
         self.batch_size = cfg.get("batch_size", 1)
         self.only_first_block = cfg.get("only_first_block", False)
+        self.max_layers = cfg.get("max_layers", None)
+        if self.max_layers is not None:
+            self.max_layers = int(self.max_layers)
+            if self.max_layers <= 0:
+                raise ValueError(f"max_layers must be positive, got {self.max_layers}")
+            if self.max_layers > len(self.layers):
+                raise ValueError(f"max_layers={self.max_layers} exceeds model layers={len(self.layers)}")
         self.num_logits_to_keep = cfg.num_logits_to_keep
         assert self.num_logits_to_keep in [0, 1]
         self.output_hidden_state_indices = cfg.get("output_hidden_state_indices", None)
@@ -1508,7 +1549,10 @@ class _Qwen3_5MoeTextModel(DynamicModule):
         self.use_cache = cfg.use_cache
 
         # Layer type tracking
-        self.layer_types = self.config.layer_types
+        self.layer_types = list(self.config.layer_types)
+        if self.max_layers is not None:
+            self.layers = nn.ModuleList(list(self.layers)[: self.max_layers])
+            self.layer_types = self.layer_types[: self.max_layers]
         self.num_full_attention_layers = sum(1 for t in self.layer_types if t == "full_attention")
         self.num_linear_attention_layers = sum(
             1 for t in self.layer_types if t == "linear_attention"
@@ -1570,6 +1614,7 @@ class _Qwen3_5MoeTextModel(DynamicModule):
             return
         self.batch_size = cfg.get("batch_size", self.batch_size)
         self.only_first_block = cfg.get("only_first_block", self.only_first_block)
+        self.max_layers = cfg.get("max_layers", self.max_layers)
         self.num_logits_to_keep = cfg.get(
             "num_logits_to_keep", self.num_logits_to_keep
         )
@@ -1863,6 +1908,8 @@ class _Qwen3_5MoeTextModel(DynamicModule):
 
             if self.only_first_block:
                 break
+            if self.max_layers is not None and idx_layer + 1 >= int(self.max_layers):
+                break
 
             # if True:
             #     break
@@ -1933,6 +1980,13 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):
         past_conv_cache: Optional[List[Tensor]] = None,
         past_recurrent_state: Optional[List[Tensor]] = None,
     ):
+        past_key_cache, past_value_cache, past_conv_cache, past_recurrent_state = _materialize_text_cache_args(
+            self.model,
+            past_key_cache,
+            past_value_cache,
+            past_conv_cache,
+            past_recurrent_state,
+        )
         if self._has_extra_hidden_output:
             hidden_states, conv_cache_out_list, recurrent_state_out_list, extra_hidden = self.model(
                 input_embeds=inputs_embeds,
