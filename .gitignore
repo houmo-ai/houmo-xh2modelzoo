@@ -221,6 +221,8 @@ examples/llm/glm_ocr/GLM-OCR
 label_task_info_engine.json
 QODER.md
 .claude
+.codegraph
+.cursor
 .gemini
 .qoder
 .github

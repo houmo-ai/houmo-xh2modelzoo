@@ -228,6 +228,14 @@ class LLMConverter:
             from .models.qwen3_5_moe import Qwen3_5MoeConverterXH2a
 
             converter_cls = Qwen3_5MoeConverterXH2a
+        elif architecture == "Qwen3_5MoeForConditionalGeneration_prune":
+            from .models.qwen3_5_moe_prune import Qwen3_5MoePruneConverterXH2a
+
+            converter_cls = Qwen3_5MoePruneConverterXH2a
+        elif architecture == "Qwen3_5MoeForCausalLM_prune":
+            from .models.qwen3_5_moe_prune import Qwen3_5MoePruneConverterXH2a
+
+            converter_cls = Qwen3_5MoePruneConverterXH2a
         elif architecture == "Qwen3_5MoeForCausalLM":
             from .models.qwen3_5_moe import Qwen3_5MoeConverterXH2a
 

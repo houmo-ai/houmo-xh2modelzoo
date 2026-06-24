@@ -1,11 +1,12 @@
 {
   "servers": {
-    "code-review-graph": {
+
+    "code_graph_mcp": {
       "type": "stdio",
-      "command": "uvx",
+      "command": "codegraph",
       "args": [
-        "code-review-graph",
-        "serve"
+        "serve",
+        "--mcp"
       ]
     },
   }

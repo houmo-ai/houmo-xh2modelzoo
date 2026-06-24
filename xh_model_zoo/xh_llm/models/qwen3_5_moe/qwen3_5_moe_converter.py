@@ -771,6 +771,16 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
         from ._moe_model import register_wrap_modules as qwen3_5_moe_register_wrap_modules
 
         qwen3_5_moe_register_wrap_modules()
+        text_config = _get_text_config(native_model)
+        max_layers = getattr(self.config, "max_layers", None)
+        if max_layers is not None:
+            max_layers = int(max_layers)
+            if max_layers <= 0:
+                raise ValueError(f"max_layers must be positive, got {max_layers}")
+            if max_layers > text_config.num_hidden_layers:
+                raise ValueError(
+                    f"max_layers={max_layers} exceeds model num_hidden_layers={text_config.num_hidden_layers}"
+                )
         spec_decode_mode = getattr(self.config, "spec_decode_mode", None)
         output_post_norm_hidden = bool(getattr(self.config, "output_post_norm_hidden", False))
         output_hidden_state_indices = getattr(self.config, "output_hidden_state_indices", None)
@@ -787,6 +797,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 max_sequence_length=self.config.context_length,
                 input_sequence_length=self.config.input_sequence_length,
                 use_cache=True,
+                max_layers=max_layers,
                 num_logits_to_keep=self.config.num_logits_to_keep,
                 linear_attention_mode=self.config.linear_attention_mode,
                 linear_chunk_size=self.config.linear_chunk_size,
@@ -826,7 +837,7 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
     ):
         text_config = _get_text_config(native_model)
         text_model = _get_text_model(wraped_model)
-        layer_types = list(text_config.layer_types)
+        layer_types = list(text_model.layer_types)
         full_attention_layer_indices = [i for i, layer_type in enumerate(layer_types) if layer_type == "full_attention"]
         linear_attention_layer_indices = [
             i for i, layer_type in enumerate(layer_types) if layer_type == "linear_attention"
@@ -1034,6 +1045,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             layers=linear_cache_meta,
             num_conv_caches=len(past_conv_caches),
         )
+        graph_past_key_caches = past_key_caches if past_key_caches else None
+        graph_past_value_caches = past_value_caches if past_value_caches else None
+        graph_past_conv_caches = past_conv_caches if past_conv_caches else None
+        graph_past_recurrent_states = past_recurrent_states if past_recurrent_states else None
 
         # Build calibration input_ids: use real text if tokenizer is available
         # (essential for W4A8 quantization — random tokens give wrong activation scales).
@@ -1116,10 +1131,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             graph_past_seq_length,
             graph_current_input_length,
             graph_linear_attn_mask,
-            past_key_caches,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
+            graph_past_key_caches,
+            graph_past_value_caches,
+            graph_past_conv_caches,
+            graph_past_recurrent_states,
         )
 
         if batch_size > 1:
@@ -1368,10 +1383,10 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
             decode_graph_past_seq_length,
             decode_graph_current_input_length,
             decode_graph_linear_attn_mask,
-            past_key_caches,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
+            graph_past_key_caches,
+            graph_past_value_caches,
+            graph_past_conv_caches,
+            graph_past_recurrent_states,
         )
 
         quanted_decode_model = convert_fx_model_to_quanted_model(
@@ -1723,4 +1738,4 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
 
     @classmethod
     def convert(cls, hf_model_path: str, config: Qwen3_5MoeConvertConfig, output_dir: str):
-        Qwen3_5MoeConverterXH2a(config)._convert(hf_model_path, output_dir)
+        cls(config)._convert(hf_model_path, output_dir)
