@@ -876,8 +876,7 @@ class _Qwen3_5MoeGatedDeltaNet(DynamicModule):  # noqa: N801
             )
 
         suppress_recurrent_state_outputs = (
-            getattr(self, "suppress_recurrent_state_outputs", False)
-            and not use_recurrent
+            getattr(self, "suppress_recurrent_state_outputs", False) and not use_recurrent
         )
         if suppress_recurrent_state_outputs:
             recurrent_state_out = None
@@ -1492,6 +1491,11 @@ class _Qwen3_5MoeTextModel(DynamicModule):  # noqa: N801
             self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
         else:
             self._setup_cos_sin_embeding()
+        self.enable_layer_tag = cfg.get("enable_layer_tag", False)
+        if self.enable_layer_tag:
+        self.tags = nn.ModuleList(
+            [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
+        )
 
     def _setup_cos_sin_embeding(self):
         if hasattr(self.rotary_emb, "cos_cached"):
@@ -1605,7 +1609,8 @@ class _Qwen3_5MoeTextModel(DynamicModule):  # noqa: N801
 
             if self.output_hidden_state_indices is not None and idx_layer in self._output_hidden_set:
                 collected_hidden_states.append(hidden_states)
-
+            if self.enable_layer_tag:
+                hidden_states = self.tags[idx_layer](hidden_states)
             if self.max_layers > 0 and idx_layer + 1 >= self.max_layers:
                 break
 

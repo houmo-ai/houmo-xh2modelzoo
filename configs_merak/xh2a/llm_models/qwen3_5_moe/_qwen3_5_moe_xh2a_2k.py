@@ -26,4 +26,5 @@ model = dict(
         ops={},
     ),
     only_first_block=False,
+    enable_layer_tag=False,
 )

@@ -1423,6 +1423,11 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
                 self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
             else:
                 self._setup_cos_sin_embeding()
+        self.enable_layer_tag = cfg.get("enable_layer_tag", False)
+        if self.enable_layer_tag:
+            self.tags = nn.ModuleList(
+                [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
+            )
 
     def _setup_cos_sin_embeding(self):
         # Keep rotary cache buffers on rotary_emb (same pattern as qwen3next).
@@ -1613,7 +1618,8 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
             # Collect hidden states at target layer indices (for DFlash)
             if self.output_hidden_state_indices is not None and idx in self._output_hidden_set:
                 collected_hidden_states.append(hidden_states)
-
+            if self.enable_layer_tag:
+                hidden_states = self.tags[idx](hidden_states)
             if self.max_layers > 0 and idx + 1 >= self.max_layers:
                 break
 

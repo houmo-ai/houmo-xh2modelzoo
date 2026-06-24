@@ -8,9 +8,9 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -496,6 +496,8 @@ class _Qwen3Model(_Qwen3ModelBase):
             )
 
             hidden_states = layer_outputs[0]
+            if self.enable_layer_tag:
+                hidden_states = self.tags[idx](hidden_states)
             if self.max_layers > 0 and idx + 1 >= self.max_layers:
                 break
 
@@ -576,7 +578,11 @@ class _Qwen3Model(_Qwen3ModelBase):
             self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
         else:
             self._setup_cos_sin_embeding()
-
+        self.enable_layer_tag = cfg.get("enable_layer_tag", False)
+        if self.enable_layer_tag:
+            self.tags = nn.ModuleList(
+                [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
+            )
         return self
 
 

@@ -43,6 +43,7 @@ CEval 口径：EvalScope / 官方 prompt，5-shot，1346 题，生成长度 4096
 
 量化 HF/GPTQModel 目录的统一约定：把 `model.hf_model` 指向量化后的 HF repo，`model.quant_weight` 保持为空。`quant_weight` 只保留给“浮点 HF 结构 + 独立 torch checkpoint 权重文件/目录”的旧式检查点恢复。
 
+模型配置新增：enable_layer_tag, 如果enable_layer_tag为True，导出HMONNX时，会在每个layer层结束时插入Tag作为标记，方便PP并行分配GPU以及按Layer切hmonnx。
 ## 导出 HMONNX
 
 ```bash
