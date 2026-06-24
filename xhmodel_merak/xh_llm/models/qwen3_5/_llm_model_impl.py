@@ -909,6 +909,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.split_conv_cache = cfg.get("split_conv_cache", True)
         self.suppress_recurrent_state_outputs = cfg.get("suppress_recurrent_state_outputs", False)
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
+        self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d so hmonnx
         # export emits a clean Conv op. xhquant 2d86b60+ routes any-kernel
         # depthwise conv2d (groups==in==out) into the VP triton impl, so the
@@ -1140,11 +1141,18 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
-        # GDR fused ops (conditional on fuse_gdr_ops flag)
-        if self.fuse_gdr_ops:
+        # GDR fused ops. ``fuse_gdr_ops`` only enables GDRChunkScan because
+        # that op changes the prefill recurrent-state I/O contract.
+        # ``fuse_gdr_block_recurrent_ops`` enables the contract-preserving
+        # GDRBlockTriInverse and GDRRecurrentScan ops independently.
+        if self.fuse_gdr_block_recurrent_ops:
             self.block_tri_inverse_op = GDRBlockTriInverse(chunk_size=chunk_size, block_size=block_size)
-            # QTL-343 / T7: eye buffers are externalized; no ``.setup()`` needed
-            # (LegacyGDRBlockTriInverse.setup() was removed — dead since QTL-339).
+            self.recurrent_scan_op = GDRRecurrentScan(sequence_length=1, output_all_states=False)
+        else:
+            self.block_tri_inverse_op = None
+            self.recurrent_scan_op = None
+
+        if self.fuse_gdr_ops:
             self.chunk_scan_op = GDRChunkScan(
                 num_chunks=num_chunks,
                 num_heads=self.num_v_heads,
@@ -1152,11 +1160,8 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
                 v_head_dim=self.head_v_dim,
                 chunk_size=chunk_size,
             )
-            self.recurrent_scan_op = GDRRecurrentScan(sequence_length=1, output_all_states=False)
         else:
-            self.block_tri_inverse_op = None
             self.chunk_scan_op = None
-            self.recurrent_scan_op = None
 
         return self
 
@@ -1206,8 +1211,7 @@ class _Qwen3_5GatedDeltaNet(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
         # Update GDR fused op buffers
-        if self.fuse_gdr_ops and self.block_tri_inverse_op is not None:
-            # QTL-343 / T7: no ``.setup()`` call needed.
+        if getattr(self, "chunk_scan_op", None) is not None:
             self.chunk_scan_op.num_chunks = num_chunks
 
         self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])

@@ -40,3 +40,4 @@ export:
       quant_type: w8a8h1_sefp
       ops: {}
     fuse_gdr_ops: false
+    fuse_gdr_block_recurrent_ops: false

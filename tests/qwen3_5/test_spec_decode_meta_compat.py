@@ -420,6 +420,7 @@ def test_spec_decode_bench_script_parses():
     _parse(SPEC_BENCH)
 
 ONNX_RUNTIME_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py"
+MERAK_HMONNX_INFERENCE = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py"
 MODEL_ZOO_CONVERT_CONFIG = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_convert_config.py"
 MODEL_ZOO_CONVERTER = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_converter.py"
 MODEL_ZOO_WRAP_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/_model.py"
@@ -468,12 +469,15 @@ def test_dense_qwen3_5_model_zoo_defaults_preserve_split_conv_contract():
     assert "normalize_force_fp32: bool = False" in convert_config_src
     assert "use_manual_depthwise_conv1d: bool = False" in convert_config_src
     assert "fuse_gdr_ops: bool = False" in convert_config_src
+    assert "fuse_gdr_block_recurrent_ops: bool = False" in convert_config_src
     assert "force_fp32=self.config.normalize_force_fp32" in converter_src
     assert "split_conv_cache=self.config.split_conv_cache" in converter_src
     assert "use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d" in converter_src
     assert "fuse_gdr_ops=self.config.fuse_gdr_ops" in converter_src
+    assert "fuse_gdr_block_recurrent_ops=self.config.fuse_gdr_block_recurrent_ops" in converter_src
     assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in wrap_model_src
     assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in wrap_model_src
+    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in wrap_model_src
     assert '"use_manual_depthwise_conv1d", False' in wrap_model_src
 
 
@@ -512,6 +516,7 @@ def test_dense_qwen3_5_merak_and_demo_expose_split_and_merged_modes():
 
     assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in merak_impl_src
     assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in merak_impl_src
+    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in merak_impl_src
     assert 'self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)' in merak_impl_src
     assert 'cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)' in export_script_src
     assert 'default=True' in export_script_src
@@ -523,6 +528,32 @@ def test_dense_qwen3_5_merak_and_demo_expose_split_and_merged_modes():
     assert 'default=False' in export_script_src
     assert 'normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)' in export_script_src
     assert 'cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(' in export_script_src
+
+
+def test_dense_qwen3_5_gdr_split_flags_keep_chunk_scan_io_contract():
+    config_src = CONFIG_FILE.read_text()
+    merak_model_src = MERAK_MODEL.read_text()
+    merak_impl_src = MERAK_MODEL.with_name("_llm_model_impl.py").read_text()
+    hmonnx_src = MERAK_HMONNX_INFERENCE.read_text()
+
+    assert "fuse_gdr_block_recurrent_ops: bool = False" in config_src
+    assert "self.fuse_gdr_block_recurrent_ops = fuse_gdr_block_recurrent_ops" in config_src
+    assert 'self.wrap_cfg["fuse_gdr_block_recurrent_ops"] = self.config.fuse_gdr_block_recurrent_ops' in merak_model_src
+
+    setup_body = merak_impl_src.split("# GDR fused ops.", 1)[1].split("return self", 1)[0]
+    assert "if self.fuse_gdr_block_recurrent_ops:" in setup_body
+    assert "self.block_tri_inverse_op = GDRBlockTriInverse" in setup_body
+    assert "self.recurrent_scan_op = GDRRecurrentScan" in setup_body
+    assert "if self.fuse_gdr_ops:" in setup_body
+    assert "self.chunk_scan_op = GDRChunkScan" in setup_body
+
+    prefill_contract_body = merak_model_src.split("def _prefill_recurrent_state_uses_cache_tensor", 1)[1].split("def _enforce_split_conv_cache_wrap_cfg", 1)[0]
+    assert 'wrap_cfg.get("fuse_gdr_ops", getattr(config, "fuse_gdr_ops", False))' in prefill_contract_body
+    assert "fuse_gdr_block_recurrent_ops" not in prefill_contract_body
+
+    hmonnx_contract_body = hmonnx_src.split("def _model_config_prefill_recurrent_state_uses_cache", 1)[1].split("class", 1)[0]
+    assert 'getattr(model_config, "fuse_gdr_ops", False)' in hmonnx_contract_body
+    assert "fuse_gdr_block_recurrent_ops" not in hmonnx_contract_body
 
 
 def test_dense_qwen3_5_dflash_uses_checkpoint_target_ids_and_guards_num_blocks():

@@ -802,6 +802,11 @@ class Qwen3_5MoeConverterXH2a(HFTransfromersConverter):
                 split_conv_cache=self.config.split_conv_cache,
                 use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d,
                 fuse_gdr_ops=getattr(self.config, "fuse_gdr_ops", False),
+                fuse_gdr_block_recurrent_ops=getattr(
+                    self.config,
+                    "fuse_gdr_block_recurrent_ops",
+                    False,
+                ),
                 kv_cache=dict(
                     cache_axis=2,
                 ),

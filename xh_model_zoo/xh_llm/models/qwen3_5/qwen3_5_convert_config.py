@@ -43,3 +43,4 @@ class Qwen3_5ConvertConfig(LLMConvertConfig):
     normalize_force_fp32: bool = False
     use_manual_depthwise_conv1d: bool = False
     fuse_gdr_ops: bool = False
+    fuse_gdr_block_recurrent_ops: bool = False

@@ -45,6 +45,7 @@ class Qwen3_5MoeConvertConfig(LLMConvertConfig):
     normalize_force_fp32: bool = False
     use_manual_depthwise_conv1d: bool = False
     fuse_gdr_ops: bool = False
+    fuse_gdr_block_recurrent_ops: bool = False
     output_hidden_state_indices: Optional[List[int]] = None
     output_post_norm_hidden: bool = False
     gptq_restore_expert_layer_spec: Optional[str] = None

@@ -45,6 +45,7 @@ export:
     normalize_force_fp32: false
     use_manual_depthwise_conv1d: false
     fuse_gdr_ops: false
+    fuse_gdr_block_recurrent_ops: false
     quant_scheme:
       quant_type: w8a8h1_sefp
       nodes:

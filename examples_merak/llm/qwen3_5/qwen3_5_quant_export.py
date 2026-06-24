@@ -226,6 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Workflow config override using dotted paths. Repeatable. "
             "Examples: --override export.model.fuse_gdr_ops=true "
+            "--override export.model.fuse_gdr_block_recurrent_ops=true "
             "--override export.model.context_max_length=32768"
         ),
     )

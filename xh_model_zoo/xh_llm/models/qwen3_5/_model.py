@@ -1017,6 +1017,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         # The production export (qwen3_5_xh2a_export_hmonnx.py) explicitly keeps
         # cfg.model.wrap_cfg.fuse_gdr_ops=False by default.
         self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)
+        self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)
         # QTL-341: route depthwise conv1d tail through self.conv1d_* modules
         # (default) so hmonnx export emits a clean Conv op. xhquant 2d86b60+
         # routes any-kernel depthwise conv2d (groups==in==out) into the VP
@@ -1257,22 +1258,22 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
 
-        # QTL-336: GDR fused ops (conditional on fuse_gdr_ops flag).
-        # Mirrors xhmodel_merak/.../_llm_model_impl.py::_Qwen3_5GatedDeltaNet._setup
-        # (post QTL-331/332/333/334). When fuse_gdr_ops is True these modules
-        # dispatch to xhquant first-class custom ops (xh::GDRBlockTriInverse /
-        # GDRChunkScan / GDRRecurrentScan), exported as single ONNX nodes under
-        # the ai.houmo.xh2a domain. The legacy in-tree impls are kept behind
-        # XHQUANT_GDR_USE_LEGACY=1 for regression/diff testing.
-        if self.fuse_gdr_ops:
+        # QTL-336: GDR fused ops. ``fuse_gdr_ops`` now only enables
+        # GDRChunkScan because that op changes the prefill recurrent-state I/O
+        # contract. ``fuse_gdr_block_recurrent_ops`` enables the
+        # contract-preserving GDRBlockTriInverse and GDRRecurrentScan ops.
+        if self.fuse_gdr_block_recurrent_ops:
             self.block_tri_inverse_op = GDRBlockTriInverse(
                 chunk_size=chunk_size, block_size=block_size
             )
-            # QTL-343 / T7: eye buffers are externalized (chunk_eye_8_batched is
-            # registered on this module and passed through _delta_rule), so no
-            # ``.setup()`` is needed for either fused (xhquant first-class op,
-            # derives eye internally) or LegacyGDRBlockTriInverse (its setup()
-            # was removed — buffers became dead after QTL-339).
+            self.recurrent_scan_op = GDRRecurrentScan(
+                sequence_length=1, output_all_states=False
+            )
+        else:
+            self.block_tri_inverse_op = None
+            self.recurrent_scan_op = None
+
+        if self.fuse_gdr_ops:
             self.chunk_scan_op = GDRChunkScan(
                 num_chunks=num_chunks,
                 num_heads=self.num_v_heads,
@@ -1280,13 +1281,8 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
                 v_head_dim=self.head_v_dim,
                 chunk_size=chunk_size,
             )
-            self.recurrent_scan_op = GDRRecurrentScan(
-                sequence_length=1, output_all_states=False
-            )
         else:
-            self.block_tri_inverse_op = None
             self.chunk_scan_op = None
-            self.recurrent_scan_op = None
 
         return self
 
@@ -1341,9 +1337,7 @@ class _Qwen3_5GatedDeltaNet(DynamicModule):
 
         # QTL-336: refresh GDR fused op buffers / num_chunks when batch/seq config
         # changes between prefill/decode wrap stages.
-        if getattr(self, "fuse_gdr_ops", False) and self.block_tri_inverse_op is not None:
-            # QTL-343 / T7: no ``.setup()`` call needed (see fuse_gdr_ops
-            # branch in setup() for rationale).
+        if getattr(self, "chunk_scan_op", None) is not None:
             self.chunk_scan_op.num_chunks = num_chunks
 
         self.conv_cache_slice = xhnn.DynamicSlice(

@@ -590,6 +590,9 @@ def test_qwen35_help_matches_supported_quant_and_export_modes(monkeypatch: pytes
     assert export_help["variants"] == ["full", "mtp", "dflash", "visual_only"]
     assert export_help["visual_sizes"] == [448, 896]
     assert export_help["fields"]["export.model.fuse_gdr_ops"]["default"] is False
+    assert "GDRChunkScan" in export_help["fields"]["export.model.fuse_gdr_ops"]["description"]
+    assert export_help["fields"]["export.model.fuse_gdr_block_recurrent_ops"]["default"] is False
+    assert "GDRBlockTriInverse" in export_help["fields"]["export.model.fuse_gdr_block_recurrent_ops"]["description"]
     assert "Qwen3_5ForConditionalGeneration_visual" in export_help["model_types"]["visual_only"]
 
 
@@ -602,6 +605,7 @@ def test_qwen35_model_docs_are_complete_enough(monkeypatch: pytest.MonkeyPatch):
     assert model_docs["hmonnx_io_doc"] == "docs/qwen3_5_hmonnx_io_spec.md"
     assert model_docs["hmonnx_io_doc_exists"] is True
     assert model_docs["default_export_summary"]["fuse_gdr_ops"] is False
+    assert model_docs["default_export_summary"]["fuse_gdr_block_recurrent_ops"] is False
     assert model_docs["default_export_summary"]["visual_sizes"] == [448, 896]
 
     supported = {(item["family"], item["model_size"]): item for item in model_docs["supported_models"]}
