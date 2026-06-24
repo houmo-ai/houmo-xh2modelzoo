@@ -1,13 +1,8 @@
-from pathlib import Path
-from typing import Optional, Tuple
-
 import torch
 from PIL import Image
 from torch import Tensor, nn
 from xhquant.api import HMONNXGoldenInference as HMONNXInference
 from xhquant.core import CacheTensor
-
-from xhquant_llm.api import Config
 
 from ..builder import MODELS
 from ..device_dtype_mixin import DeviceDtypeMixin
