@@ -183,6 +183,45 @@ def change_onnx_initializer_type(
 
 
 
+def find_less_int32_initializers_to_fp16(
+    model_path: str,
+    node_name_hint: str = "node_less_2",
+):
+    model_path = os.path.abspath(model_path)
+    model = onnx.load(model_path)
+
+    init_dtype_map = {init.name: init.data_type for init in model.graph.initializer}
+    type_map = {}
+    for vi in list(model.graph.input) + list(model.graph.value_info) + list(model.graph.output):
+        try:
+            type_map[vi.name] = vi.type.tensor_type.elem_type
+        except Exception:
+            continue
+
+    candidates = []
+    for node in model.graph.node:
+        if node.op_type == node_name_hint or node.name == node_name_hint or node_name_hint in (node.name or ""):
+            candidates.append(node)
+    if not candidates:
+        candidates = [node for node in model.graph.node if node.op_type == "Less"]
+
+    targets = set()
+    for node in candidates:
+        if len(node.input) < 2:
+            continue
+        for idx, in_name in enumerate(node.input):
+            if init_dtype_map.get(in_name) != TensorProto.INT32:
+                continue
+            other_name = next((name for j, name in enumerate(node.input) if j != idx), None)
+            other_dtype = init_dtype_map.get(other_name, type_map.get(other_name))
+            if other_dtype in (TensorProto.FLOAT16, TensorProto.FLOAT, TensorProto.DOUBLE) or other_dtype is None:
+                targets.add(in_name)
+
+    target_names = ", ".join(targets)
+    print(f"找到 {len(targets)} 个需要转换的 initializer：{targets}，分别是 {target_names}")
+    return sorted(targets)
+
+
 def main(args):
     target_device = "XH2a"
     model_dir = os.path.normpath(args.model)
@@ -311,12 +350,20 @@ def main(args):
             output_names=output_names,
         )
     
-        change_onnx_initializer_type(
-            input_model_path=hmonnx_file,
-            output_model_path=hmonnx_file,
-            target_initializer_name="_constant_48_output_0_",
-            new_data_type=TensorProto.FLOAT16,
+        target_inits = find_less_int32_initializers_to_fp16(
+            str(hmonnx_file),
+            node_name_hint="node_less_2",
         )
+        if len(target_inits) == 0:
+            print("⚠️ 未找到需要转换为 FP16 的 node_less_2/Less INT32 initializer，跳过 dtype 修复")
+        else:
+            for init_name in target_inits:
+                change_onnx_initializer_type(
+                    input_model_path=hmonnx_file,
+                    output_model_path=hmonnx_file,
+                    target_initializer_name=init_name,
+                    new_data_type=TensorProto.FLOAT16,
+                )
 
     # 生成golden
     if args.gen_golden and not Path(golden_path).exists():
