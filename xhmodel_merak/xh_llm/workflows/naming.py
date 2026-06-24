@@ -147,14 +147,15 @@ def _read_hf_max_position_embeddings(hf_model_dir: Any) -> int | None:
 def resolve_max_pe_contract(
     *,
     hf_model_dir: str | None = None,
+    max_pe_length: Any = None,
 ) -> str:
-    max_pe_length = _read_hf_max_position_embeddings(hf_model_dir)
-    if max_pe_length is None:
-        max_pe_length = DEFAULT_MAX_PE_LENGTH
-    max_pe_length = int(max_pe_length)
-    if max_pe_length <= 0:
-        raise ValueError(f"max_pe_length must be positive, got {max_pe_length!r}")
-    return f"mpe{format_context_suffix(max_pe_length)}"
+    resolved_max_pe_length = _read_hf_max_position_embeddings(hf_model_dir)
+    if resolved_max_pe_length is None:
+        resolved_max_pe_length = max_pe_length if max_pe_length is not None else DEFAULT_MAX_PE_LENGTH
+    resolved_max_pe_length = int(resolved_max_pe_length)
+    if resolved_max_pe_length <= 0:
+        raise ValueError(f"max_pe_length must be positive, got {resolved_max_pe_length!r}")
+    return f"mpe{format_context_suffix(resolved_max_pe_length)}"
 
 
 def build_merak_model_name(
@@ -172,7 +173,10 @@ def build_merak_model_name(
     weight_bits = resolve_weight_bits(quant_cfg, export_model_cfg, naming_cfg)
     activation_bits = resolve_activation_bits(export_model_cfg)
     shape = resolve_shape_contract(naming_cfg, export_model_cfg)
-    max_pe = resolve_max_pe_contract(hf_model_dir=hf_model_dir or export_model_cfg.get("hf_model"))
+    max_pe = resolve_max_pe_contract(
+        hf_model_dir=hf_model_dir or export_model_cfg.get("hf_model"),
+        max_pe_length=export_model_cfg.get("max_pe_length"),
+    )
 
     return "_".join(
         [

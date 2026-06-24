@@ -1,33 +1,43 @@
 quant:
   algorithm: gptqmodel
-  method: autoround
+  method: gptq
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
+  preset: full_vlm
   bits: 4
   group_size: 64
   rotation: false
+  hessian_mse: true
   calibration:
-    dataset: NeelNanda/pile-10k
-    nsamples: 128
-    seqlen: 2048
+    jsonl: gptqmodel/quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl
+    text_key: text
+    nsamples: 512
+    seqlen: 1024
   runtime:
-    batch_size: 8
+    batch_size: 1
     trust_remote_code: true
-    low_gpu_mem_usage: true
+    device_map: auto
+    offload_to_disk: false
+  validation:
+    check_quant_vision_demo: true
+    check_rotation_ppl: false
   seed: 42
   quant_nontext_module: false
-  sym: true
-  iters: 200
-  format: auto_gptq
+  moe:
+    attn_bits: 8
+    shared_expert_bits: 8
+    expert_bits: 4
+    expert_down_bits: 5
+    routing: bypass
 export:
   naming:
     family: qwen3_6
-    variant: 27b
-    profile: full_mtp
+    variant: 35b_a3b
+    profile: full
   model:
     chip_arch: XH2a
-    model_type: Qwen3_5ForConditionalGeneration
-    hf_model: weights/Qwen3.6-27B
+    model_type: Qwen3_5MoeForConditionalGeneration
+    hf_model: weights/Qwen3.6-35B-A3B
     model_name: auto
     context_max_length: 2048
     prefill_chunk_length: 256
@@ -54,16 +64,3 @@ export:
         quant_type: w8a8h1_sefp
         ops: {}
     only_first_block: false
-    spec_decode_mode: mtp
-    num_draft_tokens: 4
-    spec_draft_head_weight_bits: 4
-    output_post_norm_hidden: true
-    mtp_config:
-      hidden_size: 5120
-      num_key_value_heads: 4
-      head_dim: 256
-      batch_size: 1
-      input_sequence_length: 1
-      context_max_length: 2048
-      max_pe_length: 262144
-      use_cache: true

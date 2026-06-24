@@ -19,8 +19,8 @@ _HMONNX_IO_DOC = _DOC_ROOT / "qwen3_5_hmonnx_io_spec.md"
 _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
     "algorithm": {
         "type": "str",
-        "default": "autoround",
-        "description": "量化入口。默认运行 AutoRound，并保存 GPTQModel 兼容的 HuggingFace 目录。",
+        "default": "gptqmodel",
+        "description": "量化 API 提供方。默认由 GPTQModel 承接，method 决定运行 gptq 或 autoround。",
     },
     "output_format": {
         "type": "str",
@@ -63,7 +63,17 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
         "default": False,
         "description": "LLM-only 量化开关：False 表示不量化视觉/非文本模块。",
     },
-    "autoround_format": {
+    "method": {
+        "type": "str",
+        "default": "autoround",
+        "description": "GPTQModel API 方法，可选 gptq 或 autoround；autoround 默认使用 mode1 LLM-only recipe，无需在 YAML 额外配置 mode1。",
+    },
+    "rotation": {
+        "type": "bool|str",
+        "default": False,
+        "description": "默认关闭；Qwen3.5 rotated MTP sidecar 与 xh2modelzoo MTP/spec-decode 导出不兼容。",
+    },
+    "format": {
         "type": "str",
         "default": "auto_gptq",
         "description": "AutoRound 上游保存格式名；dense 脚本默认为 auto_gptq，MoE YAML 使用 auto_round:gptqmodel。",
@@ -100,13 +110,13 @@ _QUANT_FIELD_HELP: dict[str, dict[str, Any]] = {
     },
     "runtime.device_map": {
         "type": "str|null",
-        "default": "MoE: balanced",
-        "description": "MoE AutoRound 多卡切分策略；dense YAML 默认不设置。",
+        "default": "MoE AutoRound: 0",
+        "description": "MoE AutoRound 单卡加载策略；dense AutoRound YAML 默认不设置。",
     },
     "runtime.low_gpu_mem_usage": {
         "type": "bool",
-        "default": "MoE: True",
-        "description": "MoE 低显存加载开关；dense YAML 默认不设置。",
+        "default": True,
+        "description": "AutoRound 低显存加载开关；dense 与 MoE YAML 都显式开启。",
     },
     "moe.attn_bits": {
         "type": "int|null",
@@ -158,8 +168,8 @@ _EXPORT_FIELD_HELP: dict[str, dict[str, Any]] = {
     },
     "export.model.model_name": {
         "type": "str",
-        "default": "xh2_<model>_<variant>_256_2k",
-        "description": "导出产物命名前缀，随推荐 YAML 固定。",
+        "default": "auto",
+        "description": "导出产物命名前缀。推荐 YAML 统一使用 auto，并由 export.naming 生成规范化名称。",
     },
     "export.model.context_max_length": {
         "type": "int",
@@ -232,14 +242,19 @@ _QUANT_CONFIG_HELP: dict[str, Any] = {
     "default": get_default_quant_config(),
     "fields": _QUANT_FIELD_HELP,
     "supported_algorithms": {
-        "autoround": "Run AutoRound and save a GPTQModel-compatible HuggingFace artifact.",
+        "gptqmodel/method=autoround": "Run the GPTQModel AutoRound recipe and save a GPTQModel-compatible HuggingFace artifact.",
+        "gptqmodel/method=gptq": "Run GPTQModel qwen35 recipe API directly, preserving script/readme defaults.",
+        "autoround": "Legacy alias for gptqmodel/method=autoround.",
         "existing_hf": "Reuse an already quantized HuggingFace/GPTQModel directory via existing_hf_model_dir.",
         "none": "Pass config_overrides={'quant': None} to validate/export the base HF model without quantization.",
     },
     "required_constraints": [
         "group_size must be 64",
         "artifact_format/output_format must be gptqmodel_hf",
-        "autoround_format defaults to auto_gptq for dense YAML; MoE YAML uses auto_round:gptqmodel",
+        "algorithm defaults to gptqmodel; method must be gptq or autoround for fresh quantization",
+        "method=autoround uses the GPTQModel AutoRound mode1 recipe by default; do not set method=mode1 in YAML",
+        "format defaults to auto_gptq for dense YAML; MoE YAML uses auto_round:gptqmodel",
+        "rotation defaults to false because rotated MTP sidecars are incompatible with MTP/spec-decode export",
         "quant_nontext_module defaults to False for mode1 LLM-only quantization",
         "default YAML quant is not null; use config_overrides={'quant': None} only for explicit base validation",
     ],

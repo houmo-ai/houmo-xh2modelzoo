@@ -1,32 +1,40 @@
 quant:
-  algorithm: autoround
+  algorithm: gptqmodel
+  method: autoround
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
   bits: 4
   group_size: 64
+  rotation: false
   calibration:
     dataset: NeelNanda/pile-10k
     nsamples: 128
     seqlen: 2048
   runtime:
     batch_size: 8
+    gradient_accumulate_steps: 1
     trust_remote_code: true
-    device_map: balanced
+    device_map: '0'
     low_gpu_mem_usage: true
   seed: 42
   quant_nontext_module: false
   sym: true
   iters: 200
-  autoround_format: auto_round:gptqmodel
+  format: auto_round:gptqmodel
   moe:
     attn_bits: 8
     shared_expert_bits: 8
 export:
+  naming:
+    family: qwen3_6
+    variant: 35b_a3b
+    profile: visual_only
+    shape: '896'
   model:
     chip_arch: XH2a
     model_type: Qwen3_5MoeForConditionalGeneration_visual
     hf_model: weights/Qwen3.6-35B-A3B
-    model_name: xh2_Qwen3.6-35B-A3B_visual_only_896
+    model_name: auto
     max_size_w: 896
     max_size_h: 896
     quant_scheme:

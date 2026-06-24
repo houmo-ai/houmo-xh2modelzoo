@@ -9,6 +9,27 @@ conda activate xhquant_55
 # 单任务使用一张空闲 GPU，例如：CUDA_VISIBLE_DEVICES=0 <command>
 ```
 
+## 当前 workflow 默认配置与精度
+
+新的量化/导出 workflow 统一使用
+`examples_merak/llm/qwen3_5/README_workflow.md` 中的 YAML 配置。默认选择
+未带 `_gptq` 后缀的 `full.yaml`，即 AutoRound weight-only -> GPTQModel HF
+artifact -> HMONNX export；只有显式需要直接 GPTQModel GPTQ 时才使用
+`*_gptq.yaml`。4B 当前仍是旧式 Merak Python config，精度表中一起列出，
+方便和 9B / 27B / 35B-A3B 对齐查看。
+
+| 模型 | 默认配置 | CEval float | CEval AutoRound weight-only | CEval HMONNX |
+|---|---|---:|---:|---:|
+| Qwen3.5-4B | `qwen3_5/4b/qwen3_5_4b_instruct_xh2a_2k.py` | 82.39% | 79.13% | 79.94% |
+| Qwen3.5-9B | `qwen3_5/9b/qwen3_5_9b_full.yaml` | 84.92% | 84.40% | 83.58% |
+| Qwen3.6-27B | `qwen3_5/27b/qwen3_6_27b_full.yaml` | 90.64% | 90.27% | 89.90% |
+| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | 89.60% | 89.90% | 88.71% |
+
+CEval 口径：EvalScope / 官方 prompt，5-shot，1346 题，生成长度 4096。
+数据来自飞书评测表
+`https://houmo.feishu.cn/docx/RBLhdZ3EHoQBiGx4aT9c671Gn7f`
+（更新时间 2026-06-22 11:00:36）。
+
 ## 配置入口
 
 - 9B 浮点：`configs_merak/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_instruct_xh2a_2k.py`

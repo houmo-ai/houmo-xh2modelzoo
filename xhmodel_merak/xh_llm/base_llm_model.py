@@ -601,7 +601,11 @@ class BaseLLMModel(XHBaseModel):
         meta_info.pad_token_id = self.pad_token_id
         meta_info.model_config = self.config
         hf_model_path = Path(self.config.hf_model)
-        hf_config_files = list(hf_model_path.glob("*.json")) + list(hf_model_path.glob("*.jinja"))
+        hf_config_files = [
+            cfg_file
+            for cfg_file in list(hf_model_path.glob("*.json")) + list(hf_model_path.glob("*.jinja"))
+            if not cfg_file.name.endswith(".safetensors.index.json")
+        ]
         hf_config_dir = Path(output_dir) / "hf_config"
         hf_config_dir.mkdir(exist_ok=True, parents=True)
         for cfg_file in hf_config_files:
