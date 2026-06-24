@@ -73,6 +73,7 @@ def _build_quant_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
         return {
             "quant": {
                 "algorithm": "existing_hf",
+                "method": "autoround",
                 "artifact_format": args.artifact_format,
                 "existing_hf_model_dir": args.existing_hf_model_dir,
             }
@@ -105,12 +106,37 @@ def _resolve_quant_output_dir(args: argparse.Namespace) -> str:
     return str(Path(args.export_output_dir) / _QUANT_PLACEHOLDER_DIRNAME)
 
 
+def _make_json_safe(value: Any) -> Any:
+    """Return a JSON-serializable representation for CLI summaries.
+
+    Workflow results may carry rich runtime objects in fields such as
+    ``ExportResult.meta``.  The CLI summary is only an audit breadcrumb, so it
+    must not fail the already-completed quant/export/golden run because such an
+    object lacks a JSON encoder.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if is_dataclass(value):
+        return _make_json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    return repr(value)
+
+
 def _jsonable_dataclass(value: Any) -> dict[str, Any]:
     if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "__dict__"):
-        return dict(value.__dict__)
-    raise TypeError(f"Object is not JSON serializable as a workflow result: {type(value)!r}")
+        result = asdict(value)
+    elif hasattr(value, "__dict__"):
+        result = dict(value.__dict__)
+    else:
+        raise TypeError(f"Object is not JSON serializable as a workflow result: {type(value)!r}")
+    safe_result = _make_json_safe(result)
+    if not isinstance(safe_result, dict):
+        raise TypeError(f"Workflow result did not serialize to a dict: {type(value)!r}")
+    return safe_result
 
 
 def main(args: argparse.Namespace) -> None:

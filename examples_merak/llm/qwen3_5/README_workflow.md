@@ -49,26 +49,74 @@ Use `name=...` when the exact YAML is known.  Use `family/model_size/variant` fo
 
 ## Recommended YAML configs
 
-YAML filenames are topology names only.  Do not put quant-format tokens such as `w4`, `w8`, `gptq`, or `autoround` in workflow YAML filenames.
+YAML filenames are topology names plus an optional quant-method suffix. The unsuffixed files are the default AutoRound mode1 configs; `_gptq.yaml` companion files run GPTQModel GPTQ with the same export topology. Do not put bit-width tokens such as `w4` or `w8` in workflow YAML filenames.
 
-- 9B full: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml`
+- 9B full AutoRound: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml`
+- 9B full GPTQ: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_gptq.yaml`
 - 9B MTP: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml`
 - 9B DFlash: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml`
 - 9B visual-only: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_visual_only_448.yaml` or `qwen3_5_9b_visual_only_896.yaml`
-- 27B full/MTP/DFlash/visual-only: `configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/*.yaml`
-- 35B-A3B MoE full/MTP/DFlash/visual-only: `configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/*.yaml`
+- 27B full/MTP/DFlash/visual-only: AutoRound plus `_gptq.yaml` companion configs under `configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/`
+- 35B-A3B MoE full/MTP/DFlash/visual-only: AutoRound plus `_gptq.yaml` companion configs under `configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/`
 
 Default full configs include the visual branch when `export.model.visual_config` exists.  Visual-only configs are separate full visual tower exports.  Default visual buckets are `448x448` and `896x896`; change them in YAML or with overrides.  Full configs use `{"export.model.visual_config.max_size_w": 896, "export.model.visual_config.max_size_h": 896}`; visual-only configs use `{"export.model.max_size_w": 896, "export.model.max_size_h": 896}`.
 
+### Default config selection
+
+Use the unsuffixed `full.yaml` files as the default production configs unless
+the run explicitly needs MTP, DFlash, visual-only export, or direct GPTQModel
+GPTQ calibration.  These defaults run AutoRound weight-only quantization and
+export the same topology that is evaluated below.
+
+| Model | Default Merak workflow YAML | Other topology YAMLs | GPTQ companion |
+| --- | --- | --- | --- |
+| Qwen3.5-9B | `qwen3_5/9b/qwen3_5_9b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
+| Qwen3.6-27B | `qwen3_5/27b/qwen3_6_27b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
+| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
+
+`get_default_workflow_config(family=..., model_size=..., variant="full")`
+selects the AutoRound default when `quant_method` is omitted.  Pass
+`quant_method="gptq"` or an exact `_gptq` name only when the run should use the
+direct GPTQModel recipe.  Keep runtime defaults aligned with the checked-in
+YAMLs: dense AutoRound uses `batch_size: 8` and `low_gpu_mem_usage: true`; MoE
+AutoRound uses one visible GPU with `batch_size: 8`,
+`gradient_accumulate_steps: 1`, `device_map: "0"`, and
+`low_gpu_mem_usage: true`.
+
+## CEval accuracy summary
+
+Source: Feishu evaluation tracker
+`https://houmo.feishu.cn/docx/RBLhdZ3EHoQBiGx4aT9c671Gn7f`, updated
+2026-06-22 11:00:36.  Evaluation uses EvalScope / official dataset prompts,
+CEVAL 5-shot, `max_tokens = max_new_tokens = 4096`, and 1346 CEval questions.
+`weight_only` is the AutoRound weight-only HF/GPTQModel artifact; `hmonnx` is
+the exported HMONNX inference result with patched 8192 KV cache.
+
+| Model | Float CEval | AutoRound weight-only CEval | HMONNX CEval |
+| --- | ---: | ---: | ---: |
+| Qwen3.5-4B | 82.39% | 79.13% | 79.94% |
+| Qwen3.5-9B | 84.92% | 84.40% | 83.58% |
+| Qwen3.6-27B | 90.64% | 90.27% | 89.90% |
+| Qwen3.6-35B-A3B | 89.60% | 89.90% | 88.71% |
+
+The CEval table is the precision reference for the default full export
+topology.  Qwen3.5-4B is included for completeness from the same evaluation
+tracker, but it still uses the legacy `configs_merak/xh2a/.../4b/*.py`
+configs; checked-in workflow YAML defaults currently cover 9B, 27B, and
+35B-A3B.  MTP, DFlash, and visual-only configs share the quant recipe but
+should still be validated separately when they are used for release.
+
 ## Quantization contract
 
-Default YAML quantization uses AutoRound and saves a GPTQModel-compatible HF artifact.
-The workflow mirrors the existing mode1 LLM-only shell scripts without calling or editing
-`third_party/auto-round` directly:
+Default YAML quantization is now owned by the GPTQModel API.  Select the
+implementation with `quant.method`: `autoround` runs the AutoRound mode1
+LLM-only recipe by default, while `gptq` runs the GPTQModel recipe directly.
+Do not write `method: mode1` in workflow YAML.
 
 ```yaml
 quant:
-  algorithm: autoround
+  algorithm: gptqmodel
+  method: autoround
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
   bits: 4
@@ -77,7 +125,7 @@ quant:
   iters: 200
   seed: 42
   quant_nontext_module: false
-  autoround_format: auto_gptq        # dense script default
+  format: auto_gptq        # dense AutoRound recipe default
   calibration:
     dataset: NeelNanda/pile-10k
     nsamples: 128
@@ -85,17 +133,21 @@ quant:
   runtime:
     batch_size: 8
     trust_remote_code: true
+    low_gpu_mem_usage: true
 ```
 
-MoE YAMLs add the options that were previously only in `scripts_qwen35moe/run_mode1_llm_only.sh`:
+GPTQ companion YAMLs use `method: gptq`, the README-verified jsonl calibration files, `batch_size: 1`, `device_map: auto`, and `offload_to_disk: false`.
+
+MoE AutoRound YAMLs add the options that were previously only in `scripts_qwen35moe/run_mode1_llm_only.sh`:
 
 ```yaml
 quant:
-  autoround_format: auto_round:gptqmodel
+  format: auto_round:gptqmodel
   runtime:
     batch_size: 8
+    gradient_accumulate_steps: 1
     trust_remote_code: true
-    device_map: balanced
+    device_map: "0"
     low_gpu_mem_usage: true
   moe:
     attn_bits: 8
@@ -110,7 +162,7 @@ Script comparison summary:
 | LLM-only | `--mode llm-only` | same | `quant_nontext_module: false` |
 | calibration | `pile-10k`, `nsamples=128`, `seqlen=2048`, `batch_size=8` | same defaults | `calibration.*`, `runtime.batch_size` |
 | seed/sym/iters | `--seed 42 --sym --iters 200` | same defaults | `seed`, `sym`, `iters` |
-| save format | `auto_gptq` | `auto_round:gptqmodel` | `autoround_format` |
+| save format | `auto_gptq` | `auto_round:gptqmodel` | `format` |
 | MoE-only knobs | n/a | `device_map`, `low_gpu_mem_usage`, `attn_bits`, `shared_expert_bits` | `runtime.*`, `moe.*` |
 
 `group_size` must remain `64` for Qwen3.5/Qwen3.6 workflow quantization.

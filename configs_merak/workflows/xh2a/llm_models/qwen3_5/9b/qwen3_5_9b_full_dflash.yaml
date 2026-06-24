@@ -1,9 +1,11 @@
 quant:
-  algorithm: autoround
+  algorithm: gptqmodel
+  method: autoround
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
   bits: 4
   group_size: 64
+  rotation: false
   calibration:
     dataset: NeelNanda/pile-10k
     nsamples: 128
@@ -11,17 +13,22 @@ quant:
   runtime:
     batch_size: 8
     trust_remote_code: true
+    low_gpu_mem_usage: true
   seed: 42
   quant_nontext_module: false
   sym: true
   iters: 200
-  autoround_format: auto_gptq
+  format: auto_gptq
 export:
+  naming:
+    family: qwen3_5
+    variant: 9b
+    profile: full_dflash
   model:
     chip_arch: XH2a
     model_type: Qwen3_5ForConditionalGeneration
     hf_model: weights/Qwen3.5-9B
-    model_name: xh2_Qwen3.5-9B_full_dflash_256_2k
+    model_name: auto
     context_max_length: 2048
     prefill_chunk_length: 256
     max_pe_length: 262144

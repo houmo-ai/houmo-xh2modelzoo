@@ -22,6 +22,7 @@ from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
 )
 from xhmodel_merak.xh_llm.types import CacheList, KVCacheWithLinearConfig
 from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
 from xhquant.api import Config
 
 
@@ -891,12 +892,18 @@ def test_qwen3_5_moe_workflow_full_config_loads_expected_fields():
 
     cfg = Config.fromfile(str(config_path))
 
-    assert cfg.export.model.model_name == "xh2_Qwen3.6-35B-A3B_full_256_2k"
+    assert cfg.export.model.model_name == "auto"
+    assert cfg.export.naming.family == "qwen3_6"
+    assert cfg.export.naming.variant == "35b_a3b"
+    assert cfg.export.naming.profile == "full"
     assert cfg.export.model.hf_model.endswith("Qwen3.6-35B-A3B")
     assert cfg.export.model.chip_arch == "XH2a"
-    assert cfg.quant.algorithm == "autoround"
+    assert cfg.quant.algorithm == "gptqmodel"
     assert cfg.quant.artifact_format == "gptqmodel_hf"
     assert cfg.quant.group_size == 64
+    assert cfg.quant.method == "autoround"
+    assert cfg.quant.rotation is False
+    assert cfg.quant.format == "auto_round:gptqmodel"
     assert cfg.export.model.quant_scheme.quant_type == "w8a8h1_sefp"
     assert cfg.export.model.quant_scheme.nodes.lm_head.quant_type == "w8a8h1_sefp"
 
@@ -908,11 +915,12 @@ def test_qwen3_5_moe_workflow_mtp_config_loads_expected_fields(monkeypatch):
         / "qwen3_6_35b_a3b_full_mtp.yaml"
     )
 
-    cfg = Config.fromfile(str(config_path))
+    workflow_cfg = resolve_auto_model_name(WorkflowConfig.from_file(str(config_path)))
+    cfg = Config(workflow_cfg.build_export_dict(workflow_cfg.export["model"]["hf_model"]))
     monkeypatch.setattr(Path, "exists", lambda self: True)
-    model_cfg = AutoLLMConfig.from_pretrained(cfg.export.model)
+    model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
 
-    assert model_cfg.model_name == "xh2_Qwen3.6-35B-A3B_full_mtp_256_2k"
+    assert model_cfg.model_name == "xh2_qwen3_6_35b_a3b_full_mtp_autoround_w4a8_256_2k_mpe256k"
     assert model_cfg.chip_arch == "XH2a"
     assert model_cfg.spec_decode_mode == "mtp"
     assert model_cfg.quant_scheme.quant_type == "w8a8h1_sefp"

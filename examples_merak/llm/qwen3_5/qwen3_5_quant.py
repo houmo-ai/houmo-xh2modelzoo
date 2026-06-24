@@ -47,6 +47,7 @@ def _build_quant_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
         return {
             "quant": {
                 "algorithm": "existing_hf",
+                "method": "autoround",
                 "artifact_format": "gptqmodel_hf",
                 "existing_hf_model_dir": args.existing_hf_model_dir,
             }

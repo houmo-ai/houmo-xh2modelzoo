@@ -58,25 +58,26 @@ quant_cfg = get_default_quant_config()
 默认值：
 
 ```yaml
-algorithm: autoround
+algorithm: gptqmodel
+method: autoround
 output_format: gptqmodel_hf
 artifact_format: gptqmodel_hf
 bits: 4
 group_size: 64
 sym: true
 iters: 200
-autoround_format: auto_gptq
+format: auto_gptq
 calibration:
-  dataset: wikitext
-  split: train
+  dataset: NeelNanda/pile-10k
   nsamples: 128
   seqlen: 2048
 runtime:
-  batch_size: 1
+  batch_size: 8
   trust_remote_code: true
+  low_gpu_mem_usage: true
 ```
 
-约束：`group_size` 必须为 64；默认 workflow YAML 必须包含量化配置。只有显式 base 验证时才使用 `config_overrides={"quant": None}`。
+约束：`group_size` 必须为 64；默认 AutoRound workflow YAML 必须包含量化配置。GPTQ 伴随配置使用 `_gptq.yaml` 后缀并设置 `method: gptq`。只有显式 base 验证时才使用 `config_overrides={"quant": None}`。
 
 ### 3.2 默认 workflow / export 配置
 

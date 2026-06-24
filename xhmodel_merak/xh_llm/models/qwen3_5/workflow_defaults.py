@@ -15,16 +15,18 @@ _CONFIG_ROOTS = (
 )
 
 DEFAULT_QUANT_CONFIG: dict[str, Any] = {
-    "algorithm": "autoround",
+    "algorithm": "gptqmodel",
+    "method": "autoround",
     "output_format": "gptqmodel_hf",
     "artifact_format": "gptqmodel_hf",
     "bits": 4,
     "group_size": 64,
+    "rotation": False,
     "sym": True,
     "iters": 200,
     "seed": 42,
     "quant_nontext_module": False,
-    "autoround_format": "auto_gptq",
+    "format": "auto_gptq",
     "calibration": {
         "dataset": "NeelNanda/pile-10k",
         "nsamples": 128,
@@ -33,6 +35,7 @@ DEFAULT_QUANT_CONFIG: dict[str, Any] = {
     "runtime": {
         "batch_size": 8,
         "trust_remote_code": True,
+        "low_gpu_mem_usage": True,
     },
 }
 
@@ -40,6 +43,7 @@ QUANT_CONFIG_TEMPLATE: dict[str, Any] = {
     **DEFAULT_QUANT_CONFIG,
     "existing_hf": {
         "algorithm": "existing_hf",
+        "method": "autoround",
         "artifact_format": "gptqmodel_hf",
         "existing_hf_model_dir": "weights/<existing-gptqmodel-hf-dir>",
     },
@@ -49,11 +53,16 @@ EXPORT_CONFIG_TEMPLATE: dict[str, Any] = {
     "variants": ["full", "mtp", "dflash", "visual_only"],
     "visual_sizes": [448, 896],
     "full": {
+        "naming": {
+            "family": "qwen3_5",
+            "variant": "<model-size>",
+            "profile": "full",
+        },
         "model": {
             "chip_arch": "XH2a",
             "model_type": "Qwen3_5ForConditionalGeneration",
             "hf_model": "weights/<hf-model-dir>",
-            "model_name": "xh2_<model>_full_256_2k",
+            "model_name": "auto",
             "context_max_length": 2048,
             "prefill_chunk_length": 256,
             "max_pe_length": 262144,
@@ -70,9 +79,14 @@ EXPORT_CONFIG_TEMPLATE: dict[str, Any] = {
         }
     },
     "mtp": {
+        "naming": {
+            "family": "qwen3_5",
+            "variant": "<model-size>",
+            "profile": "full_mtp",
+        },
         "model": {
             "model_type": "Qwen3_5ForConditionalGeneration",
-            "model_name": "xh2_<model>_full_mtp_256_2k",
+            "model_name": "auto",
             "mtp_config": {
                 "num_nextn_predict_layers": 1,
                 "output_hidden_state_indices": [30],
@@ -80,20 +94,31 @@ EXPORT_CONFIG_TEMPLATE: dict[str, Any] = {
         }
     },
     "dflash": {
+        "naming": {
+            "family": "qwen3_5",
+            "variant": "<model-size>",
+            "profile": "full_dflash",
+        },
         "model": {
             "model_type": "Qwen3_5ForConditionalGeneration",
-            "model_name": "xh2_<model>_full_dflash_256_2k",
+            "model_name": "auto",
             "dflash_config": {
                 "target_model_dir": None,
             },
         }
     },
     "visual_only": {
+        "naming": {
+            "family": "qwen3_5",
+            "variant": "<model-size>",
+            "profile": "visual_only",
+            "shape": "448",
+        },
         "model": {
             "chip_arch": "XH2a",
             "model_type": "Qwen3_5ForConditionalGeneration_visual",
             "hf_model": "weights/<hf-model-dir>",
-            "model_name": "xh2_<model>_visual_only_448",
+            "model_name": "auto",
             "max_size_w": 448,
             "max_size_h": 448,
             "quant_scheme": {"quant_type": "w8a8h1_sefp", "ops": {}},
@@ -120,6 +145,7 @@ def list_recommended_configs() -> list[dict[str, Any]]:
     configs: list[dict[str, Any]] = []
     for path in recommended_config_paths():
         data = _load_yaml(path)
+        quant = data.get("quant") or {}
         model = data["export"]["model"]
         configs.append(
             {
@@ -127,6 +153,7 @@ def list_recommended_configs() -> list[dict[str, Any]]:
                 "family": _family_for_path(path),
                 "model_size": path.parent.name,
                 "variant": _variant_for_path(path),
+                "quant_method": str(quant.get("method", "")).lower(),
                 "visual_size": _visual_size(model),
                 "config_path": path.relative_to(_REPO_ROOT).as_posix(),
                 "model_type": model["model_type"],
@@ -142,6 +169,7 @@ def get_recommended_config_path(
     family: str | None = None,
     model_size: str | None = None,
     variant: str | None = None,
+    quant_method: str | None = None,
     visual_size: int | None = None,
 ) -> Path:
     """Return the unique recommended workflow YAML matching the selector."""
@@ -150,6 +178,7 @@ def get_recommended_config_path(
         family=family,
         model_size=model_size,
         variant=variant,
+        quant_method=quant_method,
         visual_size=visual_size,
     )
     if len(matches) != 1:
@@ -158,6 +187,7 @@ def get_recommended_config_path(
             "family": family,
             "model_size": model_size,
             "variant": variant,
+            "quant_method": quant_method,
             "visual_size": visual_size,
         }
         available = [item["name"] for item in list_recommended_configs()]
@@ -174,6 +204,7 @@ def get_default_workflow_config(
     family: str | None = None,
     model_size: str | None = None,
     variant: str | None = None,
+    quant_method: str | None = None,
     visual_size: int | None = None,
 ) -> dict[str, Any]:
     """Return a deep copy of one checked-in recommended workflow YAML."""
@@ -184,6 +215,7 @@ def get_default_workflow_config(
                 family=family,
                 model_size=model_size,
                 variant=variant,
+                quant_method=quant_method,
                 visual_size=visual_size,
             )
         )
@@ -201,6 +233,7 @@ def get_default_export_config(
     family: str | None = None,
     model_size: str | None = None,
     variant: str | None = None,
+    quant_method: str | None = None,
     visual_size: int | None = None,
 ) -> dict[str, Any]:
     """Return the export section from one recommended workflow YAML."""
@@ -209,6 +242,7 @@ def get_default_export_config(
         family=family,
         model_size=model_size,
         variant=variant,
+        quant_method=quant_method,
         visual_size=visual_size,
     )
     return copy.deepcopy(workflow_config["export"])
@@ -244,12 +278,14 @@ def _select_recommended_configs(
     family: str | None = None,
     model_size: str | None = None,
     variant: str | None = None,
+    quant_method: str | None = None,
     visual_size: int | None = None,
 ) -> list[dict[str, Any]]:
     expected_family = _normalize_family(family) if family is not None else None
     expected_model_size = model_size.lower() if model_size is not None else None
     expected_variant = variant.lower() if variant is not None else None
     expected_name = name.lower() if name is not None else None
+    expected_quant_method = quant_method.lower() if quant_method is not None else None
 
     matches: list[dict[str, Any]] = []
     for item in list_recommended_configs():
@@ -261,9 +297,15 @@ def _select_recommended_configs(
             continue
         if expected_variant is not None and item["variant"] != expected_variant:
             continue
+        if expected_quant_method is not None and item["quant_method"] != expected_quant_method:
+            continue
         if visual_size is not None and item["visual_size"] != int(visual_size):
             continue
         matches.append(item)
+    if expected_name is None and expected_quant_method is None and len(matches) > 1:
+        autoround_matches = [item for item in matches if item["quant_method"] == "autoround"]
+        if autoround_matches:
+            return autoround_matches
     return matches
 
 
@@ -285,6 +327,10 @@ def _family_for_path(path: Path) -> str:
 
 def _variant_for_path(path: Path) -> str:
     name = path.stem
+    if name.endswith("_gptq"):
+        name = name[: -len("_gptq")]
+    if name.endswith("_autoround"):
+        name = name[: -len("_autoround")]
     if "visual_only" in name:
         return "visual_only"
     if name.endswith("_full_mtp"):

@@ -21,7 +21,7 @@ QWEN35_CONFIG_ROOTS = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5",
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe",
 )
-FORBIDDEN_FILENAME_TOKENS = ("w4", "w8", "w4a8", "w8a8", "gptq", "autoround")
+FORBIDDEN_FILENAME_TOKENS = ("w4", "w8", "w4a8", "w8a8")
 
 
 def _install_lightweight_xh_llm_packages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,6 +36,17 @@ def _install_lightweight_xh_llm_packages(monkeypatch: pytest.MonkeyPatch) -> Non
         module = types.ModuleType(name)
         module.__path__ = [str(path)]
         monkeypatch.setitem(sys.modules, name, module)
+    import xhmodel_merak
+
+    monkeypatch.setattr(xhmodel_merak, "xh_llm", sys.modules["xhmodel_merak.xh_llm"], raising=False)
+    sys.modules["xhmodel_merak.xh_llm"].workflows = sys.modules["xhmodel_merak.xh_llm.workflows"]
+    sys.modules["xhmodel_merak.xh_llm"].models = sys.modules["xhmodel_merak.xh_llm.models"]
+    sys.modules["xhmodel_merak.xh_llm.models"].qwen3_5 = sys.modules[
+        "xhmodel_merak.xh_llm.models.qwen3_5"
+    ]
+    sys.modules["xhmodel_merak.xh_llm.models.qwen3_5"].quant_adapter = importlib.import_module(
+        "xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter"
+    )
 
 
 def _load_workflow_modules(monkeypatch: pytest.MonkeyPatch):
@@ -68,9 +79,36 @@ def test_all_qwen35_workflow_yamls_parse(qwen35_modules):
         assert cfg.source == str(path)
         assert cfg.export["model"]["chip_arch"] == "XH2a"
         assert cfg.export["model"]["model_type"]
-        assert cfg.quant["algorithm"] == "autoround"
+        assert cfg.export["model"]["model_name"] == "auto"
+        assert set(cfg.export["naming"]) >= {"family", "variant", "profile"}
+        assert cfg.quant["algorithm"] == "gptqmodel"
+        assert cfg.quant["method"] in {"autoround", "gptq"}
         assert cfg.quant["artifact_format"] == "gptqmodel_hf"
         assert cfg.quant["group_size"] == 64
+
+
+def test_qwen35_auto_model_names_resolve_quant_contract(qwen35_modules):
+    WorkflowConfig, _ = qwen35_modules
+    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
+
+    cases = {
+        "9b/qwen3_5_9b_full.yaml": "xh2_qwen3_5_9b_full_autoround_w4a8_256_2k_mpe256k",
+        "9b/qwen3_5_9b_full_gptq.yaml": "xh2_qwen3_5_9b_full_gptq_w4a8_256_2k_mpe256k",
+        "27b/qwen3_6_27b_full_dflash.yaml": "xh2_qwen3_6_27b_full_dflash_autoround_w4a8_256_2k_mpe256k",
+        "27b/qwen3_6_27b_visual_only_896.yaml": "xh2_qwen3_6_27b_visual_only_autoround_w4a8_896_mpe256k",
+    }
+    moe_case = (
+        QWEN35_CONFIG_ROOTS[1] / "35b_a3b/qwen3_6_35b_a3b_full.yaml",
+        "xh2_qwen3_6_35b_a3b_full_autoround_w4a8_256_2k_mpe256k",
+    )
+
+    for rel_path, expected_name in cases.items():
+        resolved = resolve_auto_model_name(WorkflowConfig.from_file(str(QWEN35_CONFIG_ROOTS[0] / rel_path)))
+        assert resolved.export["model"]["model_name"] == expected_name
+        assert "h1_sefp" not in expected_name
+
+    resolved = resolve_auto_model_name(WorkflowConfig.from_file(str(moe_case[0])))
+    assert resolved.export["model"]["model_name"] == moe_case[1]
 
 
 def test_qwen35_workflow_config_accepts_base_and_existing_hf_quant_overrides(qwen35_modules):
@@ -81,6 +119,7 @@ def test_qwen35_workflow_config_accepts_base_and_existing_hf_quant_overrides(qwe
 
     existing_hf = {
         "algorithm": "existing_hf",
+        "method": "autoround",
         "artifact_format": "gptqmodel_hf",
         "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
     }
@@ -161,8 +200,9 @@ def test_qwen35_existing_hf_quant_returns_normalized_quant_result(qwen35_modules
         config_overrides={
             "quant": {
                 "algorithm": "existing_hf",
+                "method": "autoround",
                 "artifact_format": "gptqmodel_hf",
-                        "existing_hf_model_dir": existing_rel,
+                "existing_hf_model_dir": existing_rel,
             }
         },
     )
@@ -172,159 +212,106 @@ def test_qwen35_existing_hf_quant_returns_normalized_quant_result(qwen35_modules
     assert result.quanted_model_dir == os.path.abspath("weights/Qwen3.5-9B-mode1-llm-only")
 
 
-def test_qwen35_autoround_quant_uses_yaml_calibration_runtime_and_stable_export_format(
+def test_qwen35_workflow_routes_autoround_to_adapter(
     qwen35_modules, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     _, Qwen35Workflow = qwen35_modules
     calls: dict[str, object] = {}
 
-    class FakeAutoRound:
-        def __init__(self, **kwargs):
-            calls["init"] = kwargs
+    def fake_quantize_with_autoround_api(**kwargs):
+        calls.update(kwargs)
+        from xhmodel_merak.xh_llm.workflows.result import QuantResult
 
-        def quantize_and_save(self, save_path: str, format: str):
-            calls["save"] = {"save_path": save_path, "format": format}
+        return QuantResult(
+            hf_model_dir=kwargs["hf_model_dir"],
+            quanted_model_dir=str(tmp_path / "quant"),
+        )
 
-    fake_auto_round = types.ModuleType("auto_round")
-    fake_auto_round.AutoRound = FakeAutoRound
-    monkeypatch.setitem(sys.modules, "auto_round", fake_auto_round)
-
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter.quantize_with_autoround_api",
+        fake_quantize_with_autoround_api,
+    )
     config_path = QWEN35_CONFIG_ROOTS[0] / "9b/qwen3_5_9b_full.yaml"
     workflow = Qwen35Workflow.from_config(
         hf_model_dir="weights/Qwen3.5-9B",
         config_path=str(config_path),
     )
 
-    result = workflow.quant(output_dir=str(tmp_path / "quant"), device="cuda:0")
+    result = workflow.quant(output_dir=str(tmp_path / "out"), device="cuda:0")
 
-    assert calls["init"] == {
-        "model": os.path.abspath("weights/Qwen3.5-9B"),
-        "bits": 4,
-        "group_size": 64,
-        "sym": True,
-        "batch_size": 8,
-        "seqlen": 2048,
-        "nsamples": 128,
-        "iters": 200,
-        "dataset": "NeelNanda/pile-10k",
-        "device": "cuda:0",
-        "trust_remote_code": True,
-        "seed": 42,
-        "quant_nontext_module": False,
-    }
-    expected_save_path = os.path.abspath(tmp_path / "quant" / "Qwen3.5-9B-autoround-gptqmodel")
-    assert calls["save"] == {"save_path": expected_save_path, "format": "auto_gptq"}
-    assert result.hf_model_dir == os.path.abspath("weights/Qwen3.5-9B")
-    assert result.quanted_model_dir == expected_save_path
-    assert result.skipped is False
+    assert calls["hf_model_dir"] == os.path.abspath("weights/Qwen3.5-9B")
+    assert calls["output_dir"] == str(tmp_path / "out")
+    assert calls["device"] == "cuda:0"
+    assert calls["workflow_seed"] == 1024
+    assert calls["quant_cfg"]["algorithm"] == "gptqmodel"
+    assert calls["quant_cfg"]["method"] == "autoround"
+    assert result.quanted_model_dir == str(tmp_path / "quant")
 
 
-def test_qwen35_autoround_quant_matches_dense_llm_only_script_contract(
+def test_qwen35_workflow_routes_gptqmodel_to_adapter(
     qwen35_modules, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     _, Qwen35Workflow = qwen35_modules
     calls: dict[str, object] = {}
 
-    class FakeAutoRound:
-        def __init__(self, **kwargs):
-            calls["init"] = kwargs
+    def fake_quantize_with_gptqmodel_api(**kwargs):
+        calls.update(kwargs)
+        from xhmodel_merak.xh_llm.workflows.result import QuantResult
 
-        def quantize(self):
-            calls["quantize"] = True
+        return QuantResult(
+            hf_model_dir=kwargs["hf_model_dir"],
+            quanted_model_dir=str(tmp_path / "quant"),
+        )
 
-        def save_quantized(self, save_path: str, format: str):
-            calls["save"] = {"save_path": save_path, "format": format}
-
-    fake_auto_round = types.ModuleType("auto_round")
-    fake_auto_round.AutoRound = FakeAutoRound
-    monkeypatch.setitem(sys.modules, "auto_round", fake_auto_round)
-
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter.quantize_with_gptqmodel_api",
+        fake_quantize_with_gptqmodel_api,
+    )
     config_path = QWEN35_CONFIG_ROOTS[0] / "9b/qwen3_5_9b_full.yaml"
     workflow = Qwen35Workflow.from_config(
         hf_model_dir="weights/Qwen3.5-9B",
         config_path=str(config_path),
     )
 
-    workflow.quant(output_dir=str(tmp_path / "quant"), device="cuda:0")
-
-    assert calls["init"]["dataset"] == "NeelNanda/pile-10k"
-    assert calls["init"]["batch_size"] == 8
-    assert calls["init"]["seed"] == 42
-    assert calls["init"]["quant_nontext_module"] is False
-    assert "device_map" not in calls["init"]
-    assert calls["quantize"] is True
-    assert calls["save"]["format"] == "auto_gptq"
-
-
-def test_qwen35_autoround_quant_passes_moe_runtime_and_layer_overrides(
-    qwen35_modules, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    _, Qwen35Workflow = qwen35_modules
-    calls: dict[str, object] = {}
-
-    class FakeAutoRound:
-        def __init__(self, **kwargs):
-            calls["init"] = kwargs
-
-        def quantize(self):
-            calls["quantize"] = True
-
-        def save_quantized(self, save_path: str, format: str):
-            calls["save"] = {"save_path": save_path, "format": format}
-
-    fake_auto_round = types.ModuleType("auto_round")
-    fake_auto_round.AutoRound = FakeAutoRound
-    monkeypatch.setitem(sys.modules, "auto_round", fake_auto_round)
-
-    config_path = QWEN35_CONFIG_ROOTS[1] / "35b_a3b/qwen3_6_35b_a3b_full.yaml"
-    workflow = Qwen35Workflow.from_config(
-        hf_model_dir="weights/Qwen3.6-35B-A3B",
-        config_path=str(config_path),
+    result = workflow.quant(
+        output_dir=str(tmp_path / "out"),
+        device="cuda:0",
+        config_overrides={"quant.algorithm": "gptqmodel", "quant.method": "gptq"},
     )
 
-    workflow.quant(output_dir=str(tmp_path / "quant"), device="cuda:0")
-
-    assert calls["init"]["dataset"] == "NeelNanda/pile-10k"
-    assert calls["init"]["batch_size"] == 8
-    assert calls["init"]["device_map"] == "balanced"
-    assert calls["init"]["low_gpu_mem_usage"] is True
-    assert calls["init"]["layer_config"] == {
-        "model.language_model.layers.*.self_attn.(q_proj|k_proj|v_proj|o_proj)": {
-            "bits": 8,
-            "group_size": 64,
-        },
-        "model.language_model.layers.*.linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)": {
-            "bits": 8,
-            "group_size": 64,
-        },
-        "model.language_model.layers.*.mlp.shared_expert.(gate_proj|up_proj|down_proj)": {
-            "bits": 8,
-            "group_size": 64,
-        },
-    }
-    assert calls["save"]["format"] == "auto_round:gptqmodel"
+    assert calls["device"] == "cuda:0"
+    assert calls["quant_cfg"]["algorithm"] == "gptqmodel"
+    assert calls["quant_cfg"]["method"] == "gptq"
+    assert result.quanted_model_dir == str(tmp_path / "quant")
 
 
-def test_qwen35_autoround_quant_rejects_invalid_layer_config_value(qwen35_modules, tmp_path: Path):
+def test_qwen35_workflow_rejects_unknown_algorithm(qwen35_modules, tmp_path: Path):
+    _, Qwen35Workflow = qwen35_modules
+    workflow = Qwen35Workflow.from_config(
+        hf_model_dir="weights/Qwen3.5-9B",
+        config_path=str(QWEN35_CONFIG_ROOTS[0] / "9b/qwen3_5_9b_full.yaml"),
+    )
+
+    with pytest.raises(NotImplementedError, match="algorithm='gptqmodel'"):
+        workflow.quant(
+            output_dir=str(tmp_path / "out"),
+            device="cuda:0",
+            config_overrides={"quant.algorithm": "unknown"},
+        )
+
+
+def test_qwen35_workflow_rejects_non_mapping_runtime_section(qwen35_modules, tmp_path: Path):
     _, Qwen35Workflow = qwen35_modules
     workflow = Qwen35Workflow.from_config(
         hf_model_dir="weights/Qwen3.6-35B-A3B",
         config_path=str(QWEN35_CONFIG_ROOTS[1] / "35b_a3b/qwen3_6_35b_a3b_full.yaml"),
     )
 
-    with pytest.raises(TypeError, match=r"quant\.layer_config\['bad'\] must be a mapping"):
+    with pytest.raises(TypeError, match=r"quant\.runtime must be a mapping"):
         workflow.quant(
             output_dir=str(tmp_path / "quant"),
             device="cpu",
-            config_overrides={
-                "quant": {
-                    "algorithm": "autoround",
-                    "artifact_format": "gptqmodel_hf",
-                    "bits": 4,
-                    "group_size": 64,
-                    "layer_config": {"bad": 8},
-                }
-            },
+            config_overrides={"quant.runtime": "bad"},
         )
 
 
@@ -342,6 +329,7 @@ def test_qwen35_quant_rejects_mismatched_format_aliases(qwen35_modules, tmp_path
             config_overrides={
                 "quant": {
                     "algorithm": "existing_hf",
+                    "method": "autoround",
                     "artifact_format": "gptqmodel_hf",
                     "output_format": "other",
                     "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
@@ -442,7 +430,7 @@ def test_qwen35_default_config_helpers_return_recommended_yaml(
     api = importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_5.workflow_api")
 
     quant_cfg = api.get_default_quant_config()
-    assert quant_cfg["algorithm"] == "autoround"
+    assert quant_cfg["algorithm"] == "gptqmodel"
     assert quant_cfg["artifact_format"] == "gptqmodel_hf"
     assert quant_cfg["group_size"] == 64
     assert quant_cfg["sym"] is True
@@ -451,7 +439,10 @@ def test_qwen35_default_config_helpers_return_recommended_yaml(
     assert quant_cfg["quant_nontext_module"] is False
     assert quant_cfg["calibration"]["dataset"] == "NeelNanda/pile-10k"
     assert quant_cfg["runtime"]["batch_size"] == 8
-    assert quant_cfg["autoround_format"] == "auto_gptq"
+    assert quant_cfg["runtime"]["low_gpu_mem_usage"] is True
+    assert quant_cfg["format"] == "auto_gptq"
+    assert quant_cfg["method"] == "autoround"
+    assert quant_cfg["rotation"] is False
     assert "existing_hf" not in quant_cfg
 
     quant_cfg["group_size"] = 128
@@ -468,6 +459,16 @@ def test_qwen35_default_config_helpers_return_recommended_yaml(
     )
     assert dflash_export["model"]["model_type"] == "Qwen3_5MoeForConditionalGeneration"
     assert dflash_export["model"]["dflash_config"]["target_model_dir"] is None
+    dflash_gptq = api.get_default_workflow_config(
+        family="moe",
+        model_size="35b_a3b",
+        variant="dflash",
+        quant_method="gptq",
+    )
+    assert dflash_gptq["quant"]["method"] == "gptq"
+    assert dflash_gptq["quant"]["calibration"]["jsonl"].endswith(
+        "Qwen3-Next-80B-A3B-Instruct.jsonl"
+    )
 
     visual_export = api.get_default_export_config(
         family="dense",
@@ -488,16 +489,37 @@ def test_qwen35_list_recommended_configs_is_structured_and_complete(monkeypatch:
 
     configs = api.list_recommended_configs()
 
-    assert len(configs) == 15
+    assert len(configs) == 30
     assert configs == sorted(configs, key=lambda item: item["config_path"])
     assert {item["variant"] for item in configs} == {"full", "mtp", "dflash", "visual_only"}
+    assert {item["quant_method"] for item in configs} == {"autoround", "gptq"}
     assert {item["visual_size"] for item in configs if item["variant"] == "visual_only"} == {448, 896}
+    method_pairs = {
+        (
+            item["family"],
+            item["model_size"],
+            item["variant"],
+            item["visual_size"],
+        ): set()
+        for item in configs
+    }
+    for item in configs:
+        method_pairs[
+            (
+                item["family"],
+                item["model_size"],
+                item["variant"],
+                item["visual_size"],
+            )
+        ].add(item["quant_method"])
+    assert {frozenset(value) for value in method_pairs.values()} == {frozenset({"autoround", "gptq"})}
     for item in configs:
         assert set(item) == {
             "name",
             "family",
             "model_size",
             "variant",
+            "quant_method",
             "visual_size",
             "config_path",
             "model_type",
@@ -518,7 +540,7 @@ def test_qwen35_template_dumps_are_loadable_and_match_current_defaults(monkeypat
     quant_cfg = yaml.safe_load(quant_path.read_text(encoding="utf-8"))
     export_cfg = yaml.safe_load(export_path.read_text(encoding="utf-8"))
 
-    assert quant_cfg["algorithm"] == "autoround"
+    assert quant_cfg["algorithm"] == "gptqmodel"
     assert quant_cfg["artifact_format"] == "gptqmodel_hf"
     assert quant_cfg["output_format"] == "gptqmodel_hf"
     assert quant_cfg["group_size"] == 64
@@ -528,10 +550,19 @@ def test_qwen35_template_dumps_are_loadable_and_match_current_defaults(monkeypat
     assert quant_cfg["quant_nontext_module"] is False
     assert quant_cfg["calibration"]["dataset"] == "NeelNanda/pile-10k"
     assert quant_cfg["runtime"]["batch_size"] == 8
-    assert quant_cfg["autoround_format"] == "auto_gptq"
+    assert quant_cfg["runtime"]["low_gpu_mem_usage"] is True
+    assert quant_cfg["format"] == "auto_gptq"
+    assert quant_cfg["method"] == "autoround"
+    assert quant_cfg["rotation"] is False
     assert quant_cfg["existing_hf"]["algorithm"] == "existing_hf"
+    assert quant_cfg["existing_hf"]["method"] == "autoround"
     assert export_cfg["variants"] == ["full", "mtp", "dflash", "visual_only"]
     assert export_cfg["visual_sizes"] == [448, 896]
+    assert export_cfg["full"]["naming"] == {
+        "family": "qwen3_5",
+        "variant": "<model-size>",
+        "profile": "full",
+    }
     assert export_cfg["full"]["model"]["visual_config"]["max_size_w"] == 448
     assert export_cfg["visual_only"]["model"]["max_size_h"] == 448
 
@@ -543,7 +574,7 @@ def test_qwen35_help_matches_supported_quant_and_export_modes(monkeypatch: pytes
     quant_help = api.get_quant_config_help()
     export_help = api.get_export_config_help()
 
-    assert quant_help["default"]["algorithm"] == "autoround"
+    assert quant_help["default"]["algorithm"] == "gptqmodel"
     assert quant_help["default"]["artifact_format"] == "gptqmodel_hf"
     assert quant_help["default"]["group_size"] == 64
     assert quant_help["fields"]["group_size"]["default"] == 64
@@ -551,7 +582,9 @@ def test_qwen35_help_matches_supported_quant_and_export_modes(monkeypatch: pytes
     assert quant_help["fields"]["seed"]["default"] == 42
     assert quant_help["fields"]["quant_nontext_module"]["default"] is False
     assert quant_help["fields"]["runtime.batch_size"]["default"] == 8
-    assert quant_help["fields"]["autoround_format"]["default"] == "auto_gptq"
+    assert quant_help["fields"]["format"]["default"] == "auto_gptq"
+    assert quant_help["fields"]["method"]["default"] == "autoround"
+    assert quant_help["fields"]["rotation"]["default"] is False
     assert "group_size must be 64" in quant_help["required_constraints"]
     assert "existing_hf" in quant_help["supported_algorithms"]
     assert export_help["variants"] == ["full", "mtp", "dflash", "visual_only"]

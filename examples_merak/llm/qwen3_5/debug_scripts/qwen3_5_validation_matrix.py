@@ -56,8 +56,9 @@ def existing_hf_quant_override(existing_hf_model_dir: str) -> dict[str, Any]:
     return {
         "quant": {
             "algorithm": "existing_hf",
+            "method": "autoround",
             "artifact_format": "gptqmodel_hf",
-                "existing_hf_model_dir": existing_hf_model_dir,
+            "existing_hf_model_dir": existing_hf_model_dir,
         }
     }
 
