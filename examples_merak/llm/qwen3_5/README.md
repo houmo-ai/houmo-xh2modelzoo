@@ -80,13 +80,14 @@ Merak 导出验证固定以下基础开关：
 
 当前需要覆盖的参数组合：
 
-| 组合名 | `fuse_gdr_ops` | `split_conv_cache` | 说明 |
-|---|---:|---:|---|
-| `fuse0_split1` | `False` | `True` | 默认非 GDR fuse + split conv cache |
-| `fuse0_split0` | `False` | `False` | merged conv cache 导出路径 |
-| `fuse1_split1` | `True` | `True` | GDR fused op 导出路径 |
+| 组合名 | `fuse_gdr_ops` | `fuse_gdr_block_recurrent_ops` | `split_conv_cache` | 说明 |
+|---|---:|---:|---:|---|
+| `fuse0_split1` | `False` | `False` | `True` | 默认非 GDR fuse + split conv cache |
+| `fuse0_split0` | `False` | `False` | `False` | merged conv cache 导出路径 |
+| `gdr_block_recurrent_split1` | `False` | `True` | `True` | 仅启用不改变 I/O 契约的 GDRBlockTriInverse + GDRRecurrentScan |
+| `fuse1_split1` | `True` | `True` | `True` | 旧 all-GDR fused op 等价路径 |
 
-> `fuse1` 表示 `fuse_gdr_ops=True`；`split1` 表示 `split_conv_cache=True`。
+> `fuse_gdr_ops=True` 现在仅表示启用 GDRChunkScan；`split1` 表示 `split_conv_cache=True`。
 
 `num_draft_tokens` 可以在 Merak config 的 `model` 顶层配置，例如：
 

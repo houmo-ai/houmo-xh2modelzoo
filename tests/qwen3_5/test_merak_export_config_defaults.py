@@ -957,6 +957,7 @@ def test_qwen3_5_moe_gated_delta_net_wires_fused_gdr_ops():
     source = inspect.getsource(_moe_model._Qwen3_5MoeGatedDeltaNet)
 
     assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in source
+    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in source
     assert "self.block_tri_inverse_op = GDRBlockTriInverse" in source
     assert "self.chunk_scan_op = GDRChunkScan" in source
     assert "self.recurrent_scan_op = GDRRecurrentScan" in source
@@ -998,6 +999,7 @@ def test_qwen3_5_moe_gated_delta_net_setup_creates_fused_gdr_ops():
             batch_size=1,
             split_conv_cache=True,
             fuse_gdr_ops=True,
+            fuse_gdr_block_recurrent_ops=False,
             use_manual_depthwise_conv1d=False,
         )
     )
@@ -1005,13 +1007,38 @@ def test_qwen3_5_moe_gated_delta_net_setup_creates_fused_gdr_ops():
     module._setup(cfg)
 
     assert module.fuse_gdr_ops is True
-    assert module.block_tri_inverse_op is not None
+    assert module.fuse_gdr_block_recurrent_ops is False
+    assert module.block_tri_inverse_op is None
     assert module.chunk_scan_op is not None
-    assert module.recurrent_scan_op is not None
+    assert module.recurrent_scan_op is None
     assert module.chunk_scan_op.num_chunks == 2
 
     module._update_cfg(ConfigDict({**cfg, "input_sequence_length": 24}))
     assert module.chunk_scan_op.num_chunks == 3
+
+    module_all = _moe_model._Qwen3_5MoeGatedDeltaNet.__new__(_moe_model._Qwen3_5MoeGatedDeltaNet)
+    nn.Module.__init__(module_all)
+    module_all.hidden_size = module.hidden_size
+    module_all.key_dim = module.key_dim
+    module_all.value_dim = module.value_dim
+    module_all.conv_dim = module.conv_dim
+    module_all.conv_kernel_size = module.conv_kernel_size
+    module_all.num_v_heads = module.num_v_heads
+    module_all.num_k_heads = module.num_k_heads
+    module_all.head_k_dim = module.head_k_dim
+    module_all.head_v_dim = module.head_v_dim
+    module_all.in_proj_qkv = nn.Linear(8, 12, bias=False)
+    module_all.conv1d = nn.Conv1d(12, 12, kernel_size=4, groups=12, padding=3, bias=False)
+    module_all.dt_bias = nn.Parameter(torch.zeros(2))
+    module_all.A_log = nn.Parameter(torch.zeros(2))
+
+    module_all._setup(ConfigDict({**cfg, "fuse_gdr_block_recurrent_ops": True}))
+
+    assert module_all.fuse_gdr_ops is True
+    assert module_all.fuse_gdr_block_recurrent_ops is True
+    assert module_all.block_tri_inverse_op is not None
+    assert module_all.chunk_scan_op is not None
+    assert module_all.recurrent_scan_op is not None
 
 
 def test_quant_weight_directory_resolves_single_candidate(tmp_path):

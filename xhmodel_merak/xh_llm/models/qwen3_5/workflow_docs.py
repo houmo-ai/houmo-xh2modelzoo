@@ -194,7 +194,12 @@ _EXPORT_FIELD_HELP: dict[str, dict[str, Any]] = {
     "export.model.fuse_gdr_ops": {
         "type": "bool",
         "default": False,
-        "description": "GDR fuse 开关。默认 False；编译器支持成熟后可用 override 或 YAML 改为 True。",
+        "description": "仅启用 GDRChunkScan；会影响 prefill recurrent-state HMONNX I/O 契约。默认 False。",
+    },
+    "export.model.fuse_gdr_block_recurrent_ops": {
+        "type": "bool",
+        "default": False,
+        "description": "启用 GDRBlockTriInverse 和 GDRRecurrentScan；不改变 HMONNX 输入输出契约。默认 False，可先通过 override/YAML 独立开启。",
     },
     "export.model.visual_config.max_size_w": {
         "type": "int",
@@ -274,7 +279,8 @@ _EXPORT_CONFIG_HELP: dict[str, Any] = {
         "mtp extends full with output_post_norm_hidden and mtp_config.",
         "dflash extends full with output_hidden_state_indices and dflash_config.",
         "visual_only exports the visual tower at max_size_w/max_size_h 448 or 896.",
-        "fuse_gdr_ops is config/override-only; default is False until compiler support is ready.",
+        "fuse_gdr_ops only controls GDRChunkScan and may change the prefill recurrent-state HMONNX I/O contract.",
+        "fuse_gdr_block_recurrent_ops controls GDRBlockTriInverse + GDRRecurrentScan without changing HMONNX I/O; set both flags for the former all-GDR fused behavior.",
     ],
     "template": export_config_template(),
 }
@@ -320,9 +326,10 @@ _MODEL_DOCS: dict[str, Any] = {
         "quant_type": "w8a8h1_sefp",
         "visual_sizes": [448, 896],
         "fuse_gdr_ops": False,
+        "fuse_gdr_block_recurrent_ops": False,
     },
     "validation_scope": {
-        "full": "9B and 35B-A3B are validated for base and existing_hf quant with fuse_gdr_ops False/True.",
+        "full": "9B and 35B-A3B are validated for base and existing_hf quant with GDR fuse flags off/on; set fuse_gdr_ops and fuse_gdr_block_recurrent_ops together for former all-GDR fused behavior.",
         "spec_decode": "9B and 35B-A3B MTP/DFlash validation uses existing_hf quant artifacts only.",
     },
     "hmonnx_io_doc": str(_HMONNX_IO_DOC),

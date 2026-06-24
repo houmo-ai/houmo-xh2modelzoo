@@ -73,6 +73,7 @@ def test_qwen3_5_moe_config_preserves_split_conv_cache_modes():
     assert default_cfg.normalize_force_fp32 is False
     assert default_cfg.use_manual_depthwise_conv1d is False
     assert getattr(default_cfg, "fuse_gdr_ops", False) is False
+    assert getattr(default_cfg, "fuse_gdr_block_recurrent_ops", False) is False
 
 
 def test_qwen3_5_moe_flatten_cache_outputs_splits_logits_but_keeps_pre_split_cache_outputs():

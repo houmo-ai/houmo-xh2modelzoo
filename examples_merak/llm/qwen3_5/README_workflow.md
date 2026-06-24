@@ -270,6 +270,16 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py
 
 # Existing quant HF -> export only.
 CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
+  --hf-model-dir weights/Qwen3.6-35B-A3B \
+  --config configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
+  --existing-hf-model-dir weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400 \
+  --export-output-dir work_dirs/qwen3.6-35B-A3B-fuse_gdr_block_recurrent_ops \
+  --device cuda:0 \
+  --force \
+  --override export.model.fuse_gdr_block_recurrent_ops=true
+
+# Existing quant HF -> export only.
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
   --hf-model-dir weights/SGGM-VL-27B-R3.6 \
   --config configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full.yaml \
   --existing-hf-model-dir weights/SGGM-VL-27B-R3.6-mode1-llm-only-W4G64 \
@@ -297,21 +307,29 @@ python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
 ```
 
 Run-specific export tweaks stay as dotted config overrides, for example
-`--override export.model.fuse_gdr_ops=true`.  The CLI intentionally does not
-expose quant internals such as bits, group size, dataset, or MoE bit routing.
+`--override export.model.fuse_gdr_ops=true` for GDRChunkScan, or
+`--override export.model.fuse_gdr_block_recurrent_ops=true` for
+GDRBlockTriInverse + GDRRecurrentScan.  The CLI intentionally does not expose
+quant internals such as bits, group size, dataset, or MoE bit routing.
 
 ## Export overrides
 
 `export()` consumes the `QuantResult` from `quant()`.  Do not expose variant/profile/mode/base/quant as public parameters; select a YAML and use explicit overrides only when needed.
 
-`fuse_gdr_ops` remains config/override-only:
+GDR fuse switches remain config/override-only.  `fuse_gdr_ops` only controls
+GDRChunkScan because it can change the prefill recurrent-state HMONNX I/O
+contract; `fuse_gdr_block_recurrent_ops` controls GDRBlockTriInverse and
+GDRRecurrentScan without changing model inputs/outputs:
 
 ```python
 export_result = workflow.export(
     quant_result,
     output_dir,
     device,
-    config_overrides={"export.model.fuse_gdr_ops": True},
+    config_overrides={
+        "export.model.fuse_gdr_ops": True,
+        "export.model.fuse_gdr_block_recurrent_ops": True,
+    },
 )
 ```
 
@@ -391,7 +409,7 @@ For programmatic integrations, call the lower-level helpers directly:
 
 ## Runtime validation matrix
 
-Use `debug_scripts/qwen3_5_validation_matrix.py` for the requested first-pass verification matrix.  It runs 9B and 35B-A3B with base HF weights and existing external HF/GPTQModel quant artifacts, each with `fuse_gdr_ops=false` and `fuse_gdr_ops=true`.  This does not add public workflow parameters; each case is just a YAML plus explicit `config_overrides`.
+Use `debug_scripts/qwen3_5_validation_matrix.py` for the requested first-pass verification matrix.  It runs 9B and 35B-A3B with base HF weights and existing external HF/GPTQModel quant artifacts, each with `fuse_gdr_ops=false` and `fuse_gdr_ops=true` for the chunk-scan path.  The block/recurrent GDR pair is enabled independently with `export.model.fuse_gdr_block_recurrent_ops=true` when validating the compiler-ready ops.  This does not add public workflow parameters; each case is just a YAML plus explicit `config_overrides`.
 
 ```bash
 # Check dependencies, YAMLs, base weights, and external quant artifacts first.

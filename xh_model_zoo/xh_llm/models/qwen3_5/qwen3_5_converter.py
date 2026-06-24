@@ -297,6 +297,7 @@ class Qwen3_5ConverterXH2a(HFTransfromersConverter):
                 split_conv_cache=self.config.split_conv_cache,
                 use_manual_depthwise_conv1d=self.config.use_manual_depthwise_conv1d,
                 fuse_gdr_ops=self.config.fuse_gdr_ops,
+                fuse_gdr_block_recurrent_ops=self.config.fuse_gdr_block_recurrent_ops,
                 kv_cache=dict(
                     cache_axis=2,
                 ),

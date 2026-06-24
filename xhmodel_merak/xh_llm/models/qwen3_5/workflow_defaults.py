@@ -70,6 +70,8 @@ EXPORT_CONFIG_TEMPLATE: dict[str, Any] = {
             "linear_attention_mode": "auto",
             "linear_chunk_size": 64,
             "split_conv_cache": True,
+            "fuse_gdr_ops": False,
+            "fuse_gdr_block_recurrent_ops": False,
             "quant_scheme": {"quant_type": "w8a8h1_sefp", "ops": {}},
             "visual_config": {
                 "max_size_w": 448,
@@ -123,6 +125,7 @@ EXPORT_CONFIG_TEMPLATE: dict[str, Any] = {
             "max_size_h": 448,
             "quant_scheme": {"quant_type": "w8a8h1_sefp", "ops": {}},
             "fuse_gdr_ops": False,
+            "fuse_gdr_block_recurrent_ops": False,
         }
     },
 }

@@ -147,6 +147,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         use_cache: bool = True,
         linear_chunk_size: int = 64,
         fuse_gdr_ops: bool = False,
+        fuse_gdr_block_recurrent_ops: bool = False,
         split_conv_cache: bool = True,
         normalize_force_fp32: bool = False,
         use_manual_depthwise_conv1d: bool = False,
@@ -188,6 +189,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
 
         self.linear_chunk_size = linear_chunk_size
         self.fuse_gdr_ops = fuse_gdr_ops
+        self.fuse_gdr_block_recurrent_ops = fuse_gdr_block_recurrent_ops
         self.split_conv_cache = split_conv_cache
         self.normalize_force_fp32 = normalize_force_fp32
         self.use_manual_depthwise_conv1d = use_manual_depthwise_conv1d
