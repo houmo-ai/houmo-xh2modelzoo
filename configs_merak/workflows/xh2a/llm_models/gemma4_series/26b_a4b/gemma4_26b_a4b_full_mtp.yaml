@@ -1,0 +1,100 @@
+quant:
+  algorithm: gptqmodel
+  method: gptq
+  preset: full_multimodal
+  rotation: null
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  iters: 200
+  seed: 42
+  quant_nontext_module: false
+  calibration:
+    jsonl: gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl
+    text_key: text
+    nsamples: 256
+    seqlen: 512
+  runtime:
+    batch_size: 1
+    device_map: auto
+    trust_remote_code: true
+    offload_to_disk: false
+  validation:
+    check_quant_text_demo: true
+    check_quant_image_demo: true
+    check_quant_video_demo: false
+    check_quant_audio_demo: false
+  moe:
+    routing: bypass
+    routing_batch_size: null
+export:
+  naming:
+    family: gemma4
+    variant: 26b_a4b
+    profile: full_mtp
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4ForConditionalGeneration
+    hf_model: weights/gemma-4-26B-A4B-it
+    model_name: auto
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    sliding_kv_cache_input_mode: slice_window
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      export_mode: padded
+      image_seq_length: 280
+      max_patches: 2520
+      patch_size: 16
+      pooling_kernel_size: 3
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+      input_modality: image
+    only_first_block: false
+    video_visual_config:
+      export_mode: padded
+      image_seq_length: 70
+      max_patches: 630
+      patch_size: 16
+      pooling_kernel_size: 3
+      input_modality: video
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    spec_decode_mode: mtp
+    num_draft_tokens: 4
+    output_post_norm_hidden: true
+    mtp_config:
+      assistant_hf_model: weights/gemma-4-26B-A4B-it-assistant
+      target_hf_model: weights/gemma-4-26B-A4B-it
+      body_quant_type: w8a8h1_sefp
+      lm_head_quant_type: w4a8h0_ssfp
+      batch_size: 1
+      input_sequence_length: 1
+      context_max_length: 2048
+      use_cache: true
+      num_draft_tokens: 4
+      assistant_num_hidden_layers: 4
+      assistant_layer_pattern:
+      - sliding_attention
+      - sliding_attention
+      - sliding_attention
+      - full_attention
+      assistant_hidden_size: 1024
+      assistant_num_attention_heads: 16
+      assistant_num_key_value_heads: 8
+      assistant_num_global_key_value_heads: 2
+      head_dim: 256
+      use_ordered_embeddings: false
+      shared_kv_inputs:
+      - shared_key_cache_sliding
+      - shared_value_cache_sliding
+      - shared_key_cache_full
+      - shared_value_cache_full

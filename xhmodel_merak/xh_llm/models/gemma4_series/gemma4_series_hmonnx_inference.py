@@ -136,7 +136,36 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         )
         self._kvcache_mixin = Gemma4KVCacheMixinHMONNX(self.kvcache_config, layer_kv_shapes)
         self.layer_types = getattr(meta_info, "layer_types", [])
+        self.layer_cache_types = getattr(meta_info, "layer_cache_types", [])
+        self.layer_cache_indices = getattr(meta_info, "layer_cache_indices", [])
         self.sliding_window = getattr(meta_info, "sliding_window", 1024)
+
+    def _is_mtp_export(self) -> bool:
+        return getattr(self.meta_info, "spec_decode_mode", None) == "mtp" or bool(
+            getattr(self.meta_info.model_config, "enable_mtp_outputs", False)
+        )
+
+    def _mtp_verify_length(self) -> int:
+        spec_decode = getattr(self.meta_info, "spec_decode", None) or {}
+        if hasattr(spec_decode, "get"):
+            verify_length = spec_decode.get("verify_length")
+            block_size = spec_decode.get("block_size")
+        else:
+            verify_length = getattr(spec_decode, "verify_length", None)
+            block_size = getattr(spec_decode, "block_size", None)
+        if verify_length:
+            return int(verify_length)
+        verify_length = getattr(self.meta_info, "spec_decode_verify_length", None)
+        if verify_length:
+            return int(verify_length)
+        block_size = block_size or getattr(self.meta_info, "spec_decode_block_size", None)
+        block_size = block_size or getattr(self.meta_info.model_config, "num_draft_tokens", 4)
+        return int(block_size) + 1
+
+    def get_input_sequence_length(self) -> int:
+        if self.is_decode() and self._is_mtp_export():
+            return self._mtp_verify_length()
+        return super().get_input_sequence_length()
 
     def _set_device(self, device):
         super()._set_device(device)
@@ -185,6 +214,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             logits = outs[0]
         else:
             logits = outs
+        if getattr(self.meta_info.model_config, "enable_mtp_outputs", False):
+            return outs
         return logits
 
     def get_data_preprocessor(self):

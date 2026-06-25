@@ -204,6 +204,11 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         num_logits_to_keep: int | None = 1,
         mix_search: bool = False,
         use_cache: bool = True,
+        enable_mtp_outputs: bool = False,
+        spec_decode_mode: str | None = None,
+        num_draft_tokens: int | None = None,
+        output_post_norm_hidden: bool = False,
+        mtp_config: dict | BaseConfig | None = None,
         visual_config: dict | XHGemma4SeriesVisualConfig | None = None,
         video_visual_config: dict | XHGemma4SeriesVisualConfig | None = None,
         audio_config: dict | XHGemma4SeriesAudioConfig | None = None,
@@ -225,6 +230,11 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             use_cache=use_cache,
             **kwargs,
         )
+        self.spec_decode_mode = spec_decode_mode
+        self.enable_mtp_outputs = bool(enable_mtp_outputs or spec_decode_mode == "mtp")
+        self.num_draft_tokens = num_draft_tokens
+        self.output_post_norm_hidden = bool(output_post_norm_hidden)
+        self.mtp_config = BaseConfig(**mtp_config) if isinstance(mtp_config, Mapping) else mtp_config
         hf_config = self._load_hf_config(hf_model)
         self._variant_spec: Gemma4SeriesVariantSpec = resolve_gemma4_series_variant(hf_config)
         self.variant = self._variant_spec.name

@@ -43,6 +43,8 @@ class Gemma4Preset:
     output_slug: str
     topology: str
     config_path: str
+    mtp_config_path: str
+    assistant_model_dir: str
     public_model_entry: str = PUBLIC_MODEL_ENTRY
 
 
@@ -52,31 +54,39 @@ class Gemma4Preset:
 PRESETS: dict[str, Gemma4Preset] = {
     "e2b": Gemma4Preset(
         name="e2b",
-        hf_model_dir="/data01/datasets/gemma-4-E2B-it",
+        hf_model_dir="weights/gemma-4-E2B-it",
         output_slug="gemma4_e2b_unified",
         topology="dense-e2b",
         config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml",
+        mtp_config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
+        assistant_model_dir="weights/gemma-4-E2B-it-assistant",
     ),
     "e4b": Gemma4Preset(
         name="e4b",
-        hf_model_dir="/data01/datasets/gemma-4-E4B-it",
+        hf_model_dir="weights/gemma-4-E4B-it",
         output_slug="gemma4_e4b_unified",
         topology="dense-e4b",
         config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml",
+        mtp_config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full_mtp.yaml",
+        assistant_model_dir="weights/gemma-4-E4B-it-assistant",
     ),
     "31b": Gemma4Preset(
         name="31b",
-        hf_model_dir="/data01/datasets/gemma-4-31B-it",
+        hf_model_dir="weights/gemma-4-31B-it",
         output_slug="gemma4_31b_unified",
         topology="dense-31b",
         config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml",
+        mtp_config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full_mtp.yaml",
+        assistant_model_dir="weights/gemma-4-31B-it-assistant",
     ),
     "26b-a4b": Gemma4Preset(
         name="26b-a4b",
-        hf_model_dir="/data01/datasets/gemma-4-26B-A4B-it",
+        hf_model_dir="weights/gemma-4-26B-A4B-it",
         output_slug="gemma4_26b_a4b_unified",
         topology="moe-26b-a4b",
         config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml",
+        mtp_config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full_mtp.yaml",
+        assistant_model_dir="weights/gemma-4-26B-A4B-it-assistant",
     ),
 }
 
@@ -88,12 +98,15 @@ def _remove_output_dir_if_needed(output_dir: Path, force: bool) -> None:
 
 def _preset_with_cli_overrides(args: argparse.Namespace) -> Gemma4Preset:
     preset = PRESETS[args.preset]
+    config_path = args.config_path or (preset.mtp_config_path if args.mtp_config else preset.config_path)
     return Gemma4Preset(
         name=preset.name,
         hf_model_dir=args.hf_model_dir or preset.hf_model_dir,
         output_slug=preset.output_slug,
         topology=preset.topology,
-        config_path=args.config_path or preset.config_path,
+        config_path=config_path,
+        mtp_config_path=preset.mtp_config_path,
+        assistant_model_dir=args.assistant_model_dir or preset.assistant_model_dir,
         public_model_entry=preset.public_model_entry,
     )
 
@@ -127,12 +140,20 @@ def _quant_overrides(args: argparse.Namespace, action: Action) -> dict[str, Any]
     return None
 
 
-def _export_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
+def _export_overrides(args: argparse.Namespace, preset: Gemma4Preset, action: Action) -> dict[str, Any] | None:
     overrides: dict[str, Any] = {}
     if args.context_max_length is not None:
         overrides["export.model.context_max_length"] = args.context_max_length
     if args.prefill_chunk_length is not None:
         overrides["export.model.prefill_chunk_length"] = args.prefill_chunk_length
+    if args.mtp_config:
+        overrides["export.model.spec_decode_mode"] = "mtp"
+    if args.mtp_config:
+        overrides["export.model.mtp_config.assistant_hf_model"] = preset.assistant_model_dir
+        target_hf_model = args.existing_hf_model_dir if action == "existing-hf" else preset.hf_model_dir
+        overrides["export.model.mtp_config.target_hf_model"] = target_hf_model
+    elif args.assistant_model_dir:
+        overrides["export.model.mtp_config.assistant_hf_model"] = args.assistant_model_dir
     if args.sliding_kv_cache_input_mode is not None:
         overrides["export.model.sliding_kv_cache_input_mode"] = args.sliding_kv_cache_input_mode
     return overrides or None
@@ -176,11 +197,12 @@ def run(args: argparse.Namespace) -> None:
     preset = _preset_with_cli_overrides(args)
     quant_output_dir, export_output_dir = _build_output_dirs(Path(args.work_dir), preset, action)
     quant_overrides = _quant_overrides(args, action)
-    export_overrides = _export_overrides(args)
+    export_overrides = _export_overrides(args, preset, action)
 
     if args.dry_run:
         print(f"preset: {preset.name} ({preset.topology})")
         print(f"hf_model_dir: {preset.hf_model_dir}")
+        print(f"assistant_model_dir: {preset.assistant_model_dir}")
         print(f"config_path: {preset.config_path}")
         print(f"public_model_entry: {preset.public_model_entry}")
         print(f"action: {action}")
@@ -237,6 +259,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"preset: {preset.name} ({preset.topology})")
     print(f"quant_result: {quant_result}")
     print(f"export_result: {export_result}")
+    return {"quant_result": quant_result, "export_result": export_result}
 
 
 def parse_args() -> argparse.Namespace:
@@ -252,9 +275,11 @@ def parse_args() -> argparse.Namespace:
             "quant-export runs the config quant block and is intentionally opt-in."
         ),
     )
-    parser.add_argument("--hf-model-dir", help="Override the preset HF model path.")
+    parser.add_argument("--hf-model-dir", help="Override the preset target/base HF model path.")
+    parser.add_argument("--assistant-model-dir", help="Override the preset Gemma4 assistant/MTP draft HF model path.")
     parser.add_argument("--existing-hf-model-dir", help="Already-quantized HF checkpoint for --action existing-hf.")
     parser.add_argument("--config-path", help="Override the shared unified Gemma4 workflow YAML path.")
+    parser.add_argument("--mtp-config", action="store_true", help="Use the preset full_mtp YAML and enable base MTP outputs.")
     parser.add_argument("--work-dir", default="./work_dirs/gemma4_unified_workflow_demo")
     parser.add_argument("--device", default=DEFAULT_DEVICE)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
