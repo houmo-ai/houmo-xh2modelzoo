@@ -255,11 +255,8 @@ def Qwen3OmniMoeThinkerForConditionalGeneration_forward(
         audio_feature_lengths = None
 
     if attention_mask is not None and position_ids is None:
-        if (
-            cache_position is None
-            or (cache_position is not None and cache_position[0] == 0)
-            or self.rope_deltas is None
-        ):
+        past_key_values_length = 0 if past_key_values is None else past_key_values.get_seq_length()
+        if past_key_values_length == 0 or self.rope_deltas is None:
             delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
             position_ids, rope_deltas = self.get_rope_index(
                 input_ids,
@@ -274,7 +271,7 @@ def Qwen3OmniMoeThinkerForConditionalGeneration_forward(
             self.rope_deltas = rope_deltas
         else:
             batch_size, seq_length = input_ids.shape
-            delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
+            delta = (past_key_values_length + self.rope_deltas).to(input_ids.device)
             position_ids = torch.arange(seq_length, device=input_ids.device)
             position_ids = position_ids.view(1, -1).expand(batch_size, -1)
             position_ids = position_ids.add(delta)
@@ -287,7 +284,6 @@ def Qwen3OmniMoeThinkerForConditionalGeneration_forward(
         inputs_embeds=inputs_embeds,
         use_cache=use_cache,
         output_router_logits=output_router_logits,
-        cache_position=cache_position,
         deepstack_visual_embeds=visual_embeds_multiscale,
         visual_pos_masks=visual_pos_masks,
         **kwargs,

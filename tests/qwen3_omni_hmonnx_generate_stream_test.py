@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import threading
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -87,7 +88,8 @@ def _load_stream_module_for_main(
     if validation_max_memory is None:
         validation_max_memory = {0: "40.0GiB", "cpu": "64.0GiB"}
     if ensure_hm_pixel_values_fn is None:
-        ensure_hm_pixel_values_fn = lambda inputs: inputs
+        def ensure_hm_pixel_values_fn(inputs):
+            return inputs
 
     patch_calls = []
     fake_pipeline = types.ModuleType("_hmonnx_pipeline")
@@ -101,10 +103,24 @@ def _load_stream_module_for_main(
         ("runtime_device", module_name)
     )
     fake_pipeline.apply_artifact_replacements = lambda *args, **kwargs: None
-    fake_pipeline.discover_artifacts = lambda *args, **kwargs: {"talker": {}, "talker_prediction": {}, "code2wav": {}}
+    fake_pipeline.discover_artifacts = lambda *args, **kwargs: {
+        "text": {},
+        "talker": {},
+        "talker_prediction": {},
+        "code2wav": {},
+    }
     fake_pipeline.save_json = lambda *args, **kwargs: None
     fake_pipeline.validate_golden_outputs = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "_hmonnx_pipeline", fake_pipeline)
+
+    fake_text_replacement = types.ModuleType("qwen3_omni_validate_text_hmonnx_replacement")
+
+    def _fake_text_generate_patch(thinker, text_meta, logger, accept_hidden_layer=None):
+        patch_calls.append(("text_generate", accept_hidden_layer))
+        return lambda *args, **kwargs: SimpleNamespace(sequences=torch.tensor([[1, 2]]))
+
+    fake_text_replacement._build_text_hmonnx_generate_patch = _fake_text_generate_patch
+    monkeypatch.setitem(sys.modules, "qwen3_omni_validate_text_hmonnx_replacement", fake_text_replacement)
 
     fake_api = types.ModuleType("xhquant.api")
     fake_api.get_root_logger = lambda: SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
@@ -163,6 +179,8 @@ def _load_stream_module_for_main(
     class DummyModel:
         def __init__(self):
             self._parameter = torch.nn.Parameter(torch.zeros(1, dtype=torch.float16))
+            self.config = SimpleNamespace(talker_config=SimpleNamespace(accept_hidden_layer=3))
+            self.thinker = SimpleNamespace(generate=lambda *args, **kwargs: SimpleNamespace(sequences=torch.tensor([[1, 2]])))
             self.talker = DummySubmodule()
             self.talker.code_predictor = DummySubmodule()
             self.code2wav = SimpleNamespace(
@@ -262,6 +280,7 @@ def test_streaming_decoder_emits_chunks_and_flushes_tail(monkeypatch):
         code2wav=_FakeCode2Wav(),
         chunk_size=2,
         left_context_size=1,
+        num_quantizers=2,
         on_audio_chunk=lambda chunk, chunk_index, code_steps: emitted.append((chunk.clone(), chunk_index, code_steps)),
     )
 
@@ -283,6 +302,7 @@ def test_streaming_decoder_converts_audio_chunks_to_float32(monkeypatch):
         code2wav=_FakeFloat16Code2Wav(),
         chunk_size=2,
         left_context_size=0,
+        num_quantizers=2,
         on_audio_chunk=lambda chunk, *_: emitted.append(chunk.clone()),
     )
 
@@ -354,6 +374,7 @@ def test_generate_stream_yields_audio_chunks_and_complete_result(monkeypatch):
         code2wav=model.code2wav,
         chunk_size=1,
         left_context_size=0,
+        num_quantizers=2,
     )
     events = list(module.generate_stream(model, stream_decoder=decoder, speaker="Ethan"))
 
@@ -362,6 +383,46 @@ def test_generate_stream_yields_audio_chunks_and_complete_result(monkeypatch):
     assert events[1]["audio"].shape[-1] == 2
     assert events[-1]["audio"].shape[-1] == 4
     assert torch.equal(events[-1]["text_ids"].sequences, torch.tensor([[1, 2, 3]], dtype=torch.long))
+
+
+def test_generate_stream_yields_before_generate_returns(monkeypatch):
+    module = _load_stream_module(monkeypatch)
+    continue_generate = threading.Event()
+    chunk_seen_by_consumer = threading.Event()
+
+    class FakeTalker:
+        def _update_model_kwargs_for_generation(
+            self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1
+        ):
+            return dict(model_kwargs)
+
+    class FakeModel:
+        def __init__(self):
+            self.talker = FakeTalker()
+            self.code2wav = _FakeCode2Wav()
+
+        def generate(self, **kwargs):
+            first = SimpleNamespace(hidden_states=("unused", torch.tensor([[1, 11]], dtype=torch.long)))
+            self.talker._update_model_kwargs_for_generation(first, {})
+            assert continue_generate.wait(timeout=2), "consumer did not receive chunk before generate returned"
+            audio = self.code2wav.chunked_decode(
+                torch.tensor([[[1], [11]]], dtype=torch.long),
+                chunk_size=1,
+                left_context_size=0,
+            )
+            return SimpleNamespace(sequences=torch.tensor([[1, 2, 3]], dtype=torch.long)), audio
+
+    model = FakeModel()
+    decoder = module.StreamingCode2WavDecoder(model.code2wav, chunk_size=1, left_context_size=0, num_quantizers=2)
+    stream_iter = module.generate_stream(model, stream_decoder=decoder, speaker="Ethan")
+    first_event = next(stream_iter)
+    chunk_seen_by_consumer.set()
+    assert first_event["type"] == "audio_chunk"
+    assert first_event["audio"].shape[-1] == 2
+    continue_generate.set()
+    rest = list(stream_iter)
+    assert chunk_seen_by_consumer.is_set()
+    assert rest[-1]["type"] == "complete"
 
 
 def test_main_uses_safe_loading_and_runtime_patches(monkeypatch, tmp_path):
@@ -393,6 +454,7 @@ def test_main_uses_safe_loading_and_runtime_patches(monkeypatch, tmp_path):
         stream_chunk_size=2,
         stream_left_context_size=1,
         device_map="auto",
+        replacement_mode="all",
         seed=1234,
         debug=False,
     )
@@ -405,6 +467,7 @@ def test_main_uses_safe_loading_and_runtime_patches(monkeypatch, tmp_path):
     assert ("inputs_embeds", "talker") in patch_calls
     assert ("inputs_embeds", "talker.code_predictor") in patch_calls
     assert ("runtime_device", "code2wav") in patch_calls
+    assert ("text_generate", 3) in patch_calls
 
 
 def test_main_drops_hmonnx_only_pixel_kwargs_before_stream_generate(monkeypatch, tmp_path):
@@ -442,6 +505,7 @@ def test_main_drops_hmonnx_only_pixel_kwargs_before_stream_generate(monkeypatch,
         stream_chunk_size=2,
         stream_left_context_size=1,
         device_map="cuda:0",
+        replacement_mode="all",
         seed=1234,
         debug=False,
     )

@@ -185,7 +185,13 @@ def main(args):
             dummy_codes,
             onnx_path,
             opset_version=18,
-            dynamo=True,
+            # Qwen3-Omni Code2Wav builds packed-sequence causal masks through
+            # nested vmap/custom_function_call.  The torch.export based ONNX
+            # path in torch 2.8 can fail there with
+            # "ProxyTorchDispatchMode not registered" before reaching ONNX
+            # lowering.  The legacy tracer path is sufficient for this static
+            # HMONNX graph and avoids the torch.export failure mode.
+            dynamo=False,
             do_constant_folding=True,
             input_names=["codes"],
             output_names=["embedding"],
