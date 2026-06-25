@@ -56,6 +56,12 @@ _GEMMA4_RECOMMENDED_CONFIGS = {
     "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml",
     "26b-a4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml",
 }
+_GEMMA4_RECOMMENDED_MTP_CONFIGS = {
+    "e2b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
+    "e4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full_mtp.yaml",
+    "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full_mtp.yaml",
+    "26b-a4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full_mtp.yaml",
+}
 _GEMMA4_QUANT_TEMPLATE: dict[str, Any] = {
     "algorithm": "gptqmodel",
     "method": "gptq",
@@ -187,9 +193,15 @@ _GEMMA4_EXPORT_NAMING_TEMPLATE: dict[str, Any] = {
 
 
 def list_recommended_configs() -> dict[str, str]:
-    """Return topology-named Gemma4 Series workflow YAMLs for the public API."""
+    """Return topology-named Gemma4 Series base workflow YAMLs for the public API."""
 
     return dict(_GEMMA4_RECOMMENDED_CONFIGS)
+
+
+def list_recommended_mtp_configs() -> dict[str, str]:
+    """Return topology-named Gemma4 Series MTP workflow YAMLs."""
+
+    return dict(_GEMMA4_RECOMMENDED_MTP_CONFIGS)
 
 
 def get_quant_config_help() -> str:
@@ -293,6 +305,7 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
     """Merak HMONNX workflow for the unified Gemma4 public model API."""
 
     list_recommended_configs = staticmethod(list_recommended_configs)
+    list_recommended_mtp_configs = staticmethod(list_recommended_mtp_configs)
     get_quant_config_help = staticmethod(get_quant_config_help)
     get_export_config_help = staticmethod(get_export_config_help)
     dump_quant_config_template = staticmethod(dump_quant_config_template)
@@ -906,5 +919,6 @@ __all__ = [
     "get_export_config_help",
     "get_quant_config_help",
     "list_recommended_configs",
+    "list_recommended_mtp_configs",
     "quant",
 ]

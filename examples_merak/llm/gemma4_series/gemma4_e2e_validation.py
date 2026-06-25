@@ -27,6 +27,11 @@ from typing import Iterable
 from PIL import Image, ImageDraw
 from transformers import AutoTokenizer
 
+try:
+    import onnx
+except ImportError:  # pragma: no cover - surfaced only when MTP ONNX validation runs.
+    onnx = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
 GENERATE_SCRIPT = SCRIPT_DIR / "generate.py"
@@ -136,6 +141,145 @@ def _validate_sliding_cache_shapes(meta_path: Path, meta: dict, context: int, pr
             raise ValueError(f"{meta_path}: full/global attention layers require at least one context-length cache")
 
 
+def _tensor_dims(value_info) -> list[int | str]:
+    dims: list[int | str] = []
+    for dim in value_info.type.tensor_type.shape.dim:
+        if dim.dim_value:
+            dims.append(int(dim.dim_value))
+        else:
+            dims.append(dim.dim_param or "?")
+    return dims
+
+
+def _onnx_tensor_dims(model, name: str, *, include_outputs: bool = False) -> list[int | str] | None:
+    values = list(model.graph.input)
+    if include_outputs:
+        values += list(model.graph.output)
+    for value in values:
+        if value.name == name:
+            return _tensor_dims(value)
+    return None
+
+
+def _kv_cache_attr_values(model, attr_name: str) -> list[int]:
+    values: list[int] = []
+    for node in model.graph.node:
+        if node.op_type != "KVcache":
+            continue
+        for attr in node.attribute:
+            if attr.name == attr_name:
+                values.append(int(onnx.helper.get_attribute_value(attr)))
+    return values
+
+
+def _kv_cache_only_handle_attrs(model) -> list[int]:
+    values: list[int] = []
+    for node in model.graph.node:
+        if node.op_type != "KVcache":
+            continue
+        for attr in node.attribute:
+            if attr.name in {"only_handle_old_cache", "only-handle-old-cache"}:
+                values.append(int(onnx.helper.get_attribute_value(attr)))
+    return values
+
+
+def _load_onnx_graph(meta_path: Path, meta: dict, key: str):
+    rel_path = meta.get(key)
+    if not rel_path:
+        raise ValueError(f"{meta_path}: MTP meta missing {key}")
+    path = Path(rel_path)
+    if not path.is_absolute():
+        path = meta_path.parent / path
+    if not path.exists():
+        raise FileNotFoundError(f"{meta_path}: {key} does not exist: {path}")
+    return path, onnx.load(str(path), load_external_data=False)
+
+
+def _validate_mtp_hmonnx_contract(meta_path: Path, meta: dict, context: int, prefill: int) -> None:
+    """Validate exported MTP prefill/decode graphs, not only metadata.
+
+    Stale exports can keep correct ``layer_kv_shapes`` in JSON while the ONNX
+    decode graph still has the old single-token contract.  The acceptance path
+    needs decode verify length = 1 + draft tokens.  The target sliding mask
+    follows LLMCache's compact output width
+    ``aligned(sliding_window + verify_length - 1, 16)`` while the draft shared
+    KV inputs keep the prefill-owned physical slice-window length.
+    """
+
+    model_cfg = meta.get("model_config", {})
+    spec_decode = meta.get("spec_decode") or {}
+    is_mtp = meta.get("spec_decode_mode") == "mtp" or bool(model_cfg.get("enable_mtp_outputs"))
+    if not is_mtp:
+        return
+    if onnx is None:
+        raise RuntimeError("onnx is required to validate Gemma4 MTP HMONNX contracts")
+
+    sliding_window = int(meta.get("sliding_window") or model_cfg.get("sliding_window") or 0)
+    if sliding_window <= 0:
+        raise ValueError(f"{meta_path}: MTP export requires positive sliding_window")
+    expected_sliding = _required_sliding_cache_length(prefill, sliding_window)
+    configured_sliding = int(spec_decode.get("shared_sliding_cache_length") or expected_sliding)
+    if configured_sliding != expected_sliding:
+        raise ValueError(
+            f"{meta_path}: spec_decode shared sliding cache length={configured_sliding}, "
+            f"expected {expected_sliding} (= sliding_window + prefill)"
+        )
+
+    verify_length = int(
+        spec_decode.get("verify_length")
+        or (int(spec_decode.get("block_size", model_cfg.get("num_draft_tokens", 4))) + 1)
+    )
+    if verify_length <= 1:
+        raise ValueError(f"{meta_path}: MTP verify_length must be >1, got {verify_length}")
+
+    prefill_path, prefill_model = _load_onnx_graph(meta_path, meta, "prefill_hmonnx")
+    decode_path, decode_model = _load_onnx_graph(meta_path, meta, "decode_hmonnx")
+
+    expected_decode_sliding = _aligned(sliding_window + verify_length - 1, 16)
+    expected_prefill_mask = [1, 1, prefill, expected_sliding]
+    expected_decode_mask = [1, 1, verify_length, expected_decode_sliding]
+    prefill_mask = _onnx_tensor_dims(prefill_model, "sliding_attention_mask")
+    decode_mask = _onnx_tensor_dims(decode_model, "sliding_attention_mask")
+    if prefill_mask != expected_prefill_mask:
+        raise ValueError(
+            f"{prefill_path}: sliding_attention_mask shape={prefill_mask}, "
+            f"expected {expected_prefill_mask}"
+        )
+    if decode_mask != expected_decode_mask:
+        raise ValueError(
+            f"{decode_path}: sliding_attention_mask shape={decode_mask}, "
+            f"expected {expected_decode_mask}; stale decode exports often show sequence length 1"
+        )
+
+    for graph_path, model in ((prefill_path, prefill_model), (decode_path, decode_model)):
+        outputs = [out.name for out in model.graph.output]
+        if outputs != ["logits", "target_hidden_state"]:
+            raise ValueError(f"{graph_path}: MTP target outputs={outputs}, expected logits + target_hidden_state only")
+
+    expected_prefill_amax = sliding_window
+    expected_decode_amax = sliding_window
+    prefill_amax = set(_kv_cache_attr_values(prefill_model, "attention_max_length"))
+    decode_amax = set(_kv_cache_attr_values(decode_model, "attention_max_length"))
+    if expected_prefill_amax not in prefill_amax:
+        raise ValueError(
+            f"{prefill_path}: missing sliding KVcache attention_max_length={expected_prefill_amax}; "
+            f"found {sorted(prefill_amax)}"
+        )
+    if expected_decode_amax not in decode_amax:
+        raise ValueError(
+            f"{decode_path}: missing sliding KVcache attention_max_length={expected_decode_amax}; "
+            f"found {sorted(decode_amax)}"
+        )
+
+    for graph_path, model in ((prefill_path, prefill_model), (decode_path, decode_model)):
+        default_attrs = [value for value in _kv_cache_only_handle_attrs(model) if value == 0]
+        if default_attrs:
+            raise ValueError(
+                f"{graph_path}: default-false only_handle_old_cache attrs must be omitted, "
+                f"found {len(default_attrs)} explicit zeros"
+            )
+
+
 def validate_meta(meta_path: Path, expected_preset: str) -> dict:
     meta = _load_json(meta_path)
     model_cfg = meta.get("model_config", {})
@@ -146,6 +290,7 @@ def validate_meta(meta_path: Path, expected_preset: str) -> dict:
     if prefill != REQUIRED_PREFILL:
         raise ValueError(f"{meta_path}: prefill/input length={prefill}, expected {REQUIRED_PREFILL}")
     _validate_sliding_cache_shapes(meta_path, meta, context, prefill)
+    _validate_mtp_hmonnx_contract(meta_path, meta, context, prefill)
     model_type = model_cfg.get("model_type")
     if model_type != "Gemma4ForConditionalGeneration":
         raise ValueError(f"{meta_path}: model_type={model_type!r}, expected Gemma4ForConditionalGeneration")

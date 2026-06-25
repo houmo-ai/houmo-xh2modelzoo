@@ -26,10 +26,10 @@ README 只保留最小入口和常用命令，避免和长期文档重复。
 
 | preset | HF checkpoint | workflow YAML |
 | --- | --- | --- |
-| `e2b` | `/data01/datasets/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` |
-| `e4b` | `/data01/datasets/gemma-4-E4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml` |
-| `31b` | `/data01/datasets/gemma-4-31B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml` |
-| `26b-a4b` | `/data01/datasets/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` |
+| `e2b` | `weights/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` |
+| `e4b` | `weights/gemma-4-E4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml` |
+| `31b` | `weights/gemma-4-31B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml` |
+| `26b-a4b` | `weights/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` |
 
 四份 YAML 都使用同一个 public model type：
 
@@ -105,6 +105,53 @@ xh2_gemma4_31b_full_autoround_w4a8_256_2k_mpe256k
 
 说明：31B 的 full-only 与 split-merged 评测会有重复/去重口径差异；README
 只保留用于选型的汇总数，详细路径和中间状态见上面的 work_dirs summary。
+
+## MTP target + draft export
+
+MTP uses the same Gemma4 Series model family.  Use the `full_mtp` YAMLs with
+`gemma4_series_quant_export.py`; pass the assistant/draft HF directory from the
+CLI.  The script exports target HMONNX first, then exports assistant draft ONNX
+into the same export directory and records it in `golden_meta_info.json`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+  --hf-model-dir weights/gemma-4-E2B-it \
+  --config configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml \
+  --existing-hf-model-dir /path/to/quant_hf \
+  --export-output-dir work_dirs/gemma4_series_export/e2b_mtp \
+  --mtp-assistant-model-dir weights/gemma-4-E2B-it-assistant \
+  --device cuda:0 \
+  --force
+```
+
+MTP YAMLs use `spec_decode_mode: mtp` as the high-level switch.  The target
+`target_hidden_state` output is derived from that mode, so YAML does not need a
+separate `enable_mtp_outputs` field.  Draft quantization has one source of
+truth under `mtp_config`:
+
+```yaml
+mtp_config:
+  body_quant_type: w8a8h1_sefp
+  lm_head_quant_type: w4a8h0_ssfp
+```
+
+`lm_head_quant_type` controls the assistant logits head quantization; manifest
+`draft_head_weight_bits` is derived from it.  Runtime verify/generate tools
+should prefer `--meta /path/to/golden_meta_info.json` so target and draft paths
+come from the single manifest.
+
+Non-MTP export uses the same CLI without `--mtp-assistant-model-dir` and with a
+normal `full.yaml` config:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+  --hf-model-dir weights/gemma-4-E2B-it \
+  --config configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml \
+  --existing-hf-model-dir /path/to/quant_hf \
+  --export-output-dir work_dirs/gemma4_series_export/e2b_non_mtp \
+  --device cuda:0 \
+  --force
+```
 
 ## 轻量解析验证
 

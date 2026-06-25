@@ -248,7 +248,24 @@ class _Gemma4TextAttention(DynamicModule):
         self.use_cache = bool(_cfg_get(cfg, "use_cache", True))
         self.rotary_half_dim = self.head_dim // 2
         self.num_attention_heads = self.q_proj.weight.shape[0] // self.head_dim
-        self.num_key_value_heads = self.k_proj.weight.shape[0] // self.head_dim
+        k_proj = getattr(self, "k_proj", None)
+        if k_proj is not None:
+            self.num_key_value_heads = k_proj.weight.shape[0] // self.head_dim
+        else:
+            # Gemma4 assistant layers and target KV-shared suffix layers are
+            # Q-only: Transformers does not construct k_proj/v_proj/k_norm/v_norm.
+            # They still need the target KV-head count for repeat_interleave
+            # after reading shared KV by attention type.
+            layer_type = getattr(self, "layer_type", None)
+            config = getattr(self, "config", None)
+            use_global_kv = (
+                layer_type == "full_attention"
+                and bool(getattr(config, "attention_k_eq_v", False))
+            )
+            if use_global_kv and getattr(config, "num_global_key_value_heads", None):
+                self.num_key_value_heads = int(config.num_global_key_value_heads)
+            else:
+                self.num_key_value_heads = int(getattr(config, "num_key_value_heads"))
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
         for norm_name in ("q_norm", "k_norm", "v_norm"):
             norm = getattr(self, norm_name, None)
@@ -279,6 +296,24 @@ class _Gemma4TextAttention(DynamicModule):
             self.v_cache = None
         return self
 
+    def _update_cfg(self, cfg: Optional[Dict] = None):
+        if cfg is None:
+            return self
+        if not self.use_cache or self.k_cache is None or self.v_cache is None:
+            return self
+        if not self.is_sliding_attention:
+            return self
+        # LLMCache's ``attention_max_length`` is the model's local-attention
+        # window.  The exported sliding output width is therefore naturally
+        # aligned(sliding_window + current_seq_len - 1, 16): prefill with
+        # q=256 yields 1280/768, while MTP verify decode with q=5 yields
+        # 1040/528.  The physical cache input can still be the larger
+        # slice_window + prefill_input_length tensor.
+        attention_max_length = int(getattr(self, "sliding_window", -1) or -1)
+        self.k_cache.attention_max_length = attention_max_length
+        self.v_cache.attention_max_length = attention_max_length
+        return self
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -288,7 +323,7 @@ class _Gemma4TextAttention(DynamicModule):
         current_input_length: Optional[Tensor] = None,
         past_k_cache: Optional[Tensor] = None,
         past_v_cache: Optional[Tensor] = None,
-        shared_kv: Optional[dict[int, tuple[torch.Tensor, torch.Tensor]]] = None,
+        shared_kv: Optional[dict[int | str, tuple[torch.Tensor, torch.Tensor]]] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         del kwargs
@@ -303,7 +338,15 @@ class _Gemma4TextAttention(DynamicModule):
 
         if getattr(self, "is_kv_shared_layer", False):
             assert shared_kv is not None
-            key_states, value_states = shared_kv[self.kv_shared_layer_index]
+            layer_type = getattr(self, "layer_type", None)
+            if layer_type in shared_kv:
+                key_states, value_states = shared_kv[layer_type]
+            else:
+                # Compatibility for older local experiments that keyed by an
+                # explicit source layer index.  New Gemma4 Series MTP must use
+                # layer type because vLLM/Transformers map draft S/S/S/F layers
+                # to the last non-shared target layer of the same type.
+                key_states, value_states = shared_kv[self.kv_shared_layer_index]
         else:
             key_states = self.k_proj(hidden_states).view(batch_size, seq_length, -1, self.head_dim)
             # Gemma4 dense global layers can use attention_k_eq_v=True: v_proj is absent and V reuses K input.
@@ -325,6 +368,9 @@ class _Gemma4TextAttention(DynamicModule):
         if getattr(self, "store_full_length_kv", False):
             assert shared_kv is not None
             shared_kv[self.layer_idx] = (key_states, value_states)
+            layer_type = getattr(self, "layer_type", None)
+            if layer_type is not None:
+                shared_kv[layer_type] = (key_states, value_states)
 
         key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
         value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
@@ -489,6 +535,9 @@ class _Gemma4TextDecoderLayer(DynamicModule):
 class _Gemma4TextModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         self.only_first_block = bool(_cfg_get(cfg, "only_first_block", False))
+        self.enable_mtp_outputs = bool(
+            _cfg_get(cfg, "enable_mtp_outputs", False) or _cfg_get(cfg, "spec_decode_mode", None) == "mtp"
+        )
         self.num_logits_to_keep = int(_cfg_get(cfg, "num_logits_to_keep", 1))
         self.input_sequence_length = int(_cfg_get(cfg, "input_sequence_length", 1))
         self.image_token_id = int(_cfg_get(cfg, "image_token_id", -1))
@@ -525,6 +574,19 @@ class _Gemma4TextModel(DynamicModule):
             self.per_layer_input_scale = 1.0
             self._ple_scales_fused = True
         self._setup_rope_cache(cfg)
+        return self
+
+    def _update_cfg(self, cfg: Optional[Dict] = None):
+        if cfg is None:
+            return self
+        self.enable_mtp_outputs = bool(
+            _cfg_get(cfg, "enable_mtp_outputs", self.enable_mtp_outputs)
+            or _cfg_get(cfg, "spec_decode_mode", None) == "mtp"
+        )
+        self.num_logits_to_keep = int(_cfg_get(cfg, "num_logits_to_keep", self.num_logits_to_keep) or 0)
+        self.input_sequence_length = int(_cfg_get(cfg, "input_sequence_length", self.input_sequence_length))
+        if hasattr(self, "llm_gather"):
+            self.llm_gather._update_cfg(cfg)
         return self
 
     def _setup_rope_cache(self, cfg: Optional[Dict] = None):
@@ -638,7 +700,7 @@ class _Gemma4TextModel(DynamicModule):
             )
 
         hidden_states = inputs_embeds
-        shared_kv: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        shared_kv: dict[int | str, tuple[torch.Tensor, torch.Tensor]] = {}
         cache_idx = 0
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if getattr(decoder_layer.self_attn, "is_kv_shared_layer", False):
@@ -670,18 +732,30 @@ class _Gemma4TextModel(DynamicModule):
 
         hidden_states = self.norm(hidden_states)
         if self.num_logits_to_keep == 0:
+            if self.enable_mtp_outputs:
+                return hidden_states
             return hidden_states
-        return self.llm_gather(hidden_states, current_input_length - 1)
+        hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
+        if self.enable_mtp_outputs:
+            return hidden_states
+        return hidden_states
 
 @_register_or_replace_traceable({Gemma4ForConditionalGeneration: "Gemma4ForConditionalGeneration"})
 class _Gemma4ForConditionalGeneration(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         if cfg is None:
             self.num_logits_to_keep = 0
+            self.enable_mtp_outputs = False
         elif hasattr(cfg, "get"):
             self.num_logits_to_keep = int(cfg.get("num_logits_to_keep", 0) or 0)
+            self.enable_mtp_outputs = bool(
+                cfg.get("enable_mtp_outputs", False) or cfg.get("spec_decode_mode") == "mtp"
+            )
         else:
             self.num_logits_to_keep = int(getattr(cfg, "num_logits_to_keep", 0) or 0)
+            self.enable_mtp_outputs = bool(
+                getattr(cfg, "enable_mtp_outputs", False) or getattr(cfg, "spec_decode_mode", None) == "mtp"
+            )
         # _Gemma4TextModel already applies num_logits_to_keep with BatchGather.
         # Keep the outer HF conditional wrapper branch-free for torch.fx.
         self.valid_logits_slice = None
@@ -706,6 +780,12 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )
+        # The text model owns the actual MTP-output switch during export.
+        # Keep this branch fully static so FX/torch.export sees tensor getitems,
+        # never a runtime isinstance check or a tuple flowing into lm_head.
+        mtp_outputs_enabled = self.enable_mtp_outputs or bool(
+            getattr(self.model.language_model, "enable_mtp_outputs", False)
+        )
         hidden_states = outputs
         if self.valid_logits_slice is not None:
             hidden_states = self.valid_logits_slice(hidden_states, current_input_length - 1)
@@ -715,6 +795,8 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
             logits = logits / final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * final_logit_softcapping
+        if mtp_outputs_enabled:
+            return logits, hidden_states
         return logits
 
 

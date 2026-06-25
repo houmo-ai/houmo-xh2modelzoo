@@ -22,6 +22,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
 from .gemma4_series_audio_model import XHGemma4AudioModel, XHGemma4SeriesAudioModel
 from .gemma4_series_hmonnx_inference import XHGemma4HMONNXModel, XHGemma4SeriesHMONNXModel
 from .gemma4_series_llm_model import XHGemma4Model, XHGemma4SeriesModel
+from .gemma4_series_mtp_model import XHGemma4AssistantDraftModel, XHGemma4SeriesAssistantDraftModel
 from .gemma4_series_processor import XHGemma4Processor, XHGemma4SeriesProcessor
 from .gemma4_series_vision_model import XHGemma4SeriesVisionModel, XHGemma4VisionModel
 from .export_plan import Gemma4SeriesExportPlan, build_gemma4_series_export_plan
@@ -103,6 +104,8 @@ __all__ = [
     "XHGemma4SeriesAudioModel",
     "XHGemma4SeriesHMONNXModel",
     "XHGemma4SeriesModel",
+    "XHGemma4SeriesAssistantDraftModel",
+    "XHGemma4AssistantDraftModel",
     "XHGemma4SeriesModelConfig",
     "XHGemma4SeriesProcessor",
     "XHGemma4SeriesVisionModel",

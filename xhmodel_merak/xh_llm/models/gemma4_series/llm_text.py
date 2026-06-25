@@ -113,6 +113,7 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         *,
         language_model_keeps_last_logit: bool = False,
         language_model_returns_tensor: bool = False,
+        enable_mtp_outputs: bool = False,
     ):
         super().__init__()
         self.config = hf_model.config
@@ -120,6 +121,13 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         self.lm_head = hf_model.lm_head
         self.num_logits_to_keep = int(num_logits_to_keep or 0)
         self.language_model_returns_tensor = bool(language_model_returns_tensor)
+        self.language_model_keeps_last_logit = bool(language_model_keeps_last_logit)
+        self.enable_mtp_outputs = bool(
+            enable_mtp_outputs
+            or getattr(self.language_model, "enable_mtp_outputs", False)
+            or getattr(hf_model.config, "enable_mtp_outputs", False)
+            or getattr(getattr(hf_model.config, "text_config", None), "enable_mtp_outputs", False)
+        )
         # Real Gemma4 text graphs perform the valid-token gather inside
         # _Gemma4TextModel so FX tracing sees a fixed graph without Python
         # shape checks.  Unit-test dummy language models can still exercise
@@ -129,6 +137,31 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             if self.num_logits_to_keep == 1 and not language_model_keeps_last_logit
             else None
         )
+
+    def _update_cfg(self, cfg=None):
+        if cfg is None:
+            return self
+        if hasattr(cfg, "get"):
+            num_logits_to_keep = int(cfg.get("num_logits_to_keep", self.num_logits_to_keep) or 0)
+            input_sequence_length = int(cfg.get("input_sequence_length", 1) or 1)
+        else:
+            num_logits_to_keep = int(getattr(cfg, "num_logits_to_keep", self.num_logits_to_keep) or 0)
+            input_sequence_length = int(getattr(cfg, "input_sequence_length", 1) or 1)
+        self.num_logits_to_keep = num_logits_to_keep
+        self.valid_logits_slice = (
+            xhnn.DynamicSlice([1], [1], [1])
+            if self.num_logits_to_keep == 1 and not self.language_model_keeps_last_logit
+            else None
+        )
+        if self.valid_logits_slice is not None:
+            self.valid_logits_slice.valid_length = [1]
+            if hasattr(self.valid_logits_slice, "_update_cfg"):
+                self.valid_logits_slice._update_cfg(cfg)
+        if hasattr(self.language_model, "_update_cfg"):
+            self.language_model._update_cfg(cfg)
+        elif hasattr(self.language_model, "llm_gather"):
+            self.language_model.llm_gather.update_offset_indices(1, input_sequence_length)
+        return self
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -155,7 +188,9 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             past_value_cache=past_value_cache,
             per_layer_inputs=per_layer_inputs,
         )
-        if self.language_model_returns_tensor:
+        if self.enable_mtp_outputs:
+            hidden_states = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+        elif self.language_model_returns_tensor:
             hidden_states = outputs
         else:
             hidden_states = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs
@@ -167,6 +202,8 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             logits = logits / final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * final_logit_softcapping
+        if self.enable_mtp_outputs:
+            return logits, hidden_states
         return logits
 
 
@@ -228,7 +265,12 @@ class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
         )
 
 
-def _make_text_export_bridge_if_needed(hf_model: XHGemma4ForConditionalGeneration, num_logits_to_keep: int | None = 0):
+def _make_text_export_bridge_if_needed(
+    hf_model: XHGemma4ForConditionalGeneration,
+    num_logits_to_keep: int | None = 0,
+    *,
+    enable_mtp_outputs: bool = False,
+):
     text_config = hf_model.config.get_text_config()
     if getattr(text_config, "hidden_size_per_layer_input", 0):
         return _Gemma4TextExportBridgePLE(
@@ -236,6 +278,7 @@ def _make_text_export_bridge_if_needed(hf_model: XHGemma4ForConditionalGeneratio
             num_logits_to_keep=num_logits_to_keep,
             language_model_keeps_last_logit=(int(num_logits_to_keep or 0) == 1),
             language_model_returns_tensor=True,
+            enable_mtp_outputs=enable_mtp_outputs,
         )
     return hf_model
 

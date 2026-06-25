@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
+import onnx
 from transformers import AutoModelForImageTextToText
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration
 
@@ -36,6 +37,81 @@ from .gemma4_series_audio_model import XHGemma4SeriesAudioModel
 from .gemma4_series_hmonnx_inference import XHGemma4SeriesHMONNXModel
 from .gemma4_series_vision_model import XHGemma4SeriesVisionModel
 from .xh_gemma4_series_config import Gemma4SeriesModelMeta, XHGemma4SeriesModelConfig
+
+
+def _cfg_get_value(cfg: Any, key: str, default: Any = None) -> Any:
+    if hasattr(cfg, key):
+        value = getattr(cfg, key)
+        return default if value is None else value
+    if hasattr(cfg, "get"):
+        value = cfg.get(key, default)
+        return default if value is None else value
+    return default
+
+
+def _cfg_set_value(cfg: Any, key: str, value: Any) -> None:
+    if hasattr(cfg, key):
+        setattr(cfg, key, value)
+    else:
+        cfg[key] = value
+
+
+
+
+def _quant_type_weight_bits(quant_type: Any, default: int = 4) -> int:
+    if not quant_type:
+        return default
+    text = str(quant_type)
+    if not text.startswith("w"):
+        return default
+    digits = []
+    for char in text[1:]:
+        if not char.isdigit():
+            break
+        digits.append(char)
+    return int("".join(digits)) if digits else default
+
+
+def _mtp_draft_head_weight_bits(cfg: Any, default: int = 4) -> int:
+    mtp_config = _cfg_get_value(cfg, "mtp_config", None)
+    lm_head_quant_type = _cfg_get_value(mtp_config, "lm_head_quant_type", None) if mtp_config is not None else None
+    return _quant_type_weight_bits(lm_head_quant_type, default)
+
+def _strip_default_llmcache_only_handle_old_cache_attrs(onnx_file: str | Path) -> int:
+    """Remove explicit default-false LLMCache attrs from exported ONNX.
+
+    xhquant's parser defaults ``only_handle_old_cache`` to false when the attr
+    is absent.  Keeping explicit ``0`` bloats the graph and makes new Gemma4
+    exports look different from older models for no semantic reason.  Do not
+    remove explicit true values; assistant draft graphs rely on them to mark
+    read-only shared KV inputs.
+    """
+
+    onnx_path = Path(onnx_file)
+    if not onnx_path.exists():
+        return 0
+    # Graph attrs live in the main protobuf; do not load external weights.
+    # Loading weights here would make large 26B/31B exports expensive and risks
+    # rewriting external tensors when the only required change is metadata.
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    removed = 0
+    for node in model.graph.node:
+        if node.op_type != "KVcache":
+            continue
+        kept_attrs = []
+        for attr in node.attribute:
+            if attr.name in {"only_handle_old_cache", "only-handle-old-cache"}:
+                value = onnx.helper.get_attribute_value(attr)
+                if value in (0, False):
+                    removed += 1
+                    continue
+            kept_attrs.append(attr)
+        if len(kept_attrs) != len(node.attribute):
+            del node.attribute[:]
+            node.attribute.extend(kept_attrs)
+    if removed:
+        onnx.save(model, str(onnx_path))
+    return removed
 
 
 @register_llm_model("Gemma4ForConditionalGeneration", force=True)
@@ -90,6 +166,68 @@ class XHGemma4SeriesModel(VisionLLMModel):
         self._kvcache_config = KVCacheConfig()
         self._kvcache_config.use_cache = self.config.use_cache
         self._kvcache_mixin = Gemma4KVCacheMixin(self.kvcache_config)
+        self._decode_input_sequence_length = self._mtp_verify_length() if self._is_mtp_export() else 1
+        if self._is_mtp_export():
+            self._decode_wrap_cfg_overrides = {"num_logits_to_keep": 0}
+
+    def _is_mtp_export(self) -> bool:
+        return getattr(self.config, "spec_decode_mode", None) == "mtp" or bool(
+            getattr(self.config, "enable_mtp_outputs", False)
+        )
+
+    def _mtp_num_draft_tokens(self) -> int:
+        return int(getattr(self.config, "num_draft_tokens", None) or 4)
+
+    def _mtp_verify_length(self) -> int:
+        return self._mtp_num_draft_tokens() + 1
+
+    def _mtp_shared_sliding_cache_length(self) -> int:
+        return _gemma4_cache_seq_len_for_layer(
+            layer_type="sliding_attention",
+            context_max_length=self.config.context_max_length,
+            sliding_window=self.sliding_window,
+            input_seq_len=self.config.prefill_chunk_length,
+            sliding_kv_cache_input_mode=getattr(
+                self.config, "sliding_kv_cache_input_mode", "slice_window"
+            ),
+        )
+
+    def _mtp_target_decode_sliding_output_length(self) -> int:
+        verify_length = self._mtp_verify_length()
+        return ((int(self.sliding_window) + verify_length - 1 + 15) // 16) * 16
+
+    def _mtp_decode_wrap_cfg_overrides(self) -> dict[str, int]:
+        return {"num_logits_to_keep": 0}
+
+    def _apply_wrap_cfg_to_modules(self, module: nn.Module) -> None:
+        def _update(child: nn.Module) -> None:
+            update_cfg = getattr(child, "_update_cfg", None)
+            if update_cfg is not None:
+                update_cfg(self.wrap_cfg)
+
+        module.apply(_update)
+
+    def _apply_mtp_phase_wrap_cfg(self, *, decode: bool) -> None:
+        if not self._is_mtp_export():
+            return
+        input_sequence_length = self._mtp_verify_length() if decode else self.config.prefill_chunk_length
+        _cfg_set_value(self.wrap_cfg, "input_sequence_length", input_sequence_length)
+        _cfg_set_value(
+            self.wrap_cfg,
+            "num_logits_to_keep",
+            0 if decode else self.config.num_logits_to_keep,
+        )
+        if self._data_processor is not None:
+            self._data_processor.input_sequence_length = input_sequence_length
+        self.update_cfg(self.wrap_cfg)
+
+    def set_prefill(self):
+        super().set_prefill()
+        self._apply_mtp_phase_wrap_cfg(decode=False)
+
+    def set_decode(self):
+        super().set_decode()
+        self._apply_mtp_phase_wrap_cfg(decode=True)
 
     @VisionLLMModel.work_dir.setter
     def work_dir(self, work_dir: str):
@@ -192,7 +330,11 @@ class XHGemma4SeriesModel(VisionLLMModel):
         from ._llm_model_impl import register_wrap_modules
 
         register_wrap_modules()
-        hf_model = _make_text_export_bridge_if_needed(hf_model, self.config.num_logits_to_keep)
+        hf_model = _make_text_export_bridge_if_needed(
+            hf_model,
+            self.config.num_logits_to_keep,
+            enable_mtp_outputs=self.config.enable_mtp_outputs,
+        )
         return super().init_wrap_model(hf_model)
 
     def _wraped_post(self, hf_model: Gemma4ForConditionalGeneration):
@@ -223,6 +365,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
             self.per_layer_input_embedding = Gemma4PerLayerInputEmbedding.from_language_model(llm_model)
 
         layer_kv_shapes: list[list[int]] = []
+        layer_cache_types: list[str | None] = []
+        layer_cache_indices: list[int] = []
         for layer_idx, layer in enumerate(llm_model.layers):
             attn = layer.self_attn
             if getattr(attn, "is_kv_shared_layer", False):
@@ -239,7 +383,11 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 ),
             )
             layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
+            layer_cache_types.append(layer_type)
+            layer_cache_indices.append(layer_idx)
         self._kvcache_mixin.set_layer_kv_shapes(layer_kv_shapes)
+        self.layer_cache_types = layer_cache_types
+        self.layer_cache_indices = layer_cache_indices
 
     def _get_data_preprocessor(self):
         common_kwargs = dict(
@@ -305,10 +453,11 @@ class XHGemma4SeriesModel(VisionLLMModel):
         prefill_wrap_model = wrap_model
         decode_wrap_model = _copy_model_shared_params(wrap_model)
         if getattr(self.config, "bidirectional_vision_attention", False):
+            decode_num_logits_to_keep = 0 if self._is_mtp_export() else self.config.num_logits_to_keep
             decode_wrap_model = _Gemma4DecodeNoFullMaskBridge(
                 decode_wrap_model,
-                num_logits_to_keep=self.config.num_logits_to_keep,
-                language_model_keeps_last_logit=(int(self.config.num_logits_to_keep or 0) == 1),
+                num_logits_to_keep=decode_num_logits_to_keep,
+                language_model_keeps_last_logit=(int(decode_num_logits_to_keep or 0) == 1),
                 language_model_returns_tensor=True,
             )
         self._wrap_model = wrap_model
@@ -316,7 +465,20 @@ class XHGemma4SeriesModel(VisionLLMModel):
 
         self._wrap_model = decode_wrap_model
         self.set_decode()
-        decode_frontend_model = super()._to_fronted(decode_wrap_model)
+        original_input_sequence_length = _cfg_get_value(self.wrap_cfg, "input_sequence_length")
+        original_num_logits_to_keep = _cfg_get_value(self.wrap_cfg, "num_logits_to_keep", None)
+        if self._is_mtp_export():
+            _cfg_set_value(self.wrap_cfg, "input_sequence_length", self._mtp_verify_length())
+            for key, value in self._mtp_decode_wrap_cfg_overrides().items():
+                _cfg_set_value(self.wrap_cfg, key, value)
+            self._apply_wrap_cfg_to_modules(decode_wrap_model)
+        try:
+            decode_frontend_model = super()._to_fronted(decode_wrap_model)
+        finally:
+            if original_input_sequence_length is not None:
+                _cfg_set_value(self.wrap_cfg, "input_sequence_length", original_input_sequence_length)
+            if original_num_logits_to_keep is not None:
+                _cfg_set_value(self.wrap_cfg, "num_logits_to_keep", original_num_logits_to_keep)
         self._frontend_model = prefill_frontend_model
         self._wrap_model = prefill_frontend_model
         self.set_prefill()
@@ -343,7 +505,20 @@ class XHGemma4SeriesModel(VisionLLMModel):
         torch.cuda.empty_cache()
 
         self.set_decode()
-        decode_quanted_model = super()._to_quanted(decode_fronted_model, state, infer_shape=False)
+        original_input_sequence_length = _cfg_get_value(self.wrap_cfg, "input_sequence_length")
+        original_num_logits_to_keep = _cfg_get_value(self.wrap_cfg, "num_logits_to_keep", None)
+        if self._is_mtp_export():
+            _cfg_set_value(self.wrap_cfg, "input_sequence_length", self._mtp_verify_length())
+            for key, value in self._mtp_decode_wrap_cfg_overrides().items():
+                _cfg_set_value(self.wrap_cfg, key, value)
+            self._apply_wrap_cfg_to_modules(decode_fronted_model)
+        try:
+            decode_quanted_model = super()._to_quanted(decode_fronted_model, state, infer_shape=False)
+        finally:
+            if original_input_sequence_length is not None:
+                _cfg_set_value(self.wrap_cfg, "input_sequence_length", original_input_sequence_length)
+            if original_num_logits_to_keep is not None:
+                _cfg_set_value(self.wrap_cfg, "num_logits_to_keep", original_num_logits_to_keep)
         self.set_prefill()
         return ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
 
@@ -364,6 +539,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
             "input_names": input_names,
             "output_names": ["logits"],
         }
+        if self._is_mtp_export():
+            export_cfg["output_names"].append("target_hidden_state")
         for layer_idx in range(self.kvcache_config.num_layers):
             export_cfg["input_names"].append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(self.kvcache_config.num_layers):
@@ -375,10 +552,34 @@ class XHGemma4SeriesModel(VisionLLMModel):
         meta_info.capabilities = dict(getattr(self.config, "capabilities", {}) or {})
         meta_info.layer_types = self.layer_types
         meta_info.layer_kv_shapes = self._kvcache_mixin.layer_kv_shapes
+        meta_info.layer_cache_types = list(getattr(self, "layer_cache_types", []) or [])
+        meta_info.layer_cache_indices = list(getattr(self, "layer_cache_indices", []) or [])
         meta_info.sliding_window = self.sliding_window
         meta_info.sliding_kv_cache_input_mode = getattr(
             self.config, "sliding_kv_cache_input_mode", "slice_window"
         )
+        if self._is_mtp_export():
+            block_size = self._mtp_num_draft_tokens()
+            verify_length = self._mtp_verify_length()
+            draft_head_bits = _mtp_draft_head_weight_bits(self.config)
+            spec_decode = {
+                "mode": "mtp",
+                "block_size": block_size,
+                "verify_length": verify_length,
+                "hidden_output_name": "target_hidden_state",
+                "draft_head_weight_bits": draft_head_bits,
+                "shared_sliding_cache_length": self._mtp_shared_sliding_cache_length(),
+                "shared_full_cache_length": int(self.config.context_max_length),
+                "target_decode_sliding_output_length": self._mtp_target_decode_sliding_output_length(),
+                "shared_sliding_cache_length_basis": "slice_window + prefill_input_sequence_length",
+                "target_decode_sliding_output_length_basis": "aligned(sliding_window + verify_length - 1, 16)",
+            }
+            meta_info.spec_decode_mode = "mtp"
+            meta_info.spec_decode_block_size = block_size
+            meta_info.spec_decode_verify_length = verify_length
+            meta_info.spec_decode_hidden_output_name = "target_hidden_state"
+            meta_info.spec_decode_draft_head_weight_bits = draft_head_bits
+            meta_info.spec_decode = spec_decode
         if self.per_layer_input_embedding is not None:
             artifact_path = Path(output_dir) / "per_layer_input_embedding.pt"
             self.per_layer_input_embedding.save_artifact(artifact_path)
@@ -418,6 +619,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
             if self.audio.quanted_model is None:
                 self.audio.to_quanted_aligned()
             self.audio.quanted_model.fixed()
+        if self._is_mtp_export():
+            self._decode_input_sequence_length = self._mtp_verify_length()
+            self._decode_wrap_cfg_overrides = self._mtp_decode_wrap_cfg_overrides()
         exported_info = self.get_export_info(output_dir)
         meta_info = cast(Gemma4SeriesModelMeta, exported_info.meta)
         if self.visual is not None:
@@ -446,6 +650,18 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 audio_meta.onnx = str(Path(audio_meta.onnx).relative_to(exported_info.exported_dir).as_posix())
             meta_info.audio_config = audio_meta
         self._export_hmonnx(exported_info)
+        stripped_default_cache_attrs = 0
+        for hmonnx_path in (meta_info.prefill_hmonnx, meta_info.decode_hmonnx):
+            if hmonnx_path:
+                onnx_path = Path(hmonnx_path)
+                if not onnx_path.is_absolute():
+                    onnx_path = Path(exported_info.exported_dir) / onnx_path
+                stripped_default_cache_attrs += _strip_default_llmcache_only_handle_old_cache_attrs(onnx_path)
+        if stripped_default_cache_attrs:
+            logger.info(
+                "Removed %d default-false only_handle_old_cache attributes from Gemma4 Series ONNX graphs.",
+                stripped_default_cache_attrs,
+            )
         json.dump(
             meta_info.to_dict(),
             open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"),

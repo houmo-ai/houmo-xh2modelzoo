@@ -218,17 +218,22 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             else:
                 full_mask[0, 0, q, 0] = 0
 
-        # ── Sliding attention mask (width = LLMCache output size for this input_seq_len) ──
-        # LLMCache with attention_max_length=sw outputs aligned(sw + nq - 1, 16) entries.
+        # ── Sliding attention mask (width = LLMCache output size) ──
+        # LLMCache output width is aligned(sliding_window + q_len - 1, 16).
+        # MTP decode still receives the larger physical slice-window cache
+        # tensor (sliding_window + prefill_input_length), but the attention
+        # consumes LLMCache's compact output, e.g. 1024 + verify_len(5) - 1
+        # -> aligned 1040.  The additive mask follows those compact output
+        # coordinates.
         slide_ctx = self._aligned(sw + q_len - 1, 16)
-        # Uses the _gen_mask_v2 approach: clamp past_seq_length to (sw - 1) so that
-        # the mask coordinates match the truncated KV cache managed by LLMCache.
         sliding_mask = torch.full((1, 1, q_len, slide_ctx), neg, dtype=torch.float16, device=device)
-        clamped_past = min(past_seq_length, sw - 1) if sw > 0 else past_seq_length
+        local_valid = min(max(int(past_seq_length), 0), int(slide_ctx))
+        concat_pos = min(local_valid, max(0, int(sw) - 1))
         for q in range(q_len):
             if q < current_input_length:
-                causal_end = min(slide_ctx, clamped_past + q + 1)
-                sw_start = max(0, clamped_past + q - sw + 1)
+                cache_pos = concat_pos + q
+                causal_end = min(slide_ctx, cache_pos + 1)
+                sw_start = max(0, cache_pos - sw + 1) if sw > 0 else 0
                 sliding_mask[0, 0, q, sw_start:causal_end] = 0
             else:
                 sliding_mask[0, 0, q, 0] = 0
@@ -239,8 +244,9 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         if self.bidirectional_vision_attention and mm_token_type_ids.numel() > 0:
             mm = mm_token_type_ids[:current_input_length]
             is_vision = mm > 0
-            # Offset to convert absolute positions to sliding-cache coordinates
-            cache_offset = max(0, past_seq_length - clamped_past)
+            # Offset to convert absolute positions to sliding-cache coordinates.
+            # The first retained absolute token maps to local coordinate 0.
+            cache_offset = max(0, past_seq_length - concat_pos)
             group_start = None
             for idx in range(current_input_length):
                 if bool(is_vision[idx]) and group_start is None:
