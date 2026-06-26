@@ -24,16 +24,13 @@ quant:
   seed: 42
   quant_nontext_module: false
 export:
-  naming:
-    family: qwen3_5
-    variant: 9b
-    profile: visual_only
-    shape: '896'
   model:
     chip_arch: XH2a
     model_type: Qwen3_5ForConditionalGeneration_visual
-    hf_model: weights/Qwen3.5-9B
-    model_name: auto
+    # 该字段仅用作占位，实际会在导出前实时覆盖
+    hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: qwen3_5_9b
     max_size_w: 896
     max_size_h: 896
     quant_scheme:

@@ -76,7 +76,79 @@ def test_auto_llm_workflow_loads_declared_workflow_class(monkeypatch, tmp_path):
     workflow = AutoLLMWorkflow.from_config(str(hf_model_dir), str(config_path))
 
     assert type(workflow) is DummyWorkflow
-    assert captured_cfg["hf_model"] == str(hf_model_dir)
+    assert captured_cfg["hf_model"] is None
+
+
+def test_base_workflow_formats_xhquant_model_name_from_workflow_config(tmp_path):
+    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+
+    hf_model_dir = tmp_path / "hf"
+    nested_config_dir = hf_model_dir / "nested"
+    nested_config_dir.mkdir(parents=True)
+    (nested_config_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "workflow.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "quant": {"algorithm": "gptqmodel", "bits": 4},
+                "export": {
+                    "model": {
+                        "chip_arch": "XH2a",
+                        "model_type": "DummyForCausalLM",
+                        "hf_model": "weights/dummy",
+                        "model_name": "qwen3_6_27b_full_dflash",
+                        "spec_decode_mode": "dflash",
+                        "context_max_length": 2048,
+                        "prefill_chunk_length": 256,
+                        "quant_scheme": {"quant_type": "w8a8h1_sefp"},
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workflow_config = WorkflowConfig.from_file(str(config_path))
+    workflow = BaseHMONNXWorkflow(str(hf_model_dir), str(config_path))
+
+    assert (
+        workflow._format_model_name(workflow_config, str(hf_model_dir))
+        == "xh2_qwen3_6_27b_full_dflash_dflash_w4a8_256_2k_mpe256k"
+    )
+
+
+def test_base_workflow_model_name_missing_format_field_returns_original_name(tmp_path):
+    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+
+    hf_model_dir = tmp_path / "hf"
+    hf_model_dir.mkdir()
+    config_path = tmp_path / "workflow.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "quant": None,
+                "export": {
+                    "model": {
+                        "chip_arch": "XH2a",
+                        "model_type": "DummyForCausalLM",
+                        "hf_model": "weights/dummy",
+                        "model_name": "dummy",
+                        "context_max_length": 2048,
+                        "prefill_chunk_length": 256,
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workflow_config = WorkflowConfig.from_file(str(config_path))
+    workflow = BaseHMONNXWorkflow(str(hf_model_dir), str(config_path))
+
+    assert workflow._format_model_name(workflow_config, str(hf_model_dir)) == "dummy"
 
 
 def test_auto_llm_workflow_falls_back_to_base_workflow(monkeypatch, tmp_path):

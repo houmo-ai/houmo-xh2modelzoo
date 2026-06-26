@@ -1,37 +1,22 @@
 # Qwen3.5 / Qwen3.6 Merak 模型与 HMONNX 图规格
 
-本文是 Qwen3.5 / Qwen3.6 Merak workflow 的模型文档。它补充 README 中的快速入口，说明默认配置、推荐 YAML、量化/导出字段、MTP/DFlash/Visual 支持范围，以及导出后 HMONNX 图在推理中的数据流。
+本文是 Qwen3.5 / Qwen3.6 Merak workflow 的模型文档。它补充 README 中的快速入口，说明推荐 YAML、量化/导出字段、MTP/DFlash/Visual 支持范围，以及导出后 HMONNX 图在推理中的数据流。
 
 ## 1. 支持范围
 
-| 模型 | family | model_size | HF 默认路径 | 已验证外部量化路径 | 推荐 YAML 变体 |
-| --- | --- | --- | --- | --- | --- |
-| Qwen3.5-9B | `qwen3_5` | `9b` | `weights/Qwen3.5-9B` | `weights/Qwen3.5-9B-mode1-llm-only` | full / mtp / dflash / visual_only_448 / visual_only_896 |
-| Qwen3.6-27B | `qwen3_5` | `27b` | `weights/Qwen3.6-27B` | 暂无本轮验证 | full / mtp / dflash / visual_only_448 / visual_only_896 |
-| Qwen3.6-35B-A3B | `qwen3_5_moe` | `35b_a3b` | `weights/Qwen3.6-35B-A3B` | `weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400` | full / mtp / dflash / visual_only_448 / visual_only_896 |
+| 模型 | family | model_size | HF 默认路径 | 推荐 YAML 变体 |
+| --- | --- | --- | --- | --- |
+| Qwen3.5-9B | `qwen3_5` | `9b` | `weights/Qwen3.5-9B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
+| Qwen3.6-27B | `qwen3_5` | `27b` | `weights/Qwen3.6-27B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
+| Qwen3.6-35B-A3B | `qwen3_5_moe` | `35b_a3b` | `weights/Qwen3.6-35B-A3B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
 
-本轮运行验证重点：9B 和 35B-A3B。MTP/DFlash 只验证外部已量化模型（`existing_hf` / quant 产物），不把 base 模型纳入 spec-decode runtime 验证矩阵。
+如果从已经量化好的 HF 模型目录导出，应直接把 `hf_model_dir` 指向该目录，并将 `quant` 设置为 `null`，让 workflow 跳过量化阶段。
 
-## 2. 公共 API
+## 2. 推荐调用方式
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5.workflow_api import (
-    export,
-    get_default_export_config,
-    get_default_quant_config,
-    get_default_workflow_config,
-    get_export_config_help,
-    get_model_docs,
-    get_quant_config_help,
-    list_recommended_configs,
-    quant,
-)
 from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
-```
 
-推荐集成方式：
-
-```python
 workflow = AutoLLMWorkflow.from_config(
     hf_model_dir="weights/Qwen3.5-9B",
     config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
@@ -45,17 +30,9 @@ export_result = workflow.export(
 )
 ```
 
-上游不需要重新维护 AutoRound、GPTQModel、`quant_scheme`、视觉尺寸、MTP/DFlash 细节。普通用户选择推荐 YAML；进阶用户通过结构化 help 与 config override 修改字段。
+上游不需要重新维护 AutoRound、GPTQModel、`quant_scheme`、视觉尺寸、MTP/DFlash 细节。普通用户选择推荐 YAML；进阶用户通过 `config_overrides` 修改字段。
 
-## 3. 默认配置获取
-
-### 3.1 默认量化配置
-
-```python
-quant_cfg = get_default_quant_config()
-```
-
-默认值：
+## 3. 推荐量化配置
 
 ```yaml
 algorithm: gptqmodel
@@ -77,51 +54,9 @@ runtime:
   low_gpu_mem_usage: true
 ```
 
-约束：`group_size` 必须为 64；默认 AutoRound workflow YAML 必须包含量化配置。GPTQ 伴随配置使用 `_gptq.yaml` 后缀并设置 `method: gptq`。只有显式 base 验证时才使用 `config_overrides={"quant": None}`。
+约束：`group_size` 必须为 64；GPTQ 伴随配置使用 `_gptq.yaml` 后缀并设置 `method: gptq`。`quant: null` 表示跳过量化，可直接写在 YAML 中，也可通过 `config_overrides={"quant": None}` 覆盖。
 
-### 3.2 默认 workflow / export 配置
-
-```python
-# 按唯一 YAML 名称取完整 workflow 配置
-workflow_cfg = get_default_workflow_config(name="qwen3_5_9b_full_mtp")
-
-# 按 family/model_size/variant 选择
-export_cfg = get_default_export_config(family="dense", model_size="9b", variant="dflash")
-
-# visual_only 需要指定 visual_size 才唯一
-visual_cfg = get_default_export_config(
-    family="moe",
-    model_size="35b_a3b",
-    variant="visual_only",
-    visual_size=896,
-)
-```
-
-`list_recommended_configs()` 返回所有推荐 YAML 的结构化索引，字段包括 `name`、`family`、`model_size`、`variant`、`visual_size`、`config_path`、`model_type`、`model_name`。
-
-## 4. 配置说明获取
-
-```python
-quant_help = get_quant_config_help()
-export_help = get_export_config_help()
-model_docs = get_model_docs()
-```
-
-`quant_help["fields"]` / `export_help["fields"]` 是字段级说明，格式为：
-
-```python
-{
-    "export.model.context_max_length": {
-        "type": "int",
-        "default": 2048,
-        "description": "KV cache 最大长度，影响 prefill/decode HMONNX cache shape。",
-    }
-}
-```
-
-上游 CLI 可以直接把这些结构化说明打印为帮助文本，不需要复制每个模型的参数表。
-
-## 5. 推荐 YAML 命名
+## 4. 推荐 YAML 命名
 
 YAML 名称只表达拓扑/导出形态，不表达量化格式。不要把 `w4`、`w8`、`gptq`、`autoround` 写进 workflow YAML 文件名。
 
@@ -137,9 +72,9 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/*.yaml
 configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/*.yaml
 ```
 
-## 6. Quant 流程
+## 5. Quant 流程
 
-### 6.1 默认 AutoRound → GPTQModel HF
+### 5.1 默认 AutoRound → GPTQModel HF
 
 默认 `quant()` 运行 AutoRound，并保存 GPTQModel 兼容 HF 目录。`QuantResult` 会记录：
 
@@ -149,41 +84,27 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/*.yaml
 | `quanted_model_dir` | 量化后 HF/GPTQModel 目录 |
 | `skipped` | base 验证时为 True |
 
-### 6.2 使用外部已量化模型
+### 5.2 使用已量化 HF 模型目录
 
 ```python
-config_overrides = {
-    "quant": {
-        "algorithm": "existing_hf",
-        "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
-        "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
-    }
-}
+workflow = AutoLLMWorkflow.from_config(
+    hf_model_dir="/path/to/quanted_hf_model",
+    config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
+)
+quant_result = workflow.quant(..., config_overrides={"quant": None})
 ```
 
-35B-A3B：
+该方式同样适用于 MTP 和 DFlash 导出。导出形态仍然由 `config_path` 指向的 YAML 决定。
+
+### 5.3 base 验证
 
 ```python
-config_overrides = {
-    "quant": {
-        "algorithm": "existing_hf",
-        "artifact_format": "gptqmodel_hf",
-        "source_algorithm": "autoround",
-        "existing_hf_model_dir": "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400",
-    }
-}
+quant_result = workflow.quant(..., config_overrides={"quant": None})
 ```
 
-### 6.3 base 验证
+这会跳过量化并直接使用 base HF 模型。等价地，也可以在 workflow YAML 中写 `quant: null`。
 
-```python
-quant_result = quant(..., config_overrides={"quant": None})
-```
-
-这只用于显式验证 base HF 模型；默认配置仍然是量化，不是 `null`。
-
-## 7. Export 变体
+## 6. Export 变体
 
 | variant | 说明 | 关键字段 |
 | --- | --- | --- |
@@ -198,7 +119,7 @@ quant_result = quant(..., config_overrides={"quant": None})
 config_overrides={"export.model.fuse_gdr_ops": True}
 ```
 
-## 8. Visual 支持
+## 7. Visual 支持
 
 默认 full YAML 里的 `visual_config` 使用 448×448：
 
@@ -222,7 +143,7 @@ config_overrides={
 
 visual-only 导出若要切换尺寸，用对应 `*_visual_only_448.yaml` 或 `*_visual_only_896.yaml`，或覆盖 `export.model.max_size_w/h`。
 
-## 9. MTP 数据流
+## 8. MTP 数据流
 
 MTP（Multi-Token Prediction）是单层 draft transformer。target prefill/decode 输出 `post_norm_hidden`，MTP draft 使用 token embedding + hidden 预测多个 draft token，然后 target decode 负责 verify。
 
@@ -251,7 +172,7 @@ mtp_config:
 
 35B-A3B 默认 MTP 配置：`hidden_size=2048`、`num_key_value_heads=2`、`head_dim=256`。
 
-## 10. DFlash 数据流
+## 9. DFlash 数据流
 
 DFlash 使用 target 指定层 hidden states 构造 draft 上下文，再由 DFlash draft decode 生成 draft logits。
 
@@ -273,7 +194,7 @@ dflash_config:
 
 运行时 `XHQwen3_5ModelConfig` 会把 `target_model_dir=None` 解析成当前 `export.model.hf_model`。这样用户覆盖 HF/base/quant 路径时，DFlash 不会继续指向旧模型目录。
 
-## 11. HMONNX 图 IO 概览
+## 10. HMONNX 图 IO 概览
 
 以下以 Qwen3.5-9B 典型配置为例：`hidden_size=4096`、`context_max_length=2048`、`prefill_chunk_length=256`。
 
@@ -322,9 +243,9 @@ DFlash context 输入：`target_hidden`、`past_seq_length`、`current_input_len
 
 DFlash decode 输入：`noise_embedding`、`past_seq_length`、`current_input_length`、`attn_mask`、`past_key_cache_*`、`past_value_cache_*`。输出为 `logits`。
 
-DFlash 图目前以代码实现和推荐 YAML 为依据；若后续实际导出产物的 tensor 名称或 shape 变化，应同步更新本文和 `get_model_docs()`。
+DFlash 图目前以代码实现和推荐 YAML 为依据；若后续实际导出产物的 tensor 名称或 shape 变化，应同步更新本文。
 
-## 12. 推理流水线
+## 11. 推理流水线
 
 ### 常规 full
 
@@ -354,10 +275,10 @@ loop:
   Target Decode verify -> accepted tokens + updated target cache + next target_hidden
 ```
 
-## 13. 配置维护原则
+## 12. 配置维护原则
 
-1. 默认配置必须能量化；`quant: null` 只允许通过显式 override 表达 base 验证。
+1. `quant: null` 表示跳过量化；推荐量化配置仍应显式写出 quant 字段，base 验证可以在 YAML 中写 `quant: null` 或通过 `config_overrides={"quant": None}` 覆盖。
 2. YAML 名称只描述拓扑，不描述 w4/w8/gptq/autoround。
 3. full、MTP、DFlash、visual-only 尽量复用同一套 quant/export 字段，差异只落在对应 `mtp_config` / `dflash_config` / visual 尺寸。
 4. DFlash `target_model_dir` 不写死，运行时跟随当前 `hf_model`。
-5. 上游 imodelzoo/customized_models 展示字段说明时，应调用 `get_quant_config_help()`、`get_export_config_help()`、`get_model_docs()`，不要复制一份易过期文档。
+5. 上游 imodelzoo/customized_models 展示字段说明时，应以本文件和推荐 YAML 为准，避免重新维护一套易过期字段表。

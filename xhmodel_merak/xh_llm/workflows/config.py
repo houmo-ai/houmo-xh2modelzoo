@@ -1,5 +1,4 @@
 import copy
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,11 +57,8 @@ class WorkflowConfig:
             raise ValueError("workflow export config must be a non-empty mapping")
         return export
 
-    def build_export_dict(self, export_hf_model_dir: str) -> dict[str, Any]:
-        export_cfg = copy.deepcopy(self.export)
-        # TODO 为兼容老版本导出config，实时覆盖["model"]["hf_model"]字段。重构？
-        export_cfg["model"]["hf_model"] = os.path.abspath(os.path.normpath(str(export_hf_model_dir)))
-        return export_cfg
+    def build_export_dict(self) -> dict[str, Any]:
+        return copy.deepcopy(self.export)
 
     def with_overrides(self, overrides: Mapping[str, Any] | None = None) -> "WorkflowConfig":
         if not overrides:

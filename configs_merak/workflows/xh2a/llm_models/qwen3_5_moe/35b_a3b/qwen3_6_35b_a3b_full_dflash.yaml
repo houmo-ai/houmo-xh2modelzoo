@@ -25,15 +25,13 @@ quant:
     attn_bits: 8
     shared_expert_bits: 8
 export:
-  naming:
-    family: qwen3_6
-    variant: 35b_a3b
-    profile: full_dflash
   model:
     chip_arch: XH2a
     model_type: Qwen3_5MoeForConditionalGeneration
-    hf_model: weights/Qwen3.6-35B-A3B
-    model_name: auto
+    # 该字段仅用作占位，实际会在导出前实时覆盖
+    hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: qwen3_6_35b_a3b
     context_max_length: 2048
     prefill_chunk_length: 256
     max_pe_length: 262144

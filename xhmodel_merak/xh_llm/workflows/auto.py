@@ -1,5 +1,5 @@
+import copy
 import importlib
-import os
 
 from xhmodel_merak.xh_llm.builder import get_model_class
 
@@ -17,8 +17,8 @@ class AutoLLMWorkflow:
         debug: bool = False,
     ) -> BaseHMONNXWorkflow:
         workflow_config = WorkflowConfig.from_file(config_path)
-        export_cfg = workflow_config.build_export_dict(os.path.abspath(os.path.normpath(str(hf_model_dir))))
-        model_cls = get_model_class(export_cfg["model"])
+        model_cfg = copy.deepcopy(workflow_config.export["model"])
+        model_cls = get_model_class(model_cfg)
         workflow_cls = cls._get_workflow_class(model_cls)
         return workflow_cls(
             hf_model_dir=hf_model_dir,

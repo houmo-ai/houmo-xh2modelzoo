@@ -496,156 +496,42 @@ def test_gemma4_series_autoround_mode1_builds_moe_script_command():
     assert "--sym" in command
 
 
-def test_merak_auto_model_name_resolves_quant_shape_and_hf_pe_contract(tmp_path):
-    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
-    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
-
-    base = {
-        "quant": {
-            "algorithm": "gptqmodel",
-            "method": "gptq",
-            "bits": 4,
-        },
-        "export": {
-            "naming": {
-                "family": "gemma4",
-                "variant": "e4b",
-                "profile": "full",
-            },
-            "model": {
-                "chip_arch": "XH2a",
-                "model_name": "auto",
-                "context_max_length": 8192,
-                "prefill_chunk_length": 256,
-                "quant_scheme": {"quant_type": "w8a8h1_sefp"},
-            },
-        },
-    }
-
-    resolved = resolve_auto_model_name(WorkflowConfig(data=base, source="gemma4_e4b_full.yaml"))
-
-    assert resolved.data["export"]["model"]["model_name"] == "xh2_gemma4_e4b_full_gptq_w4a8_256_8k_mpe32k"
-    assert "h1_sefp" not in resolved.data["export"]["model"]["model_name"]
-
-    base["quant"]["method"] = "autoround"
-    resolved = resolve_auto_model_name(WorkflowConfig(data=base, source="gemma4_e4b_autoround.yaml"))
-    assert resolved.data["export"]["model"]["model_name"] == "xh2_gemma4_e4b_full_autoround_w4a8_256_8k_mpe32k"
-
-    hf_dir = tmp_path / "hf"
-    hf_dir.mkdir()
-    (hf_dir / "config.json").write_text(
-        '{"text_config": {"max_position_embeddings": 262144}}',
-        encoding="utf-8",
-    )
-    resolved = resolve_auto_model_name(
-        WorkflowConfig(data=base, source="gemma4_e4b_autoround.yaml"),
-        hf_model_dir=str(hf_dir),
-    )
-    assert resolved.data["export"]["model"]["model_name"] == "xh2_gemma4_e4b_full_autoround_w4a8_256_8k_mpe256k"
-
-
-def test_merak_auto_model_name_requires_method_for_existing_hf_quant():
-    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
-    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
-
-    cfg = WorkflowConfig(
-        data={
-            "quant": {
-                "algorithm": "existing_hf",
-                "existing_hf_model_dir": "/tmp/quant",
-            },
-            "export": {
-                "naming": {
-                    "family": "gemma4",
-                    "variant": "e4b",
-                    "profile": "full",
-                },
-                "model": {
-                    "chip_arch": "XH2a",
-                    "model_name": "auto",
-                    "context_max_length": 2048,
-                    "prefill_chunk_length": 256,
-                    "quant_scheme": {"quant_type": "w8a8h1_sefp"},
-                },
-            },
-        },
-        source="existing_hf.yaml",
-    )
-
-    with pytest.raises(ValueError, match="existing_hf.*method"):
-        resolve_auto_model_name(cfg)
-
-
-def test_merak_auto_model_name_encodes_base_w8a8_contract():
-    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
-    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
-
-    cfg = WorkflowConfig(
-        data={
-            "quant": None,
-            "export": {
-                "naming": {
-                    "family": "gemma4",
-                    "variant": "e4b",
-                    "profile": "full",
-                },
-                "model": {
-                    "chip_arch": "XH2a",
-                    "model_name": "auto",
-                    "context_max_length": 2048,
-                    "prefill_chunk_length": 256,
-                    "quant_scheme": {"quant_type": "w8a8h1_sefp"},
-                },
-            },
-        },
-        source="base.yaml",
-    )
-
-    resolved = resolve_auto_model_name(cfg)
-
-    assert resolved.data["export"]["model"]["model_name"] == "xh2_gemma4_e4b_full_base_w8a8_256_2k_mpe32k"
-
-
-def test_gemma4_series_workflow_model_names_encode_quant_contract():
+def test_gemma4_series_workflow_model_names_follow_hf_name_contract():
     import re
     import yaml
-
-    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
-    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
 
     config_paths = sorted(Path("configs_merak/workflows/xh2a/llm_models/gemma4_series").glob("*/*.yaml"))
     assert config_paths
 
-    names: set[str] = set()
+    expected_names = {
+        "26b_a4b": "gemma_4_26b_a4b",
+        "31b": "gemma_4_31b",
+        "e2b": "gemma_4_e2b",
+        "e4b": "gemma_4_e4b",
+    }
     for config_path in config_paths:
-        raw_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert raw_cfg["export"]["model"]["model_name"] == "auto"
-
-        resolved = resolve_auto_model_name(WorkflowConfig.from_file(str(config_path)))
-        cfg = resolved.data
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         quant_cfg = cfg["quant"]
-        naming_cfg = cfg["export"]["naming"]
         model_cfg = cfg["export"]["model"]
         model_name = model_cfg["model_name"]
-        quant_type = model_cfg["quant_scheme"]["quant_type"]
 
         algorithm = str(quant_cfg["algorithm"]).lower()
         method = str(quant_cfg.get("method") or ("gptq" if algorithm == "gptqmodel" else algorithm)).lower()
         algorithm_token = "autoround" if method in {"autoround", "auto_round", "auto-round"} else "gptq"
-        bits_token = f"w{int(quant_cfg['bits'])}"
-        activation_match = re.search(r"a(\d+)", quant_type)
-        assert activation_match, f"{config_path}: quant_type={quant_type!r} must encode activation bits"
-        activation_token = f"a{activation_match.group(1)}"
 
         assert algorithm == "gptqmodel"
         assert method in {"gptq", "autoround"}
-        assert model_name.startswith(f"xh2_gemma4_{naming_cfg['variant']}_{naming_cfg['profile']}_{algorithm_token}_")
-        assert bits_token in model_name
-        assert activation_token in model_name
-        assert re.search(r"_256_2k_mpe(32|128|256)k$", model_name), model_name
+        assert model_name == expected_names[config_path.parent.name]
+        assert re.fullmatch(r"[a-z0-9_]+", model_name), model_name
+        assert not model_name.startswith("xh2_")
+        assert f"_{algorithm_token}" not in model_name
+        assert not re.search(r"_w\d+a\d+", model_name), model_name
+        assert not re.search(r"_\d+_\d+k", model_name), model_name
+        assert "_mpe" not in model_name
         assert "h1_sefp" not in model_name
-        assert model_name not in names
-        names.add(model_name)
+        assert model_name != "auto"
+        assert "naming" not in cfg["export"]
+        assert model_cfg["hf_model"] is None
 
 
 def test_gemma4_series_export_wrapper_stays_non_mtp_compatibility():
@@ -1213,39 +1099,6 @@ def test_gemma4_series_workflow_demo_presets_use_relative_weight_paths():
         assert preset.assistant_model_dir.startswith("weights/")
         assert not preset.hf_model_dir.startswith("/data01/")
         assert not preset.assistant_model_dir.startswith("/data01/")
-
-
-def test_gemma4_series_auto_model_name_uses_hf_position_embedding_length():
-    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
-    from xhmodel_merak.xh_llm.workflows.naming import resolve_auto_model_name
-
-    cases = {
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml": (
-            "/data01/datasets/gemma-4-E2B-it",
-            "mpe128k",
-        ),
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml": (
-            "/data01/datasets/gemma-4-E4B-it",
-            "mpe128k",
-        ),
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml": (
-            "/data01/datasets/gemma-4-31B-it",
-            "mpe256k",
-        ),
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml": (
-            "/data01/datasets/gemma-4-26B-A4B-it",
-            "mpe256k",
-        ),
-    }
-    if not all(Path(hf_dir).exists() for hf_dir, _expected in cases.values()):
-        pytest.skip("Gemma4 local HF configs are not available")
-
-    for config_path, (hf_dir, expected_suffix) in cases.items():
-        resolved = resolve_auto_model_name(
-            WorkflowConfig.from_file(config_path),
-            hf_model_dir=hf_dir,
-        )
-        assert resolved.data["export"]["model"]["model_name"].endswith(f"_256_2k_{expected_suffix}")
 
 
 def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():

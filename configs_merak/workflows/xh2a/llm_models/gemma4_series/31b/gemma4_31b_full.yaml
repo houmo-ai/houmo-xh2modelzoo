@@ -27,15 +27,13 @@ quant:
     check_quant_video_demo: false
     check_quant_audio_demo: false
 export:
-  naming:
-    family: gemma4
-    variant: 31b
-    profile: full
   model:
     chip_arch: XH2a
     model_type: Gemma4ForConditionalGeneration
+    # 该字段仅用作占位，实际会在导出前实时覆盖
     hf_model: null
-    model_name: auto
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: gemma_4_31b
     context_max_length: 2048
     prefill_chunk_length: 256
     use_cache: true

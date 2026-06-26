@@ -1,6 +1,6 @@
 """Canonical Merak Qwen3.5/Qwen3.5-MoE MTP/DFlash HMONNX demo.
 
-The implementation lives in ``workflow_runtime.spec_decode_generate`` so the
+The implementation lives in ``hmonnx_validation.spec_decode_generate`` so the
 same API is used by demos, validation matrix, and this CLI.
 
 Example:
@@ -21,7 +21,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (  # noqa: E402
+from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import (  # noqa: E402
     print_quick_test_result,
     spec_decode_generate,
 )

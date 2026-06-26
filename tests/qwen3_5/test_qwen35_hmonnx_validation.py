@@ -26,7 +26,7 @@ def _install_lightweight_xh_llm_packages(monkeypatch) -> None:
 
 def _load_runtime_module(monkeypatch):
     _install_lightweight_xh_llm_packages(monkeypatch)
-    return importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime")
+    return importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation")
 
 
 def test_find_hmonnx_meta_file_accepts_export_result_dir_and_meta(monkeypatch, tmp_path: Path):

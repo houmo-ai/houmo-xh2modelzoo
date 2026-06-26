@@ -46,7 +46,7 @@ def _load_generate_module(monkeypatch):
     )
     _install_stub(
         monkeypatch,
-        "xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime",
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation",
         {
             "hmonnx_generate": lambda *args, **kwargs: None,
             "print_quick_test_result": lambda *args, **kwargs: None,

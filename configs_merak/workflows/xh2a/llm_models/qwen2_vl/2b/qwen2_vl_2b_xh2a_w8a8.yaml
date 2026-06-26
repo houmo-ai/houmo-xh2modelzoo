@@ -4,11 +4,10 @@ export:
   model:
     chip_arch: XH2a
     model_type: Qwen2VLForConditionalGeneration
-
-    # null值仅用于占位，导出前会构造老版本config并提供真实的量化或原始模型路径
+    # 该字段仅用作占位，实际会在导出前实时覆盖
     hf_model: null
-    
-    model_name: xh2_qwen2-vl-2b_w8a8_256_2k
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: qwen2_vl_2b
     context_max_length: 2048
     prefill_chunk_length: 256
     use_cache: true

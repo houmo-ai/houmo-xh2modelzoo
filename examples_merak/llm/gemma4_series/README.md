@@ -41,21 +41,17 @@ sliding_kv_cache_input_mode: slice_window
 
 正式 QTL-384 集成导出请用 `--context-max-length 8192` 覆盖 YAML 默认值。
 
-## 自动 model_name 命名规范
+## model_name 命名规范
 
-Gemma4 Series workflow YAML 统一写：
+Gemma4 Series workflow YAML 使用显式 `model_name`：
 
 ```yaml
 export:
-  naming:
-    family: gemma4
-    variant: e4b      # e2b / e4b / 31b / 26b_a4b
-    profile: full
   model:
-    model_name: auto
+    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
 ```
 
-导出前 workflow 会自动解析成：
+命名格式：
 
 ```text
 xh2_gemma4_<variant>_<profile>_<gptq|autoround|base>_w<bits>a<act_bits>_<prefill>_<context>_mpe<max_position_embeddings>
@@ -70,12 +66,10 @@ xh2_gemma4_31b_full_autoround_w4a8_256_2k_mpe256k
 
 说明：
 
-- `mpe` 表示 HF config 里的 `max_position_embeddings`，由
-  `hf_model/config.json` 自动读取，不要在 workflow YAML 里新增
-  `max_pe_length`。
+- `mpe` 表示 HF config 里的 `max_position_embeddings`，按目标模型显式写入名称。
 - E2B/E4B 当前是 `mpe128k`；31B/26B-A4B 当前是 `mpe256k`。
-- `context_max_length` 被 CLI 覆盖为 8192 时，`256_2k` 会自动变成
-  `256_8k`，MPE 后缀保持模型配置值。
+- `context_max_length` 被 CLI 覆盖为 8192 时，需要同步把名称里的 `256_2k`
+  改为 `256_8k`。
 - `h1_sefp` 只保留在 `quant_scheme.quant_type`，不进入目录名。
 
 ## 当前推荐最优权重

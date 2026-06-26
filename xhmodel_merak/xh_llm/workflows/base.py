@@ -1,10 +1,11 @@
+import json
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .config import WorkflowConfig
-from .naming import resolve_auto_model_name
 from .result import ExportResult, QuantResult
 from .utils import same_abs_path
 
@@ -58,14 +59,8 @@ class BaseHMONNXWorkflow:
         if quant_result is None:
             raise ValueError("quant_result can't be None")
 
-        export_hf_model_dir = self._resolve_export_hf_model_dir(quant_result)
         workflow_config = self.workflow_config.with_overrides(config_overrides)
-        workflow_config = self._prepare_export_workflow_config(
-            workflow_config,
-            export_hf_model_dir=export_hf_model_dir,
-        )
-        export_cfg = workflow_config.build_export_dict(export_hf_model_dir)
-        export_cfg.pop("naming", None)
+        export_cfg = self._build_export_config(quant_result, workflow_config)
 
         work_dir_path = Path(output_dir)
         if work_dir_path.exists():
@@ -108,14 +103,6 @@ class BaseHMONNXWorkflow:
             meta = xh_model.export_hmonnx(str(work_dir_path))
         return ExportResult(work_dir=str(work_dir_path), config_file=config_file, meta=meta)
 
-    def _prepare_export_workflow_config(
-        self,
-        workflow_config: WorkflowConfig,
-        *,
-        export_hf_model_dir: str | None = None,
-    ) -> WorkflowConfig:
-        return resolve_auto_model_name(workflow_config, hf_model_dir=export_hf_model_dir)
-
     def dump_golden(
         self,
         export_result: ExportResult,
@@ -153,3 +140,112 @@ class BaseHMONNXWorkflow:
             meta_file_list = ", ".join(str(path) for path in meta_files)
             raise ValueError(f"Found multiple golden_meta_info.json files under {work_dir}: {meta_file_list}")
         return str(meta_files[0])
+
+    def _build_export_config(
+        self,
+        quant_result: QuantResult,
+        workflow_config: WorkflowConfig,
+    ) -> dict[str, Any]:
+        export_hf_model_dir = self._resolve_export_hf_model_dir(quant_result)
+        formatted_model_name = self._format_model_name(workflow_config, export_hf_model_dir)
+        export_cfg = workflow_config.build_export_dict()
+        export_cfg["model"]["hf_model"] = export_hf_model_dir
+        export_cfg["model"]["model_name"] = formatted_model_name
+        return export_cfg
+
+    def _format_model_name(
+        self,
+        workflow_config: WorkflowConfig,
+        export_hf_model_dir: str,
+    ) -> str:
+        """
+        规则如下
+        修改后model_name格式：{chip_arch}_{原始model_name}_{spec_decode_mode}_{quant_scheme}_{prefill_chunk_length}_{context_max_length}_{max_pe_length}，全部转小写
+        供参考的config.yaml：configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_dflash.yaml
+        如果有字段或其他必要信息缺失，直接终止format，返回原始model_name
+
+        各个字段规则
+        原始model_name: yaml中export.model.model_name字段，不存在直接raiseError
+        spec_decode_mode: yaml中export.model.spec_decode_mode字段，如果字段不存在"_{spec_decode_mode}"直接从format_model_name中删除
+        chip_arch: yaml中export.model.chip_arch字段，XH2a映射到xh2，其余情况不变
+        quant_scheme: yaml中export.model.quant_scheme.quant_type字段，只取w{数字}a{数字}，例如w8a16，w8a8。如果quant.bits字段存在，则w后的数字改为quant.bits数值
+        prefill_chunk_length: yaml中export.model.prefill_chunk_length字段
+        context_max_length: yaml中export.model.context_max_length字段
+        max_pe_length: yaml中export.model.max_pe_length字段。如果缺失，从export_hf_model_dir路径下的config.json中递归搜索max_position_embeddings字段
+        """
+        model_cfg = workflow_config.export["model"]
+        try:
+            model_name_token = model_cfg["model_name"]
+        except KeyError as exc:
+            raise ValueError("BaseHMONNXWorkflow requires `export.model.model_name` in workflow config") from exc
+
+        try:
+            chip_arch = model_cfg["chip_arch"]
+            quant_type = model_cfg["quant_scheme"]["quant_type"]
+            prefill_chunk_length = int(model_cfg["prefill_chunk_length"])
+            context_max_length = int(model_cfg["context_max_length"])
+        except (KeyError, TypeError):
+            return str(model_name_token)
+
+        chip_token = "xh2" if chip_arch.lower() == "xh2a" else chip_arch
+
+        spec_decode_mode = model_cfg.get("spec_decode_mode")
+        spec_decode_token = f"_{spec_decode_mode}" if spec_decode_mode else ""
+
+        match = re.search(r"w(\d+)a(\d+)", quant_type.lower())
+        if match is None:
+            raise ValueError(
+                "export.model.quant_scheme.quant_type must contain a w{bits}a{bits} token, "
+                f"got {quant_type!r}"
+            )
+        weight_bits = int(match.group(1))
+        activation_bits = int(match.group(2))
+        quant_cfg = workflow_config.quant
+        if isinstance(quant_cfg, Mapping) and quant_cfg.get("bits") is not None:
+            weight_bits = int(quant_cfg["bits"])
+        quant_token = f"w{weight_bits}a{activation_bits}"
+
+        max_pe_length = model_cfg.get("max_pe_length")
+        if max_pe_length is not None:
+            max_pe_length = int(max_pe_length)
+        else:
+            def find_max_position_embeddings(data: Any) -> Any:
+                if isinstance(data, Mapping):
+                    if "max_position_embeddings" in data:
+                        return data["max_position_embeddings"]
+                    for value in data.values():
+                        found = find_max_position_embeddings(value)
+                        if found is not None:
+                            return found
+                elif isinstance(data, list):
+                    for value in data:
+                        found = find_max_position_embeddings(value)
+                        if found is not None:
+                            return found
+                return None
+
+            hf_model_path = Path(export_hf_model_dir)
+            if hf_model_path.is_file() and hf_model_path.name == "config.json":
+                config_paths = [hf_model_path]
+            elif hf_model_path.exists():
+                config_paths = sorted(hf_model_path.rglob("config.json"))
+            else:
+                config_paths = []
+
+            for config_path in config_paths:
+                config_data = json.loads(config_path.read_text(encoding="utf-8"))
+                max_pe_length = find_max_position_embeddings(config_data)
+                if max_pe_length is not None:
+                    max_pe_length = int(max_pe_length)
+                    break
+
+        if max_pe_length is None:
+            return str(model_name_token)
+
+        def length_token(length: int) -> str:
+            return f"{length // 1024}k" if length % 1024 == 0 else str(length)
+
+        return (
+            f"{chip_token}_{model_name_token}{spec_decode_token}_{quant_token}_{length_token(prefill_chunk_length)}_"
+            f"{length_token(context_max_length)}_mpe{length_token(max_pe_length)}"
+        ).lower()

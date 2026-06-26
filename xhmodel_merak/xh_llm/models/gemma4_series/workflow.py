@@ -149,7 +149,7 @@ _GEMMA4_EXPORT_MODEL_TEMPLATE: dict[str, Any] = {
     "chip_arch": "XH2a",
     "model_type": "Gemma4ForConditionalGeneration",
     "hf_model": None,
-    "model_name": "auto",
+    "model_name": "xh2_gemma4_full_256_2k",
     "context_max_length": REQUIRED_CONTEXT_MAX_LENGTH,
     "prefill_chunk_length": REQUIRED_INPUT_SEQUENCE_LENGTH,
     "use_cache": True,
@@ -184,11 +184,6 @@ _GEMMA4_EXPORT_MODEL_TEMPLATE: dict[str, Any] = {
         },
     },
     "only_first_block": False,
-}
-_GEMMA4_EXPORT_NAMING_TEMPLATE: dict[str, Any] = {
-    "family": "gemma4",
-    "variant": "e4b",
-    "profile": "full",
 }
 
 
@@ -256,15 +251,7 @@ def dump_autoround_moe_mode1_quant_config_template(path: str | os.PathLike[str])
 
 
 def dump_export_config_template(path: str | os.PathLike[str]) -> str:
-    return _dump_yaml(
-        path,
-        {
-            "export": {
-                "naming": copy.deepcopy(_GEMMA4_EXPORT_NAMING_TEMPLATE),
-                "model": copy.deepcopy(_GEMMA4_EXPORT_MODEL_TEMPLATE),
-            }
-        },
-    )
+    return _dump_yaml(path, {"export": {"model": copy.deepcopy(_GEMMA4_EXPORT_MODEL_TEMPLATE)}})
 
 
 def quant(
@@ -777,7 +764,10 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         from ...builder import get_model_class
 
         workflow_config = self.workflow_config.with_overrides(config_overrides)
-        export_cfg = workflow_config.build_export_dict(self.hf_model_dir)
+        export_cfg = workflow_config.build_export_dict()
+        # Compatibility for this validation path only. New export config
+        # finalization should go through BaseHMONNXWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.hf_model_dir
         model_cfg = export_cfg["model"]
         export_plan = self._build_export_plan(workflow_config)
         export_plan.validate_fixed_contract()
@@ -802,7 +792,10 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             )
 
     def _build_export_plan(self, workflow_config: WorkflowConfig) -> Gemma4SeriesExportPlan:
-        export_cfg = workflow_config.build_export_dict(self.hf_model_dir)
+        export_cfg = workflow_config.build_export_dict()
+        # Compatibility for this planning path only. New export config
+        # finalization should go through BaseHMONNXWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.hf_model_dir
         model_cfg = export_cfg.get("model")
         if not isinstance(model_cfg, Mapping):
             raise TypeError("Gemma4 Series workflow export.model must be a mapping")
