@@ -57,20 +57,16 @@ CEval 精度摘要（数据源：
 | golden | 每个子模块都要有 HM-style golden：`visual`、`video_visual`、`audio`、`prefill`、`decode` |
 | video ViT | 必须单独导出 `video_visual`，不允许 pad 到 image ViT 的 2520 patch 图上 |
 
-### 1.1 自动 `model_name` 命名
+### 1.1 显式 `model_name` 命名
 
-Gemma4 Series 的 YAML 默认使用 `model_name: auto`，由 workflow 在导出前
-统一生成最终 HMONNX 目录名，避免 GPTQModel / AutoRound / base 或不同
-context 长度互相覆盖。
+Gemma4 Series 的 YAML 使用显式 `model_name`。名称需要区分模型规模、
+量化方法、weight/activation bits、shape 与 MPE，避免 GPTQModel /
+AutoRound / base 或不同 context 长度互相覆盖。
 
 ```yaml
 export:
-  naming:
-    family: gemma4
-    variant: e4b        # e2b / e4b / 31b / 26b_a4b
-    profile: full
   model:
-    model_name: auto
+    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
 ```
 
 命名格式：
@@ -89,10 +85,7 @@ export:
 - `prefill` 是 `prefill_chunk_length` / `input_sequence_length`。
 - `context` 是本次导出实际 `context_max_length`，例如 2048 -> `2k`、
   8192 -> `8k`。
-- `mpe` 表示最大位置编码长度，直接从 HF `config.json` 读取
-  `max_position_embeddings`；Gemma4 读取路径是
-  `text_config.max_position_embeddings`。workflow YAML 不再新增
-  `max_pe_length` 之类配置。
+- `mpe` 表示最大位置编码长度，按目标 HF 配置显式写入名称。
 
 示例：
 
@@ -161,13 +154,9 @@ xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
 
 ```yaml
 export:
-  naming:
-    family: gemma4
-    variant: e4b                  # 各 YAML 分别写 e2b/e4b/31b/26b_a4b
-    profile: full
   model:
     model_type: Gemma4ForConditionalGeneration
-    model_name: auto
+    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
     context_max_length: 2048      # 正式 8192 导出用 CLI override
     prefill_chunk_length: 256
     sliding_kv_cache_input_mode: slice_window

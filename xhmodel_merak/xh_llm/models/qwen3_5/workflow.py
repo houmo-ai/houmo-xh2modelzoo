@@ -1,4 +1,3 @@
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -43,11 +42,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         quant_cfg = workflow_config.quant
         if quant_cfg is None:
-            if not self._is_explicit_base_quant_override(config_overrides):
-                raise ValueError(
-                    "Qwen35Workflow default workflow YAML must configure quantization. "
-                    "Use config_overrides={'quant': None} only for explicit base-model validation."
-                )
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 skipped=True,
@@ -60,15 +54,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             raise ValueError(
                 "Qwen35Workflow.quant requires artifact_format/output_format='gptqmodel_hf'; "
                 f"got {artifact_format!r}."
-            )
-
-        if algorithm == "existing_hf":
-            existing_hf_model_dir = quant_cfg.get("existing_hf_model_dir")
-            if not existing_hf_model_dir:
-                raise ValueError("quant.algorithm='existing_hf' requires quant.existing_hf_model_dir")
-            return QuantResult(
-                hf_model_dir=self.hf_model_dir,
-                quanted_model_dir=self._normalize_path(existing_hf_model_dir),
             )
 
         export_model_cfg = workflow_config.export["model"]
@@ -92,7 +77,7 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             )
 
         raise NotImplementedError(
-            "Qwen35Workflow.quant supports quant=None, quant.algorithm='existing_hf', "
+            "Qwen35Workflow.quant supports quant=None, "
             "quant.algorithm='gptqmodel' with method='gptq' or method='autoround', "
             "or legacy quant.algorithm='autoround'/'gptq', with "
             "artifact_format/output_format='gptqmodel_hf'. "
@@ -208,7 +193,10 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         from ...builder import get_model_class
 
         workflow_config = self.workflow_config.with_overrides(config_overrides)
-        export_cfg = workflow_config.build_export_dict(self.hf_model_dir)
+        export_cfg = workflow_config.build_export_dict()
+        # Compatibility for this validation path only. New export config
+        # finalization should go through BaseHMONNXWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.hf_model_dir
         model_cls = get_model_class(export_cfg["model"])
         if model_cls is None:
             return
@@ -276,10 +264,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
             raise ValueError(f"Qwen3.5/Qwen3.6 quant group_size must be 64 when provided, got {group_size!r}")
 
     @staticmethod
-    def _is_explicit_base_quant_override(config_overrides: Mapping[str, Any] | None) -> bool:
-        return bool(config_overrides and "quant" in config_overrides and config_overrides["quant"] is None)
-
-    @staticmethod
     def _messages_have_image(messages: list[dict[str, Any]]) -> bool:
         for message in messages:
             content = message.get("content") if isinstance(message, Mapping) else None
@@ -288,10 +272,6 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
                     if isinstance(item, Mapping) and item.get("type") == "image":
                         return True
         return False
-
-    @staticmethod
-    def _normalize_path(path: str | os.PathLike[str]) -> str:
-        return os.path.abspath(os.path.normpath(str(path)))
 
 
 __all__ = ["Qwen35Workflow"]

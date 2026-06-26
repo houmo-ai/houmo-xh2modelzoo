@@ -1,6 +1,6 @@
 """Runtime quick-test helpers for Qwen3.5/Qwen3.6 HMONNX exports.
 
-The workflow API keeps quant/export concerns separate from runtime inference.
+The workflow implementation keeps quant/export concerns separate from runtime inference.
 This module provides the small runtime layer that examples and validation
 scripts use after export: find the HMONNX meta file, run a quick chat, and
 summarize MTP/DFlash speculative-decoding acceptance metrics.

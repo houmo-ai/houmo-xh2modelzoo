@@ -4,7 +4,6 @@ import pytest
 
 from xhmodel_merak.xh_llm.models.gemma4_series.export_plan import Gemma4SeriesExportPlan
 from xhmodel_merak.xh_llm.models.gemma4_series.variants import Gemma4SeriesVariantSpec
-from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
 
 
 def _plan(context_max_length: int) -> Gemma4SeriesExportPlan:
@@ -46,37 +45,3 @@ def test_gemma4_export_contract_allows_full_context_lengths(context_max_length: 
 def test_gemma4_export_contract_rejects_unapproved_context_length():
     with pytest.raises(ValueError, match="context_max_length.*2048.*8192"):
         _plan(4096).validate_fixed_contract()
-
-
-def test_gemma4_workflow_model_name_tracks_context_override():
-    workflow = Gemma4SeriesWorkflow(
-        hf_model_dir="/tmp/gemma4-e2b",
-        config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml",
-    )
-
-    overrides = workflow._with_context_aware_model_name_override(
-        {"export.model.context_max_length": 8192}
-    )
-    model_cfg = workflow.workflow_config.with_overrides(overrides).export["model"]
-
-    assert model_cfg["context_max_length"] == 8192
-    assert model_cfg["prefill_chunk_length"] == 256
-    assert model_cfg["model_name"].endswith("_256_8k")
-
-
-def test_gemma4_workflow_model_name_respects_explicit_override():
-    workflow = Gemma4SeriesWorkflow(
-        hf_model_dir="/tmp/gemma4-e2b",
-        config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml",
-    )
-
-    overrides = workflow._with_context_aware_model_name_override(
-        {
-            "export.model.context_max_length": 8192,
-            "export.model.model_name": "custom_gemma4_name",
-        }
-    )
-    model_cfg = workflow.workflow_config.with_overrides(overrides).export["model"]
-
-    assert model_cfg["context_max_length"] == 8192
-    assert model_cfg["model_name"] == "custom_gemma4_name"

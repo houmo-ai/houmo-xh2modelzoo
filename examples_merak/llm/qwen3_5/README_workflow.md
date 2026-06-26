@@ -1,117 +1,89 @@
-# Qwen3.5 / Qwen3.6 Merak workflow README
+# Qwen3.5 / Qwen3.6 Merak Workflow 使用说明
 
-Use `AutoLLMWorkflow.from_config()` for dense Qwen3.5/Qwen3.6 and Qwen3.6 MoE exports.  The public API is intentionally small: quantization only receives paths/device/overrides, and export consumes the returned `QuantResult`.  Model topology, AutoRound/GPTQModel settings, visual tower size, MTP/DFlash, and GDR fuse are YAML config or override fields.
+本文说明 Qwen3.5、Qwen3.6 dense、Qwen3.6 MoE 在 Merak workflow 下的推荐用法。统一入口是：
 
 ```python
 from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
-workflow = AutoLLMWorkflow.from_config(hf_model_dir, config_path, seed=1024, debug=False)
-quant_result = workflow.quant(output_dir, device, config_overrides=None)
-export_result = workflow.export(quant_result, output_dir, device, config_overrides=None)
-```
-
-See `examples_merak/llm/qwen3_5/qwen3_5_workflow.py` for a copyable standard example with simple constants.
-
-Full model / HMONNX IO documentation: `docs/qwen3_5_hmonnx_io_spec.md`.
-
-## Config defaults and structured help
-
-Upstream integrations should read defaults and help from the model package instead of copying
-per-model tables:
-
-```python
-from xhmodel_merak.xh_llm.models.qwen3_5.workflow_api import (
-    get_default_export_config,
-    get_default_quant_config,
-    get_default_workflow_config,
-    get_export_config_help,
-    get_model_docs,
-    get_quant_config_help,
-    list_recommended_configs,
+workflow = AutoLLMWorkflow.from_config(
+    hf_model_dir="/path/to/hf_model",
+    config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
 )
 
-quant_cfg = get_default_quant_config()
-workflow_cfg = get_default_workflow_config(name="qwen3_5_9b_full_mtp")
-export_cfg = get_default_export_config(family="dense", model_size="9b", variant="dflash")
-model_docs = get_model_docs()
+quant_result = workflow.quant(output_dir="./work_dirs/qwen3_5_quant", device="cuda")
+export_result = workflow.export(
+    quant_result=quant_result,
+    output_dir="./work_dirs/qwen3_5_export",
+    device="cuda",
+)
 ```
 
-- `get_default_quant_config()` returns the default AutoRound -> GPTQModel HF quant section.
-- `get_default_workflow_config(...)` returns one checked-in recommended YAML as a deep copy.
-- `get_default_export_config(...)` returns only the `export` section from one recommended YAML.
-- `get_quant_config_help()` / `get_export_config_help()` return field-level structured help.
-- `get_model_docs()` returns supported model paths, validation scope, and the full doc link.
-- `list_recommended_configs()` returns the stable YAML index (`name`, `family`, `model_size`,
-  `variant`, `visual_size`, `config_path`, `model_type`, `model_name`).
+可直接参考脚本：
 
-Use `name=...` when the exact YAML is known.  Use `family/model_size/variant` for UI selection;
-`visual_only` needs `visual_size=448` or `896` to be unique.
+```text
+examples_merak/llm/qwen3_5/qwen3_5_workflow.py
+```
 
-## Recommended YAML configs
+该脚本覆盖当前推荐链路：
 
-YAML filenames are topology names plus an optional quant-method suffix. The unsuffixed files are the default AutoRound mode1 configs; `_gptq.yaml` companion files run GPTQModel GPTQ with the same export topology. Do not put bit-width tokens such as `w4` or `w8` in workflow YAML filenames.
+```text
+quant -> export -> dump_golden -> quick_test_hmonnx
+```
 
-- 9B full AutoRound: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml`
-- 9B full GPTQ: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_gptq.yaml`
-- 9B MTP: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml`
-- 9B DFlash: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml`
-- 9B visual-only: `configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_visual_only_448.yaml` or `qwen3_5_9b_visual_only_896.yaml`
-- 27B full/MTP/DFlash/visual-only: AutoRound plus `_gptq.yaml` companion configs under `configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/`
-- 35B-A3B MoE full/MTP/DFlash/visual-only: AutoRound plus `_gptq.yaml` companion configs under `configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/`
+## 环境
 
-Default full configs include the visual branch when `export.model.visual_config` exists.  Visual-only configs are separate full visual tower exports.  Default visual buckets are `448x448` and `896x896`; change them in YAML or with overrides.  Full configs use `{"export.model.visual_config.max_size_w": 896, "export.model.visual_config.max_size_h": 896}`; visual-only configs use `{"export.model.max_size_w": 896, "export.model.max_size_h": 896}`.
+```bash
+conda activate xh2modelzoo
+```
 
-### Default config selection
+导出和验证建议单任务使用一张 GPU：
 
-Use the unsuffixed `full.yaml` files as the default production configs unless
-the run explicitly needs MTP, DFlash, visual-only export, or direct GPTQModel
-GPTQ calibration.  These defaults run AutoRound weight-only quantization and
-export the same topology that is evaluated below.
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py ...
+```
 
-| Model | Default Merak workflow YAML | Other topology YAMLs | GPTQ companion |
-| --- | --- | --- | --- |
-| Qwen3.5-9B | `qwen3_5/9b/qwen3_5_9b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
-| Qwen3.6-27B | `qwen3_5/27b/qwen3_6_27b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
-| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`, `full_dflash`, `visual_only_448`, `visual_only_896` | append `_gptq.yaml` |
+## 推荐配置
 
-`get_default_workflow_config(family=..., model_size=..., variant="full")`
-selects the AutoRound default when `quant_method` is omitted.  Pass
-`quant_method="gptq"` or an exact `_gptq` name only when the run should use the
-direct GPTQModel recipe.  Keep runtime defaults aligned with the checked-in
-YAMLs: dense AutoRound uses `batch_size: 8` and `low_gpu_mem_usage: true`; MoE
-AutoRound uses one visible GPU with `batch_size: 8`,
-`gradient_accumulate_steps: 1`, `device_map: "0"`, and
-`low_gpu_mem_usage: true`.
+workflow YAML 位于：
 
-## CEval accuracy summary
+```text
+configs_merak/workflows/xh2a/llm_models/qwen3_5/
+configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/
+```
 
-Source: Feishu evaluation tracker
-`https://houmo.feishu.cn/docx/RBLhdZ3EHoQBiGx4aT9c671Gn7f`, updated
-2026-06-22 11:00:36.  Evaluation uses EvalScope / official dataset prompts,
-CEVAL 5-shot, `max_tokens = max_new_tokens = 4096`, and 1346 CEval questions.
-`weight_only` is the AutoRound weight-only HF/GPTQModel artifact; `hmonnx` is
-the exported HMONNX inference result with patched 8192 KV cache.
+文件命名按模型规模和导出形态组织：
 
-| Model | Float CEval | AutoRound weight-only CEval | HMONNX CEval |
-| --- | ---: | ---: | ---: |
-| Qwen3.5-4B | 82.39% | 79.13% | 79.94% |
-| Qwen3.5-9B | 84.92% | 84.40% | 83.58% |
-| Qwen3.6-27B | 90.64% | 90.27% | 89.90% |
-| Qwen3.6-35B-A3B | 89.60% | 89.90% | 88.71% |
+- `full.yaml`：完整 LLM/VLM 导出，默认 AutoRound weight-only 量化。
+- `full_gptq.yaml`：完整导出，使用 GPTQModel GPTQ 量化。
+- `full_mtp.yaml` / `full_mtp_gptq.yaml`：MTP speculative decoding 导出。
+- `full_dflash.yaml` / `full_dflash_gptq.yaml`：DFlash speculative decoding 导出。
+- `visual_only_448.yaml` / `visual_only_896.yaml`：只导出 visual tower。
+- 带 `_gptq` 后缀的 YAML 使用 `quant.method: gptq`。
+- 不带 `_gptq` 后缀的 YAML 使用 `quant.method: autoround`。
 
-The CEval table is the precision reference for the default full export
-topology.  Qwen3.5-4B is included for completeness from the same evaluation
-tracker, but it still uses the legacy `configs_merak/xh2a/.../4b/*.py`
-configs; checked-in workflow YAML defaults currently cover 9B, 27B, and
-35B-A3B.  MTP, DFlash, and visual-only configs share the quant recipe but
-should still be validated separately when they are used for release.
+常用配置：
 
-## Quantization contract
+| 模型 | 默认 full 配置 | 其他导出形态 |
+| --- | --- | --- |
+| Qwen3.5-9B | `qwen3_5/9b/qwen3_5_9b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.6-27B | `qwen3_5/27b/qwen3_6_27b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
 
-Default YAML quantization is now owned by the GPTQModel API.  Select the
-implementation with `quant.method`: `autoround` runs the AutoRound mode1
-LLM-only recipe by default, while `gptq` runs the GPTQModel recipe directly.
-Do not write `method: mode1` in workflow YAML.
+完整 HMONNX 输入输出说明见：
+
+```text
+docs/qwen3_5_hmonnx_io_spec.md
+```
+
+## 量化
+
+`Qwen35Workflow.quant()` 当前支持三类量化入口：
+
+- `quant: null`：跳过量化，直接使用传入的 `hf_model_dir`。
+- `quant.algorithm: gptqmodel` + `quant.method: autoround`：调用 AutoRound adapter，生成 GPTQModel HF 量化目录。
+- `quant.algorithm: gptqmodel` + `quant.method: gptq`：调用 GPTQModel GPTQ adapter，生成 GPTQModel HF 量化目录。
+
+默认 AutoRound 配置示例：
 
 ```yaml
 quant:
@@ -125,7 +97,6 @@ quant:
   iters: 200
   seed: 42
   quant_nontext_module: false
-  format: auto_gptq        # dense AutoRound recipe default
   calibration:
     dataset: NeelNanda/pile-10k
     nsamples: 128
@@ -136,321 +107,144 @@ quant:
     low_gpu_mem_usage: true
 ```
 
-GPTQ companion YAMLs use `method: gptq`, the README-verified jsonl calibration files, `batch_size: 1`, `device_map: auto`, and `offload_to_disk: false`.
+Qwen3.5/Qwen3.6 workflow 量化要求 `group_size: 64`。
 
-MoE AutoRound YAMLs add the options that were previously only in `scripts_qwen35moe/run_mode1_llm_only.sh`:
-
-```yaml
-quant:
-  format: auto_round:gptqmodel
-  runtime:
-    batch_size: 8
-    gradient_accumulate_steps: 1
-    trust_remote_code: true
-    device_map: "0"
-    low_gpu_mem_usage: true
-  moe:
-    attn_bits: 8
-    shared_expert_bits: 8
-```
-
-Script comparison summary:
-
-| Field | Dense mode1 | MoE mode1 | Workflow YAML |
-| --- | --- | --- | --- |
-| LLM bits/group | `--llm_bits 4 --llm_group_size 64` | same | `bits: 4`, `group_size: 64` |
-| LLM-only | `--mode llm-only` | same | `quant_nontext_module: false` |
-| calibration | `pile-10k`, `nsamples=128`, `seqlen=2048`, `batch_size=8` | same defaults | `calibration.*`, `runtime.batch_size` |
-| seed/sym/iters | `--seed 42 --sym --iters 200` | same defaults | `seed`, `sym`, `iters` |
-| save format | `auto_gptq` | `auto_round:gptqmodel` | `format` |
-| MoE-only knobs | n/a | `device_map`, `low_gpu_mem_usage`, `attn_bits`, `shared_expert_bits` | `runtime.*`, `moe.*` |
-
-`group_size` must remain `64` for Qwen3.5/Qwen3.6 workflow quantization.
-Use overrides for run-specific MoE experiments, e.g.
-`{"quant.iters": 400, "quant.calibration.nsamples": 256}` to reproduce an `n256-iter400` run.
-
-### Quant-only CLI
-
-Use the quant-only entrypoint when upstream only needs to create or reuse the
-GPTQModel-compatible HF artifact.  The CLI intentionally exposes only paths and
-source selection; AutoRound details such as `group_size=64`, `bits`, `dataset`,
-MoE `attn_bits`, and `shared_expert_bits` stay in YAML.
+如果已经有量化后的 HF 模型目录，不需要再走量化分支。直接把
+`--model-dir` 指向该量化 HF 目录，并设置 `--export-from-quanted-model`：
 
 ```bash
-# Dense 9B AutoRound -> GPTQModel-compatible HF artifact.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_quant.py \
-  --hf-model-dir weights/Qwen3.5-9B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --output-dir work_dirs/qwen3_5_9b_quant \
-  --device cuda:0 \
-  --force
-
-# MoE 35B-A3B AutoRound with YAML-configured balanced device_map,
-# low_gpu_mem_usage, attn_bits=8, and shared_expert_bits=8.
-CUDA_VISIBLE_DEVICES=0,1 python examples_merak/llm/qwen3_5/qwen3_5_quant.py \
-  --hf-model-dir weights/Qwen3.6-35B-A3B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
-  --output-dir work_dirs/qwen3_6_35b_a3b_quant \
-  --device cuda \
-  --force
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir /path/to/quanted_hf_model \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_export \
+  --overwrite
 ```
 
-For validation-only paths, the same CLI can return a `QuantResult` without
-running AutoRound:
-
-```bash
-python examples_merak/llm/qwen3_5/qwen3_5_quant.py \
-  --hf-model-dir weights/Qwen3.5-9B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --output-dir work_dirs/qwen3_5_9b_quant \
-  --base
-```
-
-For base validation, override the top-level quant section to `None`:
+代码里等价写法是：
 
 ```python
-quant_result = workflow.quant(output_dir, device, config_overrides={"quant": None})
+quant_result = workflow.quant(
+    output_dir="./work_dirs/qwen3_5_quant",
+    device="cuda",
+    config_overrides={"quant": None},
+)
 ```
 
-For an existing externally quantized HF/GPTQModel artifact, replace the whole quant section:
+此时 `QuantResult.skipped` 为 `True`，`export()` 会直接使用 workflow 初始化时传入的 `hf_model_dir`。
 
-```python
-# Qwen3.5 9B
-config_overrides = {
-    "quant": {
-        "algorithm": "existing_hf",
-        "artifact_format": "gptqmodel_hf",
-        "existing_hf_model_dir": "weights/Qwen3.5-9B-mode1-llm-only",
-    }
-}
+## 导出
 
-# Qwen3.6 35B-A3B MoE
-config_overrides = {
-    "quant": {
-        "algorithm": "existing_hf",
-        "artifact_format": "gptqmodel_hf",
-        "existing_hf_model_dir": "weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400",
-    }
-}
-```
-
-### Quant + export CLI
-
-Use `qwen3_5_quant_export.py` when upstream wants one command that reads a
-workflow YAML, runs quantization, then exports HMONNX.  If an external quantized
-HF/GPTQModel directory already exists, pass it with `--existing-hf-model-dir`;
-the command will skip real quantization and export that directory directly.
-
-```bash
-# Real 9B quant -> export.
-CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.5-9B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --quant-output-dir work_dirs/qwen3_5_9b_quant \
-  --export-output-dir work_dirs/qwen3_5_9b_export \
-  --device cuda:0 \
-  --force
-
-CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.6-35B-A3B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
-  --quant-output-dir work_dirs/qwen3_6_35b_a3b_quant \
-  --export-output-dir work_dirs/qwen3_6_35b_a3b_export \
-  --device cuda:0 \
-  --force
-
-# Existing quant HF -> export only.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.5-9B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --existing-hf-model-dir weights/Qwen3.5-9B-mode1-llm-only \
-  --export-output-dir work_dirs/qwen3_5_9b_export \
-  --device cuda:0 \
-  --force
-
-# Existing quant HF -> export only.
-CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.6-35B-A3B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
-  --existing-hf-model-dir weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400 \
-  --export-output-dir work_dirs/qwen3.6-35B-A3B-fuse_gdr_block_recurrent_ops \
-  --device cuda:0 \
-  --force \
-  --override export.model.fuse_gdr_block_recurrent_ops=true
-
-# Existing quant HF -> export only.
-CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/SGGM-VL-27B-R3.6 \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full.yaml \
-  --existing-hf-model-dir weights/SGGM-VL-27B-R3.6-mode1-llm-only-W4G64 \
-  --export-output-dir work_dirs/SGGM-VL-27b_export \
-  --device cuda:0 \
-  --force
-
-# Base HF -> export only.
-python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.5-9B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --base \
-  --export-output-dir work_dirs/qwen3_5_9b_base_export \
-  --device cuda:0 \
-  --force
-
-python examples_merak/llm/qwen3_5/qwen3_5_quant_export.py \
-  --hf-model-dir weights/Qwen3.5-27B \
-  --config configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
-  --base \
-  --export-output-dir work_dirs/qwen3_5_9b_base_export \
-  --device cuda:0 \
-  --force
-
-```
-
-Run-specific export tweaks stay as dotted config overrides, for example
-`--override export.model.fuse_gdr_ops=true` for GDRChunkScan, or
-`--override export.model.fuse_gdr_block_recurrent_ops=true` for
-GDRBlockTriInverse + GDRRecurrentScan.  The CLI intentionally does not expose
-quant internals such as bits, group size, dataset, or MoE bit routing.
-
-## Export overrides
-
-`export()` consumes the `QuantResult` from `quant()`.  Do not expose variant/profile/mode/base/quant as public parameters; select a YAML and use explicit overrides only when needed.
-
-GDR fuse switches remain config/override-only.  `fuse_gdr_ops` only controls
-GDRChunkScan because it can change the prefill recurrent-state HMONNX I/O
-contract; `fuse_gdr_block_recurrent_ops` controls GDRBlockTriInverse and
-GDRRecurrentScan without changing model inputs/outputs:
+导出阶段消费 `quant()` 返回的 `QuantResult`：
 
 ```python
 export_result = workflow.export(
-    quant_result,
-    output_dir,
-    device,
+    quant_result=quant_result,
+    output_dir="./work_dirs/qwen3_5_export",
+    device="cuda",
+)
+```
+
+如需临时调整 visual tower 尺寸，可以通过 override 修改 YAML 字段：
+
+```python
+export_result = workflow.export(
+    quant_result=quant_result,
+    output_dir="./work_dirs/qwen3_5_export",
+    device="cuda",
     config_overrides={
-        "export.model.fuse_gdr_ops": True,
-        "export.model.fuse_gdr_block_recurrent_ops": True,
+        "export.model.visual_config.max_size_h": 896,
+        "export.model.visual_config.max_size_w": 896,
     },
 )
 ```
 
-## Running
-
-```bash
-conda activate xhquant_55
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py
-```
-
-`qwen3_5_workflow.py` runs the full demo path:
-
-```text
-quant -> export -> dump_golden -> quick_test_hmonnx
-```
-
-## Quick HMONNX conversation and SpecDecode metrics
-
-Use the top-level `qwen3_5_xh_hmonnx_generate.py` demo or `quick_test_hmonnx()` after export to run a fast runtime check.  It finds the
-exported `hmquant*/golden_meta_info.json`, runs normal HMONNX generate for full
-or visual exports, and automatically switches to MTP/DFlash speculative decoding
-when the meta contains `spec_decode.mode`; the same demo script therefore supports normal, MTP, and DFlash HMONNX outputs.
+GDR fuse 也通过配置或 override 控制：
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import quick_test_hmonnx
+config_overrides = {
+    "export.model.fuse_gdr_ops": True,
+    "export.model.fuse_gdr_block_recurrent_ops": True,
+}
+```
+
+普通 full / visual-only / MTP / DFlash 不通过脚本参数选择模型结构，而是通过选择不同 YAML 文件决定。
+
+## Golden 和 Quick Test
+
+导出完成后可以生成 golden：
+
+```python
+workflow.dump_golden(
+    export_result=export_result,
+    device="cuda",
+    input_messages={"text": "用中文简单介绍 Qwen3.5。"},
+)
+```
+
+也可以直接使用示例脚本参数：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir /path/to/hf_model \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_5_quant \
+  --export-output-dir work_dirs/qwen3_5_export \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+```
+
+quick test 使用：
+
+```python
+from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import quick_test_hmonnx
 
 quick_result = quick_test_hmonnx(
     export_result,
-    prompt="用中文介绍一下 Qwen3.5",
-    device="cuda:0",
+    prompt="用中文介绍一下 Qwen3.5。",
+    device="cuda",
     max_new_tokens=64,
     do_sample=False,
 )
-
-print(quick_result.output_text)
-print(quick_result.tokens_per_second)
-print(quick_result.spec_decode_mode)
-print(quick_result.accept_rate)
 ```
 
-The MTP/DFlash acceptance rate is computed as:
+`quick_test_hmonnx()` 会根据导出的 meta 自动选择普通 generate 或 speculative decoding。MTP/DFlash 导出的接受率统计来自 `quick_result.accept_rate` 和 `quick_result.stats`。
 
-```text
-accept_rate = accepted_drafts_total / draft_tokens_total
-```
-
-`accepted_drafts_total` and `draft_tokens_total` come from the Qwen3.5
-spec-decode runtime with `return_stats=True`.  The same result also records
-`avg_accepted_per_round` and `accepted_drafts_per_round` in `quick_result.stats`.
-
-For CLI use, run the normal HMONNX generate wrapper:
+命令行生成可以使用：
 
 ```bash
 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
-  --config work_dirs/qwen3_5_9b_workflow_export/hmquant*/golden_meta_info.json \
+  --config work_dirs/qwen3_5_export/hmquant*/golden_meta_info.json \
   --prompt "用中文介绍一下 Qwen3.5" \
   --no-sample \
   --max-new-tokens 128
 ```
 
-For MTP/DFlash acceptance-rate checks, run the spec-decode wrapper:
+MTP/DFlash 的专项 speculative decoding 验证可以使用：
 
 ```bash
 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
-  --config work_dirs/qwen3_5_validation_matrix/qwen35_9b_mtp_existing_hf/export/hmquant*/golden_meta_info.json \
-  --prompt "写一首关于 AI 的诗" \
+  --config work_dirs/qwen3_5_export/hmquant*/golden_meta_info.json \
+  --prompt "写一首关于 AI 的短诗" \
   --max-new-tokens 128 \
   --benchmark-runs 1
 ```
 
-For programmatic integrations, call the lower-level helpers directly:
+## 示例脚本参数
 
-- `workflow_runtime.find_hmonnx_meta_file(export_result_or_path)`
-- `workflow_runtime.hmonnx_generate(meta_file=..., prompt=...)`
-- `workflow_runtime.spec_decode_generate(meta_file=..., prompt=...)`
-- `workflow_runtime.quick_test_hmonnx(export_result_or_meta_file, prompt=...)`
+`qwen3_5_workflow.py` 的常用参数：
 
-## Runtime validation matrix
+- `--model-dir`：HF 模型目录；如果要从量化后的 HF 模型导出，也传该目录。
+- `--config-path`：workflow YAML 路径。
+- `--quant-output-dir`：量化输出目录。
+- `--export-output-dir`：HMONNX 导出输出目录。
+- `--device`：量化、导出、golden、quick test 使用的设备。
+- `--overwrite`：删除已有导出目录后重跑。
+- `--dump-golden`：导出后生成 golden。
+- `--quick-test`：导出后运行 HMONNX quick test。
+- `--export-from-quanted-model`：跳过量化，直接从 `--model-dir` 指定的 HF 目录导出。
+- `--bits`：临时覆盖 `quant.bits`。
+- `--max-size-h` / `--max-size-w`：临时覆盖 visual tower 输入尺寸。
 
-Use `debug_scripts/qwen3_5_validation_matrix.py` for the requested first-pass verification matrix.  It runs 9B and 35B-A3B with base HF weights and existing external HF/GPTQModel quant artifacts, each with `fuse_gdr_ops=false` and `fuse_gdr_ops=true` for the chunk-scan path.  The block/recurrent GDR pair is enabled independently with `export.model.fuse_gdr_block_recurrent_ops=true` when validating the compiler-ready ops.  This does not add public workflow parameters; each case is just a YAML plus explicit `config_overrides`.
-
-```bash
-# Check dependencies, YAMLs, base weights, and external quant artifacts first.
-conda activate xhquant_55
-python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py --preflight-only
-
-# Run the full 8-case matrix.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py --force
-
-# Run one case without golden generation.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
-  --scenario qwen35_9b_existing_hf_fuse_false \
-  --skip-golden \
-  --force
-
-# Run one case and write quick_test_result.json with output and accept_rate.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
-  --scenario qwen35_9b_mtp_existing_hf \
-  --quick-test \
-  --quick-test-max-new-tokens 64 \
-  --force
-
-# Reuse an already exported scenario and only run quick_test_hmonnx.
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_validation_matrix.py \
-  --scenario qwen35_9b_mtp_existing_hf \
-  --skip-export \
-  --quick-test \
-  --quick-test-max-new-tokens 256
-```
-
-Matrix:
-
-| Scenario | HF model | Quant source | fuse_gdr_ops |
-| --- | --- | --- | --- |
-| `qwen35_9b_base_fuse_false` | `weights/Qwen3.5-9B` | base override `{"quant": None}` | `false` |
-| `qwen35_9b_base_fuse_true` | `weights/Qwen3.5-9B` | base override `{"quant": None}` | `true` |
-| `qwen35_9b_existing_hf_fuse_false` | `weights/Qwen3.5-9B` | `weights/Qwen3.5-9B-mode1-llm-only` | `false` |
-| `qwen35_9b_existing_hf_fuse_true` | `weights/Qwen3.5-9B` | `weights/Qwen3.5-9B-mode1-llm-only` | `true` |
-| `qwen36_35b_a3b_base_fuse_false` | `weights/Qwen3.6-35B-A3B` | base override `{"quant": None}` | `false` |
-| `qwen36_35b_a3b_base_fuse_true` | `weights/Qwen3.6-35B-A3B` | base override `{"quant": None}` | `true` |
-| `qwen36_35b_a3b_existing_hf_fuse_false` | `weights/Qwen3.6-35B-A3B` | `weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400` | `false` |
-| `qwen36_35b_a3b_existing_hf_fuse_true` | `weights/Qwen3.6-35B-A3B` | `weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400` | `true` |
-
-Legacy Python config entrypoints and generation helpers remain supported. New workflow integrations should use `AutoLLMWorkflow.from_config()` with workflow YAMLs.
+新增 workflow 集成优先复用 `AutoLLMWorkflow.from_config()` 和 checked-in YAML，不要新增一套模型结构参数。

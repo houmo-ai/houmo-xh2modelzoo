@@ -1,7 +1,7 @@
 """Qwen3.5/Qwen3.6 HMONNX demo CLI.
 
 The demo accepts an exported ``golden_meta_info.json`` or export directory and
-delegates to ``workflow_runtime.hmonnx_generate``.  Normal full/visual exports,
+delegates to ``hmonnx_validation.hmonnx_generate``.  Normal full/visual exports,
 MTP, and DFlash are selected from the HMONNX meta information rather than by
 extra public flags.
 """
@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(args: argparse.Namespace) -> None:
-    from xhmodel_merak.xh_llm.models.qwen3_5.workflow_runtime import (
+    from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import (
         hmonnx_generate,
         print_quick_test_result,
     )
