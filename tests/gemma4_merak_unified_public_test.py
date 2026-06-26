@@ -736,6 +736,120 @@ def test_gemma4_series_quant_export_rejects_non_mtp_config_with_assistant():
         gemma4_series_quant_export._validate_mtp_config_complete(args, config_overrides)
 
 
+def test_gemma4_series_quant_export_reports_incomplete_mtp_config(tmp_path):
+    from examples_merak.llm.gemma4_series import gemma4_series_quant_export
+
+    config_path = tmp_path / "gemma4_incomplete_mtp.yaml"
+    config_path.write_text(
+        """
+quant: {}
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4ForConditionalGeneration
+    hf_model: /tmp/base
+    model_name: test
+    spec_decode_mode: mtp
+    num_draft_tokens: 6
+    mtp_config:
+      assistant_hf_model: /tmp/assistant
+      target_hf_model: /tmp/target
+      body_quant_type: w8a8h1_sefp
+      lm_head_quant_type: w4a8h0_ssfp
+      num_draft_tokens: 6
+""",
+        encoding="utf-8",
+    )
+    args = gemma4_series_quant_export.build_parser().parse_args(
+        [
+            "--hf-model-dir",
+            "/tmp/base",
+            "--config",
+            str(config_path),
+            "--export-output-dir",
+            "/tmp/export",
+            "--existing-hf-model-dir",
+            "/tmp/quant",
+            "--mtp-assistant-model-dir",
+            "/tmp/assistant",
+        ]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        gemma4_series_quant_export._validate_mtp_config_complete(args)
+
+    message = str(exc_info.value)
+    assert "full_mtp YAML" in message
+    assert str(config_path) in message
+    assert "export.model.mtp_config.assistant_layer_pattern" in message
+    assert "export.model.mtp_config.shared_kv_inputs" in message
+
+
+def test_gemma4_series_quant_export_validates_effective_mtp_config(tmp_path):
+    from examples_merak.llm.gemma4_series import gemma4_series_quant_export
+
+    config_path = tmp_path / "gemma4_effective_mtp.yaml"
+    config_path.write_text(
+        """
+quant: {}
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4ForConditionalGeneration
+    hf_model: /tmp/base
+    model_name: test
+    spec_decode_mode: mtp
+    num_draft_tokens: 6
+    mtp_config:
+      assistant_hf_model: /tmp/default_assistant
+      target_hf_model: /tmp/default_target
+      body_quant_type: w8a8h1_sefp
+      lm_head_quant_type: w4a8h0_ssfp
+      batch_size: 1
+      input_sequence_length: 1
+      context_max_length: 4096
+      use_cache: true
+      num_draft_tokens: 6
+      assistant_num_hidden_layers: 4
+      assistant_layer_pattern:
+      - sliding_attention
+      - sliding_attention
+      - sliding_attention
+      - full_attention
+      assistant_hidden_size: 256
+      assistant_num_attention_heads: 4
+      assistant_num_key_value_heads: 1
+      head_dim: 256
+      shared_kv_inputs:
+      - shared_key_cache_sliding
+      - shared_value_cache_sliding
+      - shared_key_cache_full
+      - shared_value_cache_full
+""",
+        encoding="utf-8",
+    )
+    args = gemma4_series_quant_export.build_parser().parse_args(
+        [
+            "--hf-model-dir",
+            "/tmp/base",
+            "--config",
+            str(config_path),
+            "--export-output-dir",
+            "/tmp/export",
+            "--existing-hf-model-dir",
+            "/tmp/quant",
+            "--mtp-assistant-model-dir",
+            "/tmp/assistant",
+        ]
+    )
+    config_overrides = gemma4_series_quant_export._merge_overrides(
+        gemma4_series_quant_export._build_quant_overrides(args),
+        gemma4_series_quant_export._build_mtp_overrides(args),
+    )
+
+    gemma4_series_quant_export._validate_mtp_config_complete(args, config_overrides)
+
+
 def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
     import json
 
@@ -744,7 +858,7 @@ def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
     export_dir = tmp_path / "export"
     export_dir.mkdir()
     meta_path = export_dir / "golden_meta_info.json"
-    draft_path = export_dir / "draft_onnx" / "draft.onnx"
+    draft_path = export_dir / "mtp_draft_decode" / "draft.onnx"
     draft_path.parent.mkdir()
     draft_path.write_text("draft", encoding="utf-8")
     meta_path.write_text(
@@ -775,8 +889,8 @@ def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
         meta_path,
         draft_path,
         lm_head_quant_type="w3a8h0_ssfp",
-        shared_sliding_len=None,
-        shared_full_len=None,
+        shared_sliding_len=768,
+        shared_full_len=2048,
     )
 
     updated = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -787,13 +901,293 @@ def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
     assert spec_decode["shared_full_cache_length"] == 4096
     assert spec_decode["target_decode_sliding_output_length"] == 1040
     assert spec_decode["draft_head_weight_bits"] == 3
-    assert spec_decode["draft_decode_onnx"] == "draft_onnx/draft.onnx"
+    assert spec_decode["draft_decode_onnx"] == "mtp_draft_decode/draft.onnx"
     assert updated["spec_decode_block_size"] == 6
     assert updated["spec_decode_verify_length"] == 7
 
 
+def test_gemma4_series_mtp_manifest_uses_non_default_model_draft_tokens(tmp_path):
+    import json
+
+    from examples_merak.llm.gemma4_series import gemma4_series_quant_export
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    meta_path = export_dir / "golden_meta_info.json"
+    draft_path = export_dir / "mtp_draft_decode" / "draft.onnx"
+    draft_path.parent.mkdir()
+    draft_path.write_text("draft", encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "spec_decode_mode": "mtp",
+                # Legacy top-level fields may be stale after a non-default
+                # MTP export.  model_config/spec_decode must win.
+                "spec_decode_block_size": 4,
+                "spec_decode_verify_length": 5,
+                "spec_decode": {
+                    "mode": "mtp",
+                    "shared_sliding_cache_length": 2304,
+                    "shared_full_cache_length": 8192,
+                },
+                "sliding_window": 2048,
+                "model_config": {
+                    "num_draft_tokens": 8,
+                    "sliding_window": 2048,
+                    "context_max_length": 8192,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gemma4_series_quant_export._update_manifest_with_draft(
+        meta_path,
+        draft_path,
+        lm_head_quant_type="w4a8h0_ssfp",
+        shared_sliding_len=1152,
+        shared_full_len=4096,
+    )
+
+    updated = json.loads(meta_path.read_text(encoding="utf-8"))
+    spec_decode = updated["spec_decode"]
+    assert spec_decode["block_size"] == 8
+    assert spec_decode["verify_length"] == 9
+    assert spec_decode["shared_sliding_cache_length"] == 2304
+    assert spec_decode["shared_full_cache_length"] == 8192
+    assert spec_decode["target_decode_sliding_output_length"] == 2064
+    assert spec_decode["draft_head_weight_bits"] == 4
+    assert updated["spec_decode_block_size"] == 8
+    assert updated["spec_decode_verify_length"] == 9
+
+
+def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tmp_path):
+    import json
+    import sys
+    import types
+
+    from xhmodel_merak.xh_llm.models.gemma4_series import mtp_workflow
+
+    hm_dir = tmp_path / "out" / "hmquant_fake"
+    hm_dir.mkdir(parents=True)
+    (hm_dir / "prefill.onnx").write_text("prefill", encoding="utf-8")
+    meta_path = hm_dir / "golden_meta_info.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "spec_decode_mode": "mtp",
+                "spec_decode": {"mode": "mtp"},
+                "model_config": {
+                    "chip_arch": "XH2a",
+                    "context_max_length": 2048,
+                    "num_draft_tokens": 4,
+                    "mtp_config": {
+                        "assistant_hf_model": "/tmp/assistant",
+                        "target_hf_model": "/tmp/base",
+                        "input_sequence_length": 1,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeConfigDict(dict):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+
+    class FakePrecisionMode:
+        ALIGNED = "aligned"
+
+    fake_logger = SimpleNamespace(info=lambda *args, **kwargs: None)
+    fake_xhquant_api = types.ModuleType("xhquant.api")
+    fake_xhquant_api.ConfigDict = FakeConfigDict
+    fake_xhquant_api.PrecisionMode = FakePrecisionMode
+    fake_xhquant_api.get_xhquant_logger = lambda: fake_logger
+    fake_xhquant_api.ptq_quantize = lambda *args, **kwargs: None
+    fake_xhquant = types.ModuleType("xhquant")
+    fake_xhquant.api = fake_xhquant_api
+    monkeypatch.setitem(sys.modules, "xhquant", fake_xhquant)
+    monkeypatch.setitem(sys.modules, "xhquant.api", fake_xhquant_api)
+
+    class FakeDraftModel:
+        quanted_model = object()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def init_wrap_model(self):
+            pass
+
+        def prepare_inputs(self, _data):
+            return {"inputs_embeds": object()}
+
+        def convert_to_fronted_graph(self, _dummy):
+            pass
+
+        def convert_to_quant_graph(self, _chip_arch):
+            pass
+
+        def convert_to_export_graph(self, _dummy):
+            pass
+
+        def to_export_onnx(self, _dummy, output_dir, prefix):
+            onnx_file = Path(output_dir) / f"{prefix}.onnx"
+            onnx_file.write_text("draft", encoding="utf-8")
+            return [str(onnx_file)]
+
+        def release_exported_model(self):
+            pass
+
+        def release_quanted_model(self):
+            pass
+
+        def release_frontend_model(self):
+            pass
+
+        def release_wraped_model(self):
+            pass
+
+    fake_mtp_model = types.ModuleType(
+        "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model"
+    )
+    fake_mtp_model.XHGemma4SeriesAssistantDraftModel = FakeDraftModel
+    monkeypatch.setitem(
+        sys.modules,
+        "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model",
+        fake_mtp_model,
+    )
+
+    draft_onnx = mtp_workflow.export_mtp_draft(
+        SimpleNamespace(work_dir=str(tmp_path / "out")),
+        hf_model_dir="/tmp/base",
+    )
+
+    assert draft_onnx is not None
+    assert draft_onnx.parent == hm_dir / "mtp_draft_decode"
+    assert not (hm_dir / "draft_onnx").exists()
+    updated = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert updated["spec_decode"]["draft_decode_onnx"].startswith("mtp_draft_decode/")
+    assert updated["draft_decode_onnx_file"].startswith("mtp_draft_decode/")
+
+
+def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series import mtp_workflow
+    from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
+    from xhmodel_merak.xh_llm.workflows.base import BaseHMONNXWorkflow
+    from xhmodel_merak.xh_llm.workflows.result import ExportResult, QuantResult
+
+    calls = []
+
+    def fake_base_export(self, quant_result, output_dir, device, config_overrides=None):
+        hm_dir = tmp_path / "out" / "hmquant_fake"
+        hm_dir.mkdir(parents=True)
+        (hm_dir / "prefill.onnx").write_text("prefill", encoding="utf-8")
+        (hm_dir / "golden_meta_info.json").write_text(
+            json.dumps(
+                {
+                    "spec_decode_mode": "mtp",
+                    "spec_decode": {"mode": "mtp"},
+                    "model_config": {
+                        "mtp_config": {
+                            "assistant_hf_model": "/tmp/assistant",
+                            "target_hf_model": "/tmp/base",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ExportResult(work_dir=str(tmp_path / "out"), config_file=str(tmp_path / "out/config.yaml"))
+
+    def fake_export_mtp_draft(export_result, *, hf_model_dir, chip_arch=None, draft_dtype="float16"):
+        calls.append((export_result.work_dir, hf_model_dir, chip_arch, draft_dtype))
+        return tmp_path / "out/hmquant_fake/mtp_draft_decode/draft.onnx"
+
+    monkeypatch.setattr(BaseHMONNXWorkflow, "export", fake_base_export)
+    monkeypatch.setattr(Gemma4SeriesWorkflow, "_validate_export_model", lambda self, config_overrides: None)
+    monkeypatch.setattr(mtp_workflow, "export_mtp_draft", fake_export_mtp_draft)
+
+    workflow = Gemma4SeriesWorkflow(
+        hf_model_dir="/tmp/base",
+        config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
+    )
+    result = workflow.export(
+        quant_result=QuantResult(hf_model_dir="/tmp/base", skipped=True),
+        output_dir=str(tmp_path / "out"),
+        device="cpu",
+    )
+
+    assert result.work_dir == str(tmp_path / "out")
+    assert calls == [(str(tmp_path / "out"), workflow.hf_model_dir, None, "float16")]
+
+
+def test_gemma4_series_workflow_dump_golden_owns_mtp_draft_golden(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
+    from xhmodel_merak.xh_llm.workflows.result import ExportResult
+
+    hm_dir = tmp_path / "out" / "hmquant_fake"
+    hm_dir.mkdir(parents=True)
+    meta_file = hm_dir / "golden_meta_info.json"
+    meta_file.write_text(
+        json.dumps(
+            {
+                "spec_decode_mode": "mtp",
+                "spec_decode": {
+                    "mode": "mtp",
+                    "draft_decode_onnx": "mtp_draft_decode/draft.onnx",
+                },
+                "model_config": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyHMONNX:
+        enable_golden = False
+
+        def to(self, device):
+            self.device = device
+
+    import xhmodel_merak.xh_llm as xh_llm
+
+    monkeypatch.setattr(
+        xh_llm,
+        "AutoLLMHONNXModel",
+        SimpleNamespace(from_pretrained=lambda _meta_file: DummyHMONNX()),
+    )
+    monkeypatch.setattr(Gemma4SeriesWorkflow, "_build_golden_message_cases", lambda *args, **kwargs: [])
+    called = []
+
+    def fake_dump_mtp_draft_golden(self, meta_file_arg, device, *, logger=None):
+        called.append((meta_file_arg, device, logger is not None))
+        return hm_dir / "mtp_draft_decode"
+
+    monkeypatch.setattr(Gemma4SeriesWorkflow, "_dump_mtp_draft_golden", fake_dump_mtp_draft_golden)
+
+    workflow = Gemma4SeriesWorkflow(
+        hf_model_dir="/tmp/base",
+        config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
+    )
+    result = workflow.dump_golden(
+        export_result=ExportResult(work_dir=str(tmp_path / "out"), config_file=str(tmp_path / "out/config.yaml")),
+        device="cpu",
+        input_messages={"text": "hello"},
+    )
+
+    assert result == str(meta_file)
+    assert called == [(str(meta_file), "cpu", True)]
+
+
 def test_gemma4_series_quant_export_non_mtp_leaves_spec_decode_unset():
     from examples_merak.llm.gemma4_series import gemma4_series_quant_export
+
+    assert not hasattr(gemma4_series_quant_export, "_export_mtp_draft")
 
     args = gemma4_series_quant_export.build_parser().parse_args(
         [
@@ -987,6 +1381,36 @@ def test_gemma4_series_decode_preprocess_skips_full_attention_mask():
     assert len(outputs) == 6
     assert outputs[3].shape[-1] != 8  # this is sliding_attention_mask, not full mask
 
+
+
+def test_gemma4_series_mtp_eos_reads_exported_generation_config(tmp_path):
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
+        _generation_config_candidates,
+        _resolve_eos_token_ids,
+    )
+
+    export_dir = tmp_path / "hmquant_test"
+    hf_config_dir = export_dir / "hf_config"
+    hf_config_dir.mkdir(parents=True)
+    meta_path = export_dir / "golden_meta_info.json"
+    meta_path.write_text("{}", encoding="utf-8")
+    (hf_config_dir / "generation_config.json").write_text(
+        '{"eos_token_id": [1, 106, 50], "pad_token_id": 0}',
+        encoding="utf-8",
+    )
+
+    class Tokenizer:
+        eos_token_id = 1
+
+    meta = {
+        "_meta_path": str(meta_path),
+        "hf_config": "hf_config",
+        "model_config": {},
+    }
+
+    eos_token_ids = _resolve_eos_token_ids(Tokenizer(), *_generation_config_candidates(meta))
+
+    assert eos_token_ids == {1, 106, 50}
 
 def test_gemma4_series_mtp_sliding_mask_uses_compact_cache_tail():
     from xhmodel_merak.xh_llm.models.gemma4_series.data_preprocess import Gemma4DataPreprocess
