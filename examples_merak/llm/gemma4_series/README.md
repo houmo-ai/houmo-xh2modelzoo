@@ -110,8 +110,10 @@ xh2_gemma4_31b_full_autoround_w4a8_256_2k_mpe256k
 
 MTP uses the same Gemma4 Series model family.  Use the `full_mtp` YAMLs with
 `gemma4_series_quant_export.py`; pass the assistant/draft HF directory from the
-CLI.  The script exports target HMONNX first, then exports assistant draft ONNX
-into the same export directory and records it in `golden_meta_info.json`.
+CLI.  `Gemma4SeriesWorkflow.export()` owns both target HMONNX export and
+assistant draft ONNX export; the CLI only injects paths/config overrides.  The
+draft is written under the same exported model directory and recorded in
+`golden_meta_info.json`.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
@@ -168,218 +170,136 @@ python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
   --preset 26b-a4b --dry-run
 ```
 
-## 一键从头量化、导出、dump golden、跑 demo
+## 一键量化/导出：`gemma4_series_quant_export.py`
 
-当前重型任务脚本就是下面这套：从原始 HF checkpoint 出发，直接使用
-checked-in GPTQModel / AutoRound workflow YAML，按“单 GPU 单任务”调度
-4 个模型 × 2 种量化，然后对每个产物跑
-text / image / video demo；E2B/E4B 额外跑 audio demo。导出规格固定为
-`context_max_length=8192`、`prefill_chunk_length=256`、`slice_window` KV cache、`--golden`。
+重型量化导出统一走 `gemma4_series_quant_export.py`，不要再通过
+`gemma4_workflow_demo.py` 做正式产物。脚本只负责：
 
-> 如果只想跑当前最优组合，把 `TASKS` 改成：
-> `('e2b','autoround'), ('e4b','gptq'), ('26b-a4b','gptq'), ('31b','gptq')`。
+1. 读取 workflow YAML；
+2. 注入 HF / existing quant / MTP assistant 路径；
+3. 调用 `workflow.quant()`、`workflow.export()`、可选 `workflow.dump_golden()`；
+4. 打印 JSON summary，最终运行以 `golden_meta_info.json` 为单一 manifest。
+
+单机多任务时遵守“单 GPU 单任务”，例如：
 
 ```bash
-cat > /tmp/run_gemma4_quant_export_demo.py <<'PY'
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import json
-import os
-import shlex
-import subprocess
-import time
-from pathlib import Path
-
-REPO = Path('/data01/home/yujy/work/xh2modelzoo')
-GPTQMODEL_REPO = REPO.parent / 'gptqmodel'
-PYTHON = '/data01/home/yujy/miniconda3/envs/gemma4/bin/python'
-ROOT = REPO / 'work_dirs' / f'qtl384_gemma4_quant_export_demo_{time.strftime("%Y%m%d_%H%M%S")}'
-CONFIG_DIR = ROOT / 'configs'
-LOG_DIR = ROOT / 'logs'
-
-# 单 GPU 单任务；按机器空闲情况改这里即可。
-GPUS = [0, 1, 5, 6, 7]
-TASKS = [
-    ('e2b', 'gptq'), ('e2b', 'autoround'),
-    ('e4b', 'gptq'), ('e4b', 'autoround'),
-    ('31b', 'gptq'), ('31b', 'autoround'),
-    ('26b-a4b', 'gptq'), ('26b-a4b', 'autoround'),
-]
-
-CONFIGS = {
-    ('e2b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml',
-    ('e2b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml',
-    ('e4b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml',
-    ('e4b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_autoround.yaml',
-    ('31b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml',
-    ('31b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml',
-    ('26b-a4b', 'gptq'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml',
-    ('26b-a4b', 'autoround'): REPO / 'configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml',
-}
-
-LONG_PROMPT = (REPO / 'work_dirs/qtl384_gemma4_exports_8192_20260620/long_prompt.txt').read_text(encoding='utf-8')
-IMAGE = REPO / '.omx/fixtures/gemma4_strict/strict_image.png'
-VIDEO = REPO / '.omx/fixtures/gemma4_strict/video_frames'
-AUDIO = REPO / '.omx/fixtures/gemma4_strict/secret_orange.wav'
-
-
-def q(x: object) -> str:
-    return shlex.quote(str(x))
-
-
-def write_configs() -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    for model, algo in TASKS:
-        source_cfg = CONFIGS[(model, algo)]
-        cfg = CONFIG_DIR / f'{model}_{algo}.yaml'
-        cfg.write_text(source_cfg.read_text(encoding='utf-8'), encoding='utf-8')
-        manifest.append({'model': model, 'algorithm': algo, 'config': str(cfg.relative_to(REPO))})
-    (ROOT / 'manifest_configs.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-
-
-def task_script(model: str, algo: str, gpu: int) -> tuple[str, Path, Path]:
-    task = f'{model}_{algo}'.replace('-', '_')
-    task_dir = ROOT / task
-    task_dir.mkdir(parents=True, exist_ok=True)
-    cfg = CONFIG_DIR / f'{model}_{algo}.yaml'
-    prompt_path = task_dir / 'long_prompt.txt'
-    prompt_path.write_text(LONG_PROMPT, encoding='utf-8')
-    supports_audio = model in {'e2b', 'e4b'}
-
-    workflow_cmd = ' '.join([
-        q(PYTHON), 'examples_merak/llm/gemma4_series/gemma4_workflow_demo.py',
-        '--preset', q(model), '--action', 'quant-export', '--config-path', q(cfg),
-        '--work-dir', q(task_dir), '--device', 'cuda:0',
-        '--context-max-length', '8192', '--prefill-chunk-length', '256',
-        '--sliding-kv-cache-input-mode', 'slice_window', '--golden', '--force',
-        '--prompt', '"$(cat ' + q(prompt_path) + ')"',
-    ])
-    gen_base = f'{q(PYTHON)} examples_merak/llm/gemma4_series/generate.py --backend hmonnx --model-config "$META" --device cuda:0'
-    lines = [
-        '#!/usr/bin/env bash',
-        'set -uo pipefail',
-        f'cd {q(REPO)}',
-        f'export CUDA_VISIBLE_DEVICES={gpu}',
-        'export CUDA_DEVICE_ORDER=PCI_BUS_ID',
-        'export TOKENIZERS_PARALLELISM=false',
-        f'export GPTQMODEL_REPO={q(GPTQMODEL_REPO)}',
-        f'export PYTHONPATH={q(REPO)}:{q(GPTQMODEL_REPO)}:${{PYTHONPATH:-}}',
-        f'echo START $(date -Is) model={model} algo={algo} gpu={gpu}',
-        workflow_cmd,
-        'rc=$?',
-        f'echo "$rc" > {q(task_dir / "workflow.rc")}',
-        'echo WORKFLOW_RC=$rc $(date -Is)',
-        'if [ "$rc" -ne 0 ]; then exit "$rc"; fi',
-        f'META=$(find {q(task_dir)} -name golden_meta_info.json | sort | tail -1)',
-        'echo META=$META',
-        f'echo "$META" > {q(task_dir / "meta_path.txt")}',
-        f'{gen_base} --prompt "$(cat {q(prompt_path)})" --max-decode-steps 128 > {q(task_dir / "demo_text.log")} 2>&1',
-        f'echo $? > {q(task_dir / "demo_text.rc")}',
-        f'{gen_base} --image-path {q(IMAGE)} --prompt "请描述图片中的文字、颜色、形状和布局，并回答图片主要表达什么。" --max-decode-steps 128 > {q(task_dir / "demo_image.log")} 2>&1',
-        f'echo $? > {q(task_dir / "demo_image.rc")}',
-        f'{gen_base} --video-path {q(VIDEO)} --video-num-frames 16 --prompt "请总结这段多帧视频画面的变化，并指出其中可见的文字、颜色或物体。" --max-decode-steps 128 > {q(task_dir / "demo_video.log")} 2>&1',
-        f'echo $? > {q(task_dir / "demo_video.rc")}',
-    ]
-    if supports_audio:
-        lines += [
-            f'{gen_base} --audio-path {q(AUDIO)} --prompt "请转写并概括这段音频内容。" --max-decode-steps 128 > {q(task_dir / "demo_audio.log")} 2>&1',
-            f'echo $? > {q(task_dir / "demo_audio.rc")}',
-        ]
-    lines += [f'echo 0 > {q(task_dir / "rc")}', 'echo DONE $(date -Is)']
-    script = task_dir / 'run.sh'
-    script.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    script.chmod(0o755)
-    return task, task_dir, script
-
-
-def launch(model: str, algo: str, gpu: int) -> dict:
-    task, task_dir, script = task_script(model, algo, gpu)
-    log = open(task_dir / 'run.log', 'ab', buffering=0)
-    proc = subprocess.Popen(['bash', str(script)], cwd=str(REPO), stdout=log, stderr=subprocess.STDOUT,
-                            env=os.environ.copy(), start_new_session=True)
-    (task_dir / 'pid').write_text(str(proc.pid), encoding='utf-8')
-    return {'task': task, 'model': model, 'algo': algo, 'gpu': gpu, 'proc': proc,
-            'dir': str(task_dir), 'start': time.time()}
-
-
-def main() -> None:
-    ROOT.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    write_configs()
-    pending = list(TASKS)
-    running = []
-    events = []
-    print(f'ROOT={ROOT}', flush=True)
-    while pending or running:
-        for gpu in GPUS:
-            if not pending:
-                break
-            if any(item['gpu'] == gpu for item in running):
-                continue
-            model, algo = pending.pop(0)
-            item = launch(model, algo, gpu)
-            running.append(item)
-            events.append({'event': 'start', 'task': item['task'], 'gpu': gpu, 'time': time.strftime('%F %T')})
-            (ROOT / 'scheduler_events.json').write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding='utf-8')
-        time.sleep(30)
-        still = []
-        for item in running:
-            rc = item['proc'].poll()
-            if rc is None:
-                still.append(item)
-                continue
-            events.append({'event': 'finish', 'task': item['task'], 'gpu': item['gpu'], 'rc': rc,
-                           'elapsed': round(time.time() - item['start'], 1), 'time': time.strftime('%F %T')})
-            Path(item['dir'], 'rc').write_text(str(rc), encoding='utf-8')
-            (ROOT / 'scheduler_events.json').write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding='utf-8')
-        running = still
-    (ROOT / 'DONE').write_text(time.strftime('%F %T'), encoding='utf-8')
-    print(f'DONE={ROOT}', flush=True)
-
-
-if __name__ == '__main__':
-    main()
-PY
-
-cd /data01/home/yujy/work/xh2modelzoo
-/data01/home/yujy/miniconda3/envs/gemma4/bin/python /tmp/run_gemma4_quant_export_demo.py
+export CUDA_VISIBLE_DEVICES=0
+PYTHON=${PYTHON:-python}
 ```
 
-进度查看：
+### 复用已有量化 HF 目录：非 MTP
 
 ```bash
-ROOT=$(ls -td work_dirs/qtl384_gemma4_quant_export_demo_* | head -1)
-cat "$ROOT/scheduler_events.json"
-find "$ROOT" -name golden_meta_info.json -print | sort
-for d in "$ROOT"/*_{gptq,autoround}; do
-  [ -d "$d" ] || continue
-  echo "=== ${d#$ROOT/} ==="
-  for f in workflow.rc demo_text.rc demo_image.rc demo_video.rc demo_audio.rc rc; do
-    [ -f "$d/$f" ] && printf '%s=' "$f" && cat "$d/$f"
-  done
-done
-```
-
-## 复用已有量化 HF 目录重新导出 HMONNX
-
-如果量化权重已经存在，才使用这个入口跳过 quant 阶段。示例：E4B GPTQModel，8192 context，256 prefill，并为所有模块 dump golden。
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_demo.py \
-  --preset e4b \
-  --action existing-hf \
-  --existing-hf-model-dir "$GEMMA4_E4B_GPTQMODEL_HF" \
-  --work-dir ./work_dirs/qtl384_gemma4_best_exports/e4b_gptqmodel \
-  --context-max-length 8192 \
-  --prefill-chunk-length 256 \
-  --sliding-kv-cache-input-mode slice_window \
-  --golden \
+$PYTHON examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+  --hf-model-dir weights/gemma-4-E2B-it \
+  --config configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml \
+  --existing-hf-model-dir "$GEMMA4_E2B_AUTOROUND_HF" \
+  --export-output-dir work_dirs/gemma4_series_export/e2b_non_mtp \
+  --device cuda:0 \
+  --dump-golden \
+  --prompt "请用中文解释量子力学。" \
   --force
 ```
 
-完整四模型命令见详细文档。
+### 复用已有量化 HF 目录：MTP target + draft
+
+必须使用 `gemma4_*_full_mtp.yaml`，或确保 YAML 中有完整
+`export.model.mtp_config`。传入 `--mtp-assistant-model-dir` 时，CLI 会在真正
+运行前校验 effective config；如果误用了普通 `full.yaml`，会直接报出缺失的
+MTP 字段。
+
+```bash
+$PYTHON examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+  --hf-model-dir weights/gemma-4-E2B-it \
+  --config configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml \
+  --existing-hf-model-dir "$GEMMA4_E2B_AUTOROUND_HF" \
+  --export-output-dir work_dirs/gemma4_series_export/e2b_mtp \
+  --mtp-assistant-model-dir weights/gemma-4-E2B-it-assistant \
+  --device cuda:0 \
+  --dump-golden \
+  --prompt "请用中文解释量子力学。" \
+  --force
+```
+
+导出完成后用 manifest 验证 target/draft 契约，并跑 512-token MTP 生成：
+
+```bash
+META=$(find work_dirs/gemma4_series_export/e2b_mtp -name golden_meta_info.json | sort | tail -1)
+
+$PYTHON examples_merak/llm/gemma4_series/mtp_hmonnx_inference.py verify \
+  --preset e2b \
+  --meta "$META" \
+  --json
+
+$PYTHON examples_merak/llm/gemma4_series/mtp_hmonnx_inference.py generate \
+  --preset e2b \
+  --meta "$META" \
+  --prompt "请用中文解释量子力学的核心思想，并说明它和人工智能推理的关系。" \
+  --max-new-tokens 512 \
+  --num-draft-tokens 4 \
+  --device cuda:0
+```
+
+### 从原始 HF 从头量化再导出
+
+不传 `--existing-hf-model-dir` 且不传 `--base` 时会执行真实 quant，此时必须
+给 `--quant-output-dir`：
+
+```bash
+$PYTHON examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+  --hf-model-dir weights/gemma-4-E4B-it \
+  --config configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml \
+  --quant-output-dir work_dirs/gemma4_series_export/e4b_quant \
+  --export-output-dir work_dirs/gemma4_series_export/e4b_hmonnx \
+  --device cuda:0 \
+  --dump-golden \
+  --prompt "请用中文概括 Gemma4 的能力。" \
+  --force
+```
+
+### 四模型推荐组合批量导出模板
+
+下面模板只覆盖当前推荐组合；按机器空闲情况给每个任务分配一张卡即可。
+`GPU` 是物理卡号，命令内部仍用 `--device cuda:0`。
+
+```bash
+set -euo pipefail
+PYTHON=${PYTHON:-python}
+ROOT=work_dirs/gemma4_series_quant_export_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$ROOT/logs"
+
+run_one() {
+  local name=$1 gpu=$2 hf=$3 cfg=$4 quant_hf=$5
+  CUDA_VISIBLE_DEVICES=$gpu "$PYTHON" \
+    examples_merak/llm/gemma4_series/gemma4_series_quant_export.py \
+      --hf-model-dir "$hf" \
+      --config "$cfg" \
+      --existing-hf-model-dir "$quant_hf" \
+      --export-output-dir "$ROOT/$name/export" \
+      --device cuda:0 \
+      --dump-golden \
+      --prompt "请用中文解释量子力学、人工智能和科学推理之间的关系。" \
+      --force > "$ROOT/logs/${name}.log" 2>&1
+  find "$ROOT/$name/export" -name golden_meta_info.json | sort | tail -1 \
+    > "$ROOT/${name}_meta.txt"
+}
+
+run_one e2b_autoround 0 weights/gemma-4-E2B-it \
+  configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml \
+  "$GEMMA4_E2B_AUTOROUND_HF" &
+run_one e4b_gptq 1 weights/gemma-4-E4B-it \
+  configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml \
+  "$GEMMA4_E4B_GPTQMODEL_HF" &
+run_one 26b_a4b_gptq 2 weights/gemma-4-26B-A4B-it \
+  configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml \
+  "$GEMMA4_26B_A4B_GPTQMODEL_HF" &
+run_one 31b_gptq 3 weights/gemma-4-31B-it \
+  configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml \
+  "$GEMMA4_31B_GPTQMODEL_HF" &
+wait
+
+find "$ROOT" -name golden_meta_info.json -print | sort
+```
 
 ## 真实 generate demo
 

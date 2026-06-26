@@ -157,7 +157,9 @@ def _resolve_draft_onnx(
             )
         path = _resolve_relative_path(str(rel), meta_path.parent)
     else:
-        path = draft_root / preset.name / "draft_onnx" / f"gemma4_series_{preset.name}_assistant_decode.onnx"
+        path = draft_root / preset.name / "mtp_draft_decode" / f"gemma4_series_{preset.name}_assistant_decode.onnx"
+        if not path.exists():
+            path = draft_root / preset.name / "draft_onnx" / f"gemma4_series_{preset.name}_assistant_decode.onnx"
     if not path.exists():
         raise FileNotFoundError(path)
     return path
@@ -686,6 +688,65 @@ def _load_prompt_inputs(tokenizer, prompt: str):
     return tokenizer([text], return_tensors="pt").input_ids
 
 
+def _read_json_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON config {path}: {exc}") from exc
+
+
+def _generation_config_candidates(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return generation/stop-token config sources in runtime order.
+
+    Gemma4 chat models encode end-of-turn as EOS candidates in HF
+    ``generation_config.json`` (for 31B this is ``[1, 106, 50]``).  The
+    exported manifest keeps the original HF files under ``hf_config/`` instead
+    of flattening every generation field into the top-level metadata, so the
+    speculative loop must read those source files rather than relying only on
+    ``tokenizer.eos_token_id``.
+    """
+
+    configs: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+
+    def add_file(path: Path) -> None:
+        resolved = path.expanduser()
+        if not resolved.is_absolute():
+            resolved = resolved.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        data = _read_json_config(resolved)
+        if data:
+            configs.append(data)
+
+    meta_path_value = meta.get("_meta_path") or meta.get("_meta_path_")
+    export_dir = Path(meta_path_value).expanduser().resolve().parent if meta_path_value else None
+    hf_config = meta.get("hf_config")
+    if export_dir is not None and hf_config:
+        hf_config_dir = Path(str(hf_config))
+        if not hf_config_dir.is_absolute():
+            hf_config_dir = export_dir / hf_config_dir
+        add_file(hf_config_dir / "generation_config.json")
+        add_file(hf_config_dir / "config.json")
+
+    model_config = meta.get("model_config") if isinstance(meta.get("model_config"), dict) else {}
+    hf_model = model_config.get("hf_model") if isinstance(model_config, dict) else None
+    if hf_model:
+        hf_model_dir = Path(str(hf_model)).expanduser()
+        add_file(hf_model_dir / "generation_config.json")
+        add_file(hf_model_dir / "config.json")
+
+    inline_generation = meta.get("generation_config")
+    if isinstance(inline_generation, dict):
+        configs.append(inline_generation)
+    if isinstance(model_config, dict):
+        configs.append(model_config)
+    return configs
+
+
 def _resolve_eos_token_ids(tokenizer, *configs: dict[str, Any]) -> set[int]:
     token_ids: list[int] = []
     for config in configs:
@@ -996,7 +1057,7 @@ def generate_with_mtp(target_model, assistant_session, tokenizer, meta: dict[str
     input_ids = _load_prompt_inputs(tokenizer, prompt).to(target_model.device)
     output_ids = input_ids[0].tolist()
     prompt_length = int(input_ids.shape[1])
-    eos_token_ids = _resolve_eos_token_ids(tokenizer, meta.get("generation_config", {}), meta.get("model_config", {}))
+    eos_token_ids = _resolve_eos_token_ids(tokenizer, *_generation_config_candidates(meta))
     spec = _meta_spec_decode(meta)
     verify_length = int(spec.get("verify_length") or meta.get("spec_decode_verify_length") or (num_draft_tokens + 1))
 
@@ -1256,7 +1317,7 @@ def _add_common_paths(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--draft-root",
         default="work_dirs/gemma4_series_mtp_clean",
-        help="Legacy root containing draft_onnx; ignored when manifest records spec_decode.draft_decode_onnx.",
+        help="Legacy root containing mtp_draft_decode/draft_onnx; ignored when manifest records draft_decode_onnx.",
     )
     parser.add_argument("--meta", help="Explicit target golden_meta_info.json or export directory for one preset.")
     parser.add_argument("--draft-onnx", help="Explicit assistant decode ONNX path for one preset.")

@@ -400,13 +400,17 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
+        from .mtp_workflow import export_mtp_draft
+
         self._validate_export_model(config_overrides)
-        return super().export(
+        export_result = super().export(
             quant_result=quant_result,
             output_dir=output_dir,
             device=device,
             config_overrides=config_overrides,
         )
+        export_mtp_draft(export_result, hf_model_dir=self.hf_model_dir)
+        return export_result
 
     def dump_golden(
         self,
@@ -507,7 +511,13 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         for case_name, messages in cases:
             _run_case(case_name, messages)
 
+        self._dump_mtp_draft_golden(meta_file, device, logger=logger)
         return meta_file
+
+    def _dump_mtp_draft_golden(self, meta_file: str, device: str, *, logger: Any | None = None) -> Path | None:
+        from .mtp_workflow import dump_mtp_draft_golden
+
+        return dump_mtp_draft_golden(meta_file, device, logger=logger)
 
     def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
         if isinstance(input_messages, list):
