@@ -365,6 +365,18 @@ def test_qwen3_5_dense_text_model_setup_splits_child_linear_attn_modules():
     assert "linear_attn._setup(cfg)" in source
 
 
+def test_qwen3_5_mrope_masks_follow_rotary_embedding_device():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+
+    source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel._setup)
+
+    assert "mask_device = self.rotary_emb.inv_freq.device" in source
+    assert "torch.ones(half_dim, device=mask_device)" in source
+    assert "torch.zeros(half_dim, device=mask_device)" in source
+    assert "torch.arange(1, mrope_section[1] * 3, 3, device=mask_device)" in source
+    assert "torch.arange(2, mrope_section[2] * 3, 3, device=mask_device)" in source
+
+
 def test_qwen3_5_hmonnx_decode_input_sequence_length_honors_spec_decode():
     from types import SimpleNamespace
 
