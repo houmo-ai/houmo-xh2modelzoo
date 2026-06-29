@@ -1387,15 +1387,16 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         head_dim = self.config.head_dim
         rotary_dim = int(head_dim * partial_rotary_factor)
         half_dim = rotary_dim // 2  # inv_freq length
+        mask_device = self.rotary_emb.inv_freq.device
 
         # Build interleaved mask indices from mrope_section
         # H positions: offset=1, stride=3, count=mrope_section[1]
-        h_ids = torch.arange(1, mrope_section[1] * 3, 3)
+        h_ids = torch.arange(1, mrope_section[1] * 3, 3, device=mask_device)
         # W positions: offset=2, stride=3, count=mrope_section[2]
-        w_ids = torch.arange(2, mrope_section[2] * 3, 3)
+        w_ids = torch.arange(2, mrope_section[2] * 3, 3, device=mask_device)
 
         # T mask: all positions not occupied by H or W
-        time_mask = torch.ones(half_dim)
+        time_mask = torch.ones(half_dim, device=mask_device)
         time_mask[h_ids] = 0
         time_mask[w_ids] = 0
         time_mask = torch.cat([time_mask, time_mask], 0)
@@ -1403,14 +1404,14 @@ class _Qwen3_5TextModel(_Qwen3_5TextModelBase):  # noqa: N801
         self.rotary_emb.register_buffer("time_mask", time_mask.half(), persistent=False)
 
         # H mask
-        hight_mask = torch.zeros(half_dim)
+        hight_mask = torch.zeros(half_dim, device=mask_device)
         hight_mask[h_ids] = 1
         hight_mask = torch.cat([hight_mask, hight_mask], 0)
         hight_mask.unsqueeze_(0).unsqueeze_(0)
         self.rotary_emb.register_buffer("hight_mask", hight_mask.half(), persistent=False)
 
         # W mask
-        width_mask = torch.zeros(half_dim)
+        width_mask = torch.zeros(half_dim, device=mask_device)
         width_mask[w_ids] = 1
         width_mask = torch.cat([width_mask, width_mask], 0)
         width_mask.unsqueeze_(0).unsqueeze_(0)
