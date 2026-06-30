@@ -2,13 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter import (
     build_qwen35_autoround_kwargs,
     build_qwen35_gptqmodel_kwargs,
 )
 
 
-def test_xh2_dense_autoround_kwargs_match_gptqmodel_api(tmp_path: Path):
+@pytest.fixture()
+def local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return dataset
+
+
+def test_xh2_dense_autoround_kwargs_match_gptqmodel_api(tmp_path: Path, local_pile10k: Path):
     kwargs = build_qwen35_autoround_kwargs(
         hf_model_dir="weights/Qwen3.5-9B",
         output_dir=str(tmp_path / "dense-ar"),
@@ -19,11 +30,11 @@ def test_xh2_dense_autoround_kwargs_match_gptqmodel_api(tmp_path: Path):
         workflow_seed=42,
     )
     assert kwargs["topology"] == "dense"
-    assert kwargs["dataset"] == "NeelNanda/pile-10k"
+    assert kwargs["dataset"] == str(local_pile10k.resolve())
     assert kwargs["format"] == "auto_gptq"
 
 
-def test_xh2_moe_autoround_kwargs_match_gptqmodel_api(tmp_path: Path):
+def test_xh2_moe_autoround_kwargs_match_gptqmodel_api(tmp_path: Path, local_pile10k: Path):
     kwargs = build_qwen35_autoround_kwargs(
         hf_model_dir="weights/Qwen3.6-35B-A3B",
         output_dir=str(tmp_path / "moe-ar"),
@@ -40,6 +51,7 @@ def test_xh2_moe_autoround_kwargs_match_gptqmodel_api(tmp_path: Path):
     assert kwargs["low_gpu_mem_usage"] is True
     assert kwargs["attn_bits"] == 8
     assert kwargs["shared_expert_bits"] == 8
+    assert kwargs["dataset"] == str(local_pile10k.resolve())
     assert kwargs["format"] == "auto_round:gptqmodel"
 
 

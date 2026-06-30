@@ -13,6 +13,8 @@ from ...workflows.result import QuantResult
 
 _DENSE_CALIBRATION_JSONL = "gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
 _MOE_CALIBRATION_JSONL = "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
+DEFAULT_AUTOROUND_DATASET = "data/calib_data/NeelNanda-pile-10k.jsonl"
+_LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
 
 
 def quantize_with_autoround_api(
@@ -111,7 +113,12 @@ def build_qwen35_autoround_kwargs(
         "nsamples": int(calibration_cfg.get("nsamples", quant_cfg.get("nsamples", 128))),
         "seqlen": int(calibration_cfg.get("seqlen", quant_cfg.get("seqlen", 2048))),
         "batch_size": int(runtime_cfg.get("batch_size", quant_cfg.get("batch_size", default_batch_size))),
-        "dataset": str(calibration_cfg.get("dataset", quant_cfg.get("dataset", "NeelNanda/pile-10k"))),
+        "dataset": _resolve_autoround_dataset_value(
+            calibration_cfg.get(
+                "dataset",
+                calibration_cfg.get("jsonl", quant_cfg.get("dataset", DEFAULT_AUTOROUND_DATASET)),
+            )
+        ),
         "device": device,
         "device_map": runtime_cfg.get("device_map", quant_cfg.get("device_map", default_device_map)),
         "low_gpu_mem_usage": _optional_bool(
@@ -249,7 +256,7 @@ def _calibration_overrides_gptqmodel_defaults(calibration_cfg: Mapping[str, Any]
     """Return whether ``quant.calibration`` should shape GPTQModel CLI args.
 
     The shared Qwen3.5 YAMLs are AutoRound-first and carry AutoRound defaults
-    under ``quant.calibration`` (NeelNanda/pile-10k, 128 samples, seqlen 2048).
+    under ``quant.calibration`` (pile-10k, 128 samples, seqlen 2048).
     When users switch only ``quant.algorithm`` to ``gptqmodel`` we must keep the
     README-verified GPTQModel defaults instead of inheriting those AutoRound
     values.  However explicit GPTQModel calibration overrides still need to be
@@ -261,7 +268,7 @@ def _calibration_overrides_gptqmodel_defaults(calibration_cfg: Mapping[str, Any]
     dataset = calibration_cfg.get("dataset")
     if dataset is None:
         return "nsamples" in calibration_cfg or "seqlen" in calibration_cfg
-    if str(dataset) != "NeelNanda/pile-10k":
+    if str(dataset) not in _LEGACY_AUTOROUND_DATASETS | {DEFAULT_AUTOROUND_DATASET}:
         return True
     return (
         calibration_cfg.get("nsamples", 128) != 128
@@ -340,6 +347,33 @@ def _resolve_calibration_value(value: Any) -> str:
     if text.startswith("gptqmodel://"):
         return _resolve_gptqmodel_resource(text)
     return text
+
+
+def _resolve_autoround_dataset_value(value: Any) -> str:
+    text = os.path.expanduser(os.path.expandvars(str(value)))
+    if text in _LEGACY_AUTOROUND_DATASETS:
+        text = DEFAULT_AUTOROUND_DATASET
+    if _is_existing_local_path(text):
+        return str(Path(text).resolve())
+    if _is_path_like_value(text):
+        raise FileNotFoundError(
+            "Qwen3.5 AutoRound calibration dataset path does not exist: "
+            f"{text!r}. Download the prepared Artifactory archive and place "
+            f"it at {DEFAULT_AUTOROUND_DATASET}."
+        )
+    return text
+
+
+def _is_existing_local_path(value: str) -> bool:
+    return Path(value).expanduser().is_file()
+
+
+def _is_path_like_value(value: str) -> bool:
+    return (
+        "$" in value
+        or value.startswith(("/", "./", "../", "~"))
+        or value.endswith((".json", ".jsonl", ".txt"))
+    )
 
 
 def _resolve_gptqmodel_resource(uri: str) -> str:

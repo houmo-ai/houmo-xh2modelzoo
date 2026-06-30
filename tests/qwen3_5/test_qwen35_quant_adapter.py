@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +19,16 @@ DENSE_EXPORT = {"model_type": "Qwen3_5ForConditionalGeneration", "use_mtp": Fals
 MOE_EXPORT = {"model_type": "Qwen3_5MoeForConditionalGeneration", "use_mtp": False}
 
 
-def test_build_autoround_dense_kwargs_matches_script_defaults():
+def _local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return dataset
+
+
+def test_build_autoround_dense_kwargs_matches_script_defaults(tmp_path, monkeypatch):
+    dataset = _local_pile10k(tmp_path, monkeypatch)
     kwargs = build_qwen35_autoround_kwargs(
         hf_model_dir="weights/Qwen3.5-9B",
         output_dir="work_dirs/qwen35_dense_ar",
@@ -40,14 +50,15 @@ def test_build_autoround_dense_kwargs_matches_script_defaults():
     assert kwargs["topology"] == "dense"
     assert kwargs["bits"] == 4
     assert kwargs["group_size"] == 64
-    assert kwargs["dataset"] == "NeelNanda/pile-10k"
+    assert kwargs["dataset"] == str(dataset.resolve())
     assert kwargs["nsamples"] == 128
     assert kwargs["seqlen"] == 2048
     assert kwargs["batch_size"] == 8
     assert kwargs["format"] == "auto_gptq"
 
 
-def test_build_autoround_moe_kwargs_matches_script_defaults():
+def test_build_autoround_moe_kwargs_matches_script_defaults(tmp_path, monkeypatch):
+    dataset = _local_pile10k(tmp_path, monkeypatch)
     kwargs = build_qwen35_autoround_kwargs(
         hf_model_dir="weights/Qwen3.6-35B-A3B",
         output_dir="work_dirs/qwen35_moe_ar",
@@ -79,7 +90,39 @@ def test_build_autoround_moe_kwargs_matches_script_defaults():
     assert kwargs["low_gpu_mem_usage"] is True
     assert kwargs["attn_bits"] == 8
     assert kwargs["shared_expert_bits"] == 8
+    assert kwargs["dataset"] == str(dataset.resolve())
     assert kwargs["format"] == "auto_round:gptqmodel"
+
+
+def test_autoround_default_dataset_requires_local_pile10k(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(FileNotFoundError, match="data/calib_data/NeelNanda-pile-10k.jsonl"):
+        build_qwen35_autoround_kwargs(
+            hf_model_dir="weights/Qwen3.5-9B",
+            output_dir="work_dirs/qwen35_dense_ar",
+            device="cuda:0",
+            quant_cfg={"algorithm": "gptqmodel", "method": "autoround", "bits": 4, "group_size": 64},
+            export_model_cfg=DENSE_EXPORT,
+            workflow_seed=1024,
+        )
+
+
+def test_autoround_default_dataset_finds_data_calib_data(tmp_path, monkeypatch):
+    dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    kwargs = build_qwen35_autoround_kwargs(
+        hf_model_dir="weights/Qwen3.5-9B",
+        output_dir="work_dirs/qwen35_dense_ar",
+        device="cuda:0",
+        quant_cfg={"algorithm": "gptqmodel", "method": "autoround", "bits": 4, "group_size": 64},
+        export_model_cfg=DENSE_EXPORT,
+        workflow_seed=1024,
+    )
+
+    assert kwargs["dataset"] == str(dataset.resolve())
 
 
 def test_build_gptqmodel_dense_kwargs_uses_dense_jsonl():
@@ -133,7 +176,8 @@ def test_rotation_allows_disabled_spec_decode_strings():
     validate_rotation_mtp_compatibility({"rotation": "hadamard"}, {"spec_decode_mode": "none", "mtp_config": "false"})
 
 
-def test_adapter_calls_autoround_api(monkeypatch):
+def test_adapter_calls_autoround_api(tmp_path, monkeypatch):
+    dataset = _local_pile10k(tmp_path, monkeypatch)
     calls = {}
     module = types.ModuleType("gptqmodel.recipes.qwen35_autoround")
 
@@ -154,6 +198,7 @@ def test_adapter_calls_autoround_api(monkeypatch):
         workflow_seed=42,
     )
     assert calls["model_dir"] == "weights/Qwen3.5-9B"
+    assert calls["dataset"] == str(dataset.resolve())
     assert result.quanted_model_dir.endswith("work_dirs/out")
 
 
