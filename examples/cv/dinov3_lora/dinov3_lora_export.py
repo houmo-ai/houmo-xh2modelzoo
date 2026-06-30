@@ -83,6 +83,17 @@ def parse_args():
         help="Golden output directory. If empty, auto-generated from hmonnx path.",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for LoRA weight initialization.")
+    parser.add_argument(
+        "--lora-init-std",
+        type=float,
+        default=0.02,
+        help="Stddev for deterministic non-zero LoRA A/B initialization when --seed is set.",
+    )
+    parser.add_argument(
+        "--keep-default-lora-init",
+        action="store_true",
+        help="Keep PEFT default LoRA initialization even when --seed is set.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable xhquant debug mode.")
     parser.add_argument("--skip-hmonnx", action="store_true", help="Skip HMONNX conversion and golden generation.")
     parser.add_argument("--skip-golden", action="store_true", help="Skip golden generation.")
@@ -100,6 +111,62 @@ def pick_dinov3_qk_target_modules(model: torch.nn.Module) -> list[str]:
         "Cannot find dinov3 q_proj/k_proj modules. "
         "Please check --model-id is a dinov3_vit checkpoint."
     )
+
+
+
+def _is_lora_adapter_weight(name: str) -> bool:
+    return ("lora_A" in name or "lora_B" in name) and name.endswith(".weight")
+
+
+def initialize_lora_adapter_weights(
+    model: torch.nn.Module,
+    seed: int | None,
+    std: float,
+    keep_default_init: bool = False,
+) -> int:
+    """Initialize LoRA A/B adapter matrices with reproducible non-zero weights.
+
+    PEFT initializes LoRA B to zero by default. During ONNX export that makes the
+    LoRA branch a no-op, so constant folding can remove adapter initializers and
+    different seeds produce byte-identical float ONNX weights. When a seed is
+    explicitly provided, fill both A and B with deterministic random values so
+    the exported graph retains seed-dependent LoRA initializers.
+    """
+    if seed is None or keep_default_init:
+        return 0
+    if std <= 0:
+        raise ValueError(f"--lora-init-std must be positive, got {std}.")
+
+    count = 0
+    generator_by_device: dict[str, torch.Generator] = {}
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if not _is_lora_adapter_weight(name):
+                continue
+            device_key = str(param.device)
+            generator = generator_by_device.get(device_key)
+            if generator is None:
+                generator = torch.Generator(device=param.device).manual_seed(seed)
+                generator_by_device[device_key] = generator
+            values = torch.randn(
+                param.shape,
+                generator=generator,
+                device=param.device,
+                dtype=torch.float32,
+            ).mul_(std)
+            param.copy_(values.to(dtype=param.dtype))
+            count += 1
+    return count
+
+
+def describe_lora_seed_initialization(
+    matrix_count: int,
+    seed: int | None,
+    std: float,
+    keep_default_init: bool,
+) -> str:
+    mode = "peft-default" if seed is None or keep_default_init else "seeded-nonzero"
+    return f"LoRA init: mode={mode}, matrices={matrix_count}, seed={seed}, std={std}"
 
 
 def main():
@@ -126,8 +193,22 @@ def main():
         task_type=TaskType.FEATURE_EXTRACTION,
     )
     model = get_peft_model(model, peft_config)
+    lora_matrix_count = initialize_lora_adapter_weights(
+        model,
+        seed=args.seed,
+        std=args.lora_init_std,
+        keep_default_init=args.keep_default_lora_init,
+    )
     model.eval()
     model.print_trainable_parameters()
+    print(
+        describe_lora_seed_initialization(
+            lora_matrix_count,
+            seed=args.seed,
+            std=args.lora_init_std,
+            keep_default_init=args.keep_default_lora_init,
+        )
+    )
 
     image = load_image(args.image_url)
     pixel_values = processor(images=image, return_tensors="pt")["pixel_values"]
