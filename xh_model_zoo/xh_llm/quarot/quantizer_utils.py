@@ -188,7 +188,7 @@ def gptq(
             if not pos_docs or (isinstance(pos_docs, list) and len(pos_docs) == 0):
                 skip_count += 1
                 if skip_count <= 3:
-                    print(f"\n[Warning] 跳过一条无正例数据: Query='{query[:10]}...'")
+                    print(f"\n[Warning] 跳过一条无正例数据的样本")
                 continue 
             true_doc = pos_docs[0] if isinstance(pos_docs, list) else pos_docs
             if not neg_docs:
