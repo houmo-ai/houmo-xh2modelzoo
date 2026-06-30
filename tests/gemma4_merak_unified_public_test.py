@@ -8,6 +8,27 @@ from torch import nn
 from xhmodel_merak.xh_llm.types import CacheList
 
 
+def _local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return dataset
+
+
+def test_gemma4_autoround_default_dataset_finds_data_calib_data(tmp_path, monkeypatch):
+    from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
+        _resolve_autoround_dataset_value,
+    )
+
+    dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert _resolve_autoround_dataset_value("NeelNanda/pile-10k") == str(dataset.resolve())
+
+
 def test_gemma4_series_ple_projection_is_fx_traceable():
     from torch.fx import symbolic_trace
 
@@ -350,11 +371,12 @@ def test_gemma4_series_no_scale_rmsnorm_uses_fused_module():
     assert "requires_grad=False" in llm_src
 
 
-def test_gemma4_series_autoround_mode1_builds_dense_script_command():
+def test_gemma4_series_autoround_mode1_builds_dense_script_command(tmp_path, monkeypatch):
     from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
         build_autoround_mode1_command,
     )
 
+    dataset = _local_pile10k(tmp_path, monkeypatch)
     model_dir = Path("/data01/datasets/gemma-4-31B-it")
     if not model_dir.exists():
         pytest.skip("Gemma4 31B local HF config is not available")
@@ -401,7 +423,7 @@ def test_gemma4_series_autoround_mode1_builds_dense_script_command():
     assert command[command.index("--nsamples") + 1] == "128"
     assert command[command.index("--seqlen") + 1] == "2048"
     assert command[command.index("--batch_size") + 1] == "8"
-    assert command[command.index("--dataset") + 1] == "NeelNanda/pile-10k"
+    assert command[command.index("--dataset") + 1] == str(dataset.resolve())
     assert "--sym" in command
 
 
@@ -448,11 +470,12 @@ def test_gemma4_series_autoround_mode1_has_separate_quant_template(tmp_path):
     assert moe_mode1_quant["runtime"]["dtype"] == "bfloat16"
 
 
-def test_gemma4_series_autoround_mode1_builds_moe_script_command():
+def test_gemma4_series_autoround_mode1_builds_moe_script_command(tmp_path, monkeypatch):
     from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
         build_autoround_mode1_command,
     )
 
+    dataset = _local_pile10k(tmp_path, monkeypatch)
     model_dir = Path("/data01/datasets/gemma-4-26B-A4B-it")
     if not model_dir.exists():
         pytest.skip("Gemma4 26B-A4B local HF config is not available")
@@ -491,7 +514,7 @@ def test_gemma4_series_autoround_mode1_builds_moe_script_command():
     assert command[command.index("--device") + 1] == "cuda:1"
     assert command[command.index("--llm_bits") + 1] == "4"
     assert command[command.index("--llm_group_size") + 1] == "64"
-    assert command[command.index("--dataset") + 1] == "NeelNanda/pile-10k"
+    assert command[command.index("--dataset") + 1] == str(dataset.resolve())
     assert command[command.index("--dtype") + 1] == "bfloat16"
     assert "--sym" in command
 

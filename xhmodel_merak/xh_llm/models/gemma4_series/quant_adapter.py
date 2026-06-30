@@ -39,7 +39,8 @@ DEFAULT_DENSE_CALIBRATION_JSONL = (
 DEFAULT_MOE_CALIBRATION_JSONL = (
     "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
 )
-DEFAULT_AUTOROUND_DATASET = "NeelNanda/pile-10k"
+DEFAULT_AUTOROUND_DATASET = "data/calib_data/NeelNanda-pile-10k.jsonl"
+_LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
 
 
 def quantize_with_autoround_mode1(
@@ -138,7 +139,7 @@ def build_autoround_mode1_command(
         str(int(runtime_cfg.get("batch_size", quant_cfg.get("batch_size", 8)))),
         "--dataset",
         str(
-            _resolve_calibration_value(
+            _resolve_autoround_dataset_value(
                 calibration_cfg.get(
                     "dataset",
                     calibration_cfg.get("jsonl", quant_cfg.get("dataset", DEFAULT_AUTOROUND_DATASET)),
@@ -210,7 +211,7 @@ def _build_autoround_moe_mode1_command(
         str(int(runtime_cfg.get("batch_size", quant_cfg.get("batch_size", 8)))),
         "--dataset",
         str(
-            _resolve_calibration_value(
+            _resolve_autoround_dataset_value(
                 calibration_cfg.get("dataset", calibration_cfg.get("jsonl", DEFAULT_AUTOROUND_DATASET))
             )
         ),
@@ -438,6 +439,21 @@ def _resolve_calibration_value(value: Any) -> str:
     return expanded
 
 
+def _resolve_autoround_dataset_value(value: Any) -> str:
+    expanded = _expand_path_like_value(value)
+    if expanded in _LEGACY_AUTOROUND_DATASETS:
+        expanded = DEFAULT_AUTOROUND_DATASET
+    if _is_existing_local_path(expanded):
+        return str(Path(expanded).resolve())
+    if _is_path_like_value(expanded):
+        raise FileNotFoundError(
+            "Gemma4 AutoRound calibration dataset path does not exist: "
+            f"{expanded!r}. Download the prepared Artifactory archive and "
+            f"place it at {DEFAULT_AUTOROUND_DATASET}."
+        )
+    return expanded
+
+
 def _resolve_gptqmodel_resource(uri: str) -> str:
     relative_path = uri.removeprefix("gptqmodel://").lstrip("/")
     spec = importlib.util.find_spec("gptqmodel")
@@ -481,6 +497,18 @@ def _preflight_autoround_command_inputs(command: list[str]) -> None:
 
 def _expand_path_like_value(value: Any) -> str:
     return os.path.expanduser(os.path.expandvars(str(value)))
+
+
+def _is_existing_local_path(value: str) -> bool:
+    return Path(value).expanduser().is_file()
+
+
+def _is_path_like_value(value: str) -> bool:
+    return (
+        "$" in value
+        or value.startswith(("/", "./", "../", "~"))
+        or value.endswith((".json", ".jsonl", ".txt"))
+    )
 
 
 def _require_existing_local_file(

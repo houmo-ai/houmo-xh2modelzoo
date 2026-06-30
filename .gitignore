@@ -195,12 +195,16 @@ data/output
 data/output_456
 data/output_bfp16
 data/calib_data/LMUData
-!data/calib_data/sampledata/
-!data/calib_data/sampledata/*.png
 data/datasets
 work_dirs
 
 data/
+!data/
+!data/calib_data/
+!data/calib_data/README.md
+!data/calib_data/NeelNanda-pile-10k.jsonl
+!data/calib_data/sampledata/
+!data/calib_data/sampledata/*.png
 benchmark_test/allure-results
 /drafts
 /weights
