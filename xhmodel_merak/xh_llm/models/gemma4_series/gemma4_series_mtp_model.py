@@ -7,19 +7,21 @@ gemma4e, and gemma4_moe MTP helpers are read-only references only.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
-import xhquant.nn as xhnn
 from safetensors.torch import load_file
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm, Gemma4TextModel
 
+import xhquant.nn as xhnn
 from xh_model_zoo.xh_llm.models.base_model import BaseModel
 from xhquant.api import ConfigDict, get_xhquant_logger
-from xhquant.nn import LLMCacheV2, MaskedAdd, RMSNorm as XHRMSNorm, SoftmaxPlus
+from xhquant.nn import LLMCacheV2, MaskedAdd, SoftmaxPlus
+from xhquant.nn import RMSNorm as XHRMSNorm
 
 
 DTYPE_MAP = {
@@ -49,6 +51,141 @@ def aligned(size: int, align: int) -> int:
 def load_json_file(path: str | Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _is_present(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def _parse_positive_int(source: str, value: Any) -> int | None:
+    if not _is_present(value):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"Gemma4 Series MTP {source} must be a positive integer: {value!r}")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"Gemma4 Series MTP {source} must be a positive integer: {value!r}")
+        parsed = int(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdecimal():
+            raise ValueError(f"Gemma4 Series MTP {source} must be a positive integer: {value!r}")
+        parsed = int(stripped)
+    else:
+        raise ValueError(f"Gemma4 Series MTP {source} must be a positive integer: {value!r}")
+    if parsed <= 0:
+        raise ValueError(f"Gemma4 Series MTP {source} must be positive, got {parsed}")
+    return parsed
+
+
+def _nested_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_hf_max_pe_length(target_config: dict[str, Any]) -> tuple[int | None, str | None]:
+    target_text_config = _nested_dict(target_config.get("text_config"))
+    candidates: list[tuple[str, Any]] = [
+        ("target_config.max_pe_length", target_config.get("max_pe_length")),
+        (
+            "target_config.text_config.max_position_embeddings",
+            target_text_config.get("max_position_embeddings"),
+        ),
+        ("target_config.max_position_embeddings", target_config.get("max_position_embeddings")),
+    ]
+    for source, raw_value in candidates:
+        value = _parse_positive_int(source, raw_value)
+        if value is not None:
+            return value, source
+    return None, None
+
+
+def _emit_max_pe_length_override_warning(yaml_value: int, hf_value: int, hf_source: str) -> None:
+    message = (
+        "Gemma4 Series max_pe_length YAML override differs from HF config: "
+        f"model_config.max_pe_length={yaml_value}, {hf_source}={hf_value}; using YAML override."
+    )
+    logging.getLogger(__name__).warning(message)
+    try:
+        get_xhquant_logger().warning(message)
+    except Exception:  # pragma: no cover - logger setup is environment-specific
+        pass
+
+
+def _format_max_pe_length_result(
+    value: int,
+    source: str,
+    *,
+    return_source: bool,
+    return_metadata: bool,
+    hf_value: int | None = None,
+    hf_source: str | None = None,
+) -> int | tuple[int, str] | dict[str, Any]:
+    if return_metadata:
+        metadata: dict[str, Any] = {"value": value, "source": source}
+        if hf_value is not None:
+            metadata["hf_value"] = hf_value
+        if hf_source is not None:
+            metadata["hf_source"] = hf_source
+        return metadata
+    return (value, source) if return_source else value
+
+
+def resolve_target_max_pe_length(
+    target_model_dir: str | Path,
+    model_cfg: dict[str, Any] | ConfigDict | None = None,
+    *,
+    max_pe_length_explicit: bool = False,
+    return_source: bool = False,
+    return_metadata: bool = False,
+) -> int | tuple[int, str] | dict[str, Any]:
+    """Resolve target/base Gemma4 MPE for MTP draft RoPE tables.
+
+    ``BaseLLMModelConfig.max_pe_length`` defaults to 32768 for legacy/internal
+    reasons.  Gemma4 Series must only treat ``model_cfg.max_pe_length`` as a
+    YAML/user override when ``max_pe_length_explicit`` is true; otherwise the HF
+    config owns the MPE.
+    """
+
+    target_config_path = Path(target_model_dir) / "config.json"
+    target_config = load_json_file(target_config_path)
+    hf_value, hf_source = _first_hf_max_pe_length(target_config)
+
+    model_cfg_dict = dict(model_cfg or {})
+    yaml_source = "model_config.max_pe_length"
+    if max_pe_length_explicit:
+        yaml_value = _parse_positive_int(yaml_source, model_cfg_dict.get("max_pe_length"))
+        if yaml_value is None:
+            raise ValueError("Gemma4 Series max_pe_length was marked explicit but model_config.max_pe_length is empty")
+        if hf_value is not None and hf_value != yaml_value:
+            _emit_max_pe_length_override_warning(yaml_value, hf_value, str(hf_source))
+        return _format_max_pe_length_result(
+            yaml_value,
+            yaml_source,
+            return_source=return_source,
+            return_metadata=return_metadata,
+            hf_value=hf_value,
+            hf_source=hf_source,
+        )
+
+    if hf_value is not None and hf_source is not None:
+        return _format_max_pe_length_result(
+            hf_value,
+            hf_source,
+            return_source=return_source,
+            return_metadata=return_metadata,
+            hf_value=hf_value,
+            hf_source=hf_source,
+        )
+
+    # Intentionally do not fall back to model_cfg.max_pe_length here.  When
+    # max_pe_length_explicit is false, that field may be BaseLLMModelConfig's
+    # legacy default (32768), not user YAML intent.
+    raise ValueError(
+        "Gemma4 Series MTP requires target max_pe_length from HF config or explicit YAML override. "
+        f"Please check target model config: {target_config_path}"
+    )
 
 
 def _compute_rotary_cache(
@@ -173,7 +310,12 @@ class Gemma4AssistantSelfAttention(nn.Module):
     ) -> torch.Tensor:
         batch_size, seq_length = hidden_states.shape[:2]
         cos, sin = position_embeddings
-        query_states = self.q_proj(hidden_states).reshape(batch_size, seq_length, self.num_attention_heads, self.head_dim)
+        query_states = self.q_proj(hidden_states).reshape(
+            batch_size,
+            seq_length,
+            self.num_attention_heads,
+            self.head_dim,
+        )
         query_states = self.q_norm(query_states).transpose(1, 2)
         query_states = self.attn_compute_cast(query_states)
         query_states = self.attn_compute_cast(self.rope(query_states, cos, sin))
@@ -501,10 +643,19 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
 
     def init_wrap_model(self, hf_model=None):
         del hf_model
+        max_position_embeddings = _parse_positive_int(
+            "wrap_cfg.target_max_pe_length",
+            self.wrap_cfg.get("target_max_pe_length"),
+        )
+        if max_position_embeddings is None:
+            max_position_embeddings = resolve_target_max_pe_length(
+                self.target_model_dir,
+                dict(self.wrap_cfg.get("model_config") or {}),
+            )
         self._wrap_model = Gemma4AssistantDraftModule(
             assistant_model_dir=self.assistant_model_dir,
             target_model_dir=self.target_model_dir,
-            max_position_embeddings=int(self.wrap_cfg.get("max_sequence_length", 2048)),
+            max_position_embeddings=int(max_position_embeddings),
             input_sequence_length=int(self.wrap_cfg.get("input_sequence_length", 1)),
             cache_axis=int(self.wrap_cfg.get("cache_axis", 2)),
         )
@@ -517,14 +668,17 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
             self.init_wrap_model()
         target_text_cfg = self._wrap_model.target_config_dict["text_config"]
         input_sequence_length = int(self.wrap_cfg.get("input_sequence_length", 1))
-        max_sequence_length = int(self.wrap_cfg.get("max_sequence_length", 2048))
+        context_length = int(self.wrap_cfg.get("context_length", 2048))
         hidden_size = int(self._wrap_model.backbone_hidden_size)
         dtype = resolve_torch_dtype(self.wrap_cfg.get("dtype", "float16"))
-        default_sliding_cache_length = aligned(int(target_text_cfg.get("sliding_window", 1024)) + input_sequence_length - 1, 16)
+        default_sliding_cache_length = aligned(
+            int(target_text_cfg.get("sliding_window", 1024)) + input_sequence_length - 1,
+            16,
+        )
         shared_sliding_cache_length = int(
             self.wrap_cfg.get("shared_sliding_cache_length", default_sliding_cache_length)
         )
-        shared_full_cache_length = int(self.wrap_cfg.get("shared_full_cache_length", max_sequence_length))
+        shared_full_cache_length = int(self.wrap_cfg.get("shared_full_cache_length", context_length))
         full_heads = int(target_text_cfg.get("num_global_key_value_heads") or target_text_cfg["num_key_value_heads"])
         full_head_dim = int(target_text_cfg.get("global_head_dim") or target_text_cfg["head_dim"])
 
@@ -533,8 +687,14 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                 inputs_embeds=torch.zeros((1, input_sequence_length, hidden_size * 2), dtype=dtype),
                 past_seq_length=torch.zeros((1,), dtype=torch.int32),
                 current_input_length=torch.full((1,), input_sequence_length, dtype=torch.int32),
-                sliding_attention_mask=torch.zeros((1, 1, input_sequence_length, shared_sliding_cache_length), dtype=dtype),
-                full_attention_mask=torch.zeros((1, 1, input_sequence_length, shared_full_cache_length), dtype=dtype),
+                sliding_attention_mask=torch.zeros(
+                    (1, 1, input_sequence_length, shared_sliding_cache_length),
+                    dtype=dtype,
+                ),
+                full_attention_mask=torch.zeros(
+                    (1, 1, input_sequence_length, shared_full_cache_length),
+                    dtype=dtype,
+                ),
                 shared_key_cache_sliding=torch.zeros(
                     (
                         1,
@@ -553,8 +713,14 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                     ),
                     dtype=dtype,
                 ),
-                shared_key_cache_full=torch.zeros((1, full_heads, shared_full_cache_length, full_head_dim), dtype=dtype),
-                shared_value_cache_full=torch.zeros((1, full_heads, shared_full_cache_length, full_head_dim), dtype=dtype),
+                shared_key_cache_full=torch.zeros(
+                    (1, full_heads, shared_full_cache_length, full_head_dim),
+                    dtype=dtype,
+                ),
+                shared_value_cache_full=torch.zeros(
+                    (1, full_heads, shared_full_cache_length, full_head_dim),
+                    dtype=dtype,
+                ),
             )
 
         return (
@@ -591,5 +757,6 @@ __all__ = [
     "XHGemma4SeriesAssistantDraftModel",
     "XHGemma4AssistantDraftModel",
     "aligned",
+    "resolve_target_max_pe_length",
     "resolve_torch_dtype",
 ]

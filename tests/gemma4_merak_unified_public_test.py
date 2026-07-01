@@ -736,6 +736,429 @@ export:
     gemma4_series_quant_export._validate_mtp_config_complete(args, config_overrides)
 
 
+
+def test_gemma4_series_mtp_resolves_target_mpe_from_model_config_fallback(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(json.dumps({"text_config": {}}), encoding="utf-8")
+
+    value, source = resolve_target_max_pe_length(
+        target_dir,
+        {"max_pe_length": 262144},
+        max_pe_length_explicit=True,
+        return_source=True,
+    )
+
+    assert value == 262144
+    assert source == "model_config.max_pe_length"
+
+
+def test_gemma4_series_mtp_target_config_mpe_wins_over_model_config_default(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+
+    value, source = resolve_target_max_pe_length(
+        target_dir,
+        {"max_pe_length": 32768},
+        return_source=True,
+    )
+
+    assert value == 262144
+    assert source == "target_config.text_config.max_position_embeddings"
+
+
+def test_gemma4_series_mtp_explicit_yaml_mpe_warns_when_hf_differs(caplog, tmp_path):
+    import json
+    import logging
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        value, source = resolve_target_max_pe_length(
+            target_dir,
+            {"max_pe_length": 32768},
+            max_pe_length_explicit=True,
+            return_source=True,
+        )
+
+    assert value == 32768
+    assert source == "model_config.max_pe_length"
+    assert "YAML override differs from HF config" in caplog.text
+
+
+def test_gemma4_series_mtp_explicit_yaml_mpe_matching_hf_has_no_mismatch_warning(caplog, tmp_path):
+    import json
+    import logging
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        value, source = resolve_target_max_pe_length(
+            target_dir,
+            {"max_pe_length": 262144},
+            max_pe_length_explicit=True,
+            return_source=True,
+        )
+
+    assert value == 262144
+    assert source == "model_config.max_pe_length"
+    assert "YAML override differs from HF config" not in caplog.text
+
+
+def test_gemma4_series_mtp_resolves_target_mpe_from_hf_text_config(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 131072}}),
+        encoding="utf-8",
+    )
+
+    value, source = resolve_target_max_pe_length(target_dir, {}, return_source=True)
+
+    assert value == 131072
+    assert source == "target_config.text_config.max_position_embeddings"
+
+
+def test_gemma4_series_mtp_resolves_target_mpe_from_hf_max_pe(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "max_pe_length": 196608,
+                "text_config": {"max_position_embeddings": 131072},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    value, source = resolve_target_max_pe_length(target_dir, {}, return_source=True)
+
+    assert value == 196608
+    assert source == "target_config.max_pe_length"
+
+
+def test_gemma4_series_mtp_resolves_target_mpe_from_hf_top_level_position(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"max_position_embeddings": 65536, "text_config": {}}),
+        encoding="utf-8",
+    )
+
+    value, source = resolve_target_max_pe_length(target_dir, {}, return_source=True)
+
+    assert value == 65536
+    assert source == "target_config.max_position_embeddings"
+
+
+def test_gemma4_series_mtp_rejects_non_positive_model_config_fallback_mpe(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="model_config.max_pe_length.*positive"):
+        resolve_target_max_pe_length(target_dir, {"max_pe_length": 0}, max_pe_length_explicit=True)
+
+
+def test_gemma4_series_mtp_rejects_invalid_target_mpe_before_fallback(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "max_pe_length": 0,
+                "text_config": {"max_position_embeddings": 131072},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="target_config.max_pe_length.*positive"):
+        resolve_target_max_pe_length(target_dir, {})
+
+
+def test_gemma4_series_mtp_rejects_non_integral_mpe_values(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="model_config.max_pe_length.*positive integer"):
+        resolve_target_max_pe_length(target_dir, {"max_pe_length": 1.9}, max_pe_length_explicit=True)
+
+    (target_dir / "config.json").write_text(
+        json.dumps({"max_pe_length": "1.9", "text_config": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="target_config.max_pe_length.*positive integer"):
+        resolve_target_max_pe_length(target_dir, {})
+
+    (target_dir / "config.json").write_text(
+        json.dumps({"max_pe_length": True, "text_config": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="target_config.max_pe_length.*positive integer"):
+        resolve_target_max_pe_length(target_dir, {})
+
+
+def test_gemma4_series_mtp_rejects_missing_target_mpe(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(json.dumps({"text_config": {}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires target max_pe_length"):
+        resolve_target_max_pe_length(target_dir, {"max_pe_length": 32768})
+
+
+def test_gemma4_series_mtp_wrapper_rejects_invalid_pre_resolved_mpe(tmp_path):
+    import json
+
+    from xhquant.api import ConfigDict
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        XHGemma4SeriesAssistantDraftModel,
+    )
+
+    assistant_dir = tmp_path / "assistant"
+    target_dir = tmp_path / "target"
+    assistant_dir.mkdir()
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+
+    model = XHGemma4SeriesAssistantDraftModel(
+        assistant_model_dir=str(assistant_dir),
+        target_model_dir=str(target_dir),
+        wrap_cfg=ConfigDict(
+            input_sequence_length=1,
+            context_length=2048,
+            target_max_pe_length=1.9,
+        ),
+        quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+    )
+
+    with pytest.raises(ValueError, match="wrap_cfg.target_max_pe_length.*positive integer"):
+        model.init_wrap_model()
+
+
+
+def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_path):
+    import json
+
+    import xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model as mtp_model
+    from xhquant.api import ConfigDict
+
+    assistant_dir = tmp_path / "assistant"
+    target_dir = tmp_path / "target"
+    assistant_dir.mkdir()
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "text_config": {
+                    "max_position_embeddings": 262144,
+                    "sliding_window": 512,
+                    "num_key_value_heads": 2,
+                    "num_global_key_value_heads": 1,
+                    "head_dim": 16,
+                    "global_head_dim": 32,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeModule(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            captured.update(kwargs)
+            self.target_config_dict = json.loads(
+                (target_dir / "config.json").read_text(encoding="utf-8")
+            )
+            self.backbone_hidden_size = 8
+
+        def forward(self, *args, **kwargs):
+            raise AssertionError("forward is not used by this test")
+
+    monkeypatch.setattr(mtp_model, "Gemma4AssistantDraftModule", FakeModule)
+
+    model = mtp_model.XHGemma4SeriesAssistantDraftModel(
+        assistant_model_dir=str(assistant_dir),
+        target_model_dir=str(target_dir),
+        wrap_cfg=ConfigDict(
+            input_sequence_length=1,
+            context_length=2048,
+            dtype="float16",
+            shared_sliding_cache_length=1024,
+            shared_full_cache_length=2048,
+        ),
+        quant_config=ConfigDict(quant_type="w8a8h1_sefp"),
+    )
+
+    model.init_wrap_model()
+    inputs = model.prepare_inputs(None)
+
+    assert captured["max_position_embeddings"] == 262144
+    assert inputs[3].shape == (1, 1, 1, 1024)
+    assert inputs[4].shape == (1, 1, 1, 2048)
+
+
+
+def test_gemma4_series_manifest_resolved_mpe_ignores_base_default(tmp_path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
+        resolve_and_update_manifest_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+    meta_path = tmp_path / "golden_meta_info.json"
+    meta_path.write_text(
+        json.dumps({"model_config": {"max_pe_length": 32768}, "spec_decode": {"mode": "mtp"}}),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_and_update_manifest_max_pe_length(
+        meta_path,
+        target_dir,
+        max_pe_length_explicit=False,
+    )
+
+    updated = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert resolved["value"] == 262144
+    assert updated["model_config"]["max_pe_length"] == 262144
+    assert updated["model_config"]["max_pe_length_source"] == "target_config.text_config.max_position_embeddings"
+    assert updated["spec_decode"]["draft_rope_max_pe_length"] == 262144
+    assert updated["spec_decode"]["target_max_pe_length_source"] == "target_config.text_config.max_position_embeddings"
+
+
+def test_gemma4_series_manifest_explicit_mpe_records_hf_metadata(caplog, tmp_path):
+    import json
+    import logging
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
+        resolve_and_update_manifest_max_pe_length,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
+    meta_path = tmp_path / "golden_meta_info.json"
+    meta_path.write_text(
+        json.dumps({"model_config": {"max_pe_length": 32768}, "spec_decode": {"mode": "mtp"}}),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        resolve_and_update_manifest_max_pe_length(
+            meta_path,
+            target_dir,
+            max_pe_length_explicit=True,
+        )
+
+    updated = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert updated["model_config"]["max_pe_length"] == 32768
+    assert updated["model_config"]["max_pe_length_source"] == "model_config.max_pe_length"
+    assert updated["model_config"]["max_pe_length_hf_value"] == 262144
+    assert updated["spec_decode"]["draft_rope_max_pe_length"] == 32768
+    assert updated["spec_decode"]["target_max_pe_length_hf_value"] == 262144
+    assert "YAML override differs from HF config" in caplog.text
+
+
 def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
     import json
 
@@ -858,18 +1281,26 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     hm_dir.mkdir(parents=True)
     (hm_dir / "prefill.onnx").write_text("prefill", encoding="utf-8")
     meta_path = hm_dir / "golden_meta_info.json"
+    target_dir = tmp_path / "base"
+    target_dir.mkdir()
+    (target_dir / "config.json").write_text(
+        json.dumps({"text_config": {"max_position_embeddings": 262144}}),
+        encoding="utf-8",
+    )
     meta_path.write_text(
         json.dumps(
             {
                 "spec_decode_mode": "mtp",
                 "spec_decode": {"mode": "mtp"},
+                "hf_model_dir": str(target_dir),
                 "model_config": {
                     "chip_arch": "XH2a",
                     "context_max_length": 2048,
+                    "max_pe_length": 32768,
                     "num_draft_tokens": 4,
                     "mtp_config": {
                         "assistant_hf_model": "/tmp/assistant",
-                        "target_hf_model": "/tmp/base",
+                        "target_hf_model": str(target_dir),
                         "input_sequence_length": 1,
                     },
                 },
@@ -896,11 +1327,15 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     monkeypatch.setitem(sys.modules, "xhquant", fake_xhquant)
     monkeypatch.setitem(sys.modules, "xhquant.api", fake_xhquant_api)
 
+    created_models = []
+
     class FakeDraftModel:
         quanted_model = object()
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.args = args
+            self.kwargs = kwargs
+            created_models.append(self)
 
         def init_wrap_model(self):
             pass
@@ -937,7 +1372,24 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     fake_mtp_model = types.ModuleType(
         "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model"
     )
+    def fake_resolve_target_max_pe_length(
+        target_model_dir,
+        model_cfg=None,
+        *,
+        max_pe_length_explicit=False,
+        return_source=False,
+        return_metadata=False,
+    ):
+        assert Path(target_model_dir) == target_dir
+        assert max_pe_length_explicit is False
+        value = 262144
+        source = "target_config.text_config.max_position_embeddings"
+        if return_metadata:
+            return {"value": value, "source": source, "hf_value": value, "hf_source": source}
+        return (value, source) if return_source else value
+
     fake_mtp_model.XHGemma4SeriesAssistantDraftModel = FakeDraftModel
+    fake_mtp_model.resolve_target_max_pe_length = fake_resolve_target_max_pe_length
     monkeypatch.setitem(
         sys.modules,
         "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model",
@@ -951,9 +1403,24 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
 
     assert draft_onnx is not None
     assert draft_onnx.parent == hm_dir / "mtp_draft_decode"
+    wrap_cfg = created_models[0].kwargs["wrap_cfg"]
+    assert wrap_cfg["context_length"] == 2048
+    assert wrap_cfg["model_config"]["context_max_length"] == 2048
+    assert wrap_cfg["target_max_pe_length"] == 262144
+    assert "max_sequence_length" not in wrap_cfg
     assert not (hm_dir / "draft_onnx").exists()
     updated = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert updated["spec_decode"]["draft_decode_onnx"].startswith("mtp_draft_decode/")
+    spec_decode = updated["spec_decode"]
+    assert spec_decode["draft_decode_onnx"].startswith("mtp_draft_decode/")
+    assert spec_decode["context_length"] == 2048
+    assert spec_decode["draft_rope_max_pe_length"] == 262144
+    assert spec_decode["target_max_pe_length_source"] == (
+        "target_config.text_config.max_position_embeddings"
+    )
+    assert updated["model_config"]["max_pe_length"] == 262144
+    assert updated["model_config"]["max_pe_length_source"] == (
+        "target_config.text_config.max_position_embeddings"
+    )
     assert updated["draft_decode_onnx_file"].startswith("mtp_draft_decode/")
 
 
@@ -992,9 +1459,16 @@ def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_pa
         calls.append((export_result.work_dir, hf_model_dir, chip_arch, draft_dtype))
         return tmp_path / "out/hmquant_fake/mtp_draft_decode/draft.onnx"
 
+    def fake_resolve_manifest(meta_path, target_model_dir, *, max_pe_length_explicit):
+        assert Path(meta_path).name == "golden_meta_info.json"
+        assert target_model_dir == "/tmp/base"
+        assert max_pe_length_explicit is False
+        return {"value": 262144, "source": "target_config.text_config.max_position_embeddings"}
+
     monkeypatch.setattr(BaseHMONNXWorkflow, "export", fake_base_export)
     monkeypatch.setattr(Gemma4SeriesWorkflow, "_validate_export_model", lambda self, config_overrides: None)
     monkeypatch.setattr(mtp_workflow, "export_mtp_draft", fake_export_mtp_draft)
+    monkeypatch.setattr(mtp_workflow, "resolve_and_update_manifest_max_pe_length", fake_resolve_manifest)
 
     workflow = Gemma4SeriesWorkflow(
         hf_model_dir="/tmp/base",

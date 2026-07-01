@@ -387,16 +387,29 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
-        from .mtp_workflow import export_mtp_draft
+        from . import mtp_workflow
 
         self._validate_export_model(config_overrides)
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        workflow_model_cfg = workflow_config.export["model"]
+        max_pe_length_explicit = (
+            "max_pe_length" in workflow_model_cfg
+            and workflow_model_cfg.get("max_pe_length") is not None
+            and workflow_model_cfg.get("max_pe_length") != ""
+        )
         export_result = super().export(
             quant_result=quant_result,
             output_dir=output_dir,
             device=device,
             config_overrides=config_overrides,
         )
-        export_mtp_draft(export_result, hf_model_dir=self.hf_model_dir)
+        meta_path = Path(self._find_golden_meta_file(export_result))
+        mtp_workflow.resolve_and_update_manifest_max_pe_length(
+            meta_path,
+            self._resolve_export_hf_model_dir(quant_result),
+            max_pe_length_explicit=max_pe_length_explicit,
+        )
+        mtp_workflow.export_mtp_draft(export_result, hf_model_dir=self.hf_model_dir)
         return export_result
 
     def dump_golden(

@@ -33,6 +33,10 @@ def mtp_config_dict(meta: dict[str, Any]) -> dict[str, Any]:
     return mtp_config if isinstance(mtp_config, dict) else {}
 
 
+def resolve_context_length(model_cfg: dict[str, Any], mtp_cfg: dict[str, Any]) -> int:
+    return int(mtp_cfg.get("context_max_length") or model_cfg.get("context_max_length") or 2048)
+
+
 def is_mtp_manifest(meta: dict[str, Any]) -> bool:
     spec_decode = meta.get("spec_decode") or {}
     mode = spec_decode.get("mode") if isinstance(spec_decode, dict) else None
@@ -127,6 +131,11 @@ def update_manifest_with_draft(
     lm_head_quant_type: str,
     shared_sliding_len: int | None,
     shared_full_len: int | None,
+    context_length: int | None = None,
+    draft_rope_max_pe_length: int | None = None,
+    target_max_pe_length_source: str | None = None,
+    target_max_pe_length_hf_value: int | None = None,
+    target_max_pe_length_hf_source: str | None = None,
 ) -> None:
     export_dir = meta_path.parent
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -172,6 +181,28 @@ def update_manifest_with_draft(
         shared_full_cache_length=shared_full_len,
         target_decode_sliding_output_length=target_decode_sliding,
     )
+    if context_length is not None:
+        spec_decode["context_length"] = int(context_length)
+    if draft_rope_max_pe_length is not None:
+        draft_rope_max_pe_length = int(draft_rope_max_pe_length)
+        spec_decode["draft_rope_max_pe_length"] = draft_rope_max_pe_length
+        if isinstance(model_cfg, dict):
+            model_cfg["max_pe_length"] = draft_rope_max_pe_length
+    if target_max_pe_length_source:
+        source = str(target_max_pe_length_source)
+        spec_decode["target_max_pe_length_source"] = source
+        if isinstance(model_cfg, dict):
+            model_cfg["max_pe_length_source"] = source
+    if target_max_pe_length_hf_value is not None:
+        hf_value = int(target_max_pe_length_hf_value)
+        spec_decode["target_max_pe_length_hf_value"] = hf_value
+        if isinstance(model_cfg, dict):
+            model_cfg["max_pe_length_hf_value"] = hf_value
+    if target_max_pe_length_hf_source:
+        hf_source = str(target_max_pe_length_hf_source)
+        spec_decode["target_max_pe_length_hf_source"] = hf_source
+        if isinstance(model_cfg, dict):
+            model_cfg["max_pe_length_hf_source"] = hf_source
     meta.update(
         spec_decode_mode="mtp",
         spec_decode_block_size=block_size,
@@ -183,6 +214,43 @@ def update_manifest_with_draft(
         spec_decode=spec_decode,
     )
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=4), encoding="utf-8")
+
+
+def resolve_and_update_manifest_max_pe_length(
+    meta_path: Path,
+    target_model_dir: str | Path,
+    *,
+    max_pe_length_explicit: bool,
+) -> dict[str, Any]:
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
+        resolve_target_max_pe_length,
+    )
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    model_cfg = model_config_dict(meta)
+    resolved = resolve_target_max_pe_length(
+        target_model_dir,
+        model_cfg,
+        max_pe_length_explicit=max_pe_length_explicit,
+        return_metadata=True,
+    )
+    assert isinstance(resolved, dict)
+    model_cfg["max_pe_length"] = int(resolved["value"])
+    model_cfg["max_pe_length_source"] = str(resolved["source"])
+    if resolved.get("hf_value") is not None:
+        model_cfg["max_pe_length_hf_value"] = int(resolved["hf_value"])
+    if resolved.get("hf_source") is not None:
+        model_cfg["max_pe_length_hf_source"] = str(resolved["hf_source"])
+    spec_decode = meta.get("spec_decode")
+    if isinstance(spec_decode, dict) and str(spec_decode.get("mode") or meta.get("spec_decode_mode")).lower() == "mtp":
+        spec_decode["draft_rope_max_pe_length"] = int(resolved["value"])
+        spec_decode["target_max_pe_length_source"] = str(resolved["source"])
+        if resolved.get("hf_value") is not None:
+            spec_decode["target_max_pe_length_hf_value"] = int(resolved["hf_value"])
+        if resolved.get("hf_source") is not None:
+            spec_decode["target_max_pe_length_hf_source"] = str(resolved["hf_source"])
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=4), encoding="utf-8")
+    return resolved
 
 
 def draft_quant_config(body_quant_type: str, lm_head_quant_type: str) -> Any:
@@ -228,30 +296,44 @@ def export_mtp_draft(
     body_quant_type = str(mtp_cfg.get("body_quant_type") or "w8a8h1_sefp")
     lm_head_quant_type = str(mtp_cfg.get("lm_head_quant_type") or "w4a8h0_ssfp")
     chip_arch = str(model_cfg.get("chip_arch") or meta.get("chip_arch") or chip_arch or "XH2a")
-    context_length = int(mtp_cfg.get("context_max_length") or model_cfg.get("context_max_length") or 2048)
+    context_length = resolve_context_length(model_cfg, mtp_cfg)
     dtype = str(mtp_cfg.get("dtype") or mtp_cfg.get("draft_dtype") or draft_dtype)
     shared_sliding_len, shared_full_len = infer_shared_cache_lengths(meta)
     output_dir = exported_dir / MTP_DRAFT_DECODE_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     import torch
+
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
         XHGemma4SeriesAssistantDraftModel,
+        resolve_target_max_pe_length,
     )
     from xhquant.api import ConfigDict, PrecisionMode, get_xhquant_logger, ptq_quantize
 
+    target_path = resolve_model_path(str(target_dir))
+    target_max_pe_length_info = resolve_target_max_pe_length(
+        target_path,
+        model_cfg,
+        max_pe_length_explicit=model_cfg.get("max_pe_length_source") == "model_config.max_pe_length",
+        return_metadata=True,
+    )
+    assert isinstance(target_max_pe_length_info, dict)
+    target_max_pe_length = int(target_max_pe_length_info["value"])
+    target_max_pe_length_source = str(target_max_pe_length_info["source"])
     logger = get_xhquant_logger()
     logger.info("Exporting Gemma4 Series MTP assistant draft ONNX to %s", output_dir)
     model = XHGemma4SeriesAssistantDraftModel(
         assistant_model_dir=str(resolve_model_path(str(assistant_dir))),
-        target_model_dir=str(resolve_model_path(str(target_dir))),
+        target_model_dir=str(target_path),
         wrap_cfg=ConfigDict(
             input_sequence_length=int(mtp_cfg.get("input_sequence_length") or 1),
-            max_sequence_length=context_length,
+            context_length=context_length,
             dtype=dtype,
             cache_axis=2,
             shared_sliding_cache_length=shared_sliding_len,
             shared_full_cache_length=shared_full_len,
+            target_max_pe_length=target_max_pe_length,
+            model_config=dict(model_cfg),
         ),
         quant_config=draft_quant_config(body_quant_type, lm_head_quant_type),
     )
@@ -280,6 +362,11 @@ def export_mtp_draft(
         lm_head_quant_type=lm_head_quant_type,
         shared_sliding_len=shared_sliding_len,
         shared_full_len=shared_full_len,
+        context_length=context_length,
+        draft_rope_max_pe_length=target_max_pe_length,
+        target_max_pe_length_source=target_max_pe_length_source,
+        target_max_pe_length_hf_value=target_max_pe_length_info.get("hf_value"),
+        target_max_pe_length_hf_source=target_max_pe_length_info.get("hf_source"),
     )
     return onnx_file
 
@@ -325,6 +412,7 @@ def dump_mtp_draft_golden(meta_file: str | Path, device: str, *, logger: Any | N
     golden_dir.mkdir(parents=True, exist_ok=True)
 
     import torch
+
     from xhquant.api import HMONNXGraphGoldenInference
 
     if logger is not None:
