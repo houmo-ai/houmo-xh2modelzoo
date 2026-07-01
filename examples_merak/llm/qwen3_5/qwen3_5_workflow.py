@@ -134,7 +134,10 @@ def main() -> None:
         workflow.dump_golden(
             export_result=export_result,
             device=args.device,
-            input_messages={"text": "用中文简单介绍 Qwen3.5。"},
+            input_messages={
+                "text": "描述这张图片",
+                "image": "data/images/qwen2_vl_demo.jpeg"
+            },
         )
 
     # test hmonnx generation
