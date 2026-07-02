@@ -116,6 +116,23 @@ def _build_output_dirs(work_dir: Path, preset: Gemma4Preset, action: Action) -> 
     return root / "quant", root / "export"
 
 
+def _looks_like_gguf_artifact(path: str | None) -> bool:
+    if not path:
+        return False
+    artifact = Path(path)
+    if artifact.is_file():
+        return artifact.suffix.lower() == ".gguf"
+    if artifact.is_dir():
+        return any(child.suffix.lower() == ".gguf" for child in artifact.iterdir())
+    return str(path).lower().endswith(".gguf")
+
+
+def _existing_artifact_format(args: argparse.Namespace) -> str:
+    if args.existing_artifact_format != "auto":
+        return args.existing_artifact_format
+    return "gguf_qat" if _looks_like_gguf_artifact(args.existing_hf_model_dir) else "gptqmodel_hf"
+
+
 def _quant_overrides(args: argparse.Namespace, action: Action) -> dict[str, Any] | None:
     if action == "base-export":
         # Explicit base export: export from the original HF checkpoint and do not
@@ -127,12 +144,15 @@ def _quant_overrides(args: argparse.Namespace, action: Action) -> dict[str, Any]
         # Intended for unified workflow configs that support an already-quantized
         # HF checkpoint as the quant stage input.  The concrete workflow owns the
         # interpretation and validation of these quant keys.
+        artifact_format = _existing_artifact_format(args)
         return {
             "quant": {
                 "algorithm": "existing_hf",
-                "artifact_format": "gptqmodel_hf",
-                "output_format": "gptqmodel_hf",
+                "artifact_format": artifact_format,
+                "output_format": artifact_format,
                 "existing_hf_model_dir": args.existing_hf_model_dir,
+                "bits": 4,
+                "group_size": 64,
             }
         }
     # Heavy quantization is opt-in only.  Use the quant block from the workflow
@@ -146,6 +166,10 @@ def _export_overrides(args: argparse.Namespace, preset: Gemma4Preset, action: Ac
         overrides["export.model.context_max_length"] = args.context_max_length
     if args.prefill_chunk_length is not None:
         overrides["export.model.prefill_chunk_length"] = args.prefill_chunk_length
+    if action == "existing-hf" and _existing_artifact_format(args) == "gguf_qat":
+        overrides["export.model.quant_scheme.quant_type"] = "w4a8h0_ssfp"
+        overrides["export.model.visual_config.quant_scheme.quant_type"] = "w4a8h0_ssfp"
+        overrides["export.model.video_visual_config.quant_scheme.quant_type"] = "w4a8h0_ssfp"
     if args.mtp_config:
         overrides["export.model.spec_decode_mode"] = "mtp"
     if args.mtp_config:
@@ -277,7 +301,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hf-model-dir", help="Override the preset target/base HF model path.")
     parser.add_argument("--assistant-model-dir", help="Override the preset Gemma4 assistant/MTP draft HF model path.")
-    parser.add_argument("--existing-hf-model-dir", help="Already-quantized HF checkpoint for --action existing-hf.")
+    parser.add_argument(
+        "--existing-hf-model-dir",
+        help=(
+            "Already-quantized artifact for --action existing-hf. Supports GPTQModel-compatible HF directories "
+            "and official Gemma4 QAT GGUF directories/files."
+        ),
+    )
+    parser.add_argument(
+        "--existing-artifact-format",
+        choices=("auto", "gptqmodel_hf", "gguf_qat"),
+        default="auto",
+        help="Artifact format for --existing-hf-model-dir; auto detects .gguf paths as gguf_qat.",
+    )
     parser.add_argument("--config-path", help="Override the shared unified Gemma4 workflow YAML path.")
     parser.add_argument("--mtp-config", action="store_true", help="Use the preset full_mtp YAML and enable base MTP outputs.")
     parser.add_argument("--work-dir", default="./work_dirs/gemma4_unified_workflow_demo")

@@ -19,6 +19,7 @@ DEFAULT_IMAGE_VISUAL_MAX_PATCHES = 2520
 DEFAULT_VIDEO_VISUAL_SEQ_LENGTH = 70
 DEFAULT_VIDEO_VISUAL_MAX_PATCHES = 630
 DEFAULT_QUANT_TYPE = "w8a8h1_sefp"
+ALLOWED_QUANT_TYPES = (DEFAULT_QUANT_TYPE, "w4a8h0_ssfp")
 
 
 @dataclass(frozen=True)
@@ -65,10 +66,11 @@ class Gemma4SeriesExportPlan:
                 "Gemma4 Series exports must use prefill/input length="
                 f"{REQUIRED_INPUT_SEQUENCE_LENGTH}, got {self.input_sequence_length}"
             )
-        if self.quant_type != DEFAULT_QUANT_TYPE:
+        if self.quant_type not in ALLOWED_QUANT_TYPES:
+            allowed_quant_types = ", ".join(repr(quant_type) for quant_type in ALLOWED_QUANT_TYPES)
             raise ValueError(
                 "Gemma4 Series export.model.quant_scheme.quant_type must be "
-                f"{DEFAULT_QUANT_TYPE!r}, got {self.quant_type!r}"
+                f"one of [{allowed_quant_types}], got {self.quant_type!r}"
             )
         if not self.export_image_visual:
             raise ValueError("Gemma4 Series exports require an image visual subgraph")
@@ -176,6 +178,7 @@ __all__ = [
     "DEFAULT_VIDEO_VISUAL_MAX_PATCHES",
     "DEFAULT_VIDEO_VISUAL_SEQ_LENGTH",
     "ALLOWED_CONTEXT_MAX_LENGTHS",
+    "ALLOWED_QUANT_TYPES",
     "Gemma4SeriesExportPlan",
     "REQUIRED_CONTEXT_MAX_LENGTH",
     "REQUIRED_INPUT_SEQUENCE_LENGTH",

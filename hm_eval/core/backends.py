@@ -807,6 +807,20 @@ class HMONNXBackend(EvalBackend):
         # _effective_merak_max_new_tokens clips generation budget separately.
         return max(1, self.max_context_tokens - 1)
 
+    def _merak_text_max_prefill_tokens(self) -> Optional[int]:
+        max_prefill_tokens = self._merak_max_prefill_tokens()
+        model_type = (self._merak_runtime_meta or {}).get("model_config", {}).get("model_type", "")
+        if (
+            isinstance(model_type, str)
+            and model_type.startswith("Qwen3_5")
+            and self._merak_prefill_chunk_length is not None
+            and self._merak_prefill_chunk_length > 0
+        ):
+            if max_prefill_tokens is None:
+                return self._merak_prefill_chunk_length
+            return min(max_prefill_tokens, self._merak_prefill_chunk_length)
+        return max_prefill_tokens
+
     def _effective_merak_max_new_tokens(self, input_length: int, requested_max_tokens: int) -> int:
         if self.max_context_tokens is None:
             return max(1, requested_max_tokens)
@@ -825,7 +839,7 @@ class HMONNXBackend(EvalBackend):
         return effective_tokens
 
     def _truncate_merak_text_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        max_prefill_tokens = self._merak_max_prefill_tokens()
+        max_prefill_tokens = self._merak_text_max_prefill_tokens()
         if max_prefill_tokens is None or input_ids.shape[-1] <= max_prefill_tokens:
             return input_ids
         truncated = input_ids[:, -max_prefill_tokens:].contiguous()

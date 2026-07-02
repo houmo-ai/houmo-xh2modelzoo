@@ -213,6 +213,9 @@ def get_quant_config_help() -> str:
         "Use config_overrides={'quant': None} only for explicit base-model validation, or replace "
         "the quant block with {'algorithm': 'existing_hf', 'artifact_format': 'gptqmodel_hf', "
         "'existing_hf_model_dir': ...} when a quantized HF directory already exists. "
+        "Official Gemma4 QAT GGUF artifacts can use artifact_format='gguf_qat'; the GGUF is "
+        "loaded as an external quant_weight artifact against the original HF config and exported "
+        f"with {DEFAULT_QUANT_TYPE}. "
         "The public group_size is fixed at 64."
     )
 
@@ -331,9 +334,10 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
 
         algorithm = str(quant_cfg.get("algorithm") or "gptqmodel").lower()
         artifact_format = self._resolve_artifact_format(quant_cfg)
-        if artifact_format != "gptqmodel_hf":
+        if artifact_format not in {"gptqmodel_hf", "gguf_qat"}:
             raise ValueError(
-                "Gemma4SeriesWorkflow.quant requires artifact_format/output_format='gptqmodel_hf'; "
+                "Gemma4SeriesWorkflow.quant requires artifact_format/output_format='gptqmodel_hf' "
+                "or 'gguf_qat' for existing official QAT GGUF artifacts; "
                 f"got {artifact_format!r}."
             )
 
@@ -341,13 +345,20 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             existing_hf_model_dir = quant_cfg.get("existing_hf_model_dir")
             if not existing_hf_model_dir:
                 raise ValueError("quant.algorithm='existing_hf' requires quant.existing_hf_model_dir")
-            existing_hf_model_dir = self._require_existing_directory(
+            existing_hf_model_dir = self._require_existing_artifact(
                 existing_hf_model_dir,
                 field="quant.existing_hf_model_dir",
             )
             return QuantResult(
                 hf_model_dir=self.hf_model_dir,
                 quanted_model_dir=existing_hf_model_dir,
+                is_quant_weight_format=artifact_format == "gguf_qat",
+            )
+
+        if artifact_format != "gptqmodel_hf":
+            raise ValueError(
+                "Gemma4SeriesWorkflow.quant only supports artifact_format='gguf_qat' with "
+                "quant.algorithm='existing_hf'."
             )
 
         method = str(quant_cfg.get("method") or "").lower().replace("-", "_")
@@ -376,7 +387,9 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
             "quant.algorithm='existing_hf', or "
             "quant.algorithm='gptqmodel' with method='gptq' or method='autoround', "
             "or legacy quant.algorithm='gptq'/'autoround', "
-            "with artifact_format/output_format='gptqmodel_hf'. "
+            "with artifact_format/output_format='gptqmodel_hf'. Existing official QAT GGUF "
+            "artifacts are supported only via quant.algorithm='existing_hf' and "
+            "artifact_format='gguf_qat'. "
             f"Got algorithm={algorithm!r}, artifact_format={artifact_format!r}."
         )
 
@@ -411,6 +424,30 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         )
         mtp_workflow.export_mtp_draft(export_result, hf_model_dir=self.hf_model_dir)
         return export_result
+
+    def _resolve_export_hf_model_dir(self, quant_result: QuantResult) -> str:
+        from ...workflows.utils import same_abs_path
+
+        if not same_abs_path(quant_result.hf_model_dir, self.hf_model_dir):
+            raise ValueError("QuantResult.hf_model_dir must be the same as self.hf_model_dir")
+        if quant_result.skipped or quant_result.is_quant_weight_format:
+            return self.hf_model_dir
+        if not quant_result.quanted_model_dir:
+            raise ValueError("QuantResult.quanted_model_dir must be provided when quant is not skipped")
+        return quant_result.quanted_model_dir
+
+    def _build_export_config(
+        self,
+        quant_result: QuantResult,
+        workflow_config: WorkflowConfig,
+    ) -> dict[str, Any]:
+        export_cfg = super()._build_export_config(quant_result, workflow_config)
+        if quant_result.is_quant_weight_format:
+            if not quant_result.quanted_model_dir:
+                raise ValueError("QuantResult.quanted_model_dir must point to the external quant weight artifact")
+            export_cfg["model"]["quant_weight"] = self._normalize_path(quant_result.quanted_model_dir)
+        export_cfg.pop("naming", None)
+        return export_cfg
 
     def dump_golden(
         self,
@@ -907,16 +944,20 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         return os.path.abspath(os.path.normpath(str(path)))
 
     @classmethod
-    def _require_existing_directory(cls, path: str | os.PathLike[str], *, field: str) -> str:
+    def _require_existing_artifact(cls, path: str | os.PathLike[str], *, field: str) -> str:
         raw_path = str(path)
         expanded = os.path.expanduser(os.path.expandvars(raw_path))
-        if "$" in expanded or not Path(expanded).is_dir():
+        artifact_path = Path(expanded)
+        if "$" in expanded or not artifact_path.exists():
             raise FileNotFoundError(
                 f"Gemma4 quant preflight failed: {field}={raw_path!r} "
-                "does not resolve to a readable local directory. "
-                "Set the corresponding environment variable or pass an existing GPTQModel-compatible HF directory."
+                "does not resolve to a readable local artifact. "
+                "Set the corresponding environment variable or pass an existing GPTQModel-compatible HF directory "
+                "or official Gemma4 QAT GGUF directory/file."
             )
         return cls._normalize_path(expanded)
+
+    _require_existing_directory = _require_existing_artifact
 
 
 XHGemma4SeriesHMONNXWorkflow = Gemma4SeriesWorkflow

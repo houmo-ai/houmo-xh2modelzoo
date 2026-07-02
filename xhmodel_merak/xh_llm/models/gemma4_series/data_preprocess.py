@@ -107,6 +107,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         sliding_window: int = 1024,
         bidirectional_vision_attention: bool = False,
         emit_full_attention_mask: bool | None = None,
+        emit_accepted_count_input: bool = False,
     ):
         super().__init__(
             BaseInputProcessorConfig(
@@ -130,6 +131,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             if emit_full_attention_mask is None
             else bool(emit_full_attention_mask)
         )
+        self.emit_accepted_count_input = bool(emit_accepted_count_input)
 
     def to(self, *args, **kwargs) -> "Gemma4DataPreprocess":
         super().to(*args, **kwargs)
@@ -337,6 +339,13 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         if per_layer_inputs is not None:
             output.append(per_layer_inputs)
         output.extend([self.past_key_caches, self.past_value_caches])
+        if self.emit_accepted_count_input:
+            accepted_count = data.get("accepted_count", 0)
+            if torch.is_tensor(accepted_count):
+                accepted_count = accepted_count.to(device=device, dtype=torch.int32).reshape(1)
+            else:
+                accepted_count = torch.tensor([int(accepted_count)], dtype=torch.int32, device=device)
+            output.append(accepted_count)
         return tuple(output)
 
 

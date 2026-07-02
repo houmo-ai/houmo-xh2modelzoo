@@ -299,19 +299,22 @@ class _Gemma4TextAttention(DynamicModule):
     def _update_cfg(self, cfg: Optional[Dict] = None):
         if cfg is None:
             return self
+        requested_accepted_count = bool(
+            _cfg_get(cfg, "enable_accepted_count_input", getattr(self, "enable_accepted_count_input", False))
+        )
+        self.enable_accepted_count_input = requested_accepted_count and self.is_sliding_attention
         if not self.use_cache or self.k_cache is None or self.v_cache is None:
             return self
-        if not self.is_sliding_attention:
-            return self
-        # LLMCache's ``attention_max_length`` is the model's local-attention
-        # window.  The exported sliding output width is therefore naturally
-        # aligned(sliding_window + current_seq_len - 1, 16): prefill with
-        # q=256 yields 1280/768, while MTP verify decode with q=5 yields
-        # 1040/528.  The physical cache input can still be the larger
-        # slice_window + prefill_input_length tensor.
-        attention_max_length = int(getattr(self, "sliding_window", -1) or -1)
-        self.k_cache.attention_max_length = attention_max_length
-        self.v_cache.attention_max_length = attention_max_length
+        if self.is_sliding_attention:
+            # LLMCache's ``attention_max_length`` is the model's local-attention
+            # window.  The exported sliding output width is therefore naturally
+            # aligned(sliding_window + current_seq_len - 1, 16): prefill with
+            # q=256 yields 1280/768, while MTP verify decode with q=5 yields
+            # 1040/528.  The physical cache input can still be the larger
+            # slice_window + prefill_input_length tensor.
+            attention_max_length = int(getattr(self, "sliding_window", -1) or -1)
+            self.k_cache.attention_max_length = attention_max_length
+            self.v_cache.attention_max_length = attention_max_length
         return self
 
     def forward(
@@ -323,6 +326,7 @@ class _Gemma4TextAttention(DynamicModule):
         current_input_length: Optional[Tensor] = None,
         past_k_cache: Optional[Tensor] = None,
         past_v_cache: Optional[Tensor] = None,
+        accepted_count: Optional[Tensor] = None,
         shared_kv: Optional[dict[int | str, tuple[torch.Tensor, torch.Tensor]]] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -362,8 +366,24 @@ class _Gemma4TextAttention(DynamicModule):
             value_states = self.attn_compute_cast(self.v_norm(value_states)).transpose(1, 2)
 
             if self.use_cache and past_k_cache is not None and past_v_cache is not None:
-                key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
-                value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
+                if getattr(self, "enable_accepted_count_input", False) and self.is_sliding_attention:
+                    key_states = self.k_cache(
+                        key_states,
+                        past_seq_length,
+                        current_input_length,
+                        past_k_cache,
+                        accepted_count,
+                    )
+                    value_states = self.v_cache(
+                        value_states,
+                        past_seq_length,
+                        current_input_length,
+                        past_v_cache,
+                        accepted_count,
+                    )
+                else:
+                    key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
+                    value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
         if getattr(self, "store_full_length_kv", False):
             assert shared_kv is not None
@@ -472,6 +492,7 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         current_input_length: Optional[Tensor] = None,
         past_k_cache: Optional[Tensor] = None,
         past_v_cache: Optional[Tensor] = None,
+        accepted_count: Optional[Tensor] = None,
         shared_kv: Optional[dict[int, tuple[torch.Tensor, torch.Tensor]]] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -487,6 +508,7 @@ class _Gemma4TextDecoderLayer(DynamicModule):
             current_input_length=current_input_length,
             past_k_cache=past_k_cache,
             past_v_cache=past_v_cache,
+            accepted_count=accepted_count,
             shared_kv=shared_kv,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -670,6 +692,7 @@ class _Gemma4TextModel(DynamicModule):
         sliding_attention_mask: Optional[Tensor] = None,
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
+        accepted_count: Optional[Tensor] = None,
     ):
         if inputs_embeds is None:
             raise ValueError("Gemma4 text graph requires inputs_embeds.")
@@ -725,6 +748,7 @@ class _Gemma4TextModel(DynamicModule):
                 current_input_length=current_input_length,
                 past_k_cache=layer_past_key_cache,
                 past_v_cache=layer_past_value_cache,
+                accepted_count=accepted_count,
                 shared_kv=shared_kv,
             )
             if self.only_first_block:

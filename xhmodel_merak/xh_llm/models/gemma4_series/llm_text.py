@@ -177,6 +177,7 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         past_key_cache,
         past_value_cache,
         per_layer_inputs=None,
+        accepted_count=None,
     ):
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
@@ -187,6 +188,7 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
             per_layer_inputs=per_layer_inputs,
+            accepted_count=accepted_count,
         )
         if self.enable_mtp_outputs:
             hidden_states = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
@@ -235,6 +237,31 @@ class _Gemma4DecodeNoFullMaskBridge(_Gemma4TextExportBridgeBase):
         )
 
 
+class _Gemma4DecodeNoFullMaskMTPBridge(_Gemma4TextExportBridgeBase):
+    """MTP decode adapter with the extra accepted_count KV-cache input."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        sliding_attention_mask,
+        past_key_cache=None,
+        past_value_cache=None,
+        accepted_count=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=sliding_attention_mask,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            accepted_count=accepted_count,
+        )
+
+
 class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
     """Text-only export bridge for E4B PLE.
 
@@ -262,6 +289,33 @@ class _Gemma4TextExportBridgePLE(_Gemma4TextExportBridgeBase):
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
             per_layer_inputs=per_layer_inputs,
+        )
+
+
+class _Gemma4TextExportBridgePLEMTPDecode(_Gemma4TextExportBridgePLE):
+    """PLE decode adapter with accepted_count as a target verify-only input."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        sliding_attention_mask,
+        per_layer_inputs,
+        past_key_cache=None,
+        past_value_cache=None,
+        accepted_count=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=sliding_attention_mask,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            per_layer_inputs=per_layer_inputs,
+            accepted_count=accepted_count,
         )
 
 
@@ -431,9 +485,16 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
 
     def _run_llm_from_processed(self, data_input):
         processed = list(data_input)
-        past_key_caches = processed[-2]
-        past_value_caches = processed[-1]
-        model_args = processed[:-2] + list(past_key_caches) + list(past_value_caches)
+        data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
+        if getattr(data_processor, "emit_accepted_count_input", False):
+            past_key_caches = processed[-3]
+            past_value_caches = processed[-2]
+            accepted_count = processed[-1]
+            model_args = processed[:-3] + list(past_key_caches) + list(past_value_caches) + [accepted_count]
+        else:
+            past_key_caches = processed[-2]
+            past_value_caches = processed[-1]
+            model_args = processed[:-2] + list(past_key_caches) + list(past_value_caches)
         logits = self._llm_model.forward(*model_args)
         if isinstance(logits, (tuple, list)):
             logits = logits[0]

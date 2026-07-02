@@ -193,12 +193,37 @@ def _w4_nodes(model: onnx.ModelProto) -> list[tuple[str, str, dict[str, Any]]]:
     return hits
 
 
-def _kv_nodes(model: onnx.ModelProto) -> list[tuple[str, str, dict[str, Any]]]:
+def _kv_nodes(model: onnx.ModelProto) -> list[tuple[str, str, dict[str, Any], list[str]]]:
     hits = []
     for node in model.graph.node:
         if node.op_type == "KVcache" or "cache" in node.op_type.lower():
-            hits.append((node.name, node.op_type, _node_attrs(node)))
+            hits.append((node.name, node.op_type, _node_attrs(node), list(node.input)))
     return hits
+
+
+def _target_decode_onnx_path(meta_path: Path, meta_dict: dict[str, Any]) -> Path:
+    export_dir = meta_path.parent
+    if meta_dict.get("decode_hmonnx"):
+        return _resolve_relative_path(meta_dict["decode_hmonnx"], export_dir)
+    return next((export_dir / "decode").glob("*.onnx"))
+
+
+def _first_sliding_kv_trace_info(meta_path: Path, meta_dict: dict[str, Any]) -> dict[str, Any] | None:
+    decode_onnx = _target_decode_onnx_path(meta_path, meta_dict)
+    decode_model = onnx.load(str(decode_onnx), load_external_data=False)
+    for node_name, op_type, attrs, node_inputs in _kv_nodes(decode_model):
+        attention_max_length = int(attrs.get("attention_max_length", attrs.get("attention-max-length", -1)))
+        if attention_max_length <= 0:
+            continue
+        return {
+            "decode_onnx": str(decode_onnx),
+            "node_name": node_name,
+            "op_type": op_type,
+            "attention_max_length": attention_max_length,
+            "node_inputs": node_inputs,
+            "accepted_count_input_index": node_inputs.index("accepted_count") if "accepted_count" in node_inputs else None,
+        }
+    return None
 
 
 def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: str | None = None, draft_onnx: str | None = None) -> dict[str, Any]:
@@ -219,7 +244,7 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         )
 
     prefill_onnx = _resolve_relative_path(meta_dict.get("prefill_hmonnx", ""), export_dir) if meta_dict.get("prefill_hmonnx") else next((export_dir / "prefill").glob("*.onnx"))
-    decode_onnx = _resolve_relative_path(meta_dict.get("decode_hmonnx", ""), export_dir) if meta_dict.get("decode_hmonnx") else next((export_dir / "decode").glob("*.onnx"))
+    decode_onnx = _target_decode_onnx_path(meta_path, meta_dict)
     prefill_model = onnx.load(str(prefill_onnx), load_external_data=False)
     decode_model = onnx.load(str(decode_onnx), load_external_data=False)
     prefill_outputs = [out.name for out in prefill_model.graph.output]
@@ -229,6 +254,32 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
     if decode_outputs != EXPECTED_BASE_OUTPUTS:
         raise AssertionError(f"{preset.name}: decode outputs mismatch: {decode_outputs}")
     decode_input_shape = _onnx_value_shape(decode_model, "input_1")
+    decode_inputs = _load_inputs(decode_onnx)
+    if "accepted_count" not in decode_inputs:
+        raise AssertionError(f"{preset.name}: target MTP verify decode graph is missing accepted_count input")
+    decode_kv_nodes = _kv_nodes(decode_model)
+    if not decode_kv_nodes:
+        raise AssertionError(f"{preset.name}: target MTP verify decode graph has no KVcache nodes")
+    sliding_kv_nodes = []
+    full_kv_nodes = []
+    for node_name, _, attrs, node_inputs in decode_kv_nodes:
+        attention_max_length = int(attrs.get("attention_max_length", attrs.get("attention-max-length", -1)))
+        if attention_max_length > 0:
+            sliding_kv_nodes.append(node_name)
+            if "accepted_count" not in node_inputs:
+                raise AssertionError(
+                    f"{preset.name}: target sliding decode KVcache {node_name} does not consume accepted_count"
+                )
+        else:
+            full_kv_nodes.append(node_name)
+            if "accepted_count" in node_inputs:
+                raise AssertionError(
+                    f"{preset.name}: target full decode KVcache {node_name} must not consume accepted_count"
+                )
+    if not sliding_kv_nodes:
+        raise AssertionError(f"{preset.name}: target MTP verify decode graph has no sliding KVcache nodes")
+    if not full_kv_nodes:
+        raise AssertionError(f"{preset.name}: target MTP verify decode graph has no full-attention KVcache nodes")
     if decode_input_shape[1] != verify_length:
         raise AssertionError(
             f"{preset.name}: target decode input length must be verify_length={verify_length}, got {decode_input_shape}"
@@ -292,7 +343,7 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
     kv_nodes = _kv_nodes(draft_model)
     if len(kv_nodes) != 4:
         raise AssertionError(f"{preset.name}: expected 4 KVcache nodes, got {len(kv_nodes)}")
-    for node_name, _, attrs in kv_nodes:
+    for node_name, _, attrs, _ in kv_nodes:
         if attrs.get("only_handle_old_cache") != 1:
             raise AssertionError(f"{preset.name}: {node_name} missing only_handle_old_cache=1: {attrs}")
         if "passthrough" in attrs:
@@ -315,7 +366,7 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         "verify_length": verify_length,
         "num_draft_tokens": num_draft_tokens,
         "prefill_inputs": _load_inputs(prefill_onnx),
-        "decode_inputs": _load_inputs(decode_onnx),
+        "decode_inputs": decode_inputs,
         "decode_input_shape": decode_input_shape,
         "decode_logits_shape": decode_logits_shape,
         "target_shared_shapes": target_shared_shapes,
@@ -324,7 +375,8 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         "draft_inputs": draft_inputs,
         "draft_outputs": draft_outputs,
         "draft_shared_shapes": {name: _onnx_value_shape(draft_model, name) for name in target_shared_shapes},
-        "kv_cache_attrs": [attrs for _, _, attrs in kv_nodes],
+        "kv_cache_attrs": [attrs for _, _, attrs, _ in kv_nodes],
+        "target_kv_cache_inputs": {node_name: node_inputs for node_name, _, _, node_inputs in decode_kv_nodes},
         "w4_head_node": {"name": w4_nodes[0][0], "op_type": w4_nodes[0][1], "attrs": w4_nodes[0][2]},
         "quant_counter": {str(key): value for key, value in sorted(quant_counter.items())},
     }
@@ -778,6 +830,22 @@ def _parse_target_outputs(outputs) -> tuple[Any, Any, dict[str, Any]]:
     return outputs[0], outputs[1], {}
 
 
+def _scalar_debug_value(value: Any) -> int | float | str:
+    try:
+        import torch
+
+        if torch.is_tensor(value):
+            if value.numel() == 1:
+                return int(value.detach().cpu().reshape(-1)[0].item())
+            return f"tensor(shape={tuple(value.shape)}, dtype={value.dtype})"
+    except Exception:
+        pass
+    try:
+        return int(value)
+    except Exception:
+        return repr(value)
+
+
 def _run_target_prefill(target_model, input_ids):
     import torch
 
@@ -813,7 +881,32 @@ def _run_target_verify(target_model, token_ids: list[int], past_seq_length: int)
     target_model.set_decode()
     target_model.set_input_sequence_length(len(token_ids))
     processor = target_model.get_data_preprocessor()
-    model_inputs = processor({"input_ids": tokens, "past_seq_length": int(past_seq_length)})
+    verify_accepted_count = int(getattr(target_model, "_mtp_next_verify_accepted_count", 0))
+    model_inputs = processor(
+        {
+            "input_ids": tokens,
+            "past_seq_length": int(past_seq_length),
+            "accepted_count": verify_accepted_count,
+        }
+    )
+    if getattr(target_model, "_mtp_trace_accepted_count", False):
+        input_names = list(getattr(getattr(target_model, "llm", None), "input_names", []) or [])
+        if not input_names and hasattr(target_model, "get_input_names"):
+            try:
+                input_names = list(target_model.get_input_names())
+            except Exception:
+                input_names = []
+        accepted_tensor = model_inputs[-1] if model_inputs else verify_accepted_count
+        print(
+            "[MTP accepted_count trace] "
+            f"verify_round={int(getattr(target_model, '_mtp_verify_round_index', 0))} "
+            f"target_decode_input accepted_count={_scalar_debug_value(accepted_tensor)} "
+            f"expected_previous_accepted={verify_accepted_count} "
+            f"past_seq_length={int(past_seq_length)} "
+            f"verify_tokens={list(map(int, token_ids))}"
+        )
+        if input_names:
+            print(f"[MTP accepted_count trace] target graph inputs={input_names}")
     outputs = target_model.forward(*model_inputs)
     logits, hidden, _ = _parse_target_outputs(outputs)
     return logits, hidden, _hmonnx_shared_from_cache(target_model)
@@ -1051,7 +1144,18 @@ def _build_assistant_inputs(
     }
 
 
-def generate_with_mtp(target_model, assistant_session, tokenizer, meta: dict[str, Any], prompt: str, max_new_tokens: int, num_draft_tokens: int):
+def generate_with_mtp(
+    target_model,
+    assistant_session,
+    tokenizer,
+    meta: dict[str, Any],
+    prompt: str,
+    max_new_tokens: int,
+    num_draft_tokens: int,
+    *,
+    trace_accepted_count: bool = False,
+    trace_kv_input_info: dict[str, Any] | None = None,
+):
     import torch
 
     input_ids = _load_prompt_inputs(tokenizer, prompt).to(target_model.device)
@@ -1072,6 +1176,7 @@ def generate_with_mtp(target_model, assistant_session, tokenizer, meta: dict[str
         "draft_accepted": 0,
         "committed_tokens": 1,
         "accepted_per_round": [],
+        "accepted_count_inputs": [],
     }
     if current_token_id in eos_token_ids or generated >= max_new_tokens:
         text = tokenizer.decode(output_ids[prompt_length:], skip_special_tokens=True).strip()
@@ -1117,6 +1222,9 @@ def generate_with_mtp(target_model, assistant_session, tokenizer, meta: dict[str
         if len(verify_ids) < verify_length:
             verify_ids = verify_ids + [verify_ids[-1]] * (verify_length - len(verify_ids))
         round_past_seq_length = int(past_seq_length)
+        verify_input_accepted_count = int(getattr(target_model, "_mtp_next_verify_accepted_count", 0))
+        setattr(target_model, "_mtp_trace_accepted_count", bool(trace_accepted_count))
+        setattr(target_model, "_mtp_verify_round_index", int(stats["verify_rounds"]))
         cache_snapshot = (
             _snapshot_hmonnx_kv_cache(target_model)
             if _target_needs_manual_cache_commit(target_model)
@@ -1133,8 +1241,22 @@ def generate_with_mtp(target_model, assistant_session, tokenizer, meta: dict[str
             if int(predicted_token) != int(draft_token):
                 break
             accepted_count += 1
+        setattr(target_model, "_mtp_next_verify_accepted_count", int(accepted_count))
+        stats["accepted_count_inputs"].append(verify_input_accepted_count)
         stats["draft_accepted"] += accepted_count
         stats["accepted_per_round"].append(accepted_count)
+        if trace_accepted_count:
+            kv_desc = trace_kv_input_info or {}
+            print(
+                "[MTP accepted_count trace] "
+                f"verify_round={int(stats['verify_rounds'])} "
+                f"first_sliding_kvcache={kv_desc.get('node_name')} "
+                f"accepted_count_input_index={kv_desc.get('accepted_count_input_index')} "
+                f"input_accepted_count={verify_input_accepted_count} "
+                f"current_round_accepted_tokens={accepted_count} "
+                f"next_verify_expected_accepted_count={accepted_count} "
+                f"match_previous={verify_input_accepted_count == (stats['accepted_per_round'][-2] if len(stats['accepted_per_round']) > 1 else 0)}"
+            )
 
         for token in draft_tokens[:accepted_count]:
             if generated >= max_new_tokens:
@@ -1278,6 +1400,12 @@ def run_generate(args: argparse.Namespace) -> None:
         args.draft_backend,
         draft_desc,
     )
+    trace_kv_input_info = _first_sliding_kv_trace_info(meta_path, meta) if args.trace_accepted_count else None
+    if args.trace_accepted_count:
+        if trace_kv_input_info is None:
+            raise RuntimeError(f"{args.preset}: cannot find a sliding KVcache node in target decode ONNX")
+        print("[MTP accepted_count trace] first sliding KVcache node")
+        print(json.dumps(trace_kv_input_info, ensure_ascii=False, indent=2))
     with TimeProfiler("gemma4_series_mtp_hmonnx_generate", logger), MemoryTracker(device=str(device), name="generate", logger=logger):
         with ExitStack() as stack:
             if args.target_backend == "hmonnx":
@@ -1291,6 +1419,8 @@ def run_generate(args: argparse.Namespace) -> None:
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
                     num_draft_tokens=args.num_draft_tokens,
+                    trace_accepted_count=args.trace_accepted_count,
+                    trace_kv_input_info=trace_kv_input_info,
                 )
 
     print(text)
@@ -1352,6 +1482,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_gen.add_argument("--draft-dtype", default="float16", help="dtype for --draft-backend torch")
     p_gen.add_argument("--target-model-dir", help="HF target dir for --draft-backend torch embedding/config.")
     p_gen.add_argument("--assistant-model-dir", help="HF assistant dir for --draft-backend torch.")
+    p_gen.add_argument(
+        "--trace-accepted-count",
+        action="store_true",
+        help="Print first sliding KVcache accepted_count inputs and per-verify accepted-token alignment.",
+    )
     p_gen.add_argument("--debug", action="store_true")
     p_gen.set_defaults(func=run_generate)
 
