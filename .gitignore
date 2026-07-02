@@ -237,3 +237,4 @@ tmp
 verify_logs
 # Local QTL export reports
 docs/qtl338_*.md
+docs/superpowers
