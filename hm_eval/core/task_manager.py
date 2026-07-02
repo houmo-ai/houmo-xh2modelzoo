@@ -149,6 +149,7 @@ def _find_invalid_choice_predictions(task: EvalTask) -> Optional[str]:
         return None
 
     checked_count = 0
+    invalid_predictions: list[str] = []
     for review_file in sorted(work_dir.rglob("reviews/**/*.jsonl")):
         try:
             for line in review_file.read_text(encoding="utf-8").splitlines():
@@ -163,11 +164,16 @@ def _find_invalid_choice_predictions(task: EvalTask) -> Optional[str]:
                 if extracted is None:
                     continue
                 checked_count += 1
+                prediction = str(extracted).strip().upper()
+                if prediction not in valid_letters:
+                    invalid_predictions.append(prediction or "<empty>")
         except Exception:
             logger.exception("Failed to parse review file for task %s: %s", task.task_id, review_file)
 
-    # Invalid extracted choices are already reflected as wrong answers in evalscope's score.
-    # They indicate model output format drift or truncation, not necessarily a platform error.
+    if invalid_predictions:
+        preview = ", ".join(invalid_predictions[:5])
+        return f"选择题评测提取到非法选项: {preview}。"
+
     if checked_count == 0 and dataset_name == "mmlu_pro":
         return "MMLU-Pro 已完成但未生成可用 review 结果，报告不完整。"
     return None
@@ -410,6 +416,8 @@ class TaskManager:
 
     def list_tasks(self) -> List[EvalTask]:
         """Return all tasks, most recent first. Refreshes non-terminal tasks from disk."""
+        # Also pick up any new task files created since the last load
+        self._load_tasks()
         for task in list(self._tasks.values()):
             self.update_task_status(task.task_id)
         return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)

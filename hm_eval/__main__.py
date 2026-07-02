@@ -18,6 +18,8 @@ def main() -> None:
     parser.add_argument("--datasets", nargs="+", help="[CLI] Dataset names")
     parser.add_argument("--limit", type=int, default=0, help="[CLI] Per-subset sample limit (0=all)")
     parser.add_argument("--max-tokens", type=int, default=512, help="[CLI] Max generation tokens")
+    parser.add_argument("--hmonnx-meta", type=str, default="", help="[CLI] HMONNX golden_meta_info.json/export_meta_info.json/meta.json path")
+    parser.add_argument("--vision-hmonnx-meta", type=str, default="", help="[CLI] Vision export_meta_info.json path for legacy multimodal HMONNX")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -65,6 +67,12 @@ def _run_cli(args) -> None:
         print(f"Error: Model not found: {args.model}")
         print(f"Available: {[m.display_name for m in registry.list_models()]}")
         return
+
+    if args.backend == "hmonnx" and "hmonnx" in model.backends:
+        if args.hmonnx_meta:
+            model.backends["hmonnx"].export_meta_info = args.hmonnx_meta
+        if args.vision_hmonnx_meta:
+            model.backends["hmonnx"].vision_export_meta_info = args.vision_hmonnx_meta
 
     print(f"Loading {model.display_name} with {args.backend} backend...")
     backend = create_backend(args.backend, model)

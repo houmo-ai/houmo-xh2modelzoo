@@ -16,15 +16,20 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 CHOICE_PATTERNS: list[str] = [
-    r"答案\s*[:：]\s*([A-J])",
-    r"正确答案\s*[:：]?\s*([A-J])",
-    r"(?i)answer\s*[:：]\s*([A-J])",
-    r"(?i)the answer is\s*[:：]?\s*([A-J])",
-    r"(?i)final answer\s*[:：]?\s*([A-J])",
-    r"(?i)option\s*([A-J])",
-    r"(?i)choice\s*([A-J])",
-    r"选项\s*([A-J])",
-    r"故选\s*([A-J])",
+    r"答案\s*[:：]\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"答案\s*(?:是|为)\s*[:：]?\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"正确答案\s*[:：]?\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"正确答案\s*(?:是|为)\s*[:：]?\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?i)answer\s*[:：]\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?i)the answer is\s*[:：]?\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?i)final answer\s*[:：]?\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?i)ANSWER\s*\*{0,2}\(?\s*([A-J])\s*\)?\*{0,2}",
+    r"(?i)option\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?i)choice\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"选项\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"(?:选择|选)\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"故选\s*\*{0,2}\(?([A-J])\)?\*{0,2}",
+    r"^[\s\*\-\(\[]*([A-J])[\)\]\.:：]\s*\S.*$",
     r"^[\s\*\-\(\[]*([A-J])[\)\]\s\.:：]*$",
 ]
 
@@ -37,7 +42,9 @@ def extract_single_choice_letter(text: str) -> Optional[str]:
         match = re.search(pattern, text, flags=re.MULTILINE)
         if match:
             return match.group(1).upper()
-    standalone = re.findall(r"\b([A-J])\b", text.upper())
+    # Fallback: search last 3 lines for a standalone letter
+    last_lines = "\n".join(text.strip().splitlines()[-3:])
+    standalone = re.findall(r"\b([A-J])\b", last_lines.upper())
     if standalone:
         return standalone[-1]
     return None
@@ -186,7 +193,7 @@ def normalize_eval_output(
     if dataset_name in _CHOICE_DATASETS:
         letter = extract_single_choice_letter(output_text)
         if letter is None:
-            return output_text
+            return "未作答"
         if dataset_name in _CHINESE_DATASETS:
             return f"答案：{letter}"
         return f"Answer: {letter}"

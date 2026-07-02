@@ -1709,6 +1709,39 @@ def test_gemma4_series_decode_preprocess_skips_full_attention_mask():
     assert outputs[3].shape[-1] != 8  # this is sliding_attention_mask, not full mask
 
 
+def test_gemma4_series_mtp_decode_keeps_accepted_count_rank_one():
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import _Gemma4HFCompatible
+    from xhmodel_merak.xh_llm.types import CacheList
+
+    captured = {}
+
+    class FakeLLM:
+        def get_data_preprocessor(self):
+            return SimpleNamespace(emit_accepted_count_input=True)
+
+        def forward(self, *args):
+            captured["args"] = args
+            return torch.zeros((1, 1, 8), dtype=torch.float16)
+
+    model = object.__new__(_Gemma4HFCompatible)
+    model._llm_model = FakeLLM()
+    accepted_count = torch.tensor([0], dtype=torch.int32)
+    data_input = (
+        torch.zeros((1, 1, 4), dtype=torch.float16),
+        torch.tensor([4], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
+        torch.zeros((1, 1, 1, 16), dtype=torch.float16),
+        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
+        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
+        accepted_count,
+    )
+
+    _Gemma4HFCompatible._run_llm_from_processed(model, data_input)
+
+    assert captured["args"][-1] is accepted_count
+    assert captured["args"][-1].shape == (1,)
+
+
 
 def test_gemma4_series_mtp_eos_reads_exported_generation_config(tmp_path):
     from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (

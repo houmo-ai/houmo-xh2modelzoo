@@ -5,14 +5,16 @@ from __future__ import annotations
 import copy
 import gc
 import json
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import torch
 import torch.nn as nn
 import onnx
-from transformers import AutoModelForImageTextToText
+from tqdm import tqdm
+from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration
 
 from xhmodel_merak.xh_llm.builder import register_llm_model
@@ -28,6 +30,9 @@ from .data_preprocess import (
 from .llm_text import (
     Gemma4KVCacheMixin,
     _Gemma4DecodeNoFullMaskBridge,
+    _Gemma4DecodeNoFullMaskMTPBridge,
+    _Gemma4TextExportBridgePLE,
+    _Gemma4TextExportBridgePLEMTPDecode,
     _copy_model_shared_params,
     _gemma4_cache_seq_len_for_layer,
     _make_text_export_bridge_if_needed,
@@ -197,7 +202,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
         return ((int(self.sliding_window) + verify_length - 1 + 15) // 16) * 16
 
     def _mtp_decode_wrap_cfg_overrides(self) -> dict[str, int]:
-        return {"num_logits_to_keep": 0}
+        return {"num_logits_to_keep": 0, "enable_accepted_count_input": True}
 
     def _apply_wrap_cfg_to_modules(self, module: nn.Module) -> None:
         def _update(child: nn.Module) -> None:
@@ -260,6 +265,428 @@ class XHGemma4SeriesModel(VisionLLMModel):
             return hf_model.language_model
         return hf_model.model.language_model
 
+    @staticmethod
+    def _is_gguf_quant_weight_path(quant_weight_path: str | None) -> bool:
+        if not quant_weight_path:
+            return False
+        path = Path(quant_weight_path)
+        if path.is_file():
+            return path.suffix.lower() == ".gguf"
+        if path.is_dir():
+            return any(child.suffix.lower() == ".gguf" for child in path.iterdir())
+        return str(quant_weight_path).lower().endswith(".gguf")
+
+    @staticmethod
+    def _resolve_gguf_artifact_files(gguf_path: str) -> tuple[str, str | None]:
+        path = Path(gguf_path)
+        if path.is_file():
+            if path.suffix.lower() != ".gguf":
+                raise ValueError(f"GGUF quant_weight must be a .gguf file or directory, got: {gguf_path}")
+            sibling_ggufs = sorted(
+                child for child in path.parent.iterdir() if child.is_file() and child.suffix.lower() == ".gguf"
+            )
+            if "mmproj" in path.name.lower():
+                main_files = [child for child in sibling_ggufs if "mmproj" not in child.name.lower()]
+                if len(main_files) != 1:
+                    candidate_list = ", ".join(str(child) for child in main_files)
+                    raise ValueError(
+                        f"GGUF mmproj file path requires exactly one sibling non-mmproj .gguf file, got "
+                        f"{len(main_files)}. Candidates: {candidate_list}"
+                    )
+                return str(main_files[0]), str(path)
+            mmproj_files = [child for child in sibling_ggufs if "mmproj" in child.name.lower()]
+            if len(mmproj_files) > 1:
+                candidate_list = ", ".join(str(child) for child in mmproj_files)
+                raise ValueError(
+                    f"GGUF file path has multiple sibling mmproj .gguf files; pass an artifact directory with "
+                    f"a single mmproj file or remove ambiguity. Candidates: {candidate_list}"
+                )
+            return str(path), str(mmproj_files[0]) if mmproj_files else None
+        if not path.is_dir():
+            raise FileNotFoundError(f"GGUF quant_weight path does not exist: {gguf_path}")
+
+        gguf_files = sorted(child for child in path.iterdir() if child.is_file() and child.suffix.lower() == ".gguf")
+        if not gguf_files:
+            raise FileNotFoundError(f"GGUF quant_weight directory does not contain any .gguf files: {gguf_path}")
+        mmproj_files = [child for child in gguf_files if "mmproj" in child.name.lower()]
+        main_files = [child for child in gguf_files if child not in mmproj_files]
+        if len(main_files) != 1:
+            candidate_list = ", ".join(str(child) for child in main_files)
+            raise ValueError(
+                f"GGUF quant_weight directory must contain exactly one non-mmproj .gguf file, got "
+                f"{len(main_files)}. Candidates: {candidate_list}"
+            )
+        if len(mmproj_files) > 1:
+            candidate_list = ", ".join(str(child) for child in mmproj_files)
+            raise ValueError(
+                f"GGUF quant_weight directory contains multiple mmproj .gguf files; pass one artifact directory "
+                f"with a single mmproj file. Candidates: {candidate_list}"
+            )
+        return str(main_files[0]), str(mmproj_files[0]) if mmproj_files else None
+
+    @classmethod
+    def _load_hf_model_from_gguf(cls, hf_model_dir: str, gguf_path: str, **kwargs) -> nn.Module:
+        try:
+            from accelerate import init_empty_weights
+            from accelerate.utils.modeling import set_module_tensor_to_device
+        except ImportError as e:
+            raise ImportError("Loading GGUF quant_weight requires accelerate.") from e
+
+        try:
+            from transformers.modeling_utils import no_init_weights
+        except ImportError:
+            no_init_weights = init_empty_weights
+
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        auto_model_cls = cls.get_hf_auto_model_cls()
+        model_dtype = cls.get_hf_model_dtype()
+        torch_dtype = kwargs.pop("torch_dtype", kwargs.pop("dtype", model_dtype))
+        model_kwargs = dict(kwargs)
+        model_kwargs.pop("device_map", None)
+        model_kwargs.pop("device", None)
+        model_kwargs.setdefault("trust_remote_code", True)
+        with no_init_weights(), init_empty_weights():
+            native_model = auto_model_cls.from_config(
+                config,
+                **model_kwargs,
+            )
+        cls._load_gemma4_gguf_weights(
+            gguf_path=gguf_path,
+            native_hf_model=native_model,
+            torch_dtype=torch_dtype,
+            set_module_tensor_to_device=set_module_tensor_to_device,
+        )
+        if native_model.can_generate():
+            try:
+                native_model.generation_config = GenerationConfig.from_pretrained(hf_model_dir)
+            except OSError:
+                logger = get_xhquant_logger()
+                logger.info("Generation config file not found, using a generation config created from the model config.")
+        return native_model.eval()
+
+    @classmethod
+    def _load_gemma4_gguf_weights(
+        cls,
+        *,
+        gguf_path: str,
+        native_hf_model: nn.Module,
+        torch_dtype: torch.dtype,
+        set_module_tensor_to_device: Callable,
+    ) -> None:
+        import numpy as np
+        from gguf import GGUFReader
+        from gguf import quants as gguf_quants
+
+        logger = get_xhquant_logger()
+        main_file, mmproj_file = cls._resolve_gguf_artifact_files(gguf_path)
+        readers = [GGUFReader(main_file)]
+        if mmproj_file is not None:
+            readers.append(GGUFReader(mmproj_file))
+
+        architecture = cls._gguf_field_string(readers[0], "general.architecture")
+        if architecture != "gemma4":
+            raise NotImplementedError(
+                f"GGUF quant_weight loading currently supports Gemma4 GGUF only, got architecture={architecture!r}."
+            )
+
+        state_shapes = {name: tuple(tensor.shape) for name, tensor in native_hf_model.state_dict().items()}
+        loaded: set[str] = set()
+        skipped: list[str] = []
+        attached_quant_weights = 0
+
+        def _reshape_gguf_array(array: np.ndarray, tensor_name: str, target_shape: tuple[int, ...]) -> np.ndarray:
+            if tensor_name == "v.patch_embd.weight" and array.ndim == 4 and len(target_shape) == 2:
+                array = array.transpose(0, 2, 3, 1)
+            if array.shape != target_shape:
+                if array.size != int(np.prod(target_shape)):
+                    raise RuntimeError(
+                        f"GGUF tensor {tensor_name} shape {array.shape} cannot be reshaped to HF shape {target_shape}."
+                    )
+                array = array.reshape(target_shape)
+            return array
+
+        def _q4_0_quant_weight(tensor: Any, target_shape: tuple[int, ...]) -> torch.Tensor:
+            blocks = np.asarray(tensor.data).view(np.uint8).reshape(-1, 18)
+            _, qs = np.hsplit(blocks, [2])
+            qcodes = qs.reshape((blocks.shape[0], -1, 1, 16)) >> np.array(
+                [0, 4], dtype=np.uint8
+            ).reshape((1, 1, 2, 1))
+            qcodes = (qcodes & np.uint8(0x0F)).reshape((blocks.shape[0], -1)).astype(np.int8) - np.int8(8)
+            qcodes = qcodes.reshape(gguf_quants.quant_shape_from_byte_shape(tensor.data.shape, tensor.tensor_type))
+            qcodes = _reshape_gguf_array(qcodes, tensor.name, target_shape)
+            return torch.from_numpy(np.asarray(qcodes)).contiguous()
+
+        def _attach_quant_weight(native_model: nn.Module, hf_name: str, quant_weight: torch.Tensor | None) -> bool:
+            if quant_weight is None:
+                return False
+            module_name, _, attr_name = hf_name.rpartition(".")
+            if attr_name != "weight":
+                return False
+            module = native_model.get_submodule(module_name) if module_name else native_model
+            if not isinstance(module, nn.Linear):
+                return False
+            if hasattr(module, "quant_weight"):
+                setattr(module, "quant_weight", quant_weight)
+            else:
+                module.register_buffer("quant_weight", quant_weight, persistent=False)
+            return True
+
+        def _gguf_tensor_to_torch(tensor: Any, target_shape: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor | None]:
+            tensor_type = int(tensor.tensor_type)
+            if tensor_type == 0:
+                array = np.asarray(tensor.data)
+                quant_weight = None
+            else:
+                array = gguf_quants.dequantize(tensor.data, tensor.tensor_type)
+                quant_weight = _q4_0_quant_weight(tensor, target_shape) if tensor_type == 2 else None
+            array = _reshape_gguf_array(array, tensor.name, target_shape)
+            tensor_value = torch.from_numpy(np.asarray(array))
+            if tensor_value.is_floating_point():
+                tensor_value = tensor_value.to(dtype=torch_dtype)
+            return tensor_value.contiguous(), quant_weight
+
+        total_tensors = sum(len(reader.tensors) for reader in readers)
+        pbar = tqdm(total=total_tensors, desc="Loading Gemma4 GGUF tensors")
+        for reader in readers:
+            for gguf_tensor in reader.tensors:
+                hf_name = cls._map_gemma4_gguf_tensor_name(gguf_tensor.name)
+                pbar.update(1)
+                if hf_name is None:
+                    skipped.append(gguf_tensor.name)
+                    continue
+                target_shape = state_shapes.get(hf_name)
+                if target_shape is None:
+                    raise KeyError(f"GGUF tensor {gguf_tensor.name!r} maps to unknown HF tensor {hf_name!r}.")
+                value, quant_weight = _gguf_tensor_to_torch(gguf_tensor, target_shape)
+                set_module_tensor_to_device(native_hf_model, hf_name, "cpu", value=value)
+                if _attach_quant_weight(native_hf_model, hf_name, quant_weight):
+                    attached_quant_weights += 1
+                loaded.add(hf_name)
+                del value, quant_weight
+        pbar.close()
+
+        if "lm_head.weight" in state_shapes and "lm_head.weight" not in loaded:
+            embed = native_hf_model.model.language_model.embed_tokens.weight
+            set_module_tensor_to_device(native_hf_model, "lm_head.weight", "cpu", value=embed.detach())
+            loaded.add("lm_head.weight")
+
+        language_model = getattr(getattr(native_hf_model, "model", None), "language_model", None)
+        layers = getattr(language_model, "layers", None)
+        if layers is not None:
+            for layer_idx, layer in enumerate(layers):
+                attn = getattr(layer, "self_attn", None)
+                source_idx = getattr(attn, "kv_shared_layer_index", None)
+                if not getattr(attn, "is_kv_shared_layer", False) or source_idx is None:
+                    continue
+                for suffix in ("k_norm.weight", "k_proj.weight", "v_norm.weight", "v_proj.weight"):
+                    target_name = f"model.language_model.layers.{layer_idx}.self_attn.{suffix}"
+                    source_name = f"model.language_model.layers.{int(source_idx)}.self_attn.{suffix}"
+                    if target_name not in state_shapes or target_name in loaded:
+                        continue
+                    source_tensor = native_hf_model.state_dict().get(source_name)
+                    if source_tensor is None or getattr(source_tensor, "device", None) is None:
+                        continue
+                    if source_tensor.device.type == "meta":
+                        continue
+                    set_module_tensor_to_device(native_hf_model, target_name, "cpu", value=source_tensor.detach().clone())
+                    loaded.add(target_name)
+
+        missing = sorted(name for name in state_shapes if name not in loaded and not name.endswith("inv_freq"))
+        meta_missing = []
+        for name in missing:
+            tensor = native_hf_model.state_dict()[name]
+            if getattr(tensor, "device", None) is not None and tensor.device.type == "meta":
+                meta_missing.append(name)
+        if meta_missing:
+            preview = ", ".join(meta_missing[:20])
+            raise RuntimeError(
+                f"Gemma4 GGUF load left {len(meta_missing)} HF tensors on meta device. "
+                f"First missing tensors: {preview}"
+            )
+        logger.info(
+            "Loaded Gemma4 GGUF weights from %s%s; loaded=%d, skipped=%d, attached_quant_weights=%d",
+            main_file,
+            f" and {mmproj_file}" if mmproj_file else "",
+            len(loaded),
+            len(skipped),
+            attached_quant_weights,
+        )
+
+    @staticmethod
+    def _gguf_field_string(reader: Any, name: str) -> str | None:
+        field = reader.fields.get(name)
+        if field is None or not field.parts:
+            return None
+        value = field.parts[-1]
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+            if isinstance(value, bytes):
+                return value.decode("utf-8")
+            if isinstance(value, list) and all(isinstance(item, int) for item in value):
+                return bytes(value).decode("utf-8")
+        return str(value)
+
+    @staticmethod
+    def _map_gemma4_gguf_tensor_name(name: str) -> str | None:
+        if name == "token_embd.weight":
+            return "model.language_model.embed_tokens.weight"
+        if name == "output_norm.weight":
+            return "model.language_model.norm.weight"
+        if name == "output.weight":
+            return "lm_head.weight"
+        if name == "per_layer_model_proj.weight":
+            return "model.language_model.per_layer_model_projection.weight"
+        if name == "per_layer_proj_norm.weight":
+            return "model.language_model.per_layer_projection_norm.weight"
+        if name == "per_layer_token_embd.weight":
+            return "model.language_model.embed_tokens_per_layer.weight"
+        if name == "rope_freqs.weight":
+            return None
+
+        block_match = re.match(r"blk\.(\d+)\.(.+)", name)
+        if block_match:
+            layer_idx, suffix = block_match.groups()
+            suffix_map = {
+                "layer_output_scale.weight": "layer_scalar",
+                "attn_q_norm.weight": "self_attn.q_norm.weight",
+                "attn_k_norm.weight": "self_attn.k_norm.weight",
+                "attn_k.weight": "self_attn.k_proj.weight",
+                "attn_q.weight": "self_attn.q_proj.weight",
+                "attn_v.weight": "self_attn.v_proj.weight",
+                "attn_output.weight": "self_attn.o_proj.weight",
+                "ffn_gate.weight": "mlp.gate_proj.weight",
+                "ffn_up.weight": "mlp.up_proj.weight",
+                "ffn_down.weight": "mlp.down_proj.weight",
+                "inp_gate.weight": "per_layer_input_gate.weight",
+                "proj.weight": "per_layer_projection.weight",
+                "post_norm.weight": "post_per_layer_input_norm.weight",
+                "attn_norm.weight": "input_layernorm.weight",
+                "post_attention_norm.weight": "post_attention_layernorm.weight",
+                "ffn_norm.weight": "pre_feedforward_layernorm.weight",
+                "post_ffw_norm.weight": "post_feedforward_layernorm.weight",
+                "ffn_gate_inp.scale": "router.scale",
+                "ffn_down_exps.scale": "router.per_expert_scale",
+                "ffn_gate_inp.weight": "router.proj.weight",
+                "ffn_gate_up_exps.weight": "experts.gate_up_proj",
+                "ffn_down_exps.weight": "experts.down_proj",
+                "post_ffw_norm_1.weight": "post_feedforward_layernorm_1.weight",
+                "post_ffw_norm_2.weight": "post_feedforward_layernorm_2.weight",
+                "pre_ffw_norm_2.weight": "pre_feedforward_layernorm_2.weight",
+            }
+            mapped_suffix = suffix_map.get(suffix)
+            if mapped_suffix is None:
+                raise KeyError(f"Unsupported Gemma4 GGUF tensor name: {name}")
+            return f"model.language_model.layers.{layer_idx}.{mapped_suffix}"
+
+        if name == "mm.input_projection.weight":
+            return "model.embed_vision.embedding_projection.weight"
+        if name == "mm.a.input_projection.weight":
+            return "model.embed_audio.embedding_projection.weight"
+        audio_top_map = {
+            "a.pre_encode.out.bias": "model.audio_tower.output_proj.bias",
+            "a.pre_encode.out.weight": "model.audio_tower.output_proj.weight",
+            "a.input_projection.weight": "model.audio_tower.subsample_conv_projection.input_proj_linear.weight",
+            "a.conv1d.0.weight": "model.audio_tower.subsample_conv_projection.layer0.conv.weight",
+            "a.conv1d.0.norm.weight": "model.audio_tower.subsample_conv_projection.layer0.norm.weight",
+            "a.conv1d.1.weight": "model.audio_tower.subsample_conv_projection.layer1.conv.weight",
+            "a.conv1d.1.norm.weight": "model.audio_tower.subsample_conv_projection.layer1.norm.weight",
+        }
+        if name in audio_top_map:
+            return audio_top_map[name]
+
+        audio_match = re.match(r"a\.blk\.(\d+)\.(.+)", name)
+        if audio_match:
+            layer_idx, suffix = audio_match.groups()
+            audio_prefix_map = {
+                "ffn_up": "feed_forward1.ffw_layer_1",
+                "ffn_down": "feed_forward1.ffw_layer_2",
+                "ffn_up_1": "feed_forward2.ffw_layer_1",
+                "ffn_down_1": "feed_forward2.ffw_layer_2",
+                "attn_q": "self_attn.q_proj",
+                "attn_k": "self_attn.k_proj",
+                "attn_v": "self_attn.v_proj",
+                "attn_out": "self_attn.post",
+                "conv_pw1": "lconv1d.linear_start",
+                "conv_pw2": "lconv1d.linear_end",
+            }
+            for gguf_prefix, hf_prefix in audio_prefix_map.items():
+                if suffix == f"{gguf_prefix}.weight":
+                    return f"model.audio_tower.layers.{layer_idx}.{hf_prefix}.linear.weight"
+                for stat_name in ("input_min", "input_max", "output_min", "output_max"):
+                    if suffix == f"{gguf_prefix}.{stat_name}":
+                        return f"model.audio_tower.layers.{layer_idx}.{hf_prefix}.{stat_name}"
+            suffix_map = {
+                "ffn_norm.weight": "feed_forward1.pre_layer_norm.weight",
+                "ffn_post_norm.weight": "feed_forward1.post_layer_norm.weight",
+                "ffn_norm_1.weight": "feed_forward2.pre_layer_norm.weight",
+                "ffn_post_norm_1.weight": "feed_forward2.post_layer_norm.weight",
+                "attn_pre_norm.weight": "norm_pre_attn.weight",
+                "attn_post_norm.weight": "norm_post_attn.weight",
+                "attn_k_rel.weight": "self_attn.relative_k_proj.weight",
+                "per_dim_scale.weight": "self_attn.per_dim_scale",
+                "conv_dw.weight": "lconv1d.depthwise_conv1d.weight",
+                "norm_conv.weight": "lconv1d.pre_layer_norm.weight",
+                "conv_norm.weight": "lconv1d.conv_norm.weight",
+                "ln2.weight": "norm_out.weight",
+            }
+            mapped_suffix = suffix_map.get(suffix)
+            if mapped_suffix is None:
+                raise KeyError(f"Unsupported Gemma4 audio GGUF tensor name: {name}")
+            return f"model.audio_tower.layers.{layer_idx}.{mapped_suffix}"
+        vision_top_map = {
+            "v.patch_embd.weight": "model.vision_tower.patch_embedder.input_proj.weight",
+            "v.position_embd.weight": "model.vision_tower.patch_embedder.position_embedding_table",
+            "v.std_bias": "model.vision_tower.std_bias",
+            "v.std_scale": "model.vision_tower.std_scale",
+            "v.post_ln.weight": "model.vision_tower.post_layernorm.weight",
+        }
+        if name in vision_top_map:
+            return vision_top_map[name]
+
+        vision_match = re.match(r"v\.blk\.(\d+)\.(.+)", name)
+        if vision_match:
+            layer_idx, suffix = vision_match.groups()
+            suffix_map = {
+                "attn_q.weight": "self_attn.q_proj.linear.weight",
+                "attn_k.weight": "self_attn.k_proj.linear.weight",
+                "attn_v.weight": "self_attn.v_proj.linear.weight",
+                "attn_out.weight": "self_attn.o_proj.linear.weight",
+                "attn_q_norm.weight": "self_attn.q_norm.weight",
+                "attn_k_norm.weight": "self_attn.k_norm.weight",
+                "ffn_gate.weight": "mlp.gate_proj.linear.weight",
+                "ffn_up.weight": "mlp.up_proj.linear.weight",
+                "ffn_down.weight": "mlp.down_proj.linear.weight",
+                "ln1.weight": "input_layernorm.weight",
+                "attn_post_norm.weight": "post_attention_layernorm.weight",
+                "ln2.weight": "pre_feedforward_layernorm.weight",
+                "ffn_post_norm.weight": "post_feedforward_layernorm.weight",
+            }
+            mapped_suffix = suffix_map.get(suffix)
+            if mapped_suffix is None:
+                vision_prefix_map = {
+                    "attn_q": "self_attn.q_proj",
+                    "attn_k": "self_attn.k_proj",
+                    "attn_v": "self_attn.v_proj",
+                    "attn_out": "self_attn.o_proj",
+                    "ffn_gate": "mlp.gate_proj",
+                    "ffn_up": "mlp.up_proj",
+                    "ffn_down": "mlp.down_proj",
+                }
+                for gguf_prefix, hf_prefix in vision_prefix_map.items():
+                    for stat_name in ("input_min", "input_max", "output_min", "output_max"):
+                        if suffix == f"{gguf_prefix}.{stat_name}":
+                            mapped_suffix = f"{hf_prefix}.{stat_name}"
+                            break
+                    if mapped_suffix is not None:
+                        break
+            if mapped_suffix is None:
+                raise KeyError(f"Unsupported Gemma4 vision GGUF tensor name: {name}")
+            return f"model.vision_tower.encoder.layers.{layer_idx}.{mapped_suffix}"
+
+        raise KeyError(f"Unsupported Gemma4 GGUF tensor name: {name}")
+
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
         # Keep Gemma4 Series on the Merak quantized-HF loading path.  GPTQModel
@@ -272,6 +699,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
         kwargs.setdefault("attn_implementation", "eager")
         kwargs.setdefault("device_map", "cpu")
         kwargs.setdefault("dtype", torch.bfloat16)
+        if cls._is_gguf_quant_weight_path(quant_weight):
+            return cls._load_hf_model_from_gguf(hf_model_dir, quant_weight, **kwargs)
         return super().get_hf_model(hf_model_dir, quant_weight=quant_weight, **kwargs)
 
     @classmethod
@@ -405,6 +834,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 bool(getattr(self.config, "bidirectional_vision_attention", False))
                 and not self.is_decode()
             ),
+            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
         )
         if getattr(self.config, "enable_moe_block", False):
             return Gemma4MoeDataPreprocess(
@@ -452,9 +882,14 @@ class XHGemma4SeriesModel(VisionLLMModel):
         self.set_prefill()
         prefill_wrap_model = wrap_model
         decode_wrap_model = _copy_model_shared_params(wrap_model)
+        if self._is_mtp_export() and isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
+            decode_wrap_model.__class__ = _Gemma4TextExportBridgePLEMTPDecode
         if getattr(self.config, "bidirectional_vision_attention", False):
             decode_num_logits_to_keep = 0 if self._is_mtp_export() else self.config.num_logits_to_keep
-            decode_wrap_model = _Gemma4DecodeNoFullMaskBridge(
+            decode_bridge_cls = (
+                _Gemma4DecodeNoFullMaskMTPBridge if self._is_mtp_export() else _Gemma4DecodeNoFullMaskBridge
+            )
+            decode_wrap_model = decode_bridge_cls(
                 decode_wrap_model,
                 num_logits_to_keep=decode_num_logits_to_keep,
                 language_model_keeps_last_logit=(int(decode_num_logits_to_keep or 0) == 1),
@@ -545,6 +980,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
             export_cfg["input_names"].append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(self.kvcache_config.num_layers):
             export_cfg["input_names"].append(f"past_value_cache_{layer_idx}")
+        if self._is_mtp_export() and is_decode:
+            export_cfg["input_names"].append("accepted_count")
         return export_cfg
 
     def _extra_export_metadata(self, output_dir: str, meta_info):

@@ -247,6 +247,7 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             sliding_window=self.sliding_window,
             bidirectional_vision_attention=bidirectional_vision_attention,
             emit_full_attention_mask=bool(bidirectional_vision_attention) and not self.is_decode(),
+            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
         )
 
     def _set_enable_golden(self, enable: bool) -> None:
@@ -299,6 +300,7 @@ class XHGemma4MoeHMONNXModel(XHGemma4SeriesHMONNXModel):
             bidirectional_vision_attention=getattr(model_config, "bidirectional_vision_attention", False),
             emit_full_attention_mask=bool(getattr(model_config, "bidirectional_vision_attention", False))
             and not self.is_decode(),
+            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
         )
 
 

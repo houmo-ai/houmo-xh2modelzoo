@@ -10,6 +10,7 @@ transformers_version: "5.5.0"
 recommended_datasets:
   - ceval
   - cmmmu
+  - ceval
   - mmmu
   - mmlu_pro
   - mmlu
