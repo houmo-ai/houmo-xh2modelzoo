@@ -35,7 +35,7 @@ def test_qwen35_quant_null_in_workflow_config_skips_quantization(tmp_path: Path)
     quant_result = workflow.quant(output_dir=str(tmp_path / "quant"), device="cpu")
 
     assert quant_result.skipped is True
-    assert quant_result.hf_model_dir == str(hf_model_dir.resolve())
+    assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
     assert quant_result.quanted_model_dir is None
 
 
@@ -57,5 +57,5 @@ def test_qwen35_quant_null_override_skips_quantization(tmp_path: Path):
     )
 
     assert quant_result.skipped is True
-    assert quant_result.hf_model_dir == str(hf_model_dir.resolve())
+    assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
     assert quant_result.quanted_model_dir is None

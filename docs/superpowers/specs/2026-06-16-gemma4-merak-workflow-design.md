@@ -12,7 +12,7 @@ Gemma4 in `xh2modelzoo` currently has several partially overlapping Merak surfac
 
 The newer workflow examples for MinerU2.5, Qwen2-VL, Qwen3 legacy, and the Qwen3.5/Qwen3.6 migration use a cleaner contract:
 
-1. Create a model-family workflow from `hf_model_dir` and a workflow YAML config.
+1. Create a model-family workflow from `model_dir` and a workflow YAML config.
 2. Run `workflow.quant(output_dir=...)`.
 3. Run `workflow.export(quant_result=..., output_dir=...)`.
 4. Optionally run `workflow.dump_golden(...)`.
@@ -55,7 +55,7 @@ The recommended API is a workflow object exported from the Gemma4 Series model p
 from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
 
 workflow = Gemma4SeriesWorkflow.from_config(
-    hf_model_dir="/data01/datasets/gemma-4-31B-it",
+    model_dir="/data01/datasets/gemma-4-31B-it",
     config_path=(
         "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/"
         "gemma4_31b_full.yaml"
@@ -88,14 +88,14 @@ Thin convenience functions may exist, but they must wrap the same workflow flow:
 from xhmodel_merak.xh_llm.models.gemma4_series.workflow import export, quant
 
 quant_result = quant(
-    hf_model_dir="/data01/datasets/gemma-4-E4B-it",
+    model_dir="/data01/datasets/gemma-4-E4B-it",
     config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml",
     output_dir="./work_dirs/gemma4_e4b_quant",
     device="cuda",
 )
 
 export_result = export(
-    hf_model_dir="/data01/datasets/gemma-4-E4B-it",
+    model_dir="/data01/datasets/gemma-4-E4B-it",
     config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml",
     quant_result=quant_result,
     output_dir="./work_dirs/gemma4_e4b_export",
@@ -103,7 +103,7 @@ export_result = export(
 )
 ```
 
-The thin functions intentionally require the same `hf_model_dir` and `config_path` as
+The thin functions intentionally require the same `model_dir` and `config_path` as
 `Gemma4SeriesWorkflow.from_config(...)`; they are convenience wrappers, not hidden global
 state.  This keeps `imodelzoo` integration explicit and side-effect free.
 
@@ -147,7 +147,7 @@ Semantics:
 - `algorithm: autoround` describes how the quantized weights are produced.
 - `output_format/artifact_format: gptqmodel_hf` describes how the quantized artifact is saved and loaded.
 - `bits: 4` and `group_size: 64` are the recommended initial defaults, matching Qwen3.5 workflow conventions.
-- `quant()` returns `QuantResult(hf_model_dir=..., quanted_model_dir=..., skipped=False)` for produced or externally supplied quantized HF artifacts.
+- `quant()` returns `QuantResult(raw_model_dir=..., quanted_model_dir=..., skipped=False)` for produced or externally supplied quantized HF artifacts.
 
 ### Base Validation
 
@@ -161,7 +161,7 @@ quant_result = workflow.quant(
 )
 ```
 
-This returns a skipped `QuantResult`, and `export()` uses the original `hf_model_dir`.
+This returns a skipped `QuantResult`, and `export()` uses the original `model_dir`.
 
 ### Existing Quantized HF Artifacts
 

@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow, BaseHMONNXWorkflow
+from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow, BaseLLMWorkflow
 from xhmodel_merak.xh_llm.workflows.result import ExportResult, QuantResult
 
 
-class DummyWorkflow(BaseHMONNXWorkflow):
+class DummyWorkflow(BaseLLMWorkflow):
     pass
 
 
@@ -112,7 +112,7 @@ def test_base_workflow_formats_xhquant_model_name_from_workflow_config(tmp_path)
         encoding="utf-8",
     )
     workflow_config = WorkflowConfig.from_file(str(config_path))
-    workflow = BaseHMONNXWorkflow(str(hf_model_dir), str(config_path))
+    workflow = BaseLLMWorkflow(str(hf_model_dir), str(config_path))
 
     assert (
         workflow._format_model_name(workflow_config, str(hf_model_dir))
@@ -146,7 +146,7 @@ def test_base_workflow_model_name_missing_format_field_returns_original_name(tmp
         encoding="utf-8",
     )
     workflow_config = WorkflowConfig.from_file(str(config_path))
-    workflow = BaseHMONNXWorkflow(str(hf_model_dir), str(config_path))
+    workflow = BaseLLMWorkflow(str(hf_model_dir), str(config_path))
 
     assert workflow._format_model_name(workflow_config, str(hf_model_dir)) == "dummy"
 
@@ -162,7 +162,7 @@ def test_auto_llm_workflow_falls_back_to_base_workflow(monkeypatch, tmp_path):
 
     workflow = AutoLLMWorkflow.from_config(str(hf_model_dir), str(config_path))
 
-    assert type(workflow) is BaseHMONNXWorkflow
+    assert type(workflow) is BaseLLMWorkflow
 
 
 @pytest.mark.parametrize(
@@ -184,7 +184,7 @@ def test_qwen2_vl_workflow_dispatches_visual_buckets(monkeypatch, tmp_path, visu
         calls.append(visual_buckets_cfg)
         return str(tmp_path / "mineru_visual_buckets.json")
 
-    monkeypatch.setattr(BaseHMONNXWorkflow, "export", fake_export)
+    monkeypatch.setattr(BaseLLMWorkflow, "export", fake_export)
     monkeypatch.setattr(XHQwen2VLHMONNXWorkflow, "_write_visual_bucket_manifest", fake_write_visual_bucket_manifest)
 
     hf_model_dir = tmp_path / "hf"
@@ -197,7 +197,7 @@ def test_qwen2_vl_workflow_dispatches_visual_buckets(monkeypatch, tmp_path, visu
     workflow = XHQwen2VLHMONNXWorkflow(str(hf_model_dir), str(config_path))
 
     workflow.export(
-        quant_result=QuantResult(hf_model_dir=str(hf_model_dir), skipped=True),
+        quant_result=QuantResult(raw_model_dir=str(hf_model_dir), skipped=True),
         output_dir=str(tmp_path / "export"),
         device="cpu",
     )
@@ -304,8 +304,7 @@ def test_gemma4_workflow_requires_explicit_base_quant_override(monkeypatch, tmp_
         config_overrides={"quant": None},
     )
     assert quant_result.skipped is True
-    assert quant_result.hf_model_dir == str(hf_model_dir.resolve())
-    assert quant_result.effective_config_file.endswith("gemma4_full_quant_override.yaml")
+    assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
 
 
 def test_gemma4_workflow_existing_hf_quant_result_is_normalized(tmp_path):
@@ -332,10 +331,8 @@ def test_gemma4_workflow_existing_hf_quant_result_is_normalized(tmp_path):
     )
 
     assert quant_result.skipped is False
-    assert quant_result.hf_model_dir == str(hf_model_dir.resolve())
+    assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
     assert quant_result.quanted_model_dir == str(existing_quant.resolve())
-    assert quant_result.algorithm == "autoround"
-    assert quant_result.effective_config_file.endswith("gemma4_full_quant_override.yaml")
 
 
 def test_gemma4_workflow_existing_hf_reports_missing_path(tmp_path):
@@ -382,17 +379,14 @@ def test_gemma4_workflow_dispatches_gptqmodel_recipe(monkeypatch, tmp_path):
     def fake_recipe(self, **kwargs):
         captured.update(kwargs)
         return QuantResult(
-            hf_model_dir=str(hf_model_dir.resolve()),
+            raw_model_dir=str(hf_model_dir.resolve()),
             quanted_model_dir=str(tmp_path / "quantized-hf"),
-            algorithm="gptqmodel:gptq",
-            effective_config_file=kwargs["effective_config_file"],
         )
 
     monkeypatch.setattr(Gemma4SeriesWorkflow, "_quant_gptqmodel_recipe", fake_recipe)
 
     result = workflow.quant(output_dir=str(tmp_path / "quant"), device="cuda:0")
 
-    assert result.algorithm == "gptqmodel:gptq"
     assert result.quanted_model_dir == str(tmp_path / "quantized-hf")
     assert captured["device"] == "cuda:0"
     assert captured["quant_cfg"]["algorithm"] == "gptqmodel"
@@ -496,7 +490,7 @@ def test_gemma4_quant_preflight_reports_missing_package_resource(monkeypatch, tm
 
     with pytest.raises(FileNotFoundError, match="quant.calibration.jsonl"):
         quant_adapter.quantize_with_gptqmodel_recipe(
-            hf_model_dir=str(hf_model_dir),
+            model_dir=str(hf_model_dir),
             output_dir=str(tmp_path / "quant"),
             device="cuda:0",
             quant_cfg=workflow_config["quant"],
@@ -602,7 +596,7 @@ def test_gemma4_package_exports_workflow_api():
 
     assert gemma4_series.Gemma4SeriesWorkflow is Gemma4SeriesWorkflow
     assert gemma4_series.XHGemma4HMONNXWorkflow is Gemma4SeriesWorkflow
-    assert set(gemma4_series.list_recommended_configs()) == {"e4b", "31b", "26b-a4b"}
+    assert set(gemma4_series.list_recommended_configs()) == {"e2b", "e4b", "31b", "26b-a4b"}
     assert "GPTQModel" in gemma4_series.get_quant_config_help()
     assert "Gemma4ForConditionalGeneration" in gemma4_series.get_export_config_help()
 
@@ -631,7 +625,7 @@ def test_gemma4_workflow_template_helpers_and_thin_quant_api(tmp_path):
     hf_model_dir.mkdir()
     config_path = _write_gemma4_workflow_config(tmp_path / "gemma4_full.yaml")
     quant_result = gemma4_series.quant(
-        hf_model_dir=str(hf_model_dir),
+        model_dir=str(hf_model_dir),
         config_path=str(config_path),
         output_dir=str(tmp_path / "quant"),
         device="cpu",
@@ -639,7 +633,7 @@ def test_gemma4_workflow_template_helpers_and_thin_quant_api(tmp_path):
     )
 
     assert quant_result.skipped is True
-    assert quant_result.hf_model_dir == str(hf_model_dir.resolve())
+    assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
 
 
 def test_gemma4_unified_config_detects_moe_without_public_model_type_split(tmp_path):

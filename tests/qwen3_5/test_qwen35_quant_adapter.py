@@ -189,7 +189,7 @@ def test_adapter_calls_autoround_api(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "gptqmodel.recipes.qwen35_autoround", module)
 
     result = quantize_with_autoround_api(
-        hf_model_dir="weights/Qwen3.5-9B",
+        model_dir="weights/Qwen3.5-9B",
         output_dir="work_dirs/out",
         device="cuda:0",
         quant_cfg={"algorithm": "gptqmodel",
@@ -214,7 +214,7 @@ def test_adapter_calls_gptqmodel_api(monkeypatch):
     monkeypatch.setitem(sys.modules, "gptqmodel.recipes.qwen35", module)
 
     result = quantize_with_gptqmodel_api(
-        hf_model_dir="weights/Qwen3.5-9B",
+        model_dir="weights/Qwen3.5-9B",
         output_dir="work_dirs/out",
         device="cuda:0",
         quant_cfg={"algorithm": "gptqmodel", "bits": 4, "group_size": 64, "rotation": False},

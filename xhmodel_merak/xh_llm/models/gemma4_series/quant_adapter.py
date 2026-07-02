@@ -45,7 +45,7 @@ _LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
 
 def quantize_with_autoround_mode1(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     output_dir: str,
     device: str,
     quant_cfg: Mapping[str, Any],
@@ -56,7 +56,7 @@ def quantize_with_autoround_mode1(
     """Run the maintained AutoRound Gemma4 mode1 scripts through workflow config."""
 
     command, quanted_model_dir, algorithm = build_autoround_mode1_command(
-        hf_model_dir=hf_model_dir,
+        hf_model_dir=model_dir,
         output_dir=output_dir,
         device=device,
         quant_cfg=quant_cfg,
@@ -72,7 +72,7 @@ def quantize_with_autoround_mode1(
             run_env.update({str(key): str(value) for key, value in env_cfg.items()})
         subprocess.run(command, cwd=str(_autoround_repo_root(quant_cfg)), env=run_env, check=True)
     return QuantResult(
-        hf_model_dir=hf_model_dir,
+        raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
     )
 
@@ -243,7 +243,7 @@ def _build_autoround_moe_mode1_command(
 
 def quantize_with_gptqmodel_recipe(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     output_dir: str,
     device: str,
     quant_cfg: Mapping[str, Any],
@@ -254,7 +254,7 @@ def quantize_with_gptqmodel_recipe(
     """Run GPTQModel's Gemma4 recipe and return a workflow ``QuantResult``."""
 
     recipe_kwargs = build_gptqmodel_recipe_kwargs(
-        hf_model_dir=hf_model_dir,
+        hf_model_dir=model_dir,
         output_dir=output_dir,
         device=device,
         quant_cfg=quant_cfg,
@@ -266,7 +266,7 @@ def quantize_with_gptqmodel_recipe(
     recipe_result = _call_gptqmodel_recipe(recipe_entrypoint, recipe_kwargs)
     quanted_model_dir = _result_output_dir(recipe_result, recipe_kwargs["output_dir"])
     return QuantResult(
-        hf_model_dir=hf_model_dir,
+        raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
     )
 

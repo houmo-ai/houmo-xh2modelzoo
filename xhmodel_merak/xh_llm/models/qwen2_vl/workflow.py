@@ -4,14 +4,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
 
 
 MINERU_VISUAL_BUCKETS_MANIFEST = "mineru_visual_buckets.json"
 
 
-class XHQwen2VLHMONNXWorkflow(BaseHMONNXWorkflow):
+class XHQwen2VLHMONNXWorkflow(BaseLLMWorkflow):
     expected_model_config_cls_name = "XHQwen2VLModelConfig"
     expected_model_cls_name = "XHQwen2VLModel"
 
@@ -189,7 +189,7 @@ class XHQwen2VLHMONNXWorkflow(BaseHMONNXWorkflow):
         if not isinstance(visual_cfg_model, Mapping) or not visual_cfg_model:
             raise ValueError("export.visual_buckets.model must be a non-empty mapping")
         visual_cfg_model = copy.deepcopy(dict(visual_cfg_model))
-        visual_cfg_model["hf_model"] = self.hf_model_dir
+        visual_cfg_model["hf_model"] = self.model_dir
         return visual_cfg_model
 
     @staticmethod

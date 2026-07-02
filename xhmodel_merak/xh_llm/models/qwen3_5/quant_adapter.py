@@ -19,7 +19,7 @@ _LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
 
 def quantize_with_autoround_api(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     output_dir: str,
     device: str,
     quant_cfg: Mapping[str, Any],
@@ -27,7 +27,7 @@ def quantize_with_autoround_api(
     workflow_seed: int,
 ) -> QuantResult:
     kwargs = build_qwen35_autoround_kwargs(
-        hf_model_dir=hf_model_dir,
+        hf_model_dir=model_dir,
         output_dir=output_dir,
         device=device,
         quant_cfg=quant_cfg,
@@ -42,14 +42,14 @@ def quantize_with_autoround_api(
     result = recipe(**kwargs)
     quanted_model_dir = _result_output_dir(result, kwargs["output_dir"])
     return QuantResult(
-        hf_model_dir=hf_model_dir,
+        raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
     )
 
 
 def quantize_with_gptqmodel_api(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     output_dir: str,
     device: str,
     quant_cfg: Mapping[str, Any],
@@ -57,7 +57,7 @@ def quantize_with_gptqmodel_api(
     workflow_seed: int,
 ) -> QuantResult:
     kwargs = build_qwen35_gptqmodel_kwargs(
-        hf_model_dir=hf_model_dir,
+        hf_model_dir=model_dir,
         output_dir=output_dir,
         device=device,
         quant_cfg=quant_cfg,
@@ -72,7 +72,7 @@ def quantize_with_gptqmodel_api(
     result = recipe(**kwargs)
     quanted_model_dir = _result_output_dir(result, kwargs["output_dir"])
     return QuantResult(
-        hf_model_dir=hf_model_dir,
+        raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
     )
 

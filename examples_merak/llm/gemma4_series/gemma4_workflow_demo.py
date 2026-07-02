@@ -246,7 +246,7 @@ def run(args: argparse.Namespace) -> None:
     _remove_output_dir_if_needed(export_output_dir, args.force)
 
     workflow = AutoLLMWorkflow.from_config(
-        hf_model_dir=preset.hf_model_dir,
+        model_dir=preset.hf_model_dir,
         config_path=preset.config_path,
         seed=args.seed,
         debug=args.debug,

@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
 
 
@@ -20,18 +20,18 @@ _QWEN35_MODEL_CONFIG_CLS_NAMES = {
 
 
 
-class Qwen35Workflow(BaseHMONNXWorkflow):
+class Qwen35Workflow(BaseLLMWorkflow):
     """Merak HMONNX workflow for Qwen3.5/Qwen3.6 dense, MoE, and visual exports."""
 
     @classmethod
     def from_config(
         cls,
-        hf_model_dir: str,
+        model_dir: str,
         config_path: str,
         seed: int = 1024,
         debug: bool = False,
     ) -> "Qwen35Workflow":
-        return cls(hf_model_dir=hf_model_dir, config_path=config_path, seed=seed, debug=debug)
+        return cls(model_dir=model_dir, config_path=config_path, seed=seed, debug=debug)
 
     def quant(
         self,
@@ -43,7 +43,7 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         quant_cfg = workflow_config.quant
         if quant_cfg is None:
             return QuantResult(
-                hf_model_dir=self.hf_model_dir,
+                raw_model_dir=self.model_dir,
                 skipped=True,
             )
 
@@ -195,8 +195,8 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         export_cfg = workflow_config.build_export_dict()
         # Compatibility for this validation path only. New export config
-        # finalization should go through BaseHMONNXWorkflow._build_export_config().
-        export_cfg["model"]["hf_model"] = self.hf_model_dir
+        # finalization should go through BaseLLMWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.model_dir
         model_cls = get_model_class(export_cfg["model"])
         if model_cls is None:
             return
@@ -220,7 +220,7 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         from .quant_adapter import quantize_with_autoround_api
 
         return quantize_with_autoround_api(
-            hf_model_dir=self.hf_model_dir,
+            model_dir=self.model_dir,
             output_dir=output_dir,
             device=device,
             quant_cfg=quant_cfg,
@@ -238,7 +238,7 @@ class Qwen35Workflow(BaseHMONNXWorkflow):
         from .quant_adapter import quantize_with_gptqmodel_api
 
         return quantize_with_gptqmodel_api(
-            hf_model_dir=self.hf_model_dir,
+            model_dir=self.model_dir,
             output_dir=output_dir,
             device=device,
             quant_cfg=quant_cfg,

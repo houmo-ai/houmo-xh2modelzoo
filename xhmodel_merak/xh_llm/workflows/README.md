@@ -14,7 +14,7 @@ Workflow 的目标是让模型导出流程具备统一入口、统一配置和�
 
 ```python
 workflow = AutoLLMWorkflow.from_config(
-    hf_model_dir="/path/to/hf_model",
+    model_dir="/path/to/hf_model",
     config_path="configs_merak/workflows/xh2a/llm_models/qwen3/0_6b/qwen3_0_6b_xh2a_w8a16.yaml",
 )
 
@@ -28,7 +28,7 @@ meta_file = workflow.dump_golden(export_result, device="cuda:0", input_messages=
 - `quant`：描述量化阶段需要什么。
 - `export`：描述 HMONNX 导出阶段需要什么。
 
-可扩展指基类负责稳定主流程，子类只覆盖模型差异。普通单模型导出复用 `BaseHMONNXWorkflow.export()`；有专属量化、额外导出产物、特殊 golden 输入或模型族校验时，在子类中覆盖对应方法。
+可扩展指基类负责稳定主流程，子类只覆盖模型差异。普通单模型导出复用 `BaseLLMWorkflow.export()`；有专属量化、额外导出产物、特殊 golden 输入或模型族校验时，在子类中覆盖对应方法。
 
 ### 设计原则
 
@@ -46,7 +46,7 @@ Workflow 只编排流程，不直接管理模型 registry，不直接实现 HMON
 ```text
 WorkflowConfig
     -> AutoLLMWorkflow
-        -> BaseHMONNXWorkflow / model-specific workflow
+        -> BaseLLMWorkflow / model-specific workflow
             -> AutoLLMConfig
             -> AutoLLMModel
             -> AutoLLMHONNXModel
@@ -85,7 +85,7 @@ configs_merak/workflows/<chip_arch>/llm_models/<model_family>/...
 `AutoLLMWorkflow` 是 workflow 的统一工厂类。新调用方通常只需要关心：
 
 ```python
-AutoLLMWorkflow.from_config(hf_model_dir, config_path, seed=1024, debug=False)
+AutoLLMWorkflow.from_config(model_dir, config_path, seed=1024, debug=False)
 ```
 
 职责：
@@ -95,12 +95,12 @@ AutoLLMWorkflow.from_config(hf_model_dir, config_path, seed=1024, debug=False)
 - 通过 `get_model_class()` 复用现有模型 registry。
 - 读取模型类上的 `WORKFLOW_CLS`。
 - 懒加载具体 workflow 子类。
-- 如果模型类没有声明 `WORKFLOW_CLS`，回退到 `BaseHMONNXWorkflow`。
+- 如果模型类没有声明 `WORKFLOW_CLS`，回退到 `BaseLLMWorkflow`。
 
 关键方法：
 
 - `from_config()`：创建 workflow 实例的统一入口。
-- `_get_workflow_class()`：解析模型类上的 `WORKFLOW_CLS`，并校验目标类必须继承 `BaseHMONNXWorkflow`。
+- `_get_workflow_class()`：解析模型类上的 `WORKFLOW_CLS`，并校验目标类必须继承 `BaseLLMWorkflow`。
 
 `WORKFLOW_CLS` 的格式是 `"module.path:ClassName"`：
 
@@ -158,7 +158,7 @@ model_name: qwen3_5_9b
 model_name: xh2_qwen3_5_9b_dflash_w4a8_256_2k_mpe256k
 ```
 
-完整导出名由 `BaseHMONNXWorkflow._format_model_name()` 在导出前补齐。
+完整导出名由 `BaseLLMWorkflow._format_model_name()` 在导出前补齐。
 
 `with_overrides()` 的覆盖规则：
 
@@ -167,7 +167,7 @@ model_name: xh2_qwen3_5_9b_dflash_w4a8_256_2k_mpe256k
 - 除 `quant` 外，只能覆盖已存在字段，不能新增字段。
 - mapping 覆盖 mapping 时，会递归检查子字段是否存在。
 
-`build_export_dict()` 只复制 `export`。它不注入 `hf_model`，也不格式化 `model_name`。新代码应优先让 `BaseHMONNXWorkflow._build_export_config()` 完成导出配置最终化。
+`build_export_dict()` 只复制 `export`。它不注入 `hf_model`，也不格式化 `model_name`。新代码应优先让 `BaseLLMWorkflow._build_export_config()` 完成导出配置最终化。
 
 ### QuantResult
 
@@ -175,7 +175,7 @@ model_name: xh2_qwen3_5_9b_dflash_w4a8_256_2k_mpe256k
 
 字段：
 
-- `hf_model_dir`：原始 HF 模型目录。必须和 workflow 初始化时传入的 `hf_model_dir` 指向同一个目录。
+- `raw_model_dir`：原始模型目录。必须和 workflow 初始化时传入的 `model_dir` 指向同一个目录。
 - `skipped`：是否跳过量化。
 - `quanted_model_dir`：量化后的 HF 模型目录。`skipped=False` 时必须提供。
 - `is_quant_weight_format`：预留字段，表示产物是否是量化权重文件格式；当前大多数 workflow 不需要使用。
@@ -184,7 +184,7 @@ model_name: xh2_qwen3_5_9b_dflash_w4a8_256_2k_mpe256k
 
 ```python
 QuantResult(
-    hf_model_dir=self.hf_model_dir,
+    raw_model_dir=self.model_dir,
     skipped=True,
 )
 ```
@@ -193,7 +193,7 @@ QuantResult(
 
 ```python
 QuantResult(
-    hf_model_dir=self.hf_model_dir,
+    raw_model_dir=self.model_dir,
     skipped=False,
     quanted_model_dir="/path/to/quanted_hf_model",
 )
@@ -211,14 +211,14 @@ QuantResult(
 
 子类的 `dump_golden()`、导出后处理、manifest 生成通常都从 `ExportResult` 中继续定位 HMONNX 产物。
 
-### BaseHMONNXWorkflow
+### BaseLLMWorkflow
 
-`BaseHMONNXWorkflow` 是唯一基类，提供通用量化跳过逻辑、通用单模型导出流程和一些 helper。
+`BaseLLMWorkflow` 是唯一基类，提供通用量化跳过逻辑、通用单模型导出流程和一些 helper。
 
 重要属性：
 
 - `workflow_config`：由 `config_path` 读取出的 `WorkflowConfig`。
-- `hf_model_dir`：规范化后的原始 HF 模型目录。
+- `model_dir`：规范化后的原始模型目录。
 - `seed`：导出时使用的随机种子。
 - `debug`：传给 `xhquant_init()`。
 - `expected_model_config_cls_name`：可选，校验 `AutoLLMConfig` 解析出的 config 类型。
@@ -243,24 +243,24 @@ QuantResult(
   - 基类只定义接口。
   - 子类必须根据模型输入格式实现。
 
-- `_resolve_export_hf_model_dir(quant_result)`：
-  - 校验 `quant_result.hf_model_dir` 和 workflow 的 `hf_model_dir` 一致。
+- `_resolve_export_model_dir(quant_result)`：
+  - 校验 `quant_result.raw_model_dir` 和 workflow 的 `model_dir` 一致。
   - `skipped=True` 时返回原始 HF 模型目录。
   - `skipped=False` 时返回 `quanted_model_dir`。
 
 - `_build_export_config(quant_result, workflow_config)`：
-  - 调用 `_resolve_export_hf_model_dir()` 得到真实导出模型目录。
+  - 调用 `_resolve_export_model_dir()` 得到真实导出模型目录。
   - 深拷贝 `workflow_config.export`。
   - 覆盖 `export.model.hf_model`。
   - 调用 `_format_model_name()` 覆盖 `export.model.model_name`。
 
-- `_format_model_name(workflow_config, export_hf_model_dir)`：
+- `_format_model_name(workflow_config, export_model_dir)`：
   - 默认生成 `{chip_arch}_{model_name}_{spec_decode_mode}_{quant_scheme}_{prefill}_{context}_mpe{max_pe}`。
   - `spec_decode_mode` 取 `export.model.spec_decode_mode`；字段缺失或为空时不拼接这一段。
   - `XH2a` 会映射成 `xh2`。
   - `quant_scheme.quant_type` 只取 `w{数字}a{数字}`。
   - `quant.bits` 表示量化权重 bit 数；如果存在，最终命名里的 `w` 位宽优先使用 `quant.bits`。
-  - `max_pe_length` 优先取 `export.model.max_pe_length`；缺失时尝试在 `export_hf_model_dir` 下递归查找 `config.json` 的 `max_position_embeddings`。
+  - `max_pe_length` 优先取 `export.model.max_pe_length`；缺失时尝试在 `export_model_dir` 下递归查找 `config.json` 的 `max_position_embeddings`。
   - 如果格式化所需字段不足，返回 YAML 中原始 `model_name`。
   - 如果 `export.model.model_name` 本身缺失，直接报错。
   - 如果 `export.model.quant_scheme.quant_type` 存在但不包含 `w{数字}a{数字}`，直接报错。
@@ -271,7 +271,7 @@ QuantResult(
 
 ### utils.py
 
-`utils.py` 当前主要提供路径比较 helper，例如 `same_abs_path()`。基类用它判断 `QuantResult.hf_model_dir` 是否和 workflow 初始化时的 `hf_model_dir` 指向同一目录，避免把不匹配的量化产物传给导出阶段。
+`utils.py` 当前主要提供路径比较 helper，例如 `same_abs_path()`。基类用它判断 `QuantResult.raw_model_dir` 是否和 workflow 初始化时的 `model_dir` 指向同一目录，避免把不匹配的量化产物传给导出阶段。
 
 ## 3. Workflow 子类开发规范
 
@@ -286,10 +286,10 @@ xhmodel_merak/xh_llm/models/<model_name>/workflow.py
 最小子类：
 
 ```python
-from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.base import BaseLLMWorkflow
 
 
-class XHNewModelWorkflow(BaseHMONNXWorkflow):
+class XHNewModelWorkflow(BaseLLMWorkflow):
     expected_model_config_cls_name = "XHNewModelConfig"
     expected_model_cls_name = "XHNewModel"
 ```
@@ -321,14 +321,14 @@ class XHNewModel(...):
 推荐结构：
 
 ```python
-class XHNewModelWorkflow(BaseHMONNXWorkflow):
+class XHNewModelWorkflow(BaseLLMWorkflow):
     expected_model_config_cls_name = "XHNewModelConfig"
     expected_model_cls_name = "XHNewModel"
 
     def quant(self, output_dir, device, config_overrides=None):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         if workflow_config.quant is None:
-            return QuantResult(hf_model_dir=self.hf_model_dir, skipped=True)
+            return QuantResult(raw_model_dir=self.model_dir, skipped=True)
         ...
 
     def export(self, quant_result, output_dir, device, config_overrides=None):
@@ -356,21 +356,21 @@ class XHNewModelWorkflow(BaseHMONNXWorkflow):
 
 ```python
 if workflow_config.quant is None:
-    return QuantResult(hf_model_dir=self.hf_model_dir, skipped=True)
+    return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 ```
 
 如果量化后保存成 HF 模型目录，应返回：
 
 ```python
 return QuantResult(
-    hf_model_dir=self.hf_model_dir,
+    raw_model_dir=self.model_dir,
     quanted_model_dir=save_path,
 )
 ```
 
 如果从已经量化好的 HF 模型目录导出，应跳过量化阶段，方式是将
 `quant` 设置为 `null`。代码里对应 `workflow_config.quant is None`，
-此时 `QuantResult.hf_model_dir` 指向传入的 HF 模型目录，`export()` 会直接
+此时 `QuantResult.raw_model_dir` 指向传入的原始模型目录，`export()` 会直接
 使用该目录构造导出配置。
 
 ### 导出实现规范
@@ -387,8 +387,8 @@ export_result = super().export(...)
 
 ```python
 export_cfg = workflow_config.build_export_dict()
-# New export config finalization should go through BaseHMONNXWorkflow._build_export_config().
-export_cfg["model"]["hf_model"] = self.hf_model_dir
+# New export config finalization should go through BaseLLMWorkflow._build_export_config().
+export_cfg["model"]["hf_model"] = self.model_dir
 ```
 
 这类代码只应出现在子类内部校验或规划路径中，不应替代基类 `_build_export_config()`。
@@ -441,7 +441,7 @@ model_name: qwen3_6_27b
 - 导出后需要操作hmonnx产物：覆盖 `export()`，用 `ExportResult` 定位导出目录并进行相应操作。
 - 需要不同输入模态：覆盖 `dump_golden()` 和 `build_input_message()`。
 - 需要导出前校验：在 `export()` 中先调用私有校验方法。
-- 需要完全不同的主流程：覆盖 `export()`，但尽量复用 `WorkflowConfig`、`QuantResult`、`ExportResult` 和 `_resolve_export_hf_model_dir()`。
+- 需要完全不同的主流程：覆盖 `export()`，但尽量复用 `WorkflowConfig`、`QuantResult`、`ExportResult` 和 `_resolve_export_model_dir()`。
 
 ## 4. Workflow 子类开发示例讲解
 
@@ -606,7 +606,7 @@ xhmodel_merak/xh_llm/models/qwen3_5/workflow.py
 - 多模态模型，导出后还要写额外文件或导出额外子图：参考 Qwen2-VL。
 - 一个模型族需要支持多量化来源、多导出形态、多输入模态：参考 Qwen3.5，但只复制自己真正需要的部分。
 
-不要一开始复制最复杂的 workflow。先继承 `BaseHMONNXWorkflow`，只在确实需要时逐步覆盖方法。基类的目标就是让简单模型保持简单，同时允许复杂模型按需扩展。
+不要一开始复制最复杂的 workflow。先继承 `BaseLLMWorkflow`，只在确实需要时逐步覆盖方法。基类的目标就是让简单模型保持简单，同时允许复杂模型按需扩展。
 
 ### 开发注意事项
 
@@ -614,7 +614,7 @@ xhmodel_merak/xh_llm/models/qwen3_5/workflow.py
 增加模型目录内的辅助函数、扩展 YAML 中已有的 `quant` 和 `export` 字段来表达
 模型差异。
 
-修改 `BaseHMONNXWorkflow`、`WorkflowConfig`、`AutoLLMWorkflow` 等公共基类和
+修改 `BaseLLMWorkflow`、`WorkflowConfig`、`AutoLLMWorkflow` 等公共基类和
 公共入口时务必慎重。这些代码会影响所有 workflow 子类，不应为了单个模型的
 特殊需求引入破坏性改动。如果确实需要调整公共接口、修改基类行为，或者进行
 影响面较大的重构，应先与相关同事讨论清楚设计方案和迁移范围，再开始实现。

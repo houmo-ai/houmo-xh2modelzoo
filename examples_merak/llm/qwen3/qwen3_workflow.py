@@ -69,7 +69,7 @@ def main() -> None:
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
     workflow = AutoLLMWorkflow.from_config(
-        hf_model_dir=args.model_dir,
+        model_dir=args.model_dir,
         config_path=args.config_path,
     )
 

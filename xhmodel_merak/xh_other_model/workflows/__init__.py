@@ -1,12 +1,12 @@
-from .auto import AutoLLMWorkflow
-from .base import BaseLLMWorkflow
+from .auto import AutoOtherModelWorkflow
+from .base import BaseOtherModelWorkflow
 from .config import WorkflowConfig
 from .result import ExportResult, QuantResult
 
 
 __all__ = [
-    "AutoLLMWorkflow",
-    "BaseLLMWorkflow",
+    "AutoOtherModelWorkflow",
+    "BaseOtherModelWorkflow",
     "ExportResult",
     "QuantResult",
     "WorkflowConfig",

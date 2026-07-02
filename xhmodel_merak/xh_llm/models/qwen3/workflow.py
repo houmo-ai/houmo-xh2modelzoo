@@ -2,11 +2,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
 
 
-class XHQwen3HMONNXWorkflow(BaseHMONNXWorkflow):
+class XHQwen3HMONNXWorkflow(BaseLLMWorkflow):
     expected_model_config_cls_name = "XHQwen3ModelConfig"
     expected_model_cls_name = "XHQwen3Model"
 
@@ -19,7 +19,7 @@ class XHQwen3HMONNXWorkflow(BaseHMONNXWorkflow):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         if workflow_config.quant is None:
             # 量化配置为None表示无需量化
-            return QuantResult(hf_model_dir=self.hf_model_dir, skipped=True)
+            return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 
         # step1 导入依赖
         from datasets import load_dataset
@@ -27,18 +27,18 @@ class XHQwen3HMONNXWorkflow(BaseHMONNXWorkflow):
 
         # step2 获取quant配置
         bits = workflow_config.quant["bits"]
-        save_path = str(Path(output_dir) / f"{Path(self.hf_model_dir).name}-gptqmodel-{bits}bit")
+        save_path = str(Path(output_dir) / f"{Path(self.model_dir).name}-gptqmodel-{bits}bit")
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
         calibration_dataset = [text for text in dataset["text"] if text.strip() and len(text.strip()) > 50][:128]
 
         # step3 执行量化
         quant_config = QuantizeConfig(bits=bits, group_size=64)
-        model = GPTQModel.load(self.hf_model_dir, quant_config, device=device)
+        model = GPTQModel.load(self.model_dir, quant_config, device=device)
         model.quantize(calibration_dataset, batch_size=128)
         model.save(save_path)
 
         # step4 构造QuantResult并返回
-        return QuantResult(hf_model_dir=self.hf_model_dir, quanted_model_dir=save_path)
+        return QuantResult(raw_model_dir=self.model_dir, quanted_model_dir=save_path)
 
     def export(
         self,

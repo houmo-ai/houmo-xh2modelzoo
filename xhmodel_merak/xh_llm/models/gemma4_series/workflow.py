@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ...workflows.base import BaseHMONNXWorkflow
+from ...workflows.base import BaseLLMWorkflow
 from ...workflows.config import WorkflowConfig
 from ...workflows.result import ExportResult, QuantResult
 from .export_plan import (
@@ -260,7 +260,7 @@ def dump_export_config_template(path: str | os.PathLike[str]) -> str:
 
 def quant(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     config_path: str,
     output_dir: str,
     device: str,
@@ -268,13 +268,13 @@ def quant(
     seed: int = 1024,
     debug: bool = False,
 ) -> QuantResult:
-    workflow = Gemma4SeriesWorkflow.from_config(hf_model_dir, config_path, seed=seed, debug=debug)
+    workflow = Gemma4SeriesWorkflow.from_config(model_dir, config_path, seed=seed, debug=debug)
     return workflow.quant(output_dir=output_dir, device=device, config_overrides=config_overrides)
 
 
 def export(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     config_path: str,
     quant_result: QuantResult,
     output_dir: str,
@@ -283,7 +283,7 @@ def export(
     seed: int = 1024,
     debug: bool = False,
 ) -> ExportResult:
-    workflow = Gemma4SeriesWorkflow.from_config(hf_model_dir, config_path, seed=seed, debug=debug)
+    workflow = Gemma4SeriesWorkflow.from_config(model_dir, config_path, seed=seed, debug=debug)
     return workflow.export(
         quant_result=quant_result,
         output_dir=output_dir,
@@ -292,7 +292,7 @@ def export(
     )
 
 
-class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
+class Gemma4SeriesWorkflow(BaseLLMWorkflow):
     """Merak HMONNX workflow for the unified Gemma4 public model API."""
 
     list_recommended_configs = staticmethod(list_recommended_configs)
@@ -307,12 +307,12 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
     @classmethod
     def from_config(
         cls,
-        hf_model_dir: str,
+        model_dir: str,
         config_path: str,
         seed: int = 1024,
         debug: bool = False,
     ) -> "Gemma4SeriesWorkflow":
-        return cls(hf_model_dir=hf_model_dir, config_path=config_path, seed=seed, debug=debug)
+        return cls(model_dir=model_dir, config_path=config_path, seed=seed, debug=debug)
 
     def quant(
         self,
@@ -329,7 +329,7 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
                     "Use config_overrides={'quant': None} only for explicit base-model validation."
                 )
             return QuantResult(
-                hf_model_dir=self.hf_model_dir,
+                raw_model_dir=self.model_dir,
                 skipped=True,
             )
 
@@ -351,7 +351,7 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
                 field="quant.existing_hf_model_dir",
             )
             return QuantResult(
-                hf_model_dir=self.hf_model_dir,
+                raw_model_dir=self.model_dir,
                 quanted_model_dir=existing_hf_model_dir,
                 is_quant_weight_format=artifact_format == "gguf_qat",
             )
@@ -420,10 +420,10 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         meta_path = Path(self._find_golden_meta_file(export_result))
         mtp_workflow.resolve_and_update_manifest_max_pe_length(
             meta_path,
-            self._resolve_export_hf_model_dir(quant_result),
+            self._resolve_export_model_dir(quant_result),
             max_pe_length_explicit=max_pe_length_explicit,
         )
-        mtp_workflow.export_mtp_draft(export_result, hf_model_dir=self.hf_model_dir)
+        mtp_workflow.export_mtp_draft(export_result, hf_model_dir=self.model_dir)
         return export_result
 
     def _resolve_export_hf_model_dir(self, quant_result: QuantResult) -> str:
@@ -817,8 +817,8 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         export_cfg = workflow_config.build_export_dict()
         # Compatibility for this validation path only. New export config
-        # finalization should go through BaseHMONNXWorkflow._build_export_config().
-        export_cfg["model"]["hf_model"] = self.hf_model_dir
+        # finalization should go through BaseLLMWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.model_dir
         model_cfg = export_cfg["model"]
         export_plan = self._build_export_plan(workflow_config)
         export_plan.validate_fixed_contract()
@@ -845,13 +845,13 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
     def _build_export_plan(self, workflow_config: WorkflowConfig) -> Gemma4SeriesExportPlan:
         export_cfg = workflow_config.build_export_dict()
         # Compatibility for this planning path only. New export config
-        # finalization should go through BaseHMONNXWorkflow._build_export_config().
-        export_cfg["model"]["hf_model"] = self.hf_model_dir
+        # finalization should go through BaseLLMWorkflow._build_export_config().
+        export_cfg["model"]["hf_model"] = self.model_dir
         model_cfg = export_cfg.get("model")
         if not isinstance(model_cfg, Mapping):
             raise TypeError("Gemma4 Series workflow export.model must be a mapping")
         return build_gemma4_series_export_plan(
-            hf_model_dir=self.hf_model_dir,
+            hf_model_dir=self.model_dir,
             export_model_cfg=model_cfg,
         )
 
@@ -886,7 +886,7 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         from .quant_adapter import quantize_with_gptqmodel_recipe
 
         return quantize_with_gptqmodel_recipe(
-            hf_model_dir=self.hf_model_dir,
+            model_dir=self.model_dir,
             output_dir=output_dir,
             device=device,
             quant_cfg=quant_cfg,
@@ -906,7 +906,7 @@ class Gemma4SeriesWorkflow(BaseHMONNXWorkflow):
         from .quant_adapter import quantize_with_autoround_mode1
 
         return quantize_with_autoround_mode1(
-            hf_model_dir=self.hf_model_dir,
+            model_dir=self.model_dir,
             output_dir=output_dir,
             device=device,
             quant_cfg=quant_cfg,

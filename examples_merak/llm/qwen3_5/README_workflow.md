@@ -6,7 +6,7 @@
 from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
 workflow = AutoLLMWorkflow.from_config(
-    hf_model_dir="/path/to/hf_model",
+    model_dir="/path/to/hf_model",
     config_path="configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml",
 )
 
@@ -79,7 +79,7 @@ docs/qwen3_5_hmonnx_io_spec.md
 
 `Qwen35Workflow.quant()` 当前支持三类量化入口：
 
-- `quant: null`：跳过量化，直接使用传入的 `hf_model_dir`。
+- `quant: null`：跳过量化，直接使用传入的 `model_dir`。
 - `quant.algorithm: gptqmodel` + `quant.method: autoround`：调用 AutoRound adapter，生成 GPTQModel HF 量化目录。
 - `quant.algorithm: gptqmodel` + `quant.method: gptq`：调用 GPTQModel GPTQ adapter，生成 GPTQModel HF 量化目录。
 
@@ -131,7 +131,7 @@ quant_result = workflow.quant(
 )
 ```
 
-此时 `QuantResult.skipped` 为 `True`，`export()` 会直接使用 workflow 初始化时传入的 `hf_model_dir`。
+此时 `QuantResult.skipped` 为 `True`，`export()` 会直接使用 workflow 初始化时传入的 `model_dir`。
 
 ## 导出
 

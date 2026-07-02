@@ -1452,7 +1452,7 @@ def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_pa
 
     from xhmodel_merak.xh_llm.models.gemma4_series import mtp_workflow
     from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
-    from xhmodel_merak.xh_llm.workflows.base import BaseHMONNXWorkflow
+    from xhmodel_merak.xh_llm.workflows.base import BaseLLMWorkflow
     from xhmodel_merak.xh_llm.workflows.result import ExportResult, QuantResult
 
     calls = []
@@ -1488,23 +1488,23 @@ def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_pa
         assert max_pe_length_explicit is False
         return {"value": 262144, "source": "target_config.text_config.max_position_embeddings"}
 
-    monkeypatch.setattr(BaseHMONNXWorkflow, "export", fake_base_export)
+    monkeypatch.setattr(BaseLLMWorkflow, "export", fake_base_export)
     monkeypatch.setattr(Gemma4SeriesWorkflow, "_validate_export_model", lambda self, config_overrides: None)
     monkeypatch.setattr(mtp_workflow, "export_mtp_draft", fake_export_mtp_draft)
     monkeypatch.setattr(mtp_workflow, "resolve_and_update_manifest_max_pe_length", fake_resolve_manifest)
 
     workflow = Gemma4SeriesWorkflow(
-        hf_model_dir="/tmp/base",
+        model_dir="/tmp/base",
         config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
     )
     result = workflow.export(
-        quant_result=QuantResult(hf_model_dir="/tmp/base", skipped=True),
+        quant_result=QuantResult(raw_model_dir="/tmp/base", skipped=True),
         output_dir=str(tmp_path / "out"),
         device="cpu",
     )
 
     assert result.work_dir == str(tmp_path / "out")
-    assert calls == [(str(tmp_path / "out"), workflow.hf_model_dir, None, "float16")]
+    assert calls == [(str(tmp_path / "out"), workflow.model_dir, None, "float16")]
 
 
 def test_gemma4_series_workflow_dump_golden_owns_mtp_draft_golden(monkeypatch, tmp_path):
@@ -1554,7 +1554,7 @@ def test_gemma4_series_workflow_dump_golden_owns_mtp_draft_golden(monkeypatch, t
     monkeypatch.setattr(Gemma4SeriesWorkflow, "_dump_mtp_draft_golden", fake_dump_mtp_draft_golden)
 
     workflow = Gemma4SeriesWorkflow(
-        hf_model_dir="/tmp/base",
+        model_dir="/tmp/base",
         config_path="configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
     )
     result = workflow.dump_golden(

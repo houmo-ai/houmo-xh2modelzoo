@@ -10,21 +10,21 @@ from .result import ExportResult, QuantResult
 from .utils import same_abs_path
 
 
-class BaseHMONNXWorkflow:
+class BaseLLMWorkflow:
     expected_model_config_cls_name: str | None = None
     expected_model_cls_name: str | None = None
 
     def __init__(
         self,
-        hf_model_dir: str,
+        model_dir: str,
         config_path: str,
         seed: int = 1024,
         debug: bool = False,
     ):
-        if not hf_model_dir:
-            raise ValueError("hf_model_dir must be provided!")
+        if not model_dir:
+            raise ValueError("model_dir must be provided!")
         self.workflow_config = WorkflowConfig.from_file(config_path)
-        self.hf_model_dir = os.path.abspath(os.path.normpath(str(hf_model_dir)))
+        self.model_dir = os.path.abspath(os.path.normpath(str(model_dir)))
         self.seed = seed
         self.debug = debug
 
@@ -37,7 +37,7 @@ class BaseHMONNXWorkflow:
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         if workflow_config.quant is not None:
             raise NotImplementedError(f"{type(self).__name__}.quant() must implement model-specific quantization")
-        return QuantResult(hf_model_dir=self.hf_model_dir, skipped=True)
+        return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 
     def export(
         self,
@@ -111,11 +111,11 @@ class BaseHMONNXWorkflow:
     ) -> str:
         raise NotImplementedError(f"{type(self).__name__}.dump_golden() must be implemented")
 
-    def _resolve_export_hf_model_dir(self, quant_result: QuantResult) -> str:
-        if not same_abs_path(quant_result.hf_model_dir, self.hf_model_dir):
-            raise ValueError("QuantResult.hf_model_dir must be the same as self.hf_model_dir")
+    def _resolve_export_model_dir(self, quant_result: QuantResult) -> str:
+        if not same_abs_path(quant_result.raw_model_dir, self.model_dir):
+            raise ValueError("QuantResult.raw_model_dir must be the same as self.model_dir")
         if quant_result.skipped:
-            return self.hf_model_dir
+            return self.model_dir
         if not quant_result.quanted_model_dir:
             raise ValueError("QuantResult.quanted_model_dir must be provided when quant is not skipped")
         return quant_result.quanted_model_dir
@@ -146,17 +146,17 @@ class BaseHMONNXWorkflow:
         quant_result: QuantResult,
         workflow_config: WorkflowConfig,
     ) -> dict[str, Any]:
-        export_hf_model_dir = self._resolve_export_hf_model_dir(quant_result)
-        formatted_model_name = self._format_model_name(workflow_config, export_hf_model_dir)
+        export_model_dir = self._resolve_export_model_dir(quant_result)
+        formatted_model_name = self._format_model_name(workflow_config, export_model_dir)
         export_cfg = workflow_config.build_export_dict()
-        export_cfg["model"]["hf_model"] = export_hf_model_dir
+        export_cfg["model"]["hf_model"] = export_model_dir
         export_cfg["model"]["model_name"] = formatted_model_name
         return export_cfg
 
     def _format_model_name(
         self,
         workflow_config: WorkflowConfig,
-        export_hf_model_dir: str,
+        export_model_dir: str,
     ) -> str:
         """
         规则如下
@@ -171,13 +171,13 @@ class BaseHMONNXWorkflow:
         quant_scheme: yaml中export.model.quant_scheme.quant_type字段，只取w{数字}a{数字}，例如w8a16，w8a8。如果quant.bits字段存在，则w后的数字改为quant.bits数值
         prefill_chunk_length: yaml中export.model.prefill_chunk_length字段
         context_max_length: yaml中export.model.context_max_length字段
-        max_pe_length: yaml中export.model.max_pe_length字段。如果缺失，从export_hf_model_dir路径下的config.json中递归搜索max_position_embeddings字段
+        max_pe_length: yaml中export.model.max_pe_length字段。如果缺失，从export_model_dir路径下的config.json中递归搜索max_position_embeddings字段
         """
         model_cfg = workflow_config.export["model"]
         try:
             model_name_token = model_cfg["model_name"]
         except KeyError as exc:
-            raise ValueError("BaseHMONNXWorkflow requires `export.model.model_name` in workflow config") from exc
+            raise ValueError("BaseLLMWorkflow requires `export.model.model_name` in workflow config") from exc
 
         try:
             chip_arch = model_cfg["chip_arch"]
@@ -224,7 +224,7 @@ class BaseHMONNXWorkflow:
                             return found
                 return None
 
-            hf_model_path = Path(export_hf_model_dir)
+            hf_model_path = Path(export_model_dir)
             if hf_model_path.is_file() and hf_model_path.name == "config.json":
                 config_paths = [hf_model_path]
             elif hf_model_path.exists():
