@@ -12,8 +12,8 @@ from .variants import Gemma4SeriesVariantSpec, resolve_gemma4_series_variant
 
 
 REQUIRED_CONTEXT_MAX_LENGTH = 2048
-ALLOWED_CONTEXT_MAX_LENGTHS = (2048, 8192)
-REQUIRED_INPUT_SEQUENCE_LENGTH = 256
+REQUIRED_INPUT_SEQUENCE_LENGTH = 320
+MIN_INPUT_SEQUENCE_LENGTH = 280
 DEFAULT_IMAGE_VISUAL_SEQ_LENGTH = 280
 DEFAULT_IMAGE_VISUAL_MAX_PATCHES = 2520
 DEFAULT_VIDEO_VISUAL_SEQ_LENGTH = 70
@@ -55,16 +55,16 @@ class Gemma4SeriesExportPlan:
     def validate_fixed_contract(self) -> None:
         """Validate the Gemma4 Series public export contract."""
 
-        if self.context_max_length not in ALLOWED_CONTEXT_MAX_LENGTHS:
-            allowed = ", ".join(str(length) for length in ALLOWED_CONTEXT_MAX_LENGTHS)
+        if self.input_sequence_length < MIN_INPUT_SEQUENCE_LENGTH:
             raise ValueError(
-                "Gemma4 Series exports must use context_max_length in "
-                f"[{allowed}], got {self.context_max_length}"
+                "Gemma4 Series exports must use prefill/input length >= "
+                f"{MIN_INPUT_SEQUENCE_LENGTH}, got {self.input_sequence_length}"
             )
-        if self.input_sequence_length != REQUIRED_INPUT_SEQUENCE_LENGTH:
+        if self.context_max_length < self.input_sequence_length:
             raise ValueError(
-                "Gemma4 Series exports must use prefill/input length="
-                f"{REQUIRED_INPUT_SEQUENCE_LENGTH}, got {self.input_sequence_length}"
+                "Gemma4 Series context_max_length must be >= prefill/input length; "
+                f"got context_max_length={self.context_max_length}, "
+                f"input_sequence_length={self.input_sequence_length}"
             )
         if self.quant_type not in ALLOWED_QUANT_TYPES:
             allowed_quant_types = ", ".join(repr(quant_type) for quant_type in ALLOWED_QUANT_TYPES)
@@ -124,6 +124,12 @@ def build_gemma4_series_export_plan(
     hf_config = _load_hf_config(hf_model_dir)
     variant = resolve_gemma4_series_variant(hf_config)
 
+    if export_model_cfg.get("mm_prefill_chunk_length") is not None:
+        raise ValueError(
+            "Gemma4 Series no longer supports mm_prefill_chunk_length/prefill_mm; "
+            "use prefill_chunk_length instead."
+        )
+
     visual_cfg = _as_mapping(export_model_cfg.get("visual_config"))
     video_visual_cfg = _as_mapping(export_model_cfg.get("video_visual_config"))
     quant_scheme = _as_mapping(export_model_cfg.get("quant_scheme"))
@@ -133,7 +139,7 @@ def build_gemma4_series_export_plan(
         context_max_length=_as_int(export_model_cfg.get("context_max_length"), 0),
         input_sequence_length=_as_int(
             export_model_cfg.get("prefill_chunk_length", export_model_cfg.get("input_sequence_length")),
-            0,
+            REQUIRED_INPUT_SEQUENCE_LENGTH,
         ),
         quant_type=quant_scheme.get("quant_type"),
         export_image_visual=bool(variant.has_image and visual_cfg),
@@ -177,10 +183,10 @@ __all__ = [
     "DEFAULT_QUANT_TYPE",
     "DEFAULT_VIDEO_VISUAL_MAX_PATCHES",
     "DEFAULT_VIDEO_VISUAL_SEQ_LENGTH",
-    "ALLOWED_CONTEXT_MAX_LENGTHS",
     "ALLOWED_QUANT_TYPES",
     "Gemma4SeriesExportPlan",
     "REQUIRED_CONTEXT_MAX_LENGTH",
+    "MIN_INPUT_SEQUENCE_LENGTH",
     "REQUIRED_INPUT_SEQUENCE_LENGTH",
     "build_gemma4_series_export_plan",
 ]

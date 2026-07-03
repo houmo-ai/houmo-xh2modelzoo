@@ -4,7 +4,7 @@
 The script is intentionally stricter than the lightweight dry-run helpers:
 
 - every checked runtime meta must be exported with context=2048 and
-  prefill/input sequence length=256;
+  prefill/input sequence length=320;
 - text prompts must tokenize to >1024 tokens and still fit the 2048 context
   with ``max_new_tokens``;
 - every preset must cover text + image generate;
@@ -38,7 +38,7 @@ GENERATE_SCRIPT = SCRIPT_DIR / "generate.py"
 
 PRESETS = ("e2b", "e4b", "31b", "26b-a4b")
 REQUIRED_CONTEXT = 2048
-REQUIRED_PREFILL = 256
+REQUIRED_PREFILL = 320
 MIN_PROMPT_TOKENS = 1025
 DEFAULT_MAX_NEW_TOKENS = 32
 
@@ -92,9 +92,11 @@ def _read_prefill_length(meta: dict) -> int | None:
         value = model_cfg.get(key)
         if value is not None:
             return int(value)
-    model_name = str(model_cfg.get("model_name", ""))
-    if "_256_" in model_name or model_name.endswith("_256_2k"):
-        return 256
+    prefill_graph = (meta.get("prefill_graphs") or {}).get("prefill")
+    if isinstance(prefill_graph, dict):
+        value = prefill_graph.get("input_sequence_length") or prefill_graph.get("prefill_chunk_length")
+        if value is not None:
+            return int(value)
     return None
 
 
@@ -107,7 +109,7 @@ def _required_sliding_cache_length(prefill: int, sliding_window: int) -> int:
     # the full current input chunk, while the cache output keeps only
     # ``sliding_window + input_sequence_length`` tokens.  Full-attention layers
     # still keep the exported context length.  This mirrors runtime metadata
-    # where sliding E4B layers are 512 + 256 = 768 and global layers are 2048.
+    # where sliding E4B layers are 512 + 320 = 832 and global layers are 2048.
     return _aligned(sliding_window + prefill, 16)
 
 
@@ -326,7 +328,7 @@ def _long_prompt(preset: str, modality: str) -> str:
     for idx in range(1, fact_count + 1):
         facts.append(
             f"资料条目{idx:03d}: Gemma4 Series 统一 API 要求 preset={preset} "
-            f"在 modality={modality} 验证中保持 context=2048、input_sequence_length=256，"
+            f"在 modality={modality} 验证中保持 context=2048、input_sequence_length=320，"
             f"并且不能把旧 gemma4/gemma4e/gemma4_moe 路径作为新实现入口。"
         )
     media_questions = {

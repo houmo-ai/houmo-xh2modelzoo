@@ -200,7 +200,8 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         fallback_hf_model: str | None = None,
         batch_size: int = 1,
         context_max_length: int = 2048,
-        prefill_chunk_length: int = 256,
+        prefill_chunk_length: int = 320,
+        mm_prefill_chunk_length: int | None = None,
         num_logits_to_keep: int | None = 1,
         mix_search: bool = False,
         use_cache: bool = True,
@@ -230,8 +231,24 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             use_cache=use_cache,
             **kwargs,
         )
-        self.spec_decode_mode = spec_decode_mode
-        self.enable_mtp_outputs = bool(enable_mtp_outputs or spec_decode_mode == "mtp")
+        if mm_prefill_chunk_length is not None:
+            raise ValueError(
+                "Gemma4 Series no longer supports mm_prefill_chunk_length/prefill_mm; "
+                "use prefill_chunk_length instead."
+            )
+        if int(prefill_chunk_length) < 280:
+            raise ValueError(
+                "Gemma4 Series prefill_chunk_length must be >= 280 for image/frame atomic prefill; "
+                f"got {prefill_chunk_length}."
+            )
+        self.spec_decode_mode = str(spec_decode_mode).lower() if spec_decode_mode is not None else None
+        sliding_kv_cache_input_mode = self._normalize_sliding_kv_cache_input_mode(sliding_kv_cache_input_mode)
+        if self.spec_decode_mode == "mtp" and sliding_kv_cache_input_mode != "slice_window":
+            raise ValueError(
+                "Gemma4 Series MTP requires sliding_kv_cache_input_mode='slice_window'; "
+                f"got {sliding_kv_cache_input_mode!r}."
+            )
+        self.enable_mtp_outputs = bool(enable_mtp_outputs or self.spec_decode_mode == "mtp")
         self.num_draft_tokens = num_draft_tokens
         self.output_post_norm_hidden = bool(output_post_norm_hidden)
         self.mtp_config = BaseConfig(**mtp_config) if isinstance(mtp_config, Mapping) else mtp_config
@@ -295,9 +312,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self.eoi_token_id: int | None = None
         self.mm_token_type_ids_enabled: bool = True
         self.fallback_hf_model = fallback_hf_model or hf_model
-        self.sliding_kv_cache_input_mode = self._normalize_sliding_kv_cache_input_mode(
-            sliding_kv_cache_input_mode
-        )
+        self.sliding_kv_cache_input_mode = sliding_kv_cache_input_mode
 
         text_config = hf_config.get("text_config", {})
         layer_types = text_config.get("layer_types", [])

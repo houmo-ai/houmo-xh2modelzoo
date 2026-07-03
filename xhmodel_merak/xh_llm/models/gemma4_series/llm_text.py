@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 import torch
@@ -18,6 +19,156 @@ from ...kv_cache_mixin import KVCacheMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import KVCacheConfig
 from .data_preprocess import Gemma4DataPreprocess
+
+
+@dataclass(frozen=True)
+class Gemma4PrefillChunk:
+    """One fixed-shape Gemma4 Series prefill invocation."""
+
+    start: int
+    end: int
+    graph_length: int
+    graph_name: str
+
+
+def plan_gemma4_atomic_prefill_chunks(
+    seq_length: int,
+    mm_token_type_ids: Optional[torch.Tensor],
+    *,
+    prefill_chunk_length: int,
+) -> list[Gemma4PrefillChunk]:
+    """Plan fixed-shape prefill chunks without splitting visual atomic ranges.
+
+    Text tokens are splittable and are greedily packed into the same prefill
+    graph as complete image/frame ranges.  Continuous ``mm_token_type_ids > 0``
+    ranges are atomic because Gemma4 applies bidirectional visual overlay inside
+    sliding-attention masks; one such range must be present in a single prefill
+    invocation so future visual K/V is available to earlier visual queries.
+    """
+
+    seq_length = int(seq_length)
+    prefill_chunk_length = int(prefill_chunk_length)
+    if seq_length <= 0:
+        return []
+    if prefill_chunk_length <= 0:
+        raise ValueError(
+            "Gemma4 Series prefill_chunk_length must be positive; "
+            f"got {prefill_chunk_length}."
+        )
+
+    if mm_token_type_ids is None:
+        mm = torch.zeros(seq_length, dtype=torch.long)
+    else:
+        mm = mm_token_type_ids.detach().flatten().to(device="cpu")[:seq_length]
+        if mm.numel() < seq_length:
+            mm = torch.cat([mm, torch.zeros(seq_length - mm.numel(), dtype=mm.dtype)])
+
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for idx, token_type in enumerate(mm.tolist()):
+        is_mm = int(token_type) > 0
+        if is_mm and start is None:
+            start = idx
+        if start is not None and (idx == seq_length - 1 or int(mm[idx + 1].item()) <= 0):
+            ranges.append((start, idx + 1))
+            start = None
+
+    segments: list[tuple[int, int, bool]] = []
+    cursor = 0
+    for range_start, range_end in ranges:
+        if cursor < range_start:
+            segments.append((cursor, range_start, False))
+        segments.append((range_start, range_end, True))
+        cursor = range_end
+    if cursor < seq_length:
+        segments.append((cursor, seq_length, False))
+
+    chunks: list[Gemma4PrefillChunk] = []
+    chunk_start: int | None = None
+    chunk_end = 0
+
+    def emit_chunk() -> None:
+        nonlocal chunk_start, chunk_end
+        if chunk_start is not None and chunk_end > chunk_start:
+            chunks.append(Gemma4PrefillChunk(chunk_start, chunk_end, prefill_chunk_length, "prefill"))
+        chunk_start = None
+        chunk_end = 0
+
+    def ensure_chunk(pos: int) -> None:
+        nonlocal chunk_start, chunk_end
+        if chunk_start is None:
+            chunk_start = pos
+            chunk_end = pos
+
+    for seg_start, seg_end, is_atomic in segments:
+        if is_atomic:
+            seg_len = seg_end - seg_start
+            if seg_len > prefill_chunk_length:
+                raise ValueError(
+                    "Gemma4 Series multimodal token range length exceeds prefill_chunk_length: "
+                    f"range=[{seg_start}, {seg_end}), length={seg_len}, "
+                    f"prefill_chunk_length={prefill_chunk_length}. Increase export.model.prefill_chunk_length."
+                )
+            ensure_chunk(seg_start)
+            if chunk_end != seg_start:
+                raise ValueError(
+                    "Gemma4 Series atomic prefill planner encountered non-contiguous segments: "
+                    f"chunk_end={chunk_end}, segment_start={seg_start}."
+                )
+            if (chunk_end - chunk_start) + seg_len > prefill_chunk_length:
+                emit_chunk()
+                ensure_chunk(seg_start)
+            chunk_end = seg_end
+            if chunk_end - chunk_start == prefill_chunk_length:
+                emit_chunk()
+            continue
+
+        pos = seg_start
+        while pos < seg_end:
+            ensure_chunk(pos)
+            if chunk_end != pos:
+                raise ValueError(
+                    "Gemma4 Series text prefill planner encountered non-contiguous segments: "
+                    f"chunk_end={chunk_end}, text_pos={pos}."
+                )
+            capacity = prefill_chunk_length - (chunk_end - chunk_start)
+            take = min(capacity, seg_end - pos)
+            chunk_end += take
+            pos += take
+            if chunk_end - chunk_start == prefill_chunk_length:
+                emit_chunk()
+
+    emit_chunk()
+    return chunks
+
+def _gemma4_runtime_prefill_length(llm_model: Any) -> int:
+    """Resolve the single Gemma4 prefill width from config/runtime surfaces.
+
+    Float/export models expose ``config`` or ``wrap_cfg`` while HMONNX runtime
+    models expose the value through ``meta_info.model_config``.  Generation must
+    not depend on only one of those surfaces because the HF-compatible wrapper is
+    shared by both paths.
+    """
+
+    candidates = (
+        getattr(llm_model, "config", None),
+        getattr(getattr(llm_model, "meta_info", None), "model_config", None),
+        getattr(llm_model, "wrap_cfg", None),
+    )
+
+    def pick_positive(name: str, default: int | None = None) -> int | None:
+        for candidate in candidates:
+            value = getattr(candidate, name, None) if candidate is not None else None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        return default
+
+    return pick_positive("prefill_chunk_length", 320) or 320
+
 
 def _copy_model_shared_params(model: nn.Module) -> nn.Module:
     """Deep-copy model structure while sharing every tensor object with the original."""
@@ -210,11 +361,11 @@ class _Gemma4TextExportBridgeBase(nn.Module):
 
 
 class _Gemma4DecodeNoFullMaskBridge(_Gemma4TextExportBridgeBase):
-    """Decode graph adapter for 31B/26B visual-bidirectional variants.
+    """Text graph adapter for Gemma4 variants whose full layers use MaskedSoftmax.
 
-    Visual soft tokens only appear during prefill.  Decode therefore does not
-    need the context-length full-attention mask input; full-attention layers
-    fall back to their internal causal softmax path when ``None`` is passed.
+    Sliding layers still consume the explicit sliding_attention_mask.  Full
+    layers receive None and therefore execute _Gemma4TextAttention's
+    xhquant.nn.MaskedSoftmax causal branch.
     """
 
     def forward(
@@ -246,9 +397,9 @@ class _Gemma4DecodeNoFullMaskMTPBridge(_Gemma4TextExportBridgeBase):
         past_seq_length,
         current_input_length,
         sliding_attention_mask,
+        accepted_count=None,
         past_key_cache=None,
         past_value_cache=None,
-        accepted_count=None,
     ):
         return self._run(
             inputs_embeds=inputs_embeds,
@@ -302,9 +453,9 @@ class _Gemma4TextExportBridgePLEMTPDecode(_Gemma4TextExportBridgePLE):
         current_input_length,
         sliding_attention_mask,
         per_layer_inputs,
+        accepted_count=None,
         past_key_cache=None,
         past_value_cache=None,
-        accepted_count=None,
     ):
         return self._run(
             inputs_embeds=inputs_embeds,
@@ -383,11 +534,10 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         *,
         token_id: int,
         features: Optional[torch.Tensor],
-        chunk_size: int,
+        prefill_chunks: list[Gemma4PrefillChunk],
     ) -> list[Optional[torch.Tensor]]:
-        steps = (input_ids.shape[1] + chunk_size - 1) // chunk_size
         if token_id < 0 or features is None:
-            return [None] * steps
+            return [None] * len(prefill_chunks)
         flat_features = _Gemma4HFCompatible._flatten_features(features)
         assert flat_features is not None
         total_token_count = int((input_ids == token_id).sum().item())
@@ -396,15 +546,22 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
                 f"Feature count does not match token count for token id {token_id}: "
                 f"{flat_features.shape[0]} vs {total_token_count}"
             )
-        chunks: list[Optional[torch.Tensor]] = []
+        feature_chunks: list[Optional[torch.Tensor]] = []
         cursor = 0
-        for step in range(steps):
-            start = step * chunk_size
-            end = min((step + 1) * chunk_size, input_ids.shape[1])
-            count = int((input_ids[:, start:end] == token_id).sum().item())
-            chunks.append(flat_features[cursor : cursor + count] if count else None)
+        for chunk in prefill_chunks:
+            count = int((input_ids[:, chunk.start : chunk.end] == token_id).sum().item())
+            feature_chunks.append(flat_features[cursor : cursor + count] if count else None)
             cursor += count
-        return chunks
+        return feature_chunks
+
+    def _activate_prefill_graph(self, graph_name: str, graph_length: int) -> None:
+        for attr_name in ("_quanted_model", "_frontend_model", "_inference_model"):
+            switcher = getattr(self._llm_model, attr_name, None)
+            if hasattr(switcher, "set_activate_model") and graph_name in switcher:
+                switcher.set_activate_model(graph_name)
+        set_input_sequence_length = getattr(self._llm_model, "set_input_sequence_length", None)
+        if set_input_sequence_length is not None:
+            set_input_sequence_length(int(graph_length))
 
     def _run_padded_visual(
         self,
@@ -487,10 +644,10 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         processed = list(data_input)
         data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
         if getattr(data_processor, "emit_accepted_count_input", False):
-            past_key_caches = processed[-3]
-            past_value_caches = processed[-2]
-            accepted_count = processed[-1]
-            model_args = processed[:-3] + list(past_key_caches) + list(past_value_caches) + [accepted_count]
+            accepted_count = processed[-3]
+            past_key_caches = processed[-2]
+            past_value_caches = processed[-1]
+            model_args = processed[:-3] + [accepted_count] + list(past_key_caches) + list(past_value_caches)
         else:
             past_key_caches = processed[-2]
             past_value_caches = processed[-1]
@@ -639,64 +796,52 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
             self._gemma4_audio_attention_mask = None
 
         seq_length = inputs_embeds.shape[1]
-        data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
         device = inputs_embeds.device
-        chunk_len = data_processor.input_sequence_length
-
-        if seq_length <= chunk_len:
-            # --- Single-chunk path (original) ---
-            data_batch = {
-                "input_ids": input_ids,
-                "image_embeds": image_embeds,
-                "video_embeds": video_embeds,
-                "audio_embeds": audio_embeds,
-                "past_seq_length": self._past_seq_length,
-                "mm_token_type_ids": mm_token_type_ids,
-            }
-            data_input = data_processor(data_batch)
-            logits = self._run_llm_from_processed(data_input)
-            if logits.dim() == 3 and logits.shape[1] > seq_length:
-                logits = logits[:, :seq_length, :]
+        prefill_len = _gemma4_runtime_prefill_length(self._llm_model)
+        if mm_token_type_ids is None:
+            mm_full = torch.zeros(seq_length, dtype=torch.long, device=device)
         else:
-            # --- Multi-chunk prefill; route every chunk through the same data
-            # preprocessor so PLE and multimodal token replacement stay correct.
-            if mm_token_type_ids is None:
-                mm_full = torch.zeros(seq_length, dtype=torch.long, device=device)
-            else:
-                mm_full = mm_token_type_ids.to(device).flatten()[:seq_length]
+            mm_full = mm_token_type_ids.to(device).flatten()[:seq_length]
 
-            steps = (seq_length + chunk_len - 1) // chunk_len
-            running_past_seq = self._past_seq_length
-            image_chunks = self._split_features_by_chunk(
-                input_ids, token_id=data_processor.image_token_id, features=image_embeds, chunk_size=chunk_len
-            )
-            video_chunks = self._split_features_by_chunk(
-                input_ids, token_id=data_processor.video_token_id, features=video_embeds, chunk_size=chunk_len
-            )
-            audio_chunks = self._split_features_by_chunk(
-                input_ids, token_id=data_processor.audio_token_id, features=audio_embeds, chunk_size=chunk_len
-            )
+        chunks = plan_gemma4_atomic_prefill_chunks(
+            seq_length,
+            mm_full,
+            prefill_chunk_length=prefill_len,
+        )
+        data_processor0: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
+        image_chunks = self._split_features_by_chunk(
+            input_ids, token_id=data_processor0.image_token_id, features=image_embeds, prefill_chunks=chunks
+        )
+        video_chunks = self._split_features_by_chunk(
+            input_ids, token_id=data_processor0.video_token_id, features=video_embeds, prefill_chunks=chunks
+        )
+        audio_chunks = self._split_features_by_chunk(
+            input_ids, token_id=data_processor0.audio_token_id, features=audio_embeds, prefill_chunks=chunks
+        )
 
-            outputs_logits = []
-            for i in range(steps):
-                start = i * chunk_len
-                end = min((i + 1) * chunk_len, seq_length)
-                sub_current_len = min(end, seq_length) - start
+        running_past_seq = self._past_seq_length
+        outputs_logits = []
+        try:
+            for idx, chunk in enumerate(chunks):
+                self._activate_prefill_graph(chunk.graph_name, chunk.graph_length)
+                data_processor: Gemma4DataPreprocess = self._llm_model.get_data_preprocessor()
+                sub_current_len = chunk.end - chunk.start
                 data_batch = {
-                    "input_ids": input_ids[:, start:end],
-                    "image_embeds": image_chunks[i],
-                    "video_embeds": video_chunks[i],
-                    "audio_embeds": audio_chunks[i],
+                    "input_ids": input_ids[:, chunk.start : chunk.end],
+                    "image_embeds": image_chunks[idx],
+                    "video_embeds": video_chunks[idx],
+                    "audio_embeds": audio_chunks[idx],
                     "past_seq_length": running_past_seq,
-                    "mm_token_type_ids": mm_full[start:end].unsqueeze(0),
+                    "mm_token_type_ids": mm_full[chunk.start : chunk.end].unsqueeze(0),
                 }
                 chunk_logits = self._run_llm_from_processed(data_processor(data_batch))
                 outputs_logits.append(chunk_logits)
                 running_past_seq += sub_current_len
+        finally:
+            self._activate_prefill_graph("prefill", prefill_len)
 
-            # Use last chunk's logits, trimmed to valid length
-            last_valid = min(chunk_len, seq_length - (steps - 1) * chunk_len)
-            logits = outputs_logits[-1][:, :last_valid, :]
+        last_valid = chunks[-1].end - chunks[-1].start
+        logits = outputs_logits[-1][:, :last_valid, :]
 
         return CausalLMOutputWithPast(
             logits=logits,

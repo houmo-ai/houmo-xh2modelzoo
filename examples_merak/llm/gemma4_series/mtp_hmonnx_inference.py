@@ -339,7 +339,6 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         raise AssertionError(f"{preset.name}: draft sliding mask width does not match shared sliding KV length")
     if _onnx_value_shape(draft_model, "full_attention_mask")[-1] != target_shared_shapes["shared_key_cache_full"][2]:
         raise AssertionError(f"{preset.name}: draft full mask width does not match shared full KV length")
-
     kv_nodes = _kv_nodes(draft_model)
     if len(kv_nodes) != 4:
         raise AssertionError(f"{preset.name}: expected 4 KVcache nodes, got {len(kv_nodes)}")
@@ -896,7 +895,7 @@ def _run_target_verify(target_model, token_ids: list[int], past_seq_length: int)
                 input_names = list(target_model.get_input_names())
             except Exception:
                 input_names = []
-        accepted_tensor = model_inputs[-1] if model_inputs else verify_accepted_count
+        accepted_tensor = model_inputs[-3] if len(model_inputs) >= 3 else verify_accepted_count
         print(
             "[MTP accepted_count trace] "
             f"verify_round={int(getattr(target_model, '_mtp_verify_round_index', 0))} "
@@ -1077,8 +1076,8 @@ def _build_draft_masks(
     if sliding_valid_length is None:
         sliding_valid_length = int(cache_valid_length or 0)
 
-    # Full/shared caches only expose valid prefix positions.  Any padded tail
-    # must remain masked or the assistant can attend to zeros as if they were KV.
+    # Full/shared target KV is preallocated to context length.  MTP draft does
+    # not update that cache, so the padded tail must be masked externally.
     full_valid = min(full_width, max(1, int(full_valid_length)))
     full_mask[0, 0, 0, :full_valid] = 0
 

@@ -322,7 +322,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional target HF/config directory recorded for draft export; defaults to existing/base target.",
     )
-    parser.add_argument("--context-length", type=int, default=2048, help="Fallback MTP draft max sequence length")
     parser.add_argument("--chip-arch", default="XH2a", help="Chip arch passed to xhquant for assistant draft export")
     parser.add_argument(
         "--mtp-body-quant-type",
@@ -348,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Workflow config override using dotted paths. Repeatable. "
             "Examples: --override export.model.context_max_length=8192 "
-            "--override export.model.prefill_chunk_length=256"
+            "--override export.model.prefill_chunk_length=320"
         ),
     )
     parser.add_argument(

@@ -35,9 +35,30 @@ README 只保留最小入口和常用命令，避免和长期文档重复。
 
 ```yaml
 model_type: Gemma4ForConditionalGeneration
-prefill_chunk_length: 256
+prefill_chunk_length: 320
 sliding_kv_cache_input_mode: slice_window
 ```
+
+## Prefill chunk selection
+
+Gemma4 Series now exports exactly one text prefill graph: `prefill` with
+`prefill_chunk_length: 320`. The 320 width is configurable but must stay at
+least 280 so one image feature block is never split. Runtime chunking packs text
+freely and treats each contiguous visual/audio range as atomic: text can fill
+remaining space after a complete range, image ranges normally occupy 280 tokens,
+and video frames are about 70 tokens so multiple complete frames can share one
+320-token prefill chunk. If the next multimodal range would cross the chunk
+boundary, the planner starts a new `prefill` call instead of slicing that range.
+
+All prefill/decode graphs share one physical sliding-cache width:
+
+```text
+aligned(sliding_window + prefill_chunk_length, 16)
+```
+
+MTP target verify keeps that physical cache width and controls the visible range
+with masks. `accepted_count` is a verify-only input for the MTP slice-window
+cache rollback path; it is not a general prefill/decode user control.
 
 正式 QTL-384 集成导出请用 `--context-max-length 8192` 覆盖 YAML 默认值。
 
@@ -48,28 +69,27 @@ Gemma4 Series workflow YAML 使用显式 `model_name`：
 ```yaml
 export:
   model:
-    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
+    model_name: gemma_4_e4b
 ```
 
 命名格式：
 
 ```text
-xh2_gemma4_<variant>_<profile>_<gptq|autoround|base>_w<bits>a<act_bits>_<prefill>_<context>_mpe<max_position_embeddings>
+gemma_4_<variant>
 ```
 
 示例：
 
 ```text
-xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
-xh2_gemma4_31b_full_autoround_w4a8_256_2k_mpe256k
+gemma_4_e2b
+gemma_4_e4b
+gemma_4_31b
+gemma_4_26b_a4b
 ```
 
 说明：
 
-- `mpe` 表示 HF config 里的 `max_position_embeddings`，按目标模型显式写入名称。
-- E2B/E4B 当前是 `mpe128k`；31B/26B-A4B 当前是 `mpe256k`。
-- `context_max_length` 被 CLI 覆盖为 8192 时，需要同步把名称里的 `256_2k`
-  改为 `256_8k`。
+- context、prefill、量化方法和 MPE 由 YAML/metadata 表达，不再塞进目录名。
 - `h1_sefp` 只保留在 `quant_scheme.quant_type`，不进入目录名。
 
 ## 当前推荐最优权重

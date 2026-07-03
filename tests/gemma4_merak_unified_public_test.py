@@ -98,48 +98,106 @@ def test_gemma4_series_preprocess_places_ple_before_kv_caches():
     assert value_cache is preprocess.past_value_caches
 
 
-def test_gemma4_series_bidirectional_vision_mask_is_config_gated():
+def test_gemma4_series_config_defaults_to_single_prefill_320_and_rejects_legacy_mm_prefill():
+    from xhmodel_merak.xh_llm.models.gemma4_series.xh_gemma4_series_config import (
+        XHGemma4SeriesModelConfig,
+    )
+
+    default_config = XHGemma4SeriesModelConfig(
+        model_name="gemma4_default_single_prefill",
+        model_type="Gemma4ForConditionalGeneration",
+        hf_model=None,
+    )
+    assert default_config.prefill_chunk_length == 320
+    assert not hasattr(default_config, "mm_prefill_chunk_length")
+
+    for prefill_chunk_length in (280, 320):
+        configured = XHGemma4SeriesModelConfig(
+            model_name=f"gemma4_single_prefill_{prefill_chunk_length}",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=None,
+            prefill_chunk_length=prefill_chunk_length,
+        )
+        assert configured.prefill_chunk_length == prefill_chunk_length
+
+    with pytest.raises(ValueError, match="prefill_chunk_length must be >= 280"):
+        XHGemma4SeriesModelConfig(
+            model_name="gemma4_short_prefill",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=None,
+            prefill_chunk_length=256,
+        )
+
+    with pytest.raises(ValueError, match="no longer supports mm_prefill_chunk_length/prefill_mm"):
+        XHGemma4SeriesModelConfig(
+            model_name="gemma4_legacy_mm_prefill",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=None,
+            prefill_chunk_length=320,
+            mm_prefill_chunk_length=320,
+        )
+
+
+def test_gemma4_series_bidirectional_vision_prefill_exports_no_full_attention_mask():
     from xhmodel_merak.xh_llm.models.gemma4_series.data_preprocess import Gemma4DataPreprocess
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        XHGemma4SeriesModel,
+    )
 
     token_embedding = nn.Embedding(16, 4)
+    preprocess = Gemma4DataPreprocess(
+        token_embedding=token_embedding,
+        input_sequence_length=4,
+        context_length=8,
+        pad_token_id=0,
+        image_token_id=9,
+        sliding_window=3,
+        bidirectional_vision_attention=True,
+        emit_full_attention_mask=False,
+    )
+    outputs = preprocess(
+        {
+            "input_ids": torch.tensor([[1, 9, 9]], dtype=torch.long),
+            "past_seq_length": 0,
+            "mm_token_type_ids": torch.tensor([[0, 1, 1]], dtype=torch.long),
+            "image_embeds": torch.zeros((2, 4), dtype=torch.float32),
+        }
+    )
+    sliding_mask = outputs[3]
+    assert sliding_mask[0, 0, 1, 2].item() == 0
+    assert sliding_mask.shape[-1] != 8  # this is sliding_attention_mask, not full_attention_mask
 
-    def build(enabled: bool):
-        preprocess = Gemma4DataPreprocess(
-            token_embedding=token_embedding,
-            input_sequence_length=4,
-            context_length=8,
-            pad_token_id=0,
-            image_token_id=9,
-            sliding_window=3,
-            bidirectional_vision_attention=enabled,
-        )
-        return preprocess._build_attention_masks(
-            current_input_length=3,
-            past_seq_length=0,
-            mm_token_type_ids=torch.tensor([0, 1, 1, 0], dtype=torch.long),
-            device=torch.device("cpu"),
-        )[0]
+    model = object.__new__(XHGemma4SeriesModel)
+    model.config = SimpleNamespace(
+        bidirectional_vision_attention=True,
+        hidden_size_per_layer_input=0,
+        spec_decode_mode=None,
+        enable_mtp_outputs=False,
+    )
+    model.per_layer_input_embedding = None
+    model._kvcache_config = SimpleNamespace(num_layers=1)
+    model._llm_prefill = True
 
-    causal_full = build(False)
-    bidir_full = build(True)
-    neg = torch.finfo(torch.float16).min
-
-    # Query at the first visual token must not see the next visual token for E4B.
-    assert causal_full[0, 0, 1, 2].item() == neg
-    # 31B/26B opt into HF's vision bidirectional attention and do see it.
-    assert bidir_full[0, 0, 1, 2].item() == 0
+    export_inputs = XHGemma4SeriesModel.get_export_cfg(model)["input_names"]
+    assert "full_attention_mask" not in export_inputs
+    assert "sliding_attention_mask" in export_inputs
 
 
-def test_gemma4_series_e4b_bridge_uses_masked_softmax_for_full_layers():
+def test_gemma4_series_full_attention_none_mask_uses_xhquant_masked_softmax():
     from pathlib import Path
 
     bridge_src = Path("xhmodel_merak/xh_llm/models/gemma4_series/llm_text.py").read_text(encoding="utf-8")
     llm_src = Path("xhmodel_merak/xh_llm/models/gemma4_series/_llm_model_impl.py").read_text(encoding="utf-8")
     assert "full_attention_mask=None" in bridge_src
+    assert "MaskedSoftmax" in llm_src
+    assert "self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)" in llm_src
     assert (
         'layer_attention_mask = local_attention_mask if layer_type == "sliding_attention" else full_attention_mask'
         in llm_src
     )
+    assert "if attention_mask is not None:" in llm_src
+    assert "attn_weights = self.masked_add(attn_weights, attention_mask)" in llm_src
+    assert "attn_weights = self.softmax(attn_weights).to(query_states.dtype)" in llm_src
     assert "attn_weights = self.masked_softmax(attn_weights, past_seq_length)" in llm_src
 
 
@@ -169,11 +227,10 @@ def test_gemma4_series_export_cfg_places_ple_before_kv_cache_names():
     model.per_layer_input_embedding = None
     model.config = SimpleNamespace(hidden_size_per_layer_input=0, bidirectional_vision_attention=True)
     cfg = XHGemma4SeriesModel.get_export_cfg(model)
-    assert cfg["input_names"][:5] == [
+    assert cfg["input_names"][:4] == [
         "inputs_embeds",
         "past_seq_length",
         "current_input_length",
-        "full_attention_mask",
         "sliding_attention_mask",
     ]
 
@@ -373,10 +430,11 @@ def test_gemma4_series_no_scale_rmsnorm_uses_fused_module():
 
 def test_gemma4_series_autoround_mode1_builds_dense_script_command(tmp_path, monkeypatch):
     from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
+        DEFAULT_DENSE_CALIBRATION_JSONL,
         build_autoround_mode1_command,
     )
 
-    dataset = _local_pile10k(tmp_path, monkeypatch)
+    _local_pile10k(tmp_path, monkeypatch)
     model_dir = Path("/data01/datasets/gemma-4-31B-it")
     if not model_dir.exists():
         pytest.skip("Gemma4 31B local HF config is not available")
@@ -388,7 +446,7 @@ def test_gemma4_series_autoround_mode1_builds_dense_script_command(tmp_path, mon
         workflow_seed=1024,
         export_model_cfg={
             "context_max_length": 2048,
-            "prefill_chunk_length": 256,
+            "prefill_chunk_length": 320,
         },
         quant_cfg={
             "algorithm": "gptqmodel",
@@ -402,7 +460,7 @@ def test_gemma4_series_autoround_mode1_builds_dense_script_command(tmp_path, mon
             "iters": 200,
             "format": "auto_gptq",
             "calibration": {
-                "dataset": "NeelNanda/pile-10k",
+                "jsonl": "gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl",
                 "nsamples": 128,
                 "seqlen": 2048,
             },
@@ -423,7 +481,10 @@ def test_gemma4_series_autoround_mode1_builds_dense_script_command(tmp_path, mon
     assert command[command.index("--nsamples") + 1] == "128"
     assert command[command.index("--seqlen") + 1] == "2048"
     assert command[command.index("--batch_size") + 1] == "8"
-    assert command[command.index("--dataset") + 1] == str(dataset.resolve())
+    dataset_arg = command[command.index("--dataset") + 1]
+    assert dataset_arg == DEFAULT_DENSE_CALIBRATION_JSONL or dataset_arg.endswith(
+        "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
+    )
     assert "--sym" in command
 
 
@@ -431,8 +492,8 @@ def test_gemma4_series_autoround_mode1_has_separate_quant_template(tmp_path):
     import yaml
 
     from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
-        DEFAULT_AUTOROUND_DATASET,
         DEFAULT_DENSE_CALIBRATION_JSONL,
+        DEFAULT_MOE_CALIBRATION_JSONL,
     )
     from xhmodel_merak.xh_llm.models.gemma4_series.workflow import (
         dump_autoround_moe_mode1_quant_config_template,
@@ -458,15 +519,15 @@ def test_gemma4_series_autoround_mode1_has_separate_quant_template(tmp_path):
     assert mode1_quant["algorithm"] == "gptqmodel"
     assert mode1_quant["method"] == "autoround"
     assert mode1_quant["preset"] == "mode1"
-    assert mode1_quant["calibration"]["dataset"] == DEFAULT_AUTOROUND_DATASET
-    assert "jsonl" not in mode1_quant["calibration"]
+    assert mode1_quant["calibration"]["jsonl"] == DEFAULT_DENSE_CALIBRATION_JSONL
+    assert "dataset" not in mode1_quant["calibration"]
     assert mode1_quant["calibration"]["seqlen"] == 2048
     assert mode1_quant["runtime"]["batch_size"] == 8
     assert moe_mode1_quant["algorithm"] == "gptqmodel"
     assert moe_mode1_quant["method"] == "autoround"
     assert moe_mode1_quant["preset"] == "mode1"
-    assert moe_mode1_quant["calibration"]["dataset"] == DEFAULT_AUTOROUND_DATASET
-    assert "jsonl" not in moe_mode1_quant["calibration"]
+    assert moe_mode1_quant["calibration"]["jsonl"] == DEFAULT_MOE_CALIBRATION_JSONL
+    assert "dataset" not in moe_mode1_quant["calibration"]
     assert moe_mode1_quant["runtime"]["dtype"] == "bfloat16"
 
 
@@ -487,7 +548,7 @@ def test_gemma4_series_autoround_mode1_builds_moe_script_command(tmp_path, monke
         workflow_seed=1024,
         export_model_cfg={
             "context_max_length": 2048,
-            "prefill_chunk_length": 256,
+            "prefill_chunk_length": 320,
         },
         quant_cfg={
             "algorithm": "gptqmodel",
@@ -1108,8 +1169,17 @@ def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_
     inputs = model.prepare_inputs(None)
 
     assert captured["max_position_embeddings"] == 262144
+    assert model.export_cfg["input_names"][:5] == [
+        "inputs_embeds",
+        "past_seq_length",
+        "current_input_length",
+        "sliding_attention_mask",
+        "full_attention_mask",
+    ]
     assert inputs[3].shape == (1, 1, 1, 1024)
     assert inputs[4].shape == (1, 1, 1, 2048)
+    assert inputs[5].shape == (1, 2, 1024, 16)
+    assert inputs[7].shape == (1, 1, 2048, 32)
 
 
 
@@ -1221,7 +1291,7 @@ def test_gemma4_series_mtp_manifest_prefers_nested_spec_decode(tmp_path):
         meta_path,
         draft_path,
         lm_head_quant_type="w3a8h0_ssfp",
-        shared_sliding_len=768,
+        shared_sliding_len=832,
         shared_full_len=2048,
     )
 
@@ -1633,7 +1703,7 @@ def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():
         output_dir="work_dirs/gemma4_dense_gptq",
         device="cuda:0",
         workflow_seed=42,
-        export_model_cfg={"context_max_length": 2048, "prefill_chunk_length": 256},
+        export_model_cfg={"context_max_length": 2048, "prefill_chunk_length": 320},
         quant_cfg=common,
     )
     moe_kwargs = build_gptqmodel_recipe_kwargs(
@@ -1641,7 +1711,7 @@ def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():
         output_dir="work_dirs/gemma4_moe_gptq",
         device="cuda:0",
         workflow_seed=42,
-        export_model_cfg={"context_max_length": 2048, "prefill_chunk_length": 256},
+        export_model_cfg={"context_max_length": 2048, "prefill_chunk_length": 320},
         quant_cfg=common,
     )
 
@@ -1692,13 +1762,126 @@ def test_gemma4_series_decode_omits_full_attention_mask_contract():
     model._llm_prefill = True
 
     prefill_inputs = model.get_export_cfg()["input_names"]
-    assert "full_attention_mask" in prefill_inputs
+    assert "full_attention_mask" not in prefill_inputs
     assert "sliding_attention_mask" in prefill_inputs
 
     model._llm_prefill = False
     decode_inputs = model.get_export_cfg()["input_names"]
     assert "full_attention_mask" not in decode_inputs
     assert "sliding_attention_mask" in decode_inputs
+
+
+def test_gemma4_series_cache_width_uses_max_text_and_mm_prefill():
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import _gemma4_cache_seq_len_for_layer
+
+    assert (
+        _gemma4_cache_seq_len_for_layer(
+            layer_type="sliding_attention",
+            context_max_length=2048,
+            sliding_window=1024,
+            input_seq_len=320,
+        )
+        == 1344
+    )
+    assert (
+        _gemma4_cache_seq_len_for_layer(
+            layer_type="sliding_attention",
+            context_max_length=2048,
+            sliding_window=1024,
+            input_seq_len=5,
+        )
+        == 1040
+    )
+
+
+def test_gemma4_series_export_metadata_reports_single_prefill_and_mtp_widths(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        XHGemma4SeriesModel,
+    )
+
+    model = object.__new__(XHGemma4SeriesModel)
+    model.config = SimpleNamespace(
+        variant="31b",
+        capabilities={},
+        prefill_chunk_length=320,
+        context_max_length=2048,
+        sliding_kv_cache_input_mode="slice_window",
+        spec_decode_mode="mtp",
+        enable_mtp_outputs=True,
+        num_draft_tokens=4,
+    )
+    model.layer_types = ["sliding_attention", "full_attention"]
+    model.layer_cache_types = ["sliding_attention", "full_attention"]
+    model.layer_cache_indices = [0, 1]
+    model.sliding_window = 1024
+    model._kvcache_mixin = SimpleNamespace(layer_kv_shapes=[[1, 2, 1344, 128], [1, 2, 2048, 128]])
+    model.per_layer_input_embedding = None
+
+    meta = SimpleNamespace()
+    model._extra_export_metadata(str(tmp_path), meta)
+
+    assert meta.prefill_graphs == {
+        "prefill": {"input_sequence_length": 320, "hmonnx": ""},
+    }
+    assert meta.prefill_chunk_length == 320
+    assert not hasattr(meta, "mm_prefill_chunk_length")
+    assert meta.sliding_cache_storage_length == 1344
+    assert meta.spec_decode["shared_sliding_cache_length"] == 1344
+    assert meta.spec_decode["shared_sliding_cache_length_basis"] == "slice_window + prefill_chunk_length"
+    assert meta.spec_decode["target_decode_sliding_output_length"] == 1040
+
+
+def test_gemma4_series_atomic_multimodal_chunk_planner_cases():
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import plan_gemma4_atomic_prefill_chunks
+
+    single_frame = torch.cat([torch.zeros(10, dtype=torch.long), torch.ones(70, dtype=torch.long)])
+    chunks = plan_gemma4_atomic_prefill_chunks(
+        80,
+        single_frame,
+        prefill_chunk_length=320,
+    )
+    assert [(c.start, c.end, c.graph_name, c.graph_length) for c in chunks] == [
+        (0, 80, "prefill", 320),
+    ]
+
+    image_280 = torch.cat([torch.zeros(100, dtype=torch.long), torch.ones(280, dtype=torch.long)])
+    chunks = plan_gemma4_atomic_prefill_chunks(
+        380,
+        image_280,
+        prefill_chunk_length=320,
+    )
+    assert [(c.start, c.end, c.graph_name, c.graph_length) for c in chunks] == [
+        (0, 100, "prefill", 320),
+        (100, 380, "prefill", 320),
+    ]
+
+    four_video_frames_with_text_gaps = torch.cat(
+        [
+            torch.ones(70, dtype=torch.long),
+            torch.zeros(1, dtype=torch.long),
+            torch.ones(70, dtype=torch.long),
+            torch.zeros(1, dtype=torch.long),
+            torch.ones(70, dtype=torch.long),
+            torch.zeros(1, dtype=torch.long),
+            torch.ones(70, dtype=torch.long),
+        ]
+    )
+    chunks = plan_gemma4_atomic_prefill_chunks(
+        int(four_video_frames_with_text_gaps.numel()),
+        four_video_frames_with_text_gaps,
+        prefill_chunk_length=320,
+    )
+    assert [(c.start, c.end, c.graph_name, c.graph_length) for c in chunks] == [
+        (0, 283, "prefill", 320),
+    ]
+
+    too_long = torch.ones(321, dtype=torch.long)
+    with pytest.raises(ValueError, match="exceeds prefill_chunk_length"):
+        plan_gemma4_atomic_prefill_chunks(
+            321,
+            too_long,
+            prefill_chunk_length=320,
+        )
 
 
 def test_gemma4_series_decode_preprocess_skips_full_attention_mask():
@@ -1754,15 +1937,15 @@ def test_gemma4_series_mtp_decode_keeps_accepted_count_rank_one():
         torch.tensor([4], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
         torch.zeros((1, 1, 1, 16), dtype=torch.float16),
-        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
-        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
         accepted_count,
+        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
+        CacheList([torch.zeros((1, 1, 16, 4), dtype=torch.float16)]),
     )
 
     _Gemma4HFCompatible._run_llm_from_processed(model, data_input)
 
-    assert captured["args"][-1] is accepted_count
-    assert captured["args"][-1].shape == (1,)
+    assert captured["args"][4] is accepted_count
+    assert captured["args"][4].shape == (1,)
 
 
 
@@ -1844,7 +2027,7 @@ def test_gemma4_series_draft_mask_uses_shared_sliding_tail():
     assistant_session = SimpleNamespace(
         input_infos={
             "sliding_attention_mask": SimpleNamespace(shape=(1, 1, 1, 8)),
-            "full_attention_mask": SimpleNamespace(shape=(1, 1, 1, 10)),
+            "full_attention_mask": SimpleNamespace(shape=(1, 1, 1, 16)),
         }
     )
 
@@ -1891,9 +2074,9 @@ def test_gemma4_series_hmonnx_shared_cache_indices_fall_back_to_kv_shapes():
     target_model = SimpleNamespace(
         _kvcache_mixin=SimpleNamespace(
             layer_kv_shapes=[
-                [1, 1, 1280, 1],
+                [1, 1, 1344, 1],
                 [1, 1, 2048, 1],
-                [1, 1, 1280, 1],
+                [1, 1, 1344, 1],
                 [1, 1, 2048, 1],
             ]
         ),
@@ -1970,20 +2153,20 @@ def test_gemma4_series_sliding_kv_cache_input_mode_controls_shape():
             layer_type="sliding_attention",
             context_max_length=2048,
             sliding_window=1024,
-            input_seq_len=256,
+            input_seq_len=320,
             sliding_kv_cache_input_mode="slice_window",
         )
-        == 1280
+        == 1344
     )
     legacy = _gemma4_cache_seq_len_for_layer(
         layer_type="sliding_attention",
         context_max_length=2048,
         sliding_window=1024,
-        input_seq_len=256,
+        input_seq_len=320,
         sliding_kv_cache_input_mode="legacy_full",
     )
     assert legacy >= 2048
-    assert legacy > 1280
+    assert legacy > 1344
 
     config = XHGemma4SeriesModelConfig(
         model_name="shape_mode",
@@ -2009,6 +2192,141 @@ def test_gemma4_series_sliding_kv_cache_input_mode_controls_shape():
         )
 
 
+def test_gemma4_series_mtp_rejects_legacy_sliding_kv_cache_contract():
+    from xhmodel_merak.xh_llm.models.gemma4_series.xh_gemma4_series_config import (
+        XHGemma4SeriesModelConfig,
+    )
+
+    with pytest.raises(ValueError, match="MTP.*slice_window"):
+        XHGemma4SeriesModelConfig(
+            model_name="mtp_legacy_shape_mode",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=None,
+            spec_decode_mode="mtp",
+            sliding_kv_cache_input_mode="legacy_full",
+        )
+
+
+def test_gemma4_series_accepted_count_is_decode_mtp_slice_window_only():
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        XHGemma4SeriesModel,
+    )
+
+    model = object.__new__(XHGemma4SeriesModel)
+    model.config = SimpleNamespace(
+        hidden_size_per_layer_input=0,
+        spec_decode_mode="mtp",
+        enable_mtp_outputs=True,
+        sliding_kv_cache_input_mode="slice_window",
+    )
+    model.per_layer_input_embedding = None
+    model._kvcache_config = SimpleNamespace(num_layers=1)
+
+    model._llm_prefill = True
+    assert "accepted_count" not in XHGemma4SeriesModel.get_export_cfg(model)["input_names"]
+
+    model._llm_prefill = False
+    decode_inputs = XHGemma4SeriesModel.get_export_cfg(model)["input_names"]
+    assert "accepted_count" in decode_inputs
+    assert decode_inputs.index("accepted_count") < decode_inputs.index("past_key_cache_0")
+
+    model.config.spec_decode_mode = None
+    model.config.enable_mtp_outputs = True
+    assert "accepted_count" not in XHGemma4SeriesModel.get_export_cfg(model)["input_names"]
+
+    model.config.spec_decode_mode = "mtp"
+    model.config.sliding_kv_cache_input_mode = "legacy_full"
+    assert "accepted_count" not in XHGemma4SeriesModel.get_export_cfg(model)["input_names"]
+
+
+def test_gemma4_series_mtp_sliding_cache_consumes_accepted_count():
+    from xhmodel_merak.xh_llm.models.gemma4_series._llm_model_impl import _Gemma4TextAttention
+
+    class Identity:
+        weight = torch.zeros((1, 1), dtype=torch.float16)
+
+        def __call__(self, x):
+            return x
+
+    class RopeIdentity:
+        def __call__(self, x, cos, sin):
+            return x
+
+    class RepeatIdentity:
+        def __call__(self, x, groups, dim):
+            return x
+
+    class MatMul:
+        def __call__(self, lhs, rhs):
+            return torch.matmul(lhs, rhs)
+
+    class Add:
+        def __call__(self, lhs, rhs):
+            return lhs + rhs
+
+    class Softmax:
+        def __call__(self, x):
+            return torch.softmax(x, dim=-1)
+
+    class CacheRecorder:
+        def __init__(self):
+            self.accepted_count = None
+
+        def __call__(self, states, past_seq_length, current_input_length, past_cache, accepted_count=None):
+            self.accepted_count = accepted_count
+            return states
+
+    def run_attention(enable_accepted_count_input):
+        attn = object.__new__(_Gemma4TextAttention)
+        attn.use_cache = True
+        attn.is_kv_shared_layer = False
+        attn.store_full_length_kv = False
+        attn.enable_accepted_count_input = enable_accepted_count_input
+        attn.head_dim = 1
+        attn.num_key_value_groups = 1
+        attn.q_proj = Identity()
+        attn.k_proj = Identity()
+        attn.v_proj = Identity()
+        attn.o_proj = Identity()
+        attn.q_norm = Identity()
+        attn.k_norm = Identity()
+        attn.v_norm = Identity()
+        attn.rope = RopeIdentity()
+        attn.attn_compute_cast = Identity()
+        attn.attn_output_cast = Identity()
+        attn.k_cache = CacheRecorder()
+        attn.v_cache = CacheRecorder()
+        attn.k_repeat_interleave = RepeatIdentity()
+        attn.v_repeat_interleave = RepeatIdentity()
+        attn.qk_matmul = MatMul()
+        attn.pv_matmul = MatMul()
+        attn.masked_add = Add()
+        attn.softmax = Softmax()
+        accepted_count = torch.tensor([2], dtype=torch.int32)
+        attn.forward(
+            hidden_states=torch.ones((1, 1, 1), dtype=torch.float16),
+            position_embeddings=(
+                torch.ones((1, 1, 1, 1), dtype=torch.float16),
+                torch.zeros((1, 1, 1, 1), dtype=torch.float16),
+            ),
+            attention_mask=torch.zeros((1, 1, 1, 1), dtype=torch.float16),
+            past_seq_length=torch.tensor([4], dtype=torch.int32),
+            current_input_length=torch.tensor([1], dtype=torch.int32),
+            past_k_cache=torch.zeros((1, 1, 16, 1), dtype=torch.float16),
+            past_v_cache=torch.zeros((1, 1, 16, 1), dtype=torch.float16),
+            accepted_count=accepted_count,
+        )
+        return accepted_count, attn.k_cache.accepted_count, attn.v_cache.accepted_count
+
+    accepted_count, k_accepted_count, v_accepted_count = run_attention(True)
+    assert k_accepted_count is accepted_count
+    assert v_accepted_count is accepted_count
+
+    _, k_accepted_count, v_accepted_count = run_attention(False)
+    assert k_accepted_count is None
+    assert v_accepted_count is None
+
+
 def test_gemma4_series_mtp_updates_sliding_cache_attention_max_length():
     from types import SimpleNamespace
 
@@ -2021,7 +2339,7 @@ def test_gemma4_series_mtp_updates_sliding_cache_attention_max_length():
     attn.k_cache = SimpleNamespace(attention_max_length=1024)
     attn.v_cache = SimpleNamespace(attention_max_length=1024)
 
-    attn._update_cfg({"sliding_cache_output_length": 1280, "input_sequence_length": 5})
+    attn._update_cfg({"sliding_cache_output_length": 1344, "input_sequence_length": 5})
 
     assert attn.k_cache.attention_max_length == 1024
     assert attn.v_cache.attention_max_length == 1024
@@ -2037,7 +2355,7 @@ def test_gemma4_series_mtp_target_contract_records_separate_cache_widths():
         num_draft_tokens=4,
         mtp_config=SimpleNamespace(lm_head_quant_type="w4a8h0_ssfp"),
         context_max_length=2048,
-        prefill_chunk_length=256,
+        prefill_chunk_length=320,
         num_logits_to_keep=1,
         bidirectional_vision_attention=False,
         sliding_kv_cache_input_mode="slice_window",
@@ -2048,7 +2366,7 @@ def test_gemma4_series_mtp_target_contract_records_separate_cache_widths():
     model.layer_cache_indices = [0, 1]
     model.per_layer_input_embedding = None
     model._kvcache_config = SimpleNamespace(num_layers=0)
-    model._kvcache_mixin = SimpleNamespace(layer_kv_shapes=[[1, 1, 1280, 1], [1, 1, 2048, 1]])
+    model._kvcache_mixin = SimpleNamespace(layer_kv_shapes=[[1, 1, 1344, 1], [1, 1, 2048, 1]])
     model._llm_prefill = True
 
     export_cfg = XHGemma4SeriesModel.get_export_cfg(model)
@@ -2056,9 +2374,10 @@ def test_gemma4_series_mtp_target_contract_records_separate_cache_widths():
 
     meta = SimpleNamespace()
     XHGemma4SeriesModel._extra_export_metadata(model, str(Path(".")), meta)
-    assert meta.spec_decode["shared_sliding_cache_length"] == 1280
+    assert meta.spec_decode["shared_sliding_cache_length"] == 1344
     assert meta.spec_decode["shared_full_cache_length"] == 2048
     assert meta.spec_decode["target_decode_sliding_output_length"] == 1040
+    assert meta.spec_decode["shared_sliding_cache_length_basis"] == "slice_window + prefill_chunk_length"
     assert "sliding_cache_output_length" not in meta.spec_decode
     assert meta.layer_cache_types == ["sliding_attention", "full_attention"]
     assert meta.layer_cache_indices == [0, 1]
@@ -2085,7 +2404,11 @@ def test_gemma4_series_e2e_validation_rejects_stale_mtp_decode(tmp_path):
             ],
             "g",
             [
-                helper.make_tensor_value_info("sliding_attention_mask", TensorProto.FLOAT16, [1, 1, q_len, mask_width]),
+                helper.make_tensor_value_info(
+                    "sliding_attention_mask",
+                    TensorProto.FLOAT16,
+                    [1, 1, q_len, mask_width],
+                ),
                 helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 1, q_len, 1]),
             ],
             [
@@ -2098,14 +2421,14 @@ def test_gemma4_series_e2e_validation_rejects_stale_mtp_decode(tmp_path):
         )
         onnx.save(helper.make_model(graph), path)
 
-    make_graph(tmp_path / "prefill.onnx", q_len=256, mask_width=1280, cache_width=1280, amax=1024)
+    make_graph(tmp_path / "prefill.onnx", q_len=320, mask_width=1344, cache_width=1344, amax=1024)
     # Stale decode: old single-token graph with slice_window-only cache width.
     make_graph(tmp_path / "decode.onnx", q_len=1, mask_width=1024, cache_width=1024, amax=1024)
     meta = {
         "spec_decode_mode": "mtp",
         "sliding_window": 1024,
         "layer_types": ["sliding_attention", "full_attention"],
-        "layer_kv_shapes": [[1, 1, 1280, 1], [1, 1, 2048, 1]],
+        "layer_kv_shapes": [[1, 1, 1344, 1], [1, 1, 2048, 1]],
         "prefill_hmonnx": "prefill.onnx",
         "decode_hmonnx": "decode.onnx",
         "visual_config": {"hmonnx": "visual.onnx"},
@@ -2113,12 +2436,12 @@ def test_gemma4_series_e2e_validation_rejects_stale_mtp_decode(tmp_path):
         "spec_decode": {
             "mode": "mtp",
             "verify_length": 5,
-            "shared_sliding_cache_length": 1280,
+            "shared_sliding_cache_length": 1344,
         },
         "model_config": {
             "model_type": "Gemma4ForConditionalGeneration",
             "context_max_length": 2048,
-            "prefill_chunk_length": 256,
+            "prefill_chunk_length": 320,
             "enable_mtp_outputs": True,
             "num_draft_tokens": 4,
         },

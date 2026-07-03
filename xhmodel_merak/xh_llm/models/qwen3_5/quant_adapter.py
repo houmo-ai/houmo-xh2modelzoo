@@ -13,8 +13,10 @@ from ...workflows.result import QuantResult
 
 _DENSE_CALIBRATION_JSONL = "gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
 _MOE_CALIBRATION_JSONL = "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
-DEFAULT_AUTOROUND_DATASET = "data/calib_data/NeelNanda-pile-10k.jsonl"
+DEFAULT_AUTOROUND_DATASET_PATH = "data/calib_data/NeelNanda-pile-10k.jsonl"
+DEFAULT_AUTOROUND_DATASET = f"xh2modelzoo://{DEFAULT_AUTOROUND_DATASET_PATH}"
 _LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
+_REPO_RESOURCE_PREFIXES = ("xh2modelzoo://", "repo://")
 
 
 def quantize_with_autoround_api(
@@ -268,7 +270,7 @@ def _calibration_overrides_gptqmodel_defaults(calibration_cfg: Mapping[str, Any]
     dataset = calibration_cfg.get("dataset")
     if dataset is None:
         return "nsamples" in calibration_cfg or "seqlen" in calibration_cfg
-    if str(dataset) not in _LEGACY_AUTOROUND_DATASETS | {DEFAULT_AUTOROUND_DATASET}:
+    if str(dataset) not in _LEGACY_AUTOROUND_DATASETS | {DEFAULT_AUTOROUND_DATASET, DEFAULT_AUTOROUND_DATASET_PATH}:
         return True
     return (
         calibration_cfg.get("nsamples", 128) != 128
@@ -353,13 +355,15 @@ def _resolve_autoround_dataset_value(value: Any) -> str:
     text = os.path.expanduser(os.path.expandvars(str(value)))
     if text in _LEGACY_AUTOROUND_DATASETS:
         text = DEFAULT_AUTOROUND_DATASET
+    if _is_repo_resource(text):
+        return _resolve_repo_resource(text)
     if _is_existing_local_path(text):
         return str(Path(text).resolve())
     if _is_path_like_value(text):
         raise FileNotFoundError(
             "Qwen3.5 AutoRound calibration dataset path does not exist: "
             f"{text!r}. Download the prepared Artifactory archive and place "
-            f"it at {DEFAULT_AUTOROUND_DATASET}."
+            f"it at {DEFAULT_AUTOROUND_DATASET_PATH}."
         )
     return text
 
@@ -385,6 +389,58 @@ def _resolve_gptqmodel_resource(uri: str) -> str:
         if candidate.is_file():
             return str(candidate.resolve())
     return uri
+
+
+def _is_repo_resource(value: str) -> bool:
+    return any(value.startswith(prefix) for prefix in _REPO_RESOURCE_PREFIXES)
+
+
+def _resolve_repo_resource(uri: str) -> str:
+    relative_path = uri
+    for prefix in _REPO_RESOURCE_PREFIXES:
+        if relative_path.startswith(prefix):
+            relative_path = relative_path.removeprefix(prefix)
+            break
+    relative_path = relative_path.lstrip("/")
+    for candidate in _repo_resource_candidates(relative_path):
+        if candidate.is_file():
+            return str(candidate.resolve())
+    raise FileNotFoundError(
+        "Qwen3.5 calibration repo resource does not exist: "
+        f"{uri!r}. Use xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl, "
+        "or set XH2MODELZOO_DATA_ROOT to the directory containing calibration data, "
+        "or set XH2MODELZOO_ROOT to the repository root."
+    )
+
+
+def _repo_resource_candidates(relative_path: str) -> list[Path]:
+    candidates: list[Path] = []
+    data_root = os.environ.get("XH2MODELZOO_DATA_ROOT")
+    if data_root:
+        root = Path(data_root).expanduser()
+        candidates.append(root / relative_path)
+        if relative_path.startswith("data/"):
+            candidates.append(root / relative_path.removeprefix("data/"))
+
+    env_root = os.environ.get("XH2MODELZOO_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser() / relative_path)
+
+    candidates.append(_repo_root() / relative_path)
+    candidates.append(Path.cwd() / relative_path)
+    return candidates
+
+
+def _repo_root() -> Path:
+    env_root = os.environ.get("XH2MODELZOO_ROOT")
+    if env_root:
+        root = Path(env_root).expanduser()
+        if root.is_dir():
+            return root.resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "configs_merak").is_dir() and (parent / "xhmodel_merak").is_dir():
+            return parent
+    return Path(__file__).resolve().parents[4]
 
 
 def _as_bool(value: Any) -> bool:
