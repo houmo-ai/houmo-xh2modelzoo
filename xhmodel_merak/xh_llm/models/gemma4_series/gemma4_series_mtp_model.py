@@ -20,7 +20,7 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm, Gemma4Text
 import xhquant.nn as xhnn
 from xh_model_zoo.xh_llm.models.base_model import BaseModel
 from xhquant.api import ConfigDict, get_xhquant_logger
-from xhquant.nn import LLMCacheV2, MaskedAdd, SoftmaxPlus
+from xhquant.nn import LLMCacheV2, MaskedAdd, MaskedSoftmax, SoftmaxPlus
 from xhquant.nn import RMSNorm as XHRMSNorm
 
 
@@ -295,6 +295,7 @@ class Gemma4AssistantSelfAttention(nn.Module):
         self.pv_matmul = xhnn.MatMul()
         self.masked_add = MaskedAdd()
         self.softmax = SoftmaxPlus(dim=-1)
+        self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
 
@@ -339,8 +340,11 @@ class Gemma4AssistantSelfAttention(nn.Module):
         key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
         value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
         attn_weights = self.qk_matmul(query_states, key_states)
-        attn_weights = self.masked_add(attn_weights, attention_mask)
-        attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        if attention_mask is not None:
+            attn_weights = self.masked_add(attn_weights, attention_mask)
+            attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        else:
+            attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
         attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.attn_output_cast(attn_output)

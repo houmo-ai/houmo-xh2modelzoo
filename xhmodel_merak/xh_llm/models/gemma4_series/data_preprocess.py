@@ -126,11 +126,12 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         self.per_layer_input_embedding = per_layer_input_embedding
         self.sliding_window = sliding_window
         self.bidirectional_vision_attention = bool(bidirectional_vision_attention)
-        self.emit_full_attention_mask = (
-            self.bidirectional_vision_attention
-            if emit_full_attention_mask is None
-            else bool(emit_full_attention_mask)
-        )
+        if emit_full_attention_mask:
+            raise ValueError(
+                "Gemma4 Series no longer emits full_attention_mask; full-attention layers use "
+                "xhquant.nn.MaskedSoftmax with attention_mask=None."
+            )
+        self.emit_full_attention_mask = False
         self.emit_accepted_count_input = bool(emit_accepted_count_input)
 
     def to(self, *args, **kwargs) -> "Gemma4DataPreprocess":
@@ -243,6 +244,9 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         # ── Vision token bidirectional attention (Gemma4 31B/26B only).
         # E4B's text_config does not opt into HF's vision-bidirectional mask;
         # keep it purely causal even when visual/audio/video soft tokens exist.
+        # The bidirectional overlay belongs only to sliding attention.  Full
+        # attention layers receive attention_mask=None at export/runtime and use
+        # xhquant.nn.MaskedSoftmax's causal path instead of this helper mask.
         if self.bidirectional_vision_attention and mm_token_type_ids.numel() > 0:
             mm = mm_token_type_ids[:current_input_length]
             is_vision = mm > 0
@@ -257,8 +261,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
                     group_end = idx + 1
                     abs_start = past_seq_length + group_start
                     abs_end = past_seq_length + group_end
-                    # Full mask: absolute positions map directly
-                    full_mask[0, 0, group_start:group_end, abs_start:abs_end] = 0
                     # Sliding mask: convert to cache-relative coordinates
                     c_start = max(0, abs_start - cache_offset)
                     c_end = min(slide_ctx, abs_end - cache_offset)
@@ -338,7 +340,6 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         output.append(sliding_attention_mask)
         if per_layer_inputs is not None:
             output.append(per_layer_inputs)
-        output.extend([self.past_key_caches, self.past_value_caches])
         if self.emit_accepted_count_input:
             accepted_count = data.get("accepted_count", 0)
             if torch.is_tensor(accepted_count):
@@ -346,6 +347,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             else:
                 accepted_count = torch.tensor([int(accepted_count)], dtype=torch.int32, device=device)
             output.append(accepted_count)
+        output.extend([self.past_key_caches, self.past_value_caches])
         return tuple(output)
 
 
@@ -354,15 +356,15 @@ class Gemma4MoeDataPreprocess(Gemma4DataPreprocess):
 
     The unified Gemma4 Series graph intentionally keeps one public text input
     order for Dense, MoE and E4B:
-    ``inputs_embeds, past_seq_length, current_input_length, full_mask,
-    sliding_mask, caches...``.
+    ``inputs_embeds, past_seq_length, current_input_length, sliding_mask,
+    caches...``.
 
     Legacy ``gemma4_moe`` used local/global mask order because that graph had a
     separate with-mask wrapper.  Reintroducing that order here silently feeds
-    the 2048-wide full mask into sliding-attention layers, while 26B-A4B's
+    a full mask into sliding-attention layers, while 26B-A4B's
     sliding KV window is only ``sliding_window + input_sequence_length - 1``
-    (1280 for 1024 + 256).  Keep the series contract canonical and let model
-    internals decide which mask each layer consumes.
+    (1344 for 1024 + 320).  Keep the series contract canonical and let full
+    layers use the standard causal masksoftmax path.
     """
 
     def __init__(self, *, sliding_window_cfg: dict, **kwargs):

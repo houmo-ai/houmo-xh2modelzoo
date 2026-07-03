@@ -34,8 +34,8 @@ export:
     hf_model: null
     # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
     model_name: gemma_4_31b
-    context_max_length: 2048
-    prefill_chunk_length: 256
+    context_max_length: 262144
+    prefill_chunk_length: 320
     use_cache: true
     num_logits_to_keep: 1
     sliding_kv_cache_input_mode: slice_window
@@ -73,7 +73,7 @@ export:
       lm_head_quant_type: w4a8h0_ssfp
       batch_size: 1
       input_sequence_length: 1
-      context_max_length: 2048
+      context_max_length: 262144
       use_cache: true
       num_draft_tokens: 4
       assistant_num_hidden_layers: 4

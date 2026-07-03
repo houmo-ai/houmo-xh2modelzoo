@@ -39,8 +39,10 @@ DEFAULT_DENSE_CALIBRATION_JSONL = (
 DEFAULT_MOE_CALIBRATION_JSONL = (
     "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
 )
-DEFAULT_AUTOROUND_DATASET = "data/calib_data/NeelNanda-pile-10k.jsonl"
+DEFAULT_AUTOROUND_DATASET_PATH = "data/calib_data/NeelNanda-pile-10k.jsonl"
+DEFAULT_AUTOROUND_DATASET = f"xh2modelzoo://{DEFAULT_AUTOROUND_DATASET_PATH}"
 _LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
+_REPO_RESOURCE_PREFIXES = ("xh2modelzoo://", "repo://")
 
 
 def quantize_with_autoround_mode1(
@@ -325,7 +327,7 @@ def build_gptqmodel_recipe_kwargs(
         "capabilities": dict(plan.capabilities),
         "export_subgraphs": dict(plan.to_log_dict()["exports"]),
         "context_max_length": int(export_model_cfg.get("context_max_length", 2048)),
-        "prefill_chunk_length": int(export_model_cfg.get("prefill_chunk_length", 256)),
+        "prefill_chunk_length": int(export_model_cfg.get("prefill_chunk_length", 320)),
         "group_size": group_size,
         "bits": int(quant_cfg.get("bits", 4)),
         "sym": _as_bool(quant_cfg.get("sym", True)),
@@ -441,15 +443,19 @@ def _resolve_calibration_value(value: Any) -> str:
 
 def _resolve_autoround_dataset_value(value: Any) -> str:
     expanded = _expand_path_like_value(value)
+    if expanded.startswith("gptqmodel://"):
+        return _resolve_gptqmodel_resource(expanded)
     if expanded in _LEGACY_AUTOROUND_DATASETS:
         expanded = DEFAULT_AUTOROUND_DATASET
+    if _is_repo_resource(expanded):
+        return _resolve_repo_resource(expanded)
     if _is_existing_local_path(expanded):
         return str(Path(expanded).resolve())
     if _is_path_like_value(expanded):
         raise FileNotFoundError(
             "Gemma4 AutoRound calibration dataset path does not exist: "
             f"{expanded!r}. Download the prepared Artifactory archive and "
-            f"place it at {DEFAULT_AUTOROUND_DATASET}."
+            f"place it at {DEFAULT_AUTOROUND_DATASET_PATH}."
         )
     return expanded
 
@@ -463,6 +469,58 @@ def _resolve_gptqmodel_resource(uri: str) -> str:
         if candidate.is_file():
             return str(candidate.resolve())
     return uri
+
+
+def _is_repo_resource(value: str) -> bool:
+    return any(value.startswith(prefix) for prefix in _REPO_RESOURCE_PREFIXES)
+
+
+def _resolve_repo_resource(uri: str) -> str:
+    relative_path = uri
+    for prefix in _REPO_RESOURCE_PREFIXES:
+        if relative_path.startswith(prefix):
+            relative_path = relative_path.removeprefix(prefix)
+            break
+    relative_path = relative_path.lstrip("/")
+    for candidate in _repo_resource_candidates(relative_path):
+        if candidate.is_file():
+            return str(candidate.resolve())
+    raise FileNotFoundError(
+        "Gemma4 calibration repo resource does not exist: "
+        f"{uri!r}. Use xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl, "
+        "or set XH2MODELZOO_DATA_ROOT to the directory containing calibration data, "
+        "or set XH2MODELZOO_ROOT to the repository root."
+    )
+
+
+def _repo_resource_candidates(relative_path: str) -> list[Path]:
+    candidates: list[Path] = []
+    data_root = os.environ.get("XH2MODELZOO_DATA_ROOT")
+    if data_root:
+        root = Path(data_root).expanduser()
+        candidates.append(root / relative_path)
+        if relative_path.startswith("data/"):
+            candidates.append(root / relative_path.removeprefix("data/"))
+
+    env_root = os.environ.get("XH2MODELZOO_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser() / relative_path)
+
+    candidates.append(_repo_root() / relative_path)
+    candidates.append(Path.cwd() / relative_path)
+    return candidates
+
+
+def _repo_root() -> Path:
+    env_root = os.environ.get("XH2MODELZOO_ROOT")
+    if env_root:
+        root = Path(env_root).expanduser()
+        if root.is_dir():
+            return root.resolve()
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "configs_merak").is_dir() and (parent / "xhmodel_merak").is_dir():
+            return parent
+    return Path(__file__).resolve().parents[4]
 
 
 def _preflight_gptqmodel_recipe_inputs(recipe_kwargs: Mapping[str, Any]) -> None:

@@ -6,7 +6,7 @@ from xhmodel_merak.xh_llm.models.gemma4_series.export_plan import Gemma4SeriesEx
 from xhmodel_merak.xh_llm.models.gemma4_series.variants import Gemma4SeriesVariantSpec
 
 
-def _plan(context_max_length: int) -> Gemma4SeriesExportPlan:
+def _plan(context_max_length: int, input_sequence_length: int = 320) -> Gemma4SeriesExportPlan:
     return Gemma4SeriesExportPlan(
         variant=Gemma4SeriesVariantSpec(
             name="gemma4-e2b",
@@ -24,7 +24,7 @@ def _plan(context_max_length: int) -> Gemma4SeriesExportPlan:
             global_attention_window_size=8192,
         ),
         context_max_length=context_max_length,
-        input_sequence_length=256,
+        input_sequence_length=input_sequence_length,
         quant_type="w8a8h1_sefp",
         export_image_visual=True,
         export_video_visual=True,
@@ -37,11 +37,21 @@ def _plan(context_max_length: int) -> Gemma4SeriesExportPlan:
     )
 
 
-@pytest.mark.parametrize("context_max_length", [2048, 8192])
-def test_gemma4_export_contract_allows_full_context_lengths(context_max_length: int):
+@pytest.mark.parametrize("context_max_length", [320, 2048, 4096, 8192, 13107])
+def test_gemma4_export_contract_allows_any_context_not_smaller_than_prefill(
+    context_max_length: int,
+):
     _plan(context_max_length).validate_fixed_contract()
 
 
-def test_gemma4_export_contract_rejects_unapproved_context_length():
-    with pytest.raises(ValueError, match="context_max_length.*2048.*8192"):
-        _plan(4096).validate_fixed_contract()
+@pytest.mark.parametrize("input_sequence_length", [0, 256, 279])
+def test_gemma4_export_contract_rejects_prefill_shorter_than_visual_atomic_range(
+    input_sequence_length: int,
+):
+    with pytest.raises(ValueError, match="prefill/input length >= 280"):
+        _plan(2048, input_sequence_length=input_sequence_length).validate_fixed_contract()
+
+
+def test_gemma4_export_contract_rejects_context_shorter_than_prefill():
+    with pytest.raises(ValueError, match="context_max_length must be >= prefill/input length"):
+        _plan(319).validate_fixed_contract()

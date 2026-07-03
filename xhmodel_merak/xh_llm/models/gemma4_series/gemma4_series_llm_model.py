@@ -10,9 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, cast
 
+import onnx
 import torch
 import torch.nn as nn
-import onnx
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGeneration
@@ -44,6 +44,10 @@ from .gemma4_series_vision_model import XHGemma4SeriesVisionModel
 from .xh_gemma4_series_config import Gemma4SeriesModelMeta, XHGemma4SeriesModelConfig
 
 
+def _is_mtp_mode(value: Any) -> bool:
+    return str(value).lower() == "mtp"
+
+
 def _cfg_get_value(cfg: Any, key: str, default: Any = None) -> Any:
     if hasattr(cfg, key):
         value = getattr(cfg, key)
@@ -59,8 +63,6 @@ def _cfg_set_value(cfg: Any, key: str, value: Any) -> None:
         setattr(cfg, key, value)
     else:
         cfg[key] = value
-
-
 
 
 def _quant_type_weight_bits(quant_type: Any, default: int = 4) -> int:
@@ -172,13 +174,29 @@ class XHGemma4SeriesModel(VisionLLMModel):
         self._kvcache_config.use_cache = self.config.use_cache
         self._kvcache_mixin = Gemma4KVCacheMixin(self.kvcache_config)
         self._decode_input_sequence_length = self._mtp_verify_length() if self._is_mtp_export() else 1
+        self._validate_mtp_sliding_kv_cache_input_mode()
         if self._is_mtp_export():
             self._decode_wrap_cfg_overrides = {"num_logits_to_keep": 0}
 
     def _is_mtp_export(self) -> bool:
-        return getattr(self.config, "spec_decode_mode", None) == "mtp" or bool(
-            getattr(self.config, "enable_mtp_outputs", False)
+        return _is_mtp_mode(getattr(self.config, "spec_decode_mode", None))
+
+    def _uses_target_verify_decode_accepted_count(self) -> bool:
+        return (
+            self._is_mtp_export()
+            and getattr(self.config, "sliding_kv_cache_input_mode", "slice_window") == "slice_window"
+            and self.is_decode()
         )
+
+    def _validate_mtp_sliding_kv_cache_input_mode(self) -> None:
+        if (
+            self._is_mtp_export()
+            and getattr(self.config, "sliding_kv_cache_input_mode", "slice_window") != "slice_window"
+        ):
+            raise ValueError(
+                "Gemma4 Series MTP requires sliding_kv_cache_input_mode='slice_window'; "
+                f"got {getattr(self.config, 'sliding_kv_cache_input_mode', None)!r}."
+            )
 
     def _mtp_num_draft_tokens(self) -> int:
         return int(getattr(self.config, "num_draft_tokens", None) or 4)
@@ -191,7 +209,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             layer_type="sliding_attention",
             context_max_length=self.config.context_max_length,
             sliding_window=self.sliding_window,
-            input_seq_len=self.config.prefill_chunk_length,
+            input_seq_len=self._prefill_cache_input_length(),
             sliding_kv_cache_input_mode=getattr(
                 self.config, "sliding_kv_cache_input_mode", "slice_window"
             ),
@@ -203,6 +221,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
 
     def _mtp_decode_wrap_cfg_overrides(self) -> dict[str, int]:
         return {"num_logits_to_keep": 0, "enable_accepted_count_input": True}
+
+    def _prefill_cache_input_length(self) -> int:
+        return int(getattr(self.config, "prefill_chunk_length", 320))
 
     def _apply_wrap_cfg_to_modules(self, module: nn.Module) -> None:
         def _update(child: nn.Module) -> None:
@@ -361,7 +382,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 native_model.generation_config = GenerationConfig.from_pretrained(hf_model_dir)
             except OSError:
                 logger = get_xhquant_logger()
-                logger.info("Generation config file not found, using a generation config created from the model config.")
+                logger.info(
+                    "Generation config file not found, using a generation config created from the model config."
+                )
         return native_model.eval()
 
     @classmethod
@@ -431,7 +454,10 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 module.register_buffer("quant_weight", quant_weight, persistent=False)
             return True
 
-        def _gguf_tensor_to_torch(tensor: Any, target_shape: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor | None]:
+        def _gguf_tensor_to_torch(
+            tensor: Any,
+            target_shape: tuple[int, ...],
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
             tensor_type = int(tensor.tensor_type)
             if tensor_type == 0:
                 array = np.asarray(tensor.data)
@@ -488,7 +514,12 @@ class XHGemma4SeriesModel(VisionLLMModel):
                         continue
                     if source_tensor.device.type == "meta":
                         continue
-                    set_module_tensor_to_device(native_hf_model, target_name, "cpu", value=source_tensor.detach().clone())
+                    set_module_tensor_to_device(
+                        native_hf_model,
+                        target_name,
+                        "cpu",
+                        value=source_tensor.detach().clone(),
+                    )
                     loaded.add(target_name)
 
         missing = sorted(name for name in state_shapes if name not in loaded and not name.endswith("inv_freq"))
@@ -806,7 +837,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 layer_type=layer_type,
                 context_max_length=self.config.context_max_length,
                 sliding_window=self.sliding_window,
-                input_seq_len=self.config.prefill_chunk_length,
+                input_seq_len=self._prefill_cache_input_length(),
                 sliding_kv_cache_input_mode=getattr(
                     self.config, "sliding_kv_cache_input_mode", "slice_window"
                 ),
@@ -830,11 +861,10 @@ class XHGemma4SeriesModel(VisionLLMModel):
             audio_token_id=self.config.audio_token_id or -1,
             video_token_id=self.config.video_token_id or -1,
             bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
-            emit_full_attention_mask=(
-                bool(getattr(self.config, "bidirectional_vision_attention", False))
-                and not self.is_decode()
-            ),
-            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
+            # Full-attention layers receive None and use xhquant.nn.MaskedSoftmax's
+            # causal path.  Only sliding attention consumes the explicit mask.
+            emit_full_attention_mask=False,
+            emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
         )
         if getattr(self.config, "enable_moe_block", False):
             return Gemma4MoeDataPreprocess(
@@ -854,16 +884,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
         )
 
     def get_data_preprocessor(self):
-        # The Gemma4 series preprocessor shape is phase-dependent:
-        #   * 31B/26B prefill emits full_attention_mask + sliding_attention_mask
-        #     for visual bidirectional attention.
-        #   * decode intentionally drops full_attention_mask and only feeds the
-        #     sliding mask to _Gemma4DecodeNoFullMaskBridge.
-        #
-        # BaseModel caches the preprocessor, which can leave decode tracing with
-        # the prefill input contract (one extra mask input). Recreate the
-        # lightweight processor whenever callers ask, so it captures the current
-        # prefill/decode phase and current KV cache objects.
+        # Recreate the lightweight processor whenever callers ask so it captures
+        # current prefill/decode length, dual-prefill shape, and KV cache objects.
         self._data_processor = None
         return super().get_data_preprocessor()
 
@@ -880,11 +902,22 @@ class XHGemma4SeriesModel(VisionLLMModel):
 
     def _to_fronted(self, wrap_model):
         self.set_prefill()
-        prefill_wrap_model = wrap_model
         decode_wrap_model = _copy_model_shared_params(wrap_model)
+
+        if isinstance(wrap_model, _Gemma4TextExportBridgePLE):
+            prefill_wrap_model = wrap_model
+        else:
+            prefill_wrap_model = _Gemma4DecodeNoFullMaskBridge(
+                wrap_model,
+                num_logits_to_keep=self.config.num_logits_to_keep,
+                language_model_keeps_last_logit=(int(self.config.num_logits_to_keep or 0) == 1),
+                language_model_returns_tensor=True,
+                enable_mtp_outputs=self.config.enable_mtp_outputs,
+            )
+
         if self._is_mtp_export() and isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
             decode_wrap_model.__class__ = _Gemma4TextExportBridgePLEMTPDecode
-        if getattr(self.config, "bidirectional_vision_attention", False):
+        elif not isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
             decode_num_logits_to_keep = 0 if self._is_mtp_export() else self.config.num_logits_to_keep
             decode_bridge_cls = (
                 _Gemma4DecodeNoFullMaskMTPBridge if self._is_mtp_export() else _Gemma4DecodeNoFullMaskBridge
@@ -894,8 +927,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 num_logits_to_keep=decode_num_logits_to_keep,
                 language_model_keeps_last_logit=(int(decode_num_logits_to_keep or 0) == 1),
                 language_model_returns_tensor=True,
+                enable_mtp_outputs=self.config.enable_mtp_outputs,
             )
-        self._wrap_model = wrap_model
+        self._wrap_model = prefill_wrap_model
         prefill_frontend_model = super()._to_fronted(prefill_wrap_model)
 
         self._wrap_model = decode_wrap_model
@@ -917,12 +951,17 @@ class XHGemma4SeriesModel(VisionLLMModel):
         self._frontend_model = prefill_frontend_model
         self._wrap_model = prefill_frontend_model
         self.set_prefill()
-        return ModelSwitcher({"prefill": prefill_frontend_model, "decode": decode_frontend_model})
+        models = {
+            "prefill": prefill_frontend_model,
+            "decode": decode_frontend_model,
+        }
+        fronted_model = ModelSwitcher(models)
+        fronted_model.set_activate_model("prefill")
+        return fronted_model
 
     def _to_quanted(self, frontend_model, state):
         decode_fronted_model = frontend_model.decode
         prefill_fronted_model = frontend_model.prefill
-
         self.set_prefill()
         # Let the xhquant pipeline own device placement.  Pre-moving the full
         # 31B prefill graph to CUDA leaves only a few MB free on an 80GB card
@@ -955,7 +994,13 @@ class XHGemma4SeriesModel(VisionLLMModel):
             if original_num_logits_to_keep is not None:
                 _cfg_set_value(self.wrap_cfg, "num_logits_to_keep", original_num_logits_to_keep)
         self.set_prefill()
-        return ModelSwitcher({"prefill": prefill_quanted_model, "decode": decode_quanted_model})
+        models = {
+            "prefill": prefill_quanted_model,
+            "decode": decode_quanted_model,
+        }
+        quanted_model = ModelSwitcher(models)
+        quanted_model.set_activate_model("prefill")
+        return quanted_model
 
     def get_export_cfg(self) -> dict[str, list[str]]:
         input_names = [
@@ -963,9 +1008,6 @@ class XHGemma4SeriesModel(VisionLLMModel):
             "past_seq_length",
             "current_input_length",
         ]
-        is_decode = not bool(getattr(self, "_llm_prefill", True))
-        if getattr(self.config, "bidirectional_vision_attention", False) and not is_decode:
-            input_names.append("full_attention_mask")
         input_names.append("sliding_attention_mask")
         if self.per_layer_input_embedding is not None or getattr(self.config, "hidden_size_per_layer_input", 0):
             # E4B PLE belongs with the text payload, immediately before KV caches.
@@ -976,12 +1018,12 @@ class XHGemma4SeriesModel(VisionLLMModel):
         }
         if self._is_mtp_export():
             export_cfg["output_names"].append("target_hidden_state")
+        if self._uses_target_verify_decode_accepted_count():
+            export_cfg["input_names"].append("accepted_count")
         for layer_idx in range(self.kvcache_config.num_layers):
             export_cfg["input_names"].append(f"past_key_cache_{layer_idx}")
         for layer_idx in range(self.kvcache_config.num_layers):
             export_cfg["input_names"].append(f"past_value_cache_{layer_idx}")
-        if self._is_mtp_export() and is_decode:
-            export_cfg["input_names"].append("accepted_count")
         return export_cfg
 
     def _extra_export_metadata(self, output_dir: str, meta_info):
@@ -992,6 +1034,14 @@ class XHGemma4SeriesModel(VisionLLMModel):
         meta_info.layer_cache_types = list(getattr(self, "layer_cache_types", []) or [])
         meta_info.layer_cache_indices = list(getattr(self, "layer_cache_indices", []) or [])
         meta_info.sliding_window = self.sliding_window
+        meta_info.prefill_chunk_length = int(self.config.prefill_chunk_length)
+        meta_info.prefill_graphs = {
+            "prefill": {
+                "input_sequence_length": int(self.config.prefill_chunk_length),
+                "hmonnx": "",
+            },
+        }
+        meta_info.sliding_cache_storage_length = self._mtp_shared_sliding_cache_length()
         meta_info.sliding_kv_cache_input_mode = getattr(
             self.config, "sliding_kv_cache_input_mode", "slice_window"
         )
@@ -1008,7 +1058,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 "shared_sliding_cache_length": self._mtp_shared_sliding_cache_length(),
                 "shared_full_cache_length": int(self.config.context_max_length),
                 "target_decode_sliding_output_length": self._mtp_target_decode_sliding_output_length(),
-                "shared_sliding_cache_length_basis": "slice_window + prefill_input_sequence_length",
+                "shared_sliding_cache_length_basis": "slice_window + prefill_chunk_length",
                 "target_decode_sliding_output_length_basis": "aligned(sliding_window + verify_length - 1, 16)",
             }
             meta_info.spec_decode_mode = "mtp"
@@ -1035,6 +1085,14 @@ class XHGemma4SeriesModel(VisionLLMModel):
         export_data.model_name = f"hmquant_{model_name}_{str_datetime}"
         export_data.str_datetime = str_datetime
         return export_data
+
+    @log_function_call()
+    def _export_hmonnx(self, exported_info: ExportData):
+        exported_info = super()._export_hmonnx(exported_info)
+        meta_info = exported_info.meta
+        if hasattr(meta_info, "prefill_graphs") and isinstance(meta_info.prefill_graphs, dict):
+            meta_info.prefill_graphs["prefill"]["hmonnx"] = meta_info.prefill_hmonnx
+        return exported_info
 
     @log_function_call()
     def export_hmonnx(self, output_dir: str):
@@ -1088,7 +1146,10 @@ class XHGemma4SeriesModel(VisionLLMModel):
             meta_info.audio_config = audio_meta
         self._export_hmonnx(exported_info)
         stripped_default_cache_attrs = 0
-        for hmonnx_path in (meta_info.prefill_hmonnx, meta_info.decode_hmonnx):
+        for hmonnx_path in (
+            meta_info.prefill_hmonnx,
+            meta_info.decode_hmonnx,
+        ):
             if hmonnx_path:
                 onnx_path = Path(hmonnx_path)
                 if not onnx_path.is_absolute():

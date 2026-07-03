@@ -20,7 +20,6 @@ from .export_plan import (
     build_gemma4_series_export_plan,
 )
 from .quant_adapter import (
-    DEFAULT_AUTOROUND_DATASET,
     DEFAULT_DENSE_CALIBRATION_JSONL,
     DEFAULT_MOE_CALIBRATION_JSONL,
 )
@@ -108,7 +107,7 @@ _GEMMA4_AUTOROUND_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
     "seed": 42,
     "format": "auto_gptq",
     "calibration": {
-        "dataset": DEFAULT_AUTOROUND_DATASET,
+        "jsonl": DEFAULT_DENSE_CALIBRATION_JSONL,
         "nsamples": 128,
         "seqlen": 2048,
     },
@@ -131,7 +130,7 @@ _GEMMA4_AUTOROUND_MOE_MODE1_QUANT_TEMPLATE: dict[str, Any] = {
     "seed": 42,
     "format": "auto_gptq",
     "calibration": {
-        "dataset": DEFAULT_AUTOROUND_DATASET,
+        "jsonl": DEFAULT_MOE_CALIBRATION_JSONL,
         "nsamples": 128,
         "seqlen": 2048,
     },
@@ -149,7 +148,7 @@ _GEMMA4_EXPORT_MODEL_TEMPLATE: dict[str, Any] = {
     "chip_arch": "XH2a",
     "model_type": "Gemma4ForConditionalGeneration",
     "hf_model": None,
-    "model_name": "xh2_gemma4_full_256_2k",
+    "model_name": "xh2_gemma4_full_320_2k",
     "context_max_length": REQUIRED_CONTEXT_MAX_LENGTH,
     "prefill_chunk_length": REQUIRED_INPUT_SEQUENCE_LENGTH,
     "use_cache": True,
@@ -208,8 +207,7 @@ def get_quant_config_help() -> str:
         "and routing bypass so every expert receives calibration activations. "
         "Dense E2B/E4B/31B checkpoints can alternatively use algorithm='gptqmodel', method='autoround', preset='mode1', "
         "which wraps third_party/auto-round/scripts_gemma4 LLM-only W4G64 no-rotation quantization "
-        f"with dataset={DEFAULT_AUTOROUND_DATASET!r}; this dataset must be "
-        "pre-downloaded/exported to data/calib_data/NeelNanda-pile-10k.jsonl. "
+        f"with calibration.jsonl={DEFAULT_DENSE_CALIBRATION_JSONL!r}. "
         "26B-A4B with the same preset wraps scripts_gemma4_moe/quantize_moe.py. "
         "Use config_overrides={'quant': None} only for explicit base-model validation, or replace "
         "the quant block with {'algorithm': 'existing_hf', 'artifact_format': 'gptqmodel_hf', "
@@ -228,7 +226,11 @@ def get_export_config_help() -> str:
         "26B-A4B MoE routing is detected internally from the HF config; callers should not select "
         "a separate _with_mask public model type. Visual export follows the padded ViT contract: "
         "image VIT uses [1,2520,768]/[1,280,9], while video VIT is exported separately with "
-        "[1,630,768]/[1,70,9] so video frames are not padded to the image VIT size."
+        "[1,630,768]/[1,70,9] so video frames are not padded to the image VIT size. "
+        "Text and multimodal prefill share one prefill_chunk_length=320 graph. "
+        "The runtime greedily packs text plus complete image/frame ranges into that fixed shape, "
+        "while never splitting one image or one video frame across chunks. "
+        "context_max_length only needs to be greater than or equal to prefill_chunk_length."
     )
 
 

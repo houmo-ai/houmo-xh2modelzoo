@@ -7,7 +7,7 @@ quant:
   group_size: 64
   rotation: false
   calibration:
-    dataset: NeelNanda/pile-10k
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
     nsamples: 128
     seqlen: 2048
   runtime:

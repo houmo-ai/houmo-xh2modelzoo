@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=gemma4_workflow_demo.DEFAULT_DEVICE)
     parser.add_argument("--seed", type=int, default=gemma4_workflow_demo.DEFAULT_SEED)
     parser.add_argument("--context-length", type=int, default=2048)
-    parser.add_argument("--prefill-chunk-length", type=int, default=256)
+    parser.add_argument("--prefill-chunk-length", type=int, default=320)
     parser.add_argument("--prompt", default=gemma4_workflow_demo.DEFAULT_PROMPT)
     parser.add_argument("--modality", choices=("text", "image", "video", "audio"), default="text")
     parser.add_argument("--image-path")
@@ -105,7 +105,7 @@ def _to_workflow_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.valid:
         raise ValueError(
             "--valid was a legacy smoke-test shortcut. Gemma4 Series validation "
-            "must use full context=2048 and prefill/input length=256."
+            "must use full context=2048 and prefill/input length=320."
         )
     if args.quant_weight:
         raise ValueError(

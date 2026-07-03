@@ -17,17 +17,14 @@ quant:
     seqlen: 2048
   runtime:
     batch_size: 8
-    dtype: bfloat16
     trust_remote_code: true
 export:
   model:
     chip_arch: XH2a
     model_type: Gemma4ForConditionalGeneration
-    # 该字段仅用作占位，实际会在导出前实时覆盖
     hf_model: null
-    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
-    model_name: gemma_4_26b_a4b
-    context_max_length: 262144
+    model_name: gemma_4_e2b
+    context_max_length: 131072
     prefill_chunk_length: 320
     use_cache: true
     num_logits_to_keep: 1
@@ -56,3 +53,33 @@ export:
       quant_scheme:
         quant_type: w8a8h1_sefp
         ops: {}
+    spec_decode_mode: mtp
+    mtp_config:
+      assistant_hf_model: weights/gemma-4-E2B-it-assistant
+      target_hf_model: weights/gemma-4-E2B-it
+      body_quant_type: w8a8h1_sefp
+      lm_head_quant_type: w4a8h0_ssfp
+      batch_size: 1
+      input_sequence_length: 1
+      context_max_length: 131072
+      use_cache: true
+      num_draft_tokens: 4
+      assistant_num_hidden_layers: 4
+      assistant_layer_pattern:
+      - sliding_attention
+      - sliding_attention
+      - sliding_attention
+      - full_attention
+      assistant_hidden_size: 256
+      assistant_num_attention_heads: 4
+      assistant_num_key_value_heads: 1
+      assistant_num_global_key_value_heads: null
+      head_dim: 256
+      use_ordered_embeddings: true
+      shared_kv_inputs:
+      - shared_key_cache_sliding
+      - shared_value_cache_sliding
+      - shared_key_cache_full
+      - shared_value_cache_full
+    num_draft_tokens: 4
+    output_post_norm_hidden: true

@@ -109,7 +109,10 @@ def _pack_defused_experts_to_moeblock(moe_block: MoeBlock, experts: nn.Module) -
                     f"does not match weight shape {tuple(weight.shape)}"
                 )
             packed_quant = torch.empty(
-                len(expert_list), *first_quant_weight.shape, device=first_quant_weight.device, dtype=first_quant_weight.dtype
+                len(expert_list),
+                *first_quant_weight.shape,
+                device=first_quant_weight.device,
+                dtype=first_quant_weight.dtype,
             )
         with torch.no_grad():
             for expert_idx, expert in enumerate(expert_list):
@@ -281,9 +284,11 @@ class _Gemma4TextAttention(DynamicModule):
         attention_max_length = getattr(self, "sliding_window", None)
         attention_max_length = int(attention_max_length) if attention_max_length is not None else -1
         self.is_sliding_attention = attention_max_length > 0
-        # Both sliding and full layers consume explicit additive masks.  Full
-        # layers fall back to MaskedSoftmax only for legacy/direct calls that do
-        # not provide a full_attention_mask.
+        self.enable_accepted_count_input = False
+        # Target full-attention decode/prefill intentionally uses the standard
+        # causal MaskedSoftmax path by passing attention_mask=None.  MTP draft
+        # full layers can still receive an explicit assistant-side mask to hide
+        # invalid padded cache slots.
         self.masked_add = MaskedAdd()
         self.softmax = SoftmaxPlus(dim=-1)
         self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
@@ -302,6 +307,9 @@ class _Gemma4TextAttention(DynamicModule):
         requested_accepted_count = bool(
             _cfg_get(cfg, "enable_accepted_count_input", getattr(self, "enable_accepted_count_input", False))
         )
+        # accepted_count is part of the target verify decode contract only.
+        # The wrapper requests it for MTP slice-window decode graphs, and the
+        # attention layer further narrows consumption to local/sliding layers.
         self.enable_accepted_count_input = requested_accepted_count and self.is_sliding_attention
         if not self.use_cache or self.k_cache is None or self.v_cache is None:
             return self
@@ -309,7 +317,7 @@ class _Gemma4TextAttention(DynamicModule):
             # LLMCache's ``attention_max_length`` is the model's local-attention
             # window.  The exported sliding output width is therefore naturally
             # aligned(sliding_window + current_seq_len - 1, 16): prefill with
-            # q=256 yields 1280/768, while MTP verify decode with q=5 yields
+            # q=320 yields 1344/832, while MTP verify decode with q=5 yields
             # 1040/528.  The physical cache input can still be the larger
             # slice_window + prefill_input_length tensor.
             attention_max_length = int(getattr(self, "sliding_window", -1) or -1)
@@ -366,24 +374,21 @@ class _Gemma4TextAttention(DynamicModule):
             value_states = self.attn_compute_cast(self.v_norm(value_states)).transpose(1, 2)
 
             if self.use_cache and past_k_cache is not None and past_v_cache is not None:
-                if getattr(self, "enable_accepted_count_input", False) and self.is_sliding_attention:
-                    key_states = self.k_cache(
-                        key_states,
-                        past_seq_length,
-                        current_input_length,
-                        past_k_cache,
-                        accepted_count,
-                    )
-                    value_states = self.v_cache(
-                        value_states,
-                        past_seq_length,
-                        current_input_length,
-                        past_v_cache,
-                        accepted_count,
-                    )
-                else:
-                    key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
-                    value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
+                cache_accepted_count = accepted_count if getattr(self, "enable_accepted_count_input", False) else None
+                key_states = self.k_cache(
+                    key_states,
+                    past_seq_length,
+                    current_input_length,
+                    past_k_cache,
+                    cache_accepted_count,
+                )
+                value_states = self.v_cache(
+                    value_states,
+                    past_seq_length,
+                    current_input_length,
+                    past_v_cache,
+                    cache_accepted_count,
+                )
 
         if getattr(self, "store_full_length_kv", False):
             assert shared_kv is not None

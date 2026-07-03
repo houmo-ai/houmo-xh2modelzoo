@@ -49,9 +49,9 @@ CEval 精度摘要（数据源：
 | 项 | 固定要求 |
 |---|---|
 | `context_max_length` | 正式集成/本轮产物使用 `8192`；轻量默认 YAML 为 `2048`，命令行可覆盖 |
-| `prefill_chunk_length` / `input_sequence_length` | `256` |
+| `prefill_chunk_length` / `input_sequence_length` | `320`（可配置但不得小于 280） |
 | LLM export | `prefill` + `decode` 两张图 |
-| KV cache | full attention 层：`context_max_length`；sliding 层：`sliding_window + 256` |
+| KV cache | full attention 层：`context_max_length`；sliding 层：`sliding_window + prefill_chunk_length`，默认 1024+320=1344（E 系列 512+320=832） |
 | `quant_scheme` | base/export 阶段也保持 `w8a8h1_sefp`，不要改成 `None` |
 | base export | 只允许用 `config_overrides={"quant": None}` 跳过 workflow quant stage |
 | golden | 每个子模块都要有 HM-style golden：`visual`、`video_visual`、`audio`、`prefill`、`decode` |
@@ -66,13 +66,13 @@ AutoRound / base 或不同 context 长度互相覆盖。
 ```yaml
 export:
   model:
-    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
+    model_name: gemma_4_e4b
 ```
 
 命名格式：
 
 ```text
-<chip>_<family>_<variant>_<profile>_<method>_w<bits>a<act_bits>_<prefill>_<context>_mpe<mpe>
+gemma_4_<variant>
 ```
 
 其中：
@@ -90,8 +90,8 @@ export:
 示例：
 
 ```text
-xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
-xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
+gemma_4_e4b
+gemma_4_31b
 ```
 
 当前 HF config 中 E2B/E4B 为 `mpe128k`，31B/26B-A4B 为 `mpe256k`。
@@ -115,8 +115,9 @@ xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
   仍走纯 causal mask；prefill 不需要额外 `full_attention_mask`，slice-window
   mask 也不需要给视觉 token 开双向注意力。
 - 31B/26B-A4B 的 `use_bidirectional_attention=vision`，视觉 token 组内部需要
-  双向可见；prefill 多一个 `full_attention_mask`，decode 不带这个输入；
-  slice-window mask 也要把视觉 token 组映射到截断后的 cache 坐标内。
+  双向可见；full attention 仍走标准 causal masksoftmax，不再额外导出
+  `full_attention_mask`；slice-window mask 负责把视觉 token 组映射到截断后的
+  cache 坐标内。
 - 26B-A4B 是 MoE，量化/加载要保证 split experts 正确，不要用会丢 expert
   或错误拼接 MoE 权重的 loader。
 
@@ -145,10 +146,10 @@ xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
 
 | 模型 | HF checkpoint | GPTQModel YAML | AutoRound YAML | MPE | 默认校准 |
 |---|---|---|---|---|---|
-| E2B | `/data01/datasets/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml` | `mpe128k` | GPTQModel: `gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl`；AutoRound: `NeelNanda/pile-10k` |
+| E2B | `/data01/datasets/gemma-4-E2B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml` | `mpe128k` | GPTQModel/AutoRound: `gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl` |
 | E4B | `/data01/datasets/gemma-4-E4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_autoround.yaml` | `mpe128k` | 同上 |
 | 31B | `/data01/datasets/gemma-4-31B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml` | `mpe256k` | 同上 |
-| 26B-A4B | `/data01/datasets/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml` | `mpe256k` | GPTQModel: `gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl`；AutoRound: `NeelNanda/pile-10k` |
+| 26B-A4B | `/data01/datasets/gemma-4-26B-A4B-it` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml` | `configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_autoround.yaml` | `mpe256k` | GPTQModel/AutoRound: `gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl` |
 
 四份 YAML 共同点：
 
@@ -156,9 +157,9 @@ xh2_gemma4_31b_full_autoround_w4a8_256_8k_mpe256k
 export:
   model:
     model_type: Gemma4ForConditionalGeneration
-    model_name: xh2_gemma4_e4b_full_gptq_w4a8_256_2k_mpe128k
+    model_name: gemma_4_e4b
     context_max_length: 2048      # 正式 8192 导出用 CLI override
-    prefill_chunk_length: 256
+    prefill_chunk_length: 320
     sliding_kv_cache_input_mode: slice_window
     quant_scheme:
       quant_type: w8a8h1_sefp
@@ -387,7 +388,7 @@ LLM 不直接接收 `input_ids`，而是由 `Gemma4DataPreprocess` 在 Host 侧�
 2. `<|image|>` / `<|video|>` / `<|audio|>` soft token 位置被对应 embeds
    scatter 替换；
 3. 构造 `past_seq_length`、`current_input_length`；
-4. 构造 full/sliding attention mask；
+4. 构造 sliding attention mask；full attention 走标准 causal masksoftmax；
 5. E2B/E4B 额外生成 `per_layer_inputs`；
 6. 附加所有 layer KV cache。
 
@@ -399,11 +400,11 @@ E2B/E4B 没有 visual bidirectional attention，所以 prefill 与 decode 都不
 Prefill/decode 输入顺序：
 
 ```text
-inputs_embeds                 [1, 256, hidden_size]
+inputs_embeds                 [1, 320, hidden_size]
 past_seq_length               [1] int32
 current_input_length          [1] int32
-sliding_attention_mask         [1, 1, 256, sliding_window + 256]
-per_layer_inputs              [1, 256, num_hidden_layers, 256]
+sliding_attention_mask         [1, 1, 320, sliding_window + 320]
+per_layer_inputs              [1, 320, num_hidden_layers, 256]
 past_key_cache_0 ...
 past_value_cache_0 ...
 ```
@@ -421,7 +422,7 @@ E2B/E4B 的 prefill 和 decode 输入个数相同，因为两者都不带
 E2B/E4B 的 `sliding_window=512`，所以 sliding cache/mask 宽度是：
 
 ```text
-512 + 256 = 768
+512 + 320 = 832
 ```
 
 PLE 细节：
@@ -430,28 +431,27 @@ PLE 细节：
 - projection、RMSNorm、add、scaling 等非 embedding 部分都在主 LLM ONNX 内；
 - PLE 输入使用清理后的 `llm_input_ids`，image/audio/video placeholder 会先替换成
   `pad_token_id`，因此 PLE 不会对多模态 special token 做额外语义 embedding；
-- 输出 shape：E2B `[1, 256, 35, 256]`，E4B `[1, 256, 42, 256]`。
+- 输出 shape：E2B `[1, 320, 35, 256]`，E4B `[1, 320, 42, 256]`。
 
 本轮 8192 meta 中的 cache 摘要：
 
 | 模型 | cache tensor 数 | sliding cache | full cache | KV heads | head dim |
 |---|---:|---:|---:|---|---|
-| E2B | 15 | 12 个 `[1,1,768,256]` | 3 个 `[1,1,8192,512]` | shared-KV 后只保留 owner cache | 256/512 |
-| E4B | 24 | 20 个 `[1,2,768,256]` | 4 个 `[1,2,8192,512]` | shared-KV 后只保留 owner cache | 256/512 |
+| E2B | 15 | 12 个 `[1,1,832,256]` | 3 个 `[1,1,8192,512]` | shared-KV 后只保留 owner cache | 256/512 |
+| E4B | 24 | 20 个 `[1,2,832,256]` | 4 个 `[1,2,8192,512]` | shared-KV 后只保留 owner cache | 256/512 |
 
 ### 7.3 31B/26B-A4B LLM 输入合同
 
-31B/26B-A4B 开启 visual bidirectional attention，prefill 比 decode 多一个
-`full_attention_mask`。
+31B/26B-A4B 开启 visual bidirectional attention，但 full attention 图输入仍与
+标准 causal masksoftmax 对齐，不再额外传 `full_attention_mask`。
 
 Prefill 输入顺序：
 
 ```text
-inputs_embeds                 [1, 256, hidden_size]
+inputs_embeds                 [1, 320, hidden_size]
 past_seq_length               [1] int32
 current_input_length          [1] int32
-full_attention_mask           [1, 1, 256, context_max_length]
-sliding_attention_mask         [1, 1, 256, sliding_window + 256]
+sliding_attention_mask         [1, 1, 320, sliding_window + 320]
 past_key_cache_0 ...
 past_value_cache_0 ...
 ```
@@ -459,10 +459,10 @@ past_value_cache_0 ...
 Decode 输入顺序：
 
 ```text
-inputs_embeds                 [1, 256, hidden_size]   # decode 图仍按固定 input seq 导出
+inputs_embeds                 [1, 320, hidden_size]   # decode 图仍按固定 input seq 导出
 past_seq_length               [1] int32
 current_input_length          [1] int32
-sliding_attention_mask         [1, 1, 256, sliding_window + 256]
+sliding_attention_mask         [1, 1, 320, sliding_window + 320]
 past_key_cache_0 ...
 past_value_cache_0 ...
 ```
@@ -470,34 +470,31 @@ past_value_cache_0 ...
 31B/26B-A4B 的 `sliding_window=1024`，所以 sliding cache/mask 宽度是：
 
 ```text
-1024 + 256 = 1280
+1024 + 320 = 1344
 ```
 
 输入个数：
 
 | 模型 | prefill 输入个数 | decode 输入个数 | 差异原因 |
 |---|---:|---:|---|
-| 31B | 125 | 124 | prefill 多 `full_attention_mask`；60 K + 60 V |
-| 26B-A4B | 65 | 64 | prefill 多 `full_attention_mask`；30 K + 30 V |
+| 31B | 124 | 124 | 4 个非 cache 输入 + 60 K + 60 V |
+| 26B-A4B | 64 | 64 | 4 个非 cache 输入 + 30 K + 30 V |
 
-这就是 31B/26B-A4B 与 E2B/E4B 的最重要 runtime 输入差异：prefill 需要
-同时喂 full mask 和 sliding mask，decode 只喂 sliding mask。
+31B/26B-A4B 与 E2B/E4B 的主要 runtime 差异在于 per-layer input embedding：E2B/E4B 额外带 PLE 输入，31B/26B-A4B 不带；四个模型都不再传 full attention mask。
 
 Visual bidirectional attention 处理：
 
 - `mm_token_type_ids > 0` 的连续视觉 token 组内部双向可见；
-- full mask 中按绝对位置打开 `[group_start, group_end)`；
 - sliding mask 中先用 `cache_offset = max(0, past_seq_length - clamped_past)`
   转成 slice-window cache 坐标，再打开对应区间；
-- decode 不带 `full_attention_mask`，由 `_Gemma4DecodeNoFullMaskBridge` 保持
-  decode 图输入个数与旧合同一致。
+- full attention 不接收额外 mask，标准 causal masksoftmax 负责全局层可见性。
 
 本轮 8192 meta 中的 cache 摘要：
 
 | 模型 | cache tensor 数 | sliding cache | full cache | KV heads | head dim |
 |---|---:|---:|---:|---|---|
-| 31B | 60 | 50 个 `[1,16,1280,256]` | 10 个 `[1,4,8192,512]` | sliding/global 不同 KV heads | 256/512 |
-| 26B-A4B | 30 | 25 个 `[1,8,1280,256]` | 5 个 `[1,2,8192,512]` | sliding/global 不同 KV heads | 256/512 |
+| 31B | 60 | 50 个 `[1,16,1344,256]` | 10 个 `[1,4,8192,512]` | sliding/global 不同 KV heads | 256/512 |
+| 26B-A4B | 30 | 25 个 `[1,8,1344,256]` | 5 个 `[1,2,8192,512]` | sliding/global 不同 KV heads | 256/512 |
 
 ## 8. 量化与导出命令
 
@@ -522,7 +519,7 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --existing-hf-model-dir "$GEMMA4_E2B_AUTOROUND_HF" \
   --work-dir ./work_dirs/qtl384_gemma4_best_exports/e2b_autoround \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -537,7 +534,7 @@ CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --existing-hf-model-dir "$GEMMA4_E4B_GPTQMODEL_HF" \
   --work-dir ./work_dirs/qtl384_gemma4_best_exports/e4b_gptqmodel \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -552,7 +549,7 @@ CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --existing-hf-model-dir "$GEMMA4_26B_A4B_GPTQMODEL_HF" \
   --work-dir ./work_dirs/qtl384_gemma4_best_exports/26b_a4b_gptqmodel \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -567,7 +564,7 @@ CUDA_VISIBLE_DEVICES=3 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --existing-hf-model-dir "$GEMMA4_31B_GPTQMODEL_HF" \
   --work-dir ./work_dirs/qtl384_gemma4_best_exports/31b_gptqmodel \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -581,7 +578,7 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --action quant-export \
   --work-dir ./work_dirs/gemma4_series_quant_export/e4b_gptqmodel \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -602,8 +599,9 @@ third_party/auto-round/scripts_gemma4_moe
 
 接口上仍通过 `Gemma4SeriesWorkflow.quant(...)` 进入。仓库已提供四份
 AutoRound YAML，语义是 `algorithm: gptqmodel` + `method: autoround`，产物
-仍保存为 GPTQModel HF 格式，校准数据集对齐真实脚本用法：
-`calibration.dataset: NeelNanda/pile-10k`，不是 jsonl 文件。
+仍保存为 GPTQModel HF 格式。校准入口统一使用稳定的 GPTQModel 资源 URI，
+避免 `data/calib_data/...` 随执行目录变化导致找不到文件：
+`calibration.jsonl: gptqmodel://quantization/calibration/...`。
 
 ```text
 configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_autoround.yaml
@@ -620,7 +618,7 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --action quant-export \
   --work-dir ./work_dirs/gemma4_series_quant_export/e2b_autoround \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --sliding-kv-cache-input-mode slice_window \
   --golden \
   --force
@@ -639,7 +637,7 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/gemma4_series/gemma4_workflow_d
   --action base-export \
   --work-dir ./work_dirs/gemma4_series_base_export/31b \
   --context-max-length 8192 \
-  --prefill-chunk-length 256 \
+  --prefill-chunk-length 320 \
   --force
 ```
 
@@ -734,8 +732,8 @@ generate。完成验收时必须保留 generate 输出，不要只保留 dry-run
    export 仍按 `w8a8h1_sefp` 走 `to_quanted_aligned`。
 5. **不要忽略 per-layer inputs**：E2B/E4B 的 LLM 输入包含 `per_layer_inputs`，
    且 `per_layer_input_embedding.pt` 是 runtime 必需 artifact。
-6. **不要复用 prefill processor 给 decode**：31B/26B prefill 比 decode 多
-   `full_attention_mask`，runtime 会按阶段重建 data preprocessor。
+6. **不要复用旧 full-mask 合同**：31B/26B 视觉双向只影响 slice-window
+   mask；full attention 统一走标准 causal masksoftmax。
 7. **不要只测短 prompt**：短 prompt 容易绕过 slice-window/cache 边界 bug。
 8. **单 GPU 单任务**：大模型导出/生成可多 GPU 并行，但每张卡同时只跑一个
    Gemma4 重型任务。
@@ -817,7 +815,7 @@ flowchart LR
   PLE --> LLM[LLM Dense\n35层]
   SC --> LLM
   LLM --> PF[prefill\n无full mask]
-  PF --> KV[15组KV\n768/8192]
+  PF --> KV[15组KV\n832/8192]
   KV --> DE[decode\n同输入数]
   DE --> O[答案]
 
@@ -859,7 +857,7 @@ flowchart LR
   PLE --> LLM[LLM Dense\n42层]
   SC --> LLM
   LLM --> PF[prefill\n无full mask]
-  PF --> KV[24组KV\n768/8192]
+  PF --> KV[24组KV\n832/8192]
   KV --> DE[decode\n同输入数]
   DE --> O[答案]
 
@@ -899,7 +897,7 @@ flowchart LR
   FM --> PF[prefill\n125输入]
   SM --> PF
   LLM --> PF
-  PF --> KV[60组KV\n1280/8192]
+  PF --> KV[60组KV\n1344/8192]
   KV --> DE[decode\n124输入]
   SM --> DE
   DE --> O[答案]
@@ -942,7 +940,7 @@ flowchart LR
   FM --> PF[prefill\n65输入]
   SM --> PF
   MOE --> PF
-  PF --> KV[30组KV\n1280/8192]
+  PF --> KV[30组KV\n1344/8192]
   KV --> DE[decode\n64输入]
   SM --> DE
   DE --> O[答案]

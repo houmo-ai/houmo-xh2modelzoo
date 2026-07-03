@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 
 from xhquant.core import HybridCacheTensor
@@ -11,6 +13,115 @@ from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import KVCacheConfig, VLLMModelMeta
 from .data_preprocess import Gemma4DataPreprocess, Gemma4MoeDataPreprocess, Gemma4PerLayerInputEmbedding
 from .gemma4_series_processor import XHGemma4Processor
+
+
+def _as_positive_int(value, default: int | None = None) -> int | None:
+    try:
+        if value is None:
+            return default
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _gemma4_prefill_graph_length_from_meta(meta_info) -> int:
+    """Return the single Gemma4 prefill graph width from runtime metadata."""
+
+    model_config = getattr(meta_info, "model_config", None)
+    prefill_len = _as_positive_int(getattr(model_config, "prefill_chunk_length", None))
+
+    raw_graphs = getattr(meta_info, "prefill_graphs", None)
+    graph_len = None
+    if isinstance(raw_graphs, dict) and raw_graphs:
+        value = raw_graphs.get("prefill")
+        if isinstance(value, dict):
+            graph_len = _as_positive_int(value.get("input_sequence_length", value.get("prefill_chunk_length")))
+        elif value is not None:
+            length = getattr(value, "input_sequence_length", None)
+            if length is None:
+                length = getattr(value, "prefill_chunk_length", None)
+            graph_len = _as_positive_int(length)
+        if any(str(name) != "prefill" for name in raw_graphs):
+            raise ValueError(
+                "Gemma4 Series metadata must declare only the single 'prefill' graph; "
+                f"got prefill_graphs={list(raw_graphs)}."
+            )
+
+    resolved = graph_len or prefill_len
+    if resolved is None:
+        raise ValueError(
+            "Gemma4 Series metadata must declare model_config.prefill_chunk_length "
+            "or prefill_graphs['prefill'].input_sequence_length."
+        )
+    if prefill_len is not None and graph_len is not None and graph_len != prefill_len:
+        raise ValueError(
+            "Gemma4 prefill graph length does not match model_config.prefill_chunk_length: "
+            f"prefill_graphs.prefill={graph_len}, prefill_chunk_length={prefill_len}."
+        )
+    return int(resolved)
+
+
+def _gemma4_prefill_graph_lengths_from_meta(meta_info) -> dict[str, int]:
+    """Compatibility wrapper returning the single declared prefill graph."""
+
+    return {"prefill": _gemma4_prefill_graph_length_from_meta(meta_info)}
+
+
+def _select_gemma4_prefill_graph_name(requested_input_sequence_length: int, graph_lengths: dict[str, int]) -> str:
+    requested = int(requested_input_sequence_length)
+    prefill_len = int(graph_lengths.get("prefill", -1))
+    if requested == prefill_len:
+        return "prefill"
+    raise ValueError(
+        "No Gemma4 prefill graph matches requested input_sequence_length "
+        f"{requested}; available={{'prefill': {prefill_len}}}."
+    )
+
+def _gemma4_meta_base_dir(meta_info) -> Path | None:
+    meta_path = getattr(meta_info, "_meta_path_", None)
+    if meta_path:
+        return Path(meta_path).parent
+    for attr_name in ("prefill_hmonnx", "decode_hmonnx"):
+        path_value = getattr(meta_info, attr_name, None)
+        if not path_value:
+            continue
+        path = Path(str(path_value))
+        if path.is_absolute():
+            # Runtime meta stores graph paths as "<graph-dir>/<file.onnx>".
+            # The export root is therefore the parent of that graph directory.
+            return path.parent.parent
+    return None
+
+
+def _gemma4_resolve_meta_path(meta_info, value: str | None) -> str | None:
+    if not value:
+        return None
+    path = Path(str(value))
+    if path.is_absolute():
+        return str(path)
+    base_dir = _gemma4_meta_base_dir(meta_info)
+    return str(base_dir / path) if base_dir is not None else str(path)
+
+
+def _gemma4_prefill_graph_hmonnx_from_meta(meta_info, graph_name: str) -> str | None:
+    if graph_name != "prefill":
+        raise ValueError(
+            "Gemma4 Series runtime only supports the single 'prefill' graph; "
+            f"got {graph_name!r}."
+        )
+    raw_graphs = getattr(meta_info, "prefill_graphs", None) or {}
+    value = raw_graphs.get("prefill") if isinstance(raw_graphs, dict) else None
+    if isinstance(value, dict) and (value.get("hmonnx") or value.get("path")):
+        return _gemma4_resolve_meta_path(meta_info, value.get("hmonnx") or value.get("path"))
+    hmonnx = getattr(value, "hmonnx", None) if value is not None else None
+    if hmonnx:
+        return _gemma4_resolve_meta_path(meta_info, hmonnx)
+    return _gemma4_resolve_meta_path(meta_info, getattr(meta_info, "prefill_hmonnx", None))
+
+
+def _is_mtp_mode(value) -> bool:
+    return str(value).lower() == "mtp"
 
 
 class Gemma4VisualHMONNXModel(HMONNXModel):
@@ -94,7 +205,11 @@ class Gemma4KVCacheMixinHMONNX(KVCacheMixin):
         if full_cache_len <= 0 and self.layer_kv_shapes:
             full_cache_len = max(int(shape[2]) for shape in self.layer_kv_shapes if len(shape) > 2)
         for shape in self.layer_kv_shapes:
-            cache_type = HybridCacheTensor if len(shape) > 2 and int(shape[2]) < full_cache_len else self.CACHCE_TENSOR_TYPE
+            cache_type = (
+                HybridCacheTensor
+                if len(shape) > 2 and int(shape[2]) < full_cache_len
+                else self.CACHCE_TENSOR_TYPE
+            )
             self.past_key_caches.append(cache_type(torch.zeros(shape, dtype=dtype)))
             self.past_value_caches.append(cache_type(torch.zeros(shape, dtype=dtype)))
 
@@ -135,15 +250,42 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             [],
         )
         self._kvcache_mixin = Gemma4KVCacheMixinHMONNX(self.kvcache_config, layer_kv_shapes)
+        self.prefill_graph_lengths = _gemma4_prefill_graph_lengths_from_meta(meta_info)
+        self.prefill_models = {"prefill": self.prefill_model}
+        self._active_prefill_graph_name = "prefill"
+        self._active_prefill_model = self.prefill_model
+        self._active_prefill_input_sequence_length = int(self.prefill_graph_lengths["prefill"])
         self.layer_types = getattr(meta_info, "layer_types", [])
         self.layer_cache_types = getattr(meta_info, "layer_cache_types", [])
         self.layer_cache_indices = getattr(meta_info, "layer_cache_indices", [])
         self.sliding_window = getattr(meta_info, "sliding_window", 1024)
+        self._validate_mtp_sliding_kv_cache_input_mode()
 
     def _is_mtp_export(self) -> bool:
-        return getattr(self.meta_info, "spec_decode_mode", None) == "mtp" or bool(
-            getattr(self.meta_info.model_config, "enable_mtp_outputs", False)
+        return _is_mtp_mode(getattr(self.meta_info, "spec_decode_mode", None))
+
+    def _sliding_kv_cache_input_mode(self) -> str:
+        return str(
+            getattr(
+                self.meta_info,
+                "sliding_kv_cache_input_mode",
+                getattr(self.meta_info.model_config, "sliding_kv_cache_input_mode", "slice_window"),
+            )
+        ).lower()
+
+    def _uses_target_verify_decode_accepted_count(self) -> bool:
+        return (
+            self._is_mtp_export()
+            and self._sliding_kv_cache_input_mode() == "slice_window"
+            and self.is_decode()
         )
+
+    def _validate_mtp_sliding_kv_cache_input_mode(self) -> None:
+        if self._is_mtp_export() and self._sliding_kv_cache_input_mode() != "slice_window":
+            raise ValueError(
+                "Gemma4 Series MTP requires sliding_kv_cache_input_mode='slice_window'; "
+                f"got {self._sliding_kv_cache_input_mode()!r}."
+            )
 
     def _mtp_verify_length(self) -> int:
         spec_decode = getattr(self.meta_info, "spec_decode", None) or {}
@@ -163,6 +305,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         return int(block_size) + 1
 
     def get_input_sequence_length(self) -> int:
+        if self.is_prefill():
+            return int(self._active_prefill_input_sequence_length)
         if self.is_decode() and self._is_mtp_export():
             return self._mtp_verify_length()
         return super().get_input_sequence_length()
@@ -191,6 +335,43 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             self.per_layer_input_embedding.to(dtype=dtype)
         return self
 
+
+    def _select_prefill_graph_for_length(self, input_sequence_length: int) -> str:
+        graph_name = _select_gemma4_prefill_graph_name(input_sequence_length, self.prefill_graph_lengths)
+        self._active_prefill_graph_name = graph_name
+        self._active_prefill_model = self.prefill_model
+        self._active_prefill_input_sequence_length = int(input_sequence_length)
+        return graph_name
+
+    def set_input_sequence_length(self, seq_length: int):
+        if self.is_prefill():
+            self._select_prefill_graph_for_length(int(seq_length))
+        return super().set_input_sequence_length(seq_length)
+
+    def set_prefill(self):
+        self._llm_prefill = True
+        input_sequence_length = int(getattr(self.meta_info.model_config, "prefill_chunk_length", 320))
+        self._select_prefill_graph_for_length(input_sequence_length)
+        self._active_prefill_model.to(device=self.device)
+        self.set_input_sequence_length(input_sequence_length)
+
+    def forward(self, *args, **kwargs):
+        args = unfold_args(args)
+        args = [arg.to(torch.int32) if arg.dtype == torch.int64 else arg for arg in args]
+        if self._llm_prefill:
+            self._active_prefill_model.to(device=self.device)
+            outs = self._active_prefill_model(*args)
+        else:
+            outs = super().forward(*args, **kwargs)
+
+        if isinstance(outs, (tuple, list)):
+            logits = outs[0]
+        else:
+            logits = outs
+        if getattr(self.meta_info.model_config, "enable_mtp_outputs", False):
+            return outs
+        return logits
+
     def get_tf_processor(self):
         processor = XHGemma4Processor.from_pretrained(
             self.hf_model_dir,
@@ -201,29 +382,18 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         if self.audio_meta is not None:
             processor.config.audio_feature_length = getattr(self.audio_meta, "input_feature_length", None)
             processor.config.audio_attention_chunk_size = getattr(self.audio_meta, "attention_chunk_size", 12) or 12
-            processor.config.audio_attention_context_left = getattr(self.audio_meta, "attention_context_left", 13) or 13
-            processor.config.audio_attention_context_right = getattr(self.audio_meta, "attention_context_right", 0) or 0
+            processor.config.audio_attention_context_left = (
+                getattr(self.audio_meta, "attention_context_left", 13) or 13
+            )
+            processor.config.audio_attention_context_right = (
+                getattr(self.audio_meta, "attention_context_right", 0) or 0
+            )
         return processor
-
-    def forward(self, *args):
-        args = unfold_args(args)
-        args = [arg.to(torch.int32) if arg.dtype == torch.int64 else arg for arg in args]
-        outs = super().forward(*args)
-
-        if isinstance(outs, (tuple, list)):
-            logits = outs[0]
-        else:
-            logits = outs
-        if getattr(self.meta_info.model_config, "enable_mtp_outputs", False):
-            return outs
-        return logits
 
     def get_data_preprocessor(self):
         # Keep the runtime input contract phase-aligned with the exported
-        # prefill/decode graphs.  Dense 31B and MoE 26B prefill include a
-        # full_attention_mask for visual bidirectional attention, while decode
-        # omits that input.  The base HMONNX class caches processors, so a
-        # prefill processor would otherwise feed one extra mask to decode.
+        # prefill/decode graphs. Full-attention layers use the graph-internal
+        # causal MaskedSoftmax path; runtime feeds only the sliding mask.
         self._data_processor = None
         return super().get_data_preprocessor()
 
@@ -246,8 +416,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             per_layer_input_embedding=self.per_layer_input_embedding,
             sliding_window=self.sliding_window,
             bidirectional_vision_attention=bidirectional_vision_attention,
-            emit_full_attention_mask=bool(bidirectional_vision_attention) and not self.is_decode(),
-            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
+            emit_full_attention_mask=False,
+            emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
         )
 
     def _set_enable_golden(self, enable: bool) -> None:
@@ -298,9 +468,8 @@ class XHGemma4MoeHMONNXModel(XHGemma4SeriesHMONNXModel):
             video_token_id=getattr(model_config, "video_token_id", -1) or -1,
             sliding_window_cfg=sliding_window_cfg,
             bidirectional_vision_attention=getattr(model_config, "bidirectional_vision_attention", False),
-            emit_full_attention_mask=bool(getattr(model_config, "bidirectional_vision_attention", False))
-            and not self.is_decode(),
-            emit_accepted_count_input=self.is_decode() and self._is_mtp_export(),
+            emit_full_attention_mask=False,
+            emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
         )
 
 

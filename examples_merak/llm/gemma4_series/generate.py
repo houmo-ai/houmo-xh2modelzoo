@@ -583,7 +583,7 @@ def main() -> None:
     parser.add_argument("--backend", type=str, default="hmonnx", choices=["hmonnx", "hf"])
     parser.add_argument(
         "--model-config", type=str,
-        default="work_dirs/gemma4_moe_with_mask_26b_a4b_it_xh2a_w8a8_256_2k/export_meta_info.json",
+        default="work_dirs/gemma4_series_export/export_meta_info.json",
         help="HMONNX runtime meta: golden_meta_info.json or export_meta_info.json with exported_dir.",
     )
     parser.add_argument(
