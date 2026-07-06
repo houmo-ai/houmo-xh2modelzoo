@@ -12,6 +12,7 @@ class BaseInputProcessorConfig(BaseConfig):
         self.input_sequence_length = input_sequence_length
         self.past_key_caches = past_key_caches
         self.past_value_caches = past_value_caches
+        self.enable_page_attention = kwargs.get("enable_page_attention", False)
         if "pad_token_id" in kwargs:
             self.pad_token_id = kwargs["pad_token_id"]
         else:
@@ -25,11 +26,27 @@ class BaseLLMInputProcessor:
         self.input_sequence_length = config.input_sequence_length
         self.past_key_caches = config.past_key_caches
         self.past_value_caches = config.past_value_caches
+        self.enable_page_attention = config.enable_page_attention
         self.embed_tokens = config.embed_tokens
         self.pad_token_id = config.pad_token_id
 
         self._device = torch.device("cpu")
         self._dtype = torch.float16
+
+    def set_page_attention_context(
+        self,
+        past_key_caches,
+        past_value_caches,
+        block_ids,
+        slot_mapping,
+        block_size: int,
+    ) -> None:
+        self.enable_page_attention = True
+        self.past_key_caches = past_key_caches
+        self.past_value_caches = past_value_caches
+        self.page_attention_block_ids = block_ids
+        self.page_attention_slot_mapping = slot_mapping
+        self.page_attention_block_size = block_size
 
     def to(self, *args, **kwargs) -> "BaseLLMInputProcessor":
         device, dtype = torch._C._nn._parse_to(*args, **kwargs)[:2]
@@ -93,6 +110,12 @@ class BaseLLMInputProcessor:
 
         past_seq_length = data["past_seq_length"]
         assert past_seq_length >= 0, "past_seq_length should be non-negative."
+        if self.enable_page_attention:
+            return (
+                inputs_embeds,
+                torch.tensor([past_seq_length], dtype=torch.int32, device=self._device),
+                torch.tensor([seq_length], dtype=torch.int32, device=self._device),
+            )
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
         assert past_key_caches is not None and past_value_caches is not None, "KV cache is not available."
