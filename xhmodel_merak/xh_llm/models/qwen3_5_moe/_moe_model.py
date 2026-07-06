@@ -1493,9 +1493,9 @@ class _Qwen3_5MoeTextModel(DynamicModule):  # noqa: N801
             self._setup_cos_sin_embeding()
         self.enable_layer_tag = cfg.get("enable_layer_tag", False)
         if self.enable_layer_tag:
-        self.tags = nn.ModuleList(
-            [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
-        )
+            self.tags = nn.ModuleList(
+                [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
+            )
 
     def _setup_cos_sin_embeding(self):
         if hasattr(self.rotary_emb, "cos_cached"):
