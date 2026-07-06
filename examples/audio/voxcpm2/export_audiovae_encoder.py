@@ -26,7 +26,10 @@ from xhquant.api import (
     get_root_logger,
 )
 from xhquant.patch.core import RewriterContext
-from voxcpm import VoxCPM2Model
+try:
+    from voxcpm import VoxCPM2Model
+except ImportError:
+    from voxcpm.model.voxcpm2 import VoxCPM2Model
 from utils import (
     compute_audiovae_encoder_input_length,
     load_and_pad_audio,

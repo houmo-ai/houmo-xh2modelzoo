@@ -24,6 +24,7 @@ from voxcpm.modules.layers import ScalarQuantizationLayer
 from .voxcpm2_hmonnx_sessions import (
     AudioVAEDecoderSession,
     AudioVAEEncoderSession,
+    AudioVAEStatefulStreamingDecoderSession,
     BaseLMDecodeSession,
     BaseLMPrefillSession,
     LocDiTStepSession,
@@ -355,6 +356,15 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             device=self.device,
             dtype=self.input_dtype,
         )
+        stateful_stream_meta, _ = self._find_stateful_stream_decoder(work_dir)
+        self.vae_stream_decoder = None
+        if stateful_stream_meta is not None:
+            self.vae_stream_decoder = AudioVAEStatefulStreamingDecoderSession(
+                str(work_dir / stateful_stream_meta["hmonnx_file"]),
+                stateful_stream_meta,
+                device=self.device,
+                dtype=self.input_dtype,
+            )
         self.out_sample_rate = (full_meta or stream_meta)["out_sample_rate"]
         if vae_enc_meta is not None:
             self.chunk_size = int(vae_enc_meta["chunk_size"])
@@ -399,6 +409,22 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             chosen = min(metas, key=lambda m: m["num_patches"])
         else:  # full
             chosen = max(metas, key=lambda m: m["num_patches"])
+        return chosen, chosen["hmonnx_file"]
+
+    def _find_stateful_stream_decoder(self, work_dir: Path) -> Tuple[Optional[dict], Optional[str]]:
+        """查找真流式 AudioVAE decoder 元信息。"""
+        dirs = sorted(work_dir.glob("AudioVAE_Decoder_StreamState_np*"))
+        metas = []
+        for d in dirs:
+            meta_files = list(d.glob("audiovae_decoder_streaming_stateful_np*_meta_info.json"))
+            if not meta_files:
+                continue
+            meta = load_meta(meta_files[0])
+            metas.append(meta)
+        if not metas:
+            return None, None
+        # 当前真流式默认 np1；若后续多份并存,优先选 num_patches 最小的 step 图。
+        chosen = min(metas, key=lambda m: int(m.get("num_patches", 999999)))
         return chosen, chosen["hmonnx_file"]
 
     def _find_encoder(self, work_dir: Path) -> Tuple[Optional[dict], Optional[str]]:
@@ -821,7 +847,7 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         cfg_value: float,
         streaming: bool,
         streaming_prefix_len: int,
-    ) -> Generator[Tuple[torch.Tensor, List[torch.Tensor]], None, None]:
+    ) -> Generator[Tuple[torch.Tensor, List[torch.Tensor], int], None, None]:
         """核心推理循环(对应 VoxCPM2Model._inference)。"""
         # --- 1. prefill ---
         lm_hidden, residual_hidden, valid_len = self._run_prefill(
@@ -839,6 +865,7 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         # 拿 streaming_prefix_len-1 个作为起点,这样 streaming 拼接时有上下文
         pred_feat_seq: List[torch.Tensor] = []
         has_continuation = bool(audio_mask[0, valid_len - 1].item() == 1)
+        context_len = 0
         if has_continuation:
             audio_indices = audio_mask[0, :valid_len].nonzero(as_tuple=True)[0]
             context_len = min(streaming_prefix_len - 1, int(len(audio_indices)))
@@ -875,7 +902,7 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
                 feat_pred = chunk.permute(0, 3, 1, 2).reshape(
                     1, self.latent_dim, -1,
                 )  # 等价 rearrange("b t p d -> b d (t p)")
-                yield feat_pred, pred_feat_seq
+                yield feat_pred, pred_feat_seq, context_len
 
             # stop
             stop_flag = self._stop_flag(lm_hidden)
@@ -893,7 +920,7 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         if not streaming:
             full_seq = torch.cat(pred_feat_seq, dim=1)  # [1, T_all, P, D]
             feat_pred = full_seq.permute(0, 3, 1, 2).reshape(1, self.latent_dim, -1)
-            yield feat_pred, pred_feat_seq
+            yield feat_pred, pred_feat_seq, context_len
 
     # ------------------------------------------------------------------ #
     # 公共 API — 对齐 VoxCPM.generate
@@ -903,7 +930,11 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         return next(self._generate(*args, streaming=False, **kwargs))
 
     def generate_streaming(self, *args, **kwargs):
-        return self._generate(*args, streaming=True, **kwargs)
+        return self._generate(*args, streaming=True, streaming_backend="stateful", **kwargs)
+
+    def generate_streaming_legacy(self, *args, **kwargs):
+        """旧版 overlap/crop 流式接口,使用 AudioVAE_Decoder_np*。"""
+        return self._generate(*args, streaming=True, streaming_backend="overlap", **kwargs)
 
     @torch.inference_mode()
     def _generate(
@@ -918,6 +949,7 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         max_len: int = 2000,
         streaming: bool = False,
         streaming_prefix_len: int = 4,
+        streaming_backend: str = "stateful",
     ) -> Generator[np.ndarray, None, None]:
         """对齐 VoxCPM.generate:返回 numpy.ndarray 波形。
 
@@ -931,6 +963,9 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             raise FileNotFoundError(reference_wav_path)
         if (prompt_wav_path is None) != (prompt_text is None):
             raise ValueError("prompt_wav_path and prompt_text must both be provided or both be None")
+        streaming_backend = str(streaming_backend).lower().strip()
+        if streaming_backend not in {"stateful", "overlap"}:
+            raise ValueError("streaming_backend must be one of ['stateful', 'overlap']")
 
         target_text = text.replace("\n", " ")
         # 对齐 PyTorch VoxCPM2Model.generate 的默认策略:
@@ -953,7 +988,9 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             text_token, audio_feat, text_mask, audio_mask,
         )
 
-        patch_len = self.patch_size * self.chunk_size  # 一个 latent patch 对应的样本数
+        # 一个 latent patch 对应的输出音频采样点数。encoder chunk_size 是 16k
+        # 输入侧 hop，decoder upscale 是 48k 输出侧 hop，二者不能混用。
+        decode_patch_len = self.patch_size * int(self.vae_decoder.upscale)
 
         # 3. 核心推理
         inference_gen = self._inference_core(
@@ -970,20 +1007,35 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             streaming_prefix_len=streaming_prefix_len,
         )
 
-        has_continuation = bool(prompt_wav_path)
-
         if streaming:
-            for latent_pred, _ in inference_gen:
-                audio = self.vae_decoder(latent_pred.to(self.input_dtype), mode="stream")
-                # streaming:只输出最后一个 patch 对应的新音频
-                audio = audio[..., -patch_len:].squeeze(1).cpu().numpy()
+            if streaming_backend == "stateful" and self.vae_stream_decoder is None:
+                raise FileNotFoundError(
+                    "AudioVAE_Decoder_StreamState_np* not found. "
+                    "Run export_audiovae_decoder_streaming_stateful.py or use "
+                    "generate_streaming_legacy()/streaming_backend='overlap'."
+                )
+            if streaming_backend == "stateful":
+                self.vae_stream_decoder.reset()
+            for latent_pred, pred_feat_seq, _ in inference_gen:
+                if streaming_backend == "stateful":
+                    newest_patch = pred_feat_seq[-1]  # [1, 1, P, D]
+                    newest_latent = newest_patch.permute(0, 3, 1, 2).reshape(
+                        1, self.latent_dim, -1,
+                    )
+                    audio = self.vae_stream_decoder(newest_latent.to(self.input_dtype))
+                else:
+                    # 旧版无状态 overlap/crop 流式:解最近 streaming_prefix_len 个
+                    # patch,再只吐最后一个 patch 对应的音频。
+                    audio = self.vae_decoder(latent_pred.to(self.input_dtype), mode="stream")
+                    audio = audio[..., -decode_patch_len:]
+                audio = audio.squeeze(1).cpu().numpy()
                 yield audio.squeeze(0) if audio.ndim >= 2 else audio
         else:
-            latent_pred, _ = next(inference_gen)
+            latent_pred, _, context_len = next(inference_gen)
             # 非 streaming 一次解码完整
             audio = self.vae_decoder(latent_pred.to(self.input_dtype), mode="auto")
-            if has_continuation:
+            if context_len > 0:
                 # 跳过 prompt 对应的部分(参考 VoxCPM2Model._generate 末尾逻辑)
-                audio = audio[..., patch_len * (streaming_prefix_len - 1):]
+                audio = audio[..., decode_patch_len * context_len:]
             audio = audio.squeeze(1).cpu().numpy()
             yield audio.squeeze(0) if audio.ndim >= 2 else audio

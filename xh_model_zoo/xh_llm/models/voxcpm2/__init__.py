@@ -26,6 +26,7 @@ from .voxcpm3_hmonnx_model import VoxCPM2HMONNXTTSPipeline
 from .voxcpm2_hmonnx_sessions import (
     AudioVAEDecoderSession,
     AudioVAEEncoderSession,
+    AudioVAEStatefulStreamingDecoderSession,
     BaseLMDecodeSession,
     BaseLMPrefillSession,
     LocDiTStepSession,
@@ -48,4 +49,5 @@ __all__ = [
     "LocDiTStepSession",
     "AudioVAEEncoderSession",
     "AudioVAEDecoderSession",
+    "AudioVAEStatefulStreamingDecoderSession",
 ]

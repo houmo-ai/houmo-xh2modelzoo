@@ -29,7 +29,10 @@ from xhquant.api import (
 )
 from xhquant.patch.core import RewriterContext
 
-from voxcpm import VoxCPM2Model
+try:
+    from voxcpm import VoxCPM2Model
+except ImportError:
+    from voxcpm.model.voxcpm2 import VoxCPM2Model
 
 try:
     from .utils import write_json_file

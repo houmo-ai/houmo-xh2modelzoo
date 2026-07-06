@@ -75,7 +75,10 @@ from xhquant.api import (
 )
 from xhquant.patch.core import RewriterContext
 
-from voxcpm import VoxCPM2Model
+try:
+    from voxcpm import VoxCPM2Model
+except ImportError:
+    from voxcpm.model.voxcpm2 import VoxCPM2Model
 
 try:
     from .utils import write_json_file
@@ -236,6 +239,15 @@ def _build_real_calibration_samples(
         ]
         return samples[0], samples, False
 
+    def _unwrap_latent(value):
+        if isinstance(value, dict):
+            for key in ("mu", "z", "latent", "latents"):
+                if key in value:
+                    return value[key]
+        if isinstance(value, (tuple, list)):
+            return value[0]
+        return value
+
     if wav_path is None:
         return _fallback_random()
 
@@ -252,21 +264,19 @@ def _build_real_calibration_samples(
             last_err = None
             # 1) 2D [B, L]
             try:
-                latent = encoder(wav)
+                latent = _unwrap_latent(encoder(wav))
             except Exception as e:
                 last_err = e
             # 2) 3D [B, 1, L]
             if latent is None:
                 try:
-                    latent = encoder(wav.unsqueeze(1))
+                    latent = _unwrap_latent(encoder(wav.unsqueeze(1)))
                 except Exception as e:
                     last_err = e
             # 3) 通过 audio_vae 顶层 encode 方法
             if latent is None and hasattr(voxcpm2.audio_vae, "encode"):
                 try:
-                    latent = voxcpm2.audio_vae.encode(wav)
-                    if isinstance(latent, (tuple, list)):
-                        latent = latent[0]
+                    latent = _unwrap_latent(voxcpm2.audio_vae.encode(wav))
                 except Exception as e:
                     last_err = e
 

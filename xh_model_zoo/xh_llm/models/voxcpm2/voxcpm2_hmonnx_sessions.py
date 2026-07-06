@@ -13,6 +13,8 @@ Session 清单:
     AudioVAEEncoderSession     (单一定长 chunk)
     AudioVAEDecoderSession     (同时加载 stream 和 full 两张图,按调用时的
                                 输入形状自动选择)
+    AudioVAEStatefulStreamingDecoderSession
+                              (真流式 decoder:显式维护 state_in/state_out)
 """
 
 from __future__ import annotations
@@ -410,6 +412,93 @@ class AudioVAEDecoderSession:
                 parts.append(piece)
                 pos = end
             return torch.cat(parts, dim=-1)
+
+
+class AudioVAEStatefulStreamingDecoderSession:
+    """AudioVAE 真流式 decoder session。
+
+    对应 ``AudioVAE_Decoder_StreamState_np1`` 导出图。每次只输入最新
+    latent patch,并把 ``state_out_*`` 回填到下一步 ``state_in_*``。
+    """
+
+    _DTYPE_MAP = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float64": torch.float64,
+        "int32": torch.int32,
+        "int64": torch.int64,
+    }
+
+    def __init__(
+        self,
+        onnx_path: str,
+        meta: dict,
+        device: torch.device,
+        dtype: torch.dtype = torch.float16,
+    ):
+        self.session = HMONNXGoldenInference(onnx_path)
+        self.session.to(device)
+        self.device = device
+        self.dtype = dtype
+        self.meta = meta
+        self.state_specs = list(meta.get("state_specs", []))
+        self.graph_input_dtype = dict(meta.get("graph_input_dtype", {}))
+        self.sr_idx = int(meta.get("precomputed_sr_idx", 3))
+        self.upscale = int(meta["upscale"])
+        self.latent_dim = int(meta["latent_dim"])
+        self.patch_size = int(meta["patch_size"])
+        self.num_patches = int(meta["num_patches"])
+        self.T = self.num_patches * self.patch_size
+        self.states: List[torch.Tensor] = []
+        self.reset()
+
+    def _dtype_for(self, name: str, default: torch.dtype | None = None) -> torch.dtype:
+        dtype_name = self.graph_input_dtype.get(name)
+        if dtype_name in self._DTYPE_MAP:
+            return self._DTYPE_MAP[dtype_name]
+        return default or self.dtype
+
+    def _cast(self, tensor: torch.Tensor, name: str) -> torch.Tensor:
+        return tensor.to(device=self.device, dtype=self._dtype_for(name, tensor.dtype))
+
+    def reset(self):
+        self.states = []
+        for idx, spec in enumerate(self.state_specs):
+            self.states.append(
+                torch.zeros(
+                    tuple(spec["shape"]),
+                    device=self.device,
+                    dtype=self._dtype_for(f"state_in_{idx}"),
+                )
+            )
+
+    def __call__(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            z: [1, latent_dim, patch_size]，即最新一个 VoxCPM2 latent patch
+        Returns:
+            audio: [1, 1, patch_size * upscale]
+        """
+        assert z.dim() == 3 and z.shape[0] == 1
+        if z.shape[-1] != self.T:
+            raise ValueError(
+                f"stateful streaming decoder expects T={self.T}, got {z.shape[-1]}"
+            )
+        z = self._cast(z, "z")
+        sr_idx = torch.tensor([self.sr_idx], dtype=torch.int32, device=self.device)
+        sr_idx = self._cast(sr_idx, "sr_idx")
+        out = self.session(z, sr_idx, *self.states)
+        if not isinstance(out, (list, tuple)):
+            raise RuntimeError("stateful streaming decoder should return audio plus states")
+        if len(out) != len(self.state_specs) + 1:
+            raise RuntimeError(
+                f"Unexpected stateful decoder outputs: {len(out)} "
+                f"(expect {len(self.state_specs) + 1})"
+            )
+        audio = out[0]
+        self.states = [state.detach() for state in out[1:]]
+        return audio
 
 
 # ---------------------------------------------------------------------------

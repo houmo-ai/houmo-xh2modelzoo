@@ -37,7 +37,10 @@ from xh_model_zoo.xh_llm.models.voxcpm2 import (
 )
 from xh_model_zoo.xh_llm.models.voxcpm2.voxcpm2_llm_model_impl import register_wrap_cls  # noqa: F401
 
-from voxcpm import VoxCPM2Model
+try:
+    from voxcpm import VoxCPM2Model
+except ImportError:
+    from voxcpm.model.voxcpm2 import VoxCPM2Model
 
 try:
     from .utils import (

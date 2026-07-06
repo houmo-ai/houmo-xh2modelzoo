@@ -107,9 +107,14 @@ def main(args):
 
     t0 = time.time()
     if args.streaming:
-        print(f"[demo] streaming mode", file=sys.stderr)
+        print(f"[demo] streaming mode backend={args.streaming_backend}", file=sys.stderr)
         chunks = []
-        for i, chunk in enumerate(pipeline.generate_streaming(**gen_kwargs)):
+        stream_iter = (
+            pipeline.generate_streaming_legacy(**gen_kwargs)
+            if args.streaming_backend == "overlap"
+            else pipeline.generate_streaming(**gen_kwargs)
+        )
+        for i, chunk in enumerate(stream_iter):
             chunks.append(np.asarray(chunk, dtype=np.float32).reshape(-1))
             print(f"  chunk {i}: {chunks[-1].shape[0]} samples", file=sys.stderr)
         audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
@@ -224,6 +229,13 @@ def build_argparser():
     p.add_argument("--min_len", type=int, default=3)
     p.add_argument("--max_len", type=int, default=500)
     p.add_argument("--streaming", action="store_true")
+    p.add_argument(
+        "--streaming_backend",
+        type=str,
+        default="stateful",
+        choices=["stateful", "overlap"],
+        help="streaming decoder 后端: stateful 为真流式 cache 图; overlap 为旧 np3 overlap/crop",
+    )
     p.add_argument("--cpu", action="store_true", help="强制 CPU 推理")
     p.add_argument("--output", type=str, default="output.wav")
     p.add_argument("--seed", type=int, default=0)
