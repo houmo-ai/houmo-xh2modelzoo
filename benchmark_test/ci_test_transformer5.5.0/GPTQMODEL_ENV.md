@@ -44,10 +44,14 @@ The transformer5.5 CI image must already provide two dependency groups:
    `datasets`, `logbar`, `tokenicer`, `torchao`, and `kernels`.
 
 2. `run.sh` installs xh2modelzoo-missing GPTQModel runtime dependencies
-   before quantization starts:
+   before quantization starts. It first generates a temporary constraints
+   file from the currently installed `torch`, `torchvision`, `torchaudio`,
+   `triton`, and `nvidia-*` packages, then asks pip to respect those pinned
+   versions while resolving the remaining dependencies:
 
    ```bash
-   python -m pip install --disable-pip-version-check \
+   python -m pip install --break-system-packages --disable-pip-version-check \
+     -c /tmp/torch-stack-constraints.txt \
      qwen-vl-utils==0.0.14 \
      compressed-tensors==0.15.0.1 \
      'threadpoolctl>=3.6.0' \
@@ -55,6 +59,7 @@ The transformer5.5 CI image must already provide two dependency groups:
      'hf_transfer>=0.1.9' \
      'huggingface_hub>=0.34.4' \
      'tokenicer>=0.0.8' \
+     'pypcre>=0.2.11' \
      'logbar>=0.2.1' \
      'maturin>=1.9.4' \
      'pyarrow>=21.0' \
@@ -63,14 +68,23 @@ The transformer5.5 CI image must already provide two dependency groups:
      'defuser>=0.0.6' \
      py-cpuinfo \
      tqdm \
-     pydantic
+     pydantic==2.13.4
    ```
 
    This list is the subset of `/path/to/gptqmodel/requirements.txt` that is
    not declared by xh2modelzoo, plus `qwen-vl-utils` and
    `compressed-tensors` for model import. Without these packages, CI can fail
    before quant/export with missing imports such as `qwen_vl_utils`,
-   `compressed_tensors`, `logbar`, `cpuinfo`, or `tokenicer`.
+   `compressed_tensors`, `logbar`, `cpuinfo`, `tokenicer`, `pcre`, or
+   `pydantic_core`.
+
+   Avoid `--no-deps` for this bootstrap: GPTQModel dependency packages need
+   their own lightweight transitive dependencies, for example `tokenicer`
+   needs `pcre` and `pydantic` needs `pydantic_core`. The constraints file is
+   the guardrail that prevents dependency resolution from changing the
+   preinstalled CUDA stack. On Ubuntu 24 images with an externally managed
+   system Python, keep `--break-system-packages`; otherwise pip stops before
+   installing missing GPTQModel recipe dependencies.
 
    Do **not** install `compressed-tensors==0.14.0.1` through normal pip
    dependency resolution in the transformer5.5 image: its package metadata
@@ -96,7 +110,9 @@ import compressed_tensors
 from compressed_tensors import has_offloaded_params
 import tqdm
 import pydantic
+import pydantic_core
 import tokenicer
+import pcre
 import logbar
 import cpuinfo
 import threadpoolctl

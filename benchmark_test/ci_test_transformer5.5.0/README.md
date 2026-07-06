@@ -35,8 +35,12 @@ installing GPTQModel in the test job. Configure `GPTQMODEL_SOURCE_DIR` and
 `PYTHONPATH` before running CI; see `GPTQMODEL_ENV.md` for the exact commands
 for IT/image setup. `run.sh` installs the lightweight packages that this
 lane needs from GPTQModel requirements but xh2modelzoo does not declare, plus
-Qwen/Gemma import-time packages, so CI does not fail before quant/export when
-the base image is missing them.
+Qwen/Gemma import-time packages. It generates temporary pip constraints from
+the preinstalled `torch`, `torchvision`, `torchaudio`, `triton`, and
+`nvidia-*` packages so missing Python dependencies are installed without
+upgrading the CUDA stack. On the Ubuntu 24 CI image the script uses
+`--break-system-packages` because the job runs against the image-owned system
+Python.
 
 ## Calibration data
 

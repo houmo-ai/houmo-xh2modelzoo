@@ -86,6 +86,8 @@ def _gemma_gptq(model_name: str) -> dict[str, Any]:
             "quant.validation.check_quant_image_demo": False,
             "quant.validation.check_quant_video_demo": False,
             "quant.validation.check_quant_audio_demo": False,
+            "export.model.context_max_length": 2048,
+            "export.model.prefill_chunk_length": 320,
         }
     )
     return overrides
@@ -98,6 +100,8 @@ def _gemma_autoround(model_name: str) -> dict[str, Any]:
             "quant.calibration.seqlen": 256,
             "quant.iters": 4,
             "quant.runtime.batch_size": 1,
+            "export.model.context_max_length": 2048,
+            "export.model.prefill_chunk_length": 320,
         }
     )
     return overrides
@@ -125,11 +129,11 @@ MODELS: tuple[tuple[str, str, int, int, str, str, str], ...] = (
     ("Qwen3.5-4B", "qwen3_5", 4, 4, QWEN_DENSE_GPTQ_9B, QWEN_DENSE_AR_9B, "qwen3_5_4b"),
     ("Qwen3.5-9B", "qwen3_5", 4, 4, QWEN_DENSE_GPTQ_9B, QWEN_DENSE_AR_9B, "qwen3_5_9b"),
     ("Qwen3.5-27B", "qwen3_5", 4, 4, QWEN_DENSE_GPTQ_27B, QWEN_DENSE_AR_27B, "qwen3_5_27b"),
-    ("Qwen3.5-35B-A3B", "qwen3_5", 4, 4, QWEN_MOE_GPTQ_35B, QWEN_MOE_AR_35B, "qwen3_5_35b_a3b"),
+    ("Qwen3.5-35B-A3B", "qwen3_5", 2, 4, QWEN_MOE_GPTQ_35B, QWEN_MOE_AR_35B, "qwen3_5_35b_a3b"),
     ("gemma-4-E2B-it", "gemma4", 6, 4, GEMMA_E2B_GPTQ, GEMMA_E2B_AR, "gemma_4_e2b"),
     ("gemma-4-E4B-it", "gemma4", 6, 4, GEMMA_E4B_GPTQ, GEMMA_E4B_AR, "gemma_4_e4b"),
     ("gemma-4-31B-it", "gemma4", 6, 4, GEMMA_31B_GPTQ, GEMMA_31B_AR, "gemma_4_31b"),
-    ("gemma-4-26B-A4B-it", "gemma4", 6, 4, GEMMA_26B_GPTQ, GEMMA_26B_AR, "gemma_4_26b_a4b"),
+    ("gemma-4-26B-A4B-it", "gemma4", 2, 4, GEMMA_26B_GPTQ, GEMMA_26B_AR, "gemma_4_26b_a4b"),
 )
 
 
@@ -195,13 +199,13 @@ def _ensure_autoround_dataset() -> None:
 
 def _qwen_quant(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     config_path: str,
     output_dir: str,
     device: str,
     config_overrides: dict[str, Any],
 ):
-    workflow = _qwen_workflow(hf_model_dir=hf_model_dir, config_path=config_path)
+    workflow = _qwen_workflow(model_dir=model_dir, config_path=config_path)
     return workflow.quant(
         output_dir=output_dir,
         device=device,
@@ -211,14 +215,14 @@ def _qwen_quant(
 
 def _qwen_export(
     *,
-    hf_model_dir: str,
+    model_dir: str,
     config_path: str,
     quant_result,
     output_dir: str,
     device: str,
     config_overrides: dict[str, Any],
 ):
-    workflow = _qwen_workflow(hf_model_dir=hf_model_dir, config_path=config_path)
+    workflow = _qwen_workflow(model_dir=model_dir, config_path=config_path)
     return workflow.export(
         quant_result=quant_result,
         output_dir=output_dir,
@@ -227,12 +231,12 @@ def _qwen_export(
     )
 
 
-def _qwen_workflow(*, hf_model_dir: str, config_path: str):
+def _qwen_workflow(*, model_dir: str, config_path: str):
     """Use the same public workflow entrypoint as the Qwen3.5 example."""
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
     return AutoLLMWorkflow.from_config(
-        hf_model_dir=hf_model_dir,
+        model_dir=model_dir,
         config_path=config_path,
     )
 
@@ -292,7 +296,7 @@ def test_trimmed_model_quant_to_export(case: Case) -> None:
 
         stage = "quant"
         quant_result = quant(
-            hf_model_dir=str(model_dir),
+            model_dir=str(model_dir),
             config_path=str(REPO_ROOT / case.config),
             output_dir=str(case_output / "quant"),
             device=DEVICE,
@@ -301,7 +305,7 @@ def test_trimmed_model_quant_to_export(case: Case) -> None:
 
         stage = "export"
         export_result = export(
-            hf_model_dir=str(model_dir),
+            model_dir=str(model_dir),
             config_path=str(REPO_ROOT / case.config),
             quant_result=quant_result,
             output_dir=str(case_output / "export"),

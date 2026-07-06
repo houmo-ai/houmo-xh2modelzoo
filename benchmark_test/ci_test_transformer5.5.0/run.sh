@@ -16,23 +16,6 @@ export no_proxy="${no_proxy:-${NO_PROXY}}"
 
 cd "${REPO_ROOT}"
 
-python -m pip install --disable-pip-version-check \
-  qwen-vl-utils==0.0.14 \
-  compressed-tensors==0.15.0.1 \
-  'threadpoolctl>=3.6.0' \
-  'device-smi>=0.5.2' \
-  'hf_transfer>=0.1.9' \
-  'huggingface_hub>=0.34.4' \
-  'tokenicer>=0.0.8' \
-  'logbar>=0.2.1' \
-  'maturin>=1.9.4' \
-  'pyarrow>=21.0' \
-  'torchao>=0.14.1' \
-  'kernels>=0.12.2' \
-  'defuser>=0.0.6' \
-  py-cpuinfo \
-  tqdm \
-  pydantic
 
 python -m pytest \
   --confcutdir="${SCRIPT_DIR}" \
