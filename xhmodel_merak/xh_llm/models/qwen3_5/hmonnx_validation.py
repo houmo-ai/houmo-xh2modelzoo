@@ -115,7 +115,7 @@ def hmonnx_generate(
     min_output_tokens: int = 0,
     auto_offload: bool = False,
     cuda_graph: bool = False,
-    device_map: None,
+    device_map: None = None,
 ) -> HMONNXQuickTestResult:
     """Run a lightweight HMONNX generate smoke test for full or visual exports."""
     import torch

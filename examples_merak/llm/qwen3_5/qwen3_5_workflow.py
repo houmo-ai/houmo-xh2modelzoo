@@ -1,18 +1,45 @@
 """Standard Qwen3.5/Qwen3.6 Merak workflow example.
 
 Run this file from the repository root.  Model shape, quantization, visual
-size, MTP/DFlash, and GDR options stay in YAML or ``CONFIG_OVERRIDES``; the
-workflow API only needs paths plus ``QuantResult``.
+size, MTP/DFlash, FlashAttention, and GDR defaults stay in YAML.  The CLI only
+adds explicit run-local overrides.
 """
 
 import argparse
 import shutil
 from pathlib import Path
 
+
 def _remove_output_dir_if_needed(output_dir: str, force: bool) -> None:
     path = Path(output_dir)
     if force and path.exists():
         shutil.rmtree(path)
+
+
+def _add_bool_override_args(
+    parser: argparse.ArgumentParser,
+    *,
+    dest: str,
+    enable_flag: str,
+    disable_flag: str,
+    help_name: str,
+) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        enable_flag,
+        dest=dest,
+        action="store_true",
+        default=None,
+        help=f"Enable {help_name} for this export run.",
+    )
+    group.add_argument(
+        disable_flag,
+        dest=dest,
+        action="store_false",
+        default=None,
+        help=f"Disable {help_name} for this export run.",
+    )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -81,6 +108,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="ViT input width, set this param to override config.yaml",
     )
+    _add_bool_override_args(
+        parser,
+        dest="flash_attention",
+        enable_flag="--enable-flash-attention",
+        disable_flag="--disable-flash-attention",
+        help_name="FlashAttention",
+    )
+    _add_bool_override_args(
+        parser,
+        dest="fuse_gdr_ops",
+        enable_flag="--enable-fuse-gdr-ops",
+        disable_flag="--disable-fuse-gdr-ops",
+        help_name="fuse_gdr_ops",
+    )
+    _add_bool_override_args(
+        parser,
+        dest="fuse_gdr_block_recurrent_ops",
+        enable_flag="--enable-fuse-gdr-block-recurrent-ops",
+        disable_flag="--disable-fuse-gdr-block-recurrent-ops",
+        help_name="fuse_gdr_block_recurrent_ops",
+    )
     return parser.parse_args()
 
 
@@ -121,6 +169,12 @@ def main() -> None:
         config_overrides["export.model.visual_config.max_size_h"] = args.max_size_h
     if args.max_size_w:
         config_overrides["export.model.visual_config.max_size_w"] = args.max_size_w
+    if args.flash_attention is not None:
+        config_overrides["export.model.flash_attention.enable"] = args.flash_attention
+    if args.fuse_gdr_ops is not None:
+        config_overrides["export.model.fuse_gdr_ops"] = args.fuse_gdr_ops
+    if args.fuse_gdr_block_recurrent_ops is not None:
+        config_overrides["export.model.fuse_gdr_block_recurrent_ops"] = args.fuse_gdr_block_recurrent_ops
     export_result = workflow.export(
         quant_result=quant_result,
         output_dir=args.export_output_dir,
@@ -136,7 +190,7 @@ def main() -> None:
             device=args.device,
             input_messages={
                 "text": "描述这张图片",
-                "image": "data/images/qwen2_vl_demo.jpeg"
+                "image": "data/images/qwen2_vl_demo.jpeg",
             },
         )
 

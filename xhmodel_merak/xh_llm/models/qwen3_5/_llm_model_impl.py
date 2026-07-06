@@ -34,6 +34,7 @@ Combines:
 import importlib
 import math
 import types
+import warnings
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -42,7 +43,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from xhquant import nn as xhnn
-from xhquant.nn import BfpFlashAttention, LLMCacheV2, MaskedSoftmax, MatMul, RMSNorm
+from xhquant.nn import FlashAttention, LLMCacheV2, MaskedSoftmax, MatMul, RMSNorm
 from xhquant.nn.modules import Cos, Sin
 from xhquant.utils.registry import DynamicModule
 
@@ -540,8 +541,15 @@ class _Qwen3_5TextAttention(_Qwen3_5TextAttentionBase):  # noqa: N801
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
-        if self.use_bfp_flash_attention:
-            attn_output = self.bfp_attn(query_states, key_states, value_states)
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                key_states,
+                value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+            )
+            attn_output = attn_output.reshape(bsz, q_len, self.attn_hidden_dim)
         else:
             query_states = query_states * self.kv_scale
             key_states = key_states.transpose(2, 3)
@@ -570,21 +578,48 @@ class _Qwen3_5TextAttention(_Qwen3_5TextAttentionBase):  # noqa: N801
         if self.enable_rope:
             self.rope = xhnn.Rope()
 
-        bfp_flash_attention_cfg = cfg.get("bfp_flash_attention", None)
-        self.use_bfp_flash_attention = False
-        if bfp_flash_attention_cfg is not None:
-            self.use_bfp_flash_attention = bfp_flash_attention_cfg.enable
-            self.sefp_manbit = bfp_flash_attention_cfg.sefp_manbit
-            self.out_fp_manbit = bfp_flash_attention_cfg.out_fp_manbit
-            self.out_fp_expbit = bfp_flash_attention_cfg.out_fp_expbit
-        if self.use_bfp_flash_attention:
-            self.bfp_attn = BfpFlashAttention(
+        flash_attention_cfg = cfg.get("flash_attention", None)
+        if flash_attention_cfg is None and cfg.get("bfp_flash_attention", None) is not None:
+            warnings.warn(
+                "Qwen3.5 `bfp_flash_attention` is deprecated and no longer enables FlashAttention. "
+                "Use `flash_attention.enable=True` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.use_flash_attention = False
+        if flash_attention_cfg is not None:
+            if hasattr(flash_attention_cfg, "get"):
+                cfg_get = flash_attention_cfg.get
+            else:
+                def cfg_get(key, default=None):
+                    return default
+
+            self.use_flash_attention = bool(cfg_get("enable", False))
+            legacy_manbit = cfg_get("sefp_manbit", 8)
+            legacy_manbit = legacy_manbit + 1 if legacy_manbit <= 7 else legacy_manbit
+            self.flash_q_bits = cfg_get("q_bits", cfg_get("q_manbit", legacy_manbit))
+            self.flash_s_bits = cfg_get("s_bits", cfg_get("p_manbit", self.flash_q_bits))
+            flash_k_bits = cfg_get("k_bits", cfg_get("k_manbit", 8))
+            flash_v_bits = cfg_get("v_bits", cfg_get("v_manbit", 8))
+            if self.flash_q_bits not in (8, 16) or self.flash_s_bits not in (8, 16):
+                raise ValueError(
+                    "flash_attention q_bits/s_bits must be 8 or 16, "
+                    f"got q_bits={self.flash_q_bits}, s_bits={self.flash_s_bits}"
+                )
+            if flash_k_bits != 8 or flash_v_bits != 8:
+                raise ValueError(
+                    "flash_attention compiler ABI requires k_bits=v_bits=8, "
+                    f"got k_bits={flash_k_bits}, v_bits={flash_v_bits}"
+                )
+        if self.use_flash_attention:
+            self.flash_attn = FlashAttention(
                 self.attn_hidden_dim,
                 self.num_heads,
                 True,
-                self.sefp_manbit,
-                self.out_fp_expbit,
-                self.out_fp_manbit,
+                scale=1 / math.sqrt(self.head_dim),
+                num_kv_heads=self.num_key_value_heads,
+                q_bits=self.flash_q_bits,
+                s_bits=self.flash_s_bits,
             )
 
         self.use_cache = cfg.use_cache

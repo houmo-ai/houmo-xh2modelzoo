@@ -39,6 +39,10 @@ export:
     num_logits_to_keep: 1
     linear_attention_mode: auto
     linear_chunk_size: 64
+    flash_attention:
+      enable: false
+      q_bits: 8
+      s_bits: 8
     split_conv_cache: true
     normalize_force_fp32: false
     use_manual_depthwise_conv1d: false

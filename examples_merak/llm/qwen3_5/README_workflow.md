@@ -135,17 +135,72 @@ quant_result = workflow.quant(
 
 ## 导出
 
-导出阶段消费 `quant()` 返回的 `QuantResult`：
+导出阶段只消费 `quant()` 返回的 `QuantResult`。如果要使用已经量化好的
+HF/GPTQModel 目录，不要在 workflow 里新增 `existing_hf` algorithm；使用
+`--export-from-quanted-model`，或者在代码中传 `config_overrides={"quant": None}`。
 
-```python
-export_result = workflow.export(
-    quant_result=quant_result,
-    output_dir="./work_dirs/qwen3_5_export",
-    device="cuda",
-)
+### Workflow CLI
+
+`qwen3_5_workflow.py` 是 Qwen3.5 量化和导出的唯一示例入口。
+模型结构和量化参数放在 YAML；FlashAttention/GDR 默认值也放在 YAML，
+必要时可用 workflow CLI 做本次运行的显式开关覆盖。
+
+真实量化后导出：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_5_9b_quant \
+  --export-output-dir work_dirs/qwen3_5_9b_export \
+  --device cuda:0 \
+  --overwrite
 ```
 
-如需临时调整 visual tower 尺寸，可以通过 override 修改 YAML 字段：
+使用已经量化好的 HF/GPTQModel 目录导出时，传入量化模型目录并使用
+`--export-from-quanted-model`。该模式会通过 `quant=None` 跳过量化，
+不会引入额外的 workflow quant algorithm。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_gptq.yaml \
+  --quant-output-dir work_dirs/qwen3_5_9b_flash_quant \
+  --export-output-dir work_dirs/qwen3_5_9b_flash_export \
+  --device cuda:0 \
+  --export-from-quanted-model \
+  --overwrite
+```
+
+FlashAttention 默认由 YAML 控制。例如各 full/gptq YAML 中默认关闭：
+
+```yaml
+export:
+  model:
+    flash_attention:
+      enable: false
+      q_bits: 8
+      s_bits: 8
+```
+
+`qwen3_5_workflow.py` 不提供 `flash-q-bits` / `flash-s-bits` 参数，
+q/s bits 保持 YAML 配置。运行时如需临时开关 FlashAttention，可传
+`--enable-flash-attention` 或 `--disable-flash-attention`，只覆盖
+`export.model.flash_attention.enable`。当前本地 HMONNX runtime 只验收 q/s=8。
+
+GDR 同样默认由 YAML 控制。运行时需要临时覆盖时，可以使用
+`--enable-fuse-gdr-ops` / `--disable-fuse-gdr-ops`，以及
+`--enable-fuse-gdr-block-recurrent-ops` /
+`--disable-fuse-gdr-block-recurrent-ops`。
+
+## Export overrides
+
+`export()` consumes the `QuantResult` from `quant()`.  Do not expose variant/profile/mode/base/quant as public parameters; select a YAML and use explicit overrides only when needed.
+
+GDR fuse switches remain YAML-owned by default.  `fuse_gdr_ops` only controls
+GDRChunkScan because it can change the prefill recurrent-state HMONNX I/O
+contract; `fuse_gdr_block_recurrent_ops` controls GDRBlockTriInverse and
+GDRRecurrentScan without changing model inputs/outputs:
 
 ```python
 export_result = workflow.export(
@@ -159,7 +214,7 @@ export_result = workflow.export(
 )
 ```
 
-GDR fuse 也通过配置或 override 控制：
+代码里也可以通过 export config_overrides 临时覆盖 GDR fuse：
 
 ```python
 config_overrides = {
@@ -193,6 +248,22 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --dump-golden \
   --quick-test \
   --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-122B-A10B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_5_122B_quant \
+  --export-output-dir work_dirs/qwen3_5_122B_export \
+  --quick-test \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-122B-A10B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full_gptq.yaml \
+  --quant-output-dir work_dirs/qwen3_5_122B_gptq_quant \
+  --export-output-dir work_dirs/qwen3_5_122B_gptq_export \
+  --quick-test \
+  --overwrite
 ```
 
 quick test 使用：
@@ -215,10 +286,13 @@ quick_result = quick_test_hmonnx(
 
 ```bash
 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
-  --config work_dirs/qwen3_5_export/hmquant*/golden_meta_info.json \
+  --config  work_dirs/qwen3_5_122B_export/hmquant_xh2_qwen3_5_122b_a10b_w4a8_256_2k_mpe256k_448x448_20260702/golden_meta_info.json \
   --prompt "用中文介绍一下 Qwen3.5" \
   --no-sample \
-  --max-new-tokens 128
+  --max-new-tokens 128 \
+  --auto-offload \
+  --cuda-graph \
+  --use-v2
 ```
 
 MTP/DFlash 的专项 speculative decoding 验证可以使用：
@@ -246,5 +320,8 @@ python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
 - `--export-from-quanted-model`：跳过量化，直接从 `--model-dir` 指定的 HF 目录导出。
 - `--bits`：临时覆盖 `quant.bits`。
 - `--max-size-h` / `--max-size-w`：临时覆盖 visual tower 输入尺寸。
+- `--enable-flash-attention` / `--disable-flash-attention`：临时覆盖 FlashAttention 开关。
+- `--enable-fuse-gdr-ops` / `--disable-fuse-gdr-ops`：临时覆盖 GDRChunkScan fuse。
+- `--enable-fuse-gdr-block-recurrent-ops` / `--disable-fuse-gdr-block-recurrent-ops`：临时覆盖 GDRBlockTriInverse/GDRRecurrentScan fuse。
 
 新增 workflow 集成优先复用 `AutoLLMWorkflow.from_config()` 和 checked-in YAML，不要新增一套模型结构参数。
