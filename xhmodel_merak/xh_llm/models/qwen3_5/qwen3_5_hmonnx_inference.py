@@ -109,7 +109,6 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
-        self._sync_page_attention_mode_to_kvcache()
 
     @property
     def past_conv_caches(self):
@@ -184,7 +183,8 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
         )
         prefill_recurrent_state_uses_cache = (
-            getattr(self, "_llm_prefill", True) and self._prefill_recurrent_state_uses_cache()
+            getattr(self, "_llm_prefill", True)
+            and self._prefill_recurrent_state_uses_cache()
         )
         recurrent_state_out_per_step = 0 if prefill_recurrent_state_uses_cache else len(past_recurrent_states)
         conv_cache_out_count = conv_cache_out_per_step * verify_steps
@@ -261,7 +261,6 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             vision_start_token_id=self.meta_info.model_config.vision_start_token_id,
             vision_end_token_id=self.meta_info.model_config.vision_end_token_id,
             spatial_merge_size=self.meta_info.model_config.spatial_merge_size,
-            enable_page_attention=self.enable_page_attention,
         )
         return data_preprocess
 

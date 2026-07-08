@@ -23,7 +23,6 @@ class KVCacheMixin:
         self._device = None
         self._dtype = None
         self._cache_initialized = False
-        self.enable_page_attention = False
 
     @property
     def use_cache(self) -> bool:
@@ -31,8 +30,6 @@ class KVCacheMixin:
 
     def prepare_kv_cache(self):
         if self._cache_initialized:
-            return
-        if self.enable_page_attention:
             return
         if not self.use_cache:
             return

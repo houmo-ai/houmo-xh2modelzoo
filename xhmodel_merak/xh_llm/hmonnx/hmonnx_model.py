@@ -32,18 +32,16 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
 
     def __init__(
         self,
-        hmonnx: str,
+        hmonnx,
         onnx_graph=None,
         enable_golden: bool = False,
         enable_cuda_graph: bool = False,
         enable_auto_offload=False,
-        device_map: str | None | torch.device | list[str | torch.device] = None,
-        layer_infos=None,
+        device_map: str | None = None,
     ):
         self._hmonnx_path = hmonnx
         self._onnx_graph = onnx_graph
         self._session_device_map = device_map
-        self._session_layer_infos = layer_infos
         self._enable_cuda_graph = enable_cuda_graph
         self._fast_mode = False
 
@@ -67,7 +65,6 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
             session_config.enable_auto_offload = enable_auto_offload
             session_config.exec_devices = normalized_device_map
             session_config.enable_golden = enable_golden
-            session_config.layers = self._session_layer_infos
             if self._onnx_graph is None:
                 self.hmonnx_session = HMONNXInferenceV2(self._hmonnx_path, session_config)
             else:

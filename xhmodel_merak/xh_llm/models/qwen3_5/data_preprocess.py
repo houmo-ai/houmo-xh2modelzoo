@@ -47,15 +47,8 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         vision_end_token_id: int = -1,
         spatial_merge_size: int = 2,
         patch_size: int = 16,
-        enable_page_attention: bool = False,
     ):
-        config = BaseInputProcessorConfig(
-            token_embedding,
-            input_sequence_length,
-            past_key_caches,
-            past_value_caches,
-            enable_page_attention=enable_page_attention,
-        )
+        config = BaseInputProcessorConfig(token_embedding, input_sequence_length, past_key_caches, past_value_caches)
         super().__init__(config)
         self.token_embedding = token_embedding
         self.input_sequence_length = input_sequence_length
@@ -345,18 +338,6 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         if not isinstance(self.past_recurrent_states, CacheList):
             raise ValueError(f"past_recurrent_states expected CacheList, but got {type(self.past_recurrent_states)}")
         past_conv_caches = _flatten_split_conv_cache_outputs(self.past_conv_caches)
-        if self.enable_page_attention:
-            return (
-                inputs_embeds.to(self._device),
-                time_position_ids,
-                height_position_ids,
-                width_position_ids,
-                torch.tensor([past_seq_length], dtype=torch.int32).to(self._device),
-                torch.tensor([seq_length], dtype=torch.int32).to(self._device),
-                linear_attn_mask.to(device),
-                past_conv_caches,
-                self.past_recurrent_states,
-            )
         return (
             inputs_embeds.to(self._device),
             time_position_ids,

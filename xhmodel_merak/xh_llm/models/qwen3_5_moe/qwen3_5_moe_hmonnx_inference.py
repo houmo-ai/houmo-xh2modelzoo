@@ -34,7 +34,6 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
-        self._sync_page_attention_mode_to_kvcache()
 
     @property
     def past_conv_caches(self):
@@ -186,7 +185,6 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             vision_start_token_id=self.meta_info.model_config.vision_start_token_id,
             vision_end_token_id=self.meta_info.model_config.vision_end_token_id,
             spatial_merge_size=self.meta_info.model_config.spatial_merge_size,
-            enable_page_attention=self.enable_page_attention,
         )
         return data_preprocess
 
