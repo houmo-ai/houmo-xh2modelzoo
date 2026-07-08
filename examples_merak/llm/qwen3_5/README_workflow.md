@@ -119,6 +119,24 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --export-from-quanted-model \
   --export-output-dir work_dirs/qwen3_5_export \
   --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/SGGM-VL-27B-R3.6-mode1-llm-only-W4G64 \
+  --model-name SGGM-VL-27B-R3.6 \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/SGGM-VL-27B-R3.6_export \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_9b_flashattention_fuse_gdr_export \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --overwrite
 ```
 
 代码里等价写法是：
@@ -293,6 +311,16 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
   --auto-offload \
   --cuda-graph \
   --use-v2
+
+python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
+  --config  work_dirs/qwen3_5_9b_flashattention_fuse_gdr_export/hmquant_xh2_qwen3_5_9b_w4a8_256_256k_mpe256k_448x448_20260707/golden_meta_info.json \
+  --prompt "你好，用一句话介绍北京。" \
+  --think \
+  --no-sample \
+  --max-new-tokens 20480 \
+  --auto-offload \
+  --cuda-graph \
+  --use-v2
 ```
 
 MTP/DFlash 的专项 speculative decoding 验证可以使用：
@@ -318,8 +346,10 @@ python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
 - `--dump-golden`：导出后生成 golden。
 - `--quick-test`：导出后运行 HMONNX quick test。
 - `--export-from-quanted-model`：跳过量化，直接从 `--model-dir` 指定的 HF 目录导出。
+- `--model-name`：临时覆盖 `export.model.model_name`，用于 YAML 架构相同但导出命名不同的 checkpoint；`.` 和 `-` 会归一化成 `_`。
 - `--bits`：临时覆盖 `quant.bits`。
 - `--max-size-h` / `--max-size-w`：临时覆盖 visual tower 输入尺寸。
+- `--context-max-length` / `--context-length`：临时覆盖导出最大上下文长度（`export.model.context_max_length`），并在 MTP/DFlash 配置存在时同步覆盖 draft cache 长度。
 - `--enable-flash-attention` / `--disable-flash-attention`：临时覆盖 FlashAttention 开关。
 - `--enable-fuse-gdr-ops` / `--disable-fuse-gdr-ops`：临时覆盖 GDRChunkScan fuse。
 - `--enable-fuse-gdr-block-recurrent-ops` / `--disable-fuse-gdr-block-recurrent-ops`：临时覆盖 GDRBlockTriInverse/GDRRecurrentScan fuse。

@@ -16,6 +16,15 @@ def _remove_output_dir_if_needed(output_dir: str, force: bool) -> None:
         shutil.rmtree(path)
 
 
+def _normalize_model_name(model_name: str) -> str:
+    return model_name.strip().lower().replace(".", "_").replace("-", "_")
+
+
+def _apply_model_name_override(config_overrides: dict[str, object], model_name: str | None) -> None:
+    if model_name:
+        config_overrides["export.model.model_name"] = _normalize_model_name(model_name)
+
+
 def _add_bool_override_args(
     parser: argparse.ArgumentParser,
     *,
@@ -41,6 +50,38 @@ def _add_bool_override_args(
     )
 
 
+def _config_path_exists(data: dict, path: str) -> bool:
+    current = data
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
+
+
+def _add_context_length_overrides(
+    config_overrides: dict[str, object],
+    workflow_data: dict,
+    context_max_length: int | None,
+) -> None:
+    if context_max_length is None:
+        return
+    if context_max_length <= 0:
+        raise ValueError(f"--context-max-length must be positive, got {context_max_length}")
+
+    # Keep speculative draft cache lengths aligned with the target model when
+    # those sections are present; strict WorkflowConfig overrides reject missing
+    # paths, so probe the loaded YAML before adding optional draft overrides.
+    candidate_paths = (
+        "export.model.context_max_length",
+        "export.model.mtp_config.context_max_length",
+        "export.model.dflash_config.max_sequence_length",
+    )
+    for path in candidate_paths:
+        if _config_path_exists(workflow_data, path):
+            config_overrides[path] = context_max_length
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the Qwen3.5/Qwen3.6 Merak quant/export workflow.",
@@ -49,6 +90,16 @@ def parse_args() -> argparse.Namespace:
         "--model-dir",
         required=True,
         help="HF model directory.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=None,
+        help=(
+            "Override export.model.model_name from the workflow YAML. "
+            "Use this for fine-tuned checkpoints that share the YAML architecture; "
+            "'.' and '-' are normalized to '_'. "
+            "Example: Qwen3.6-27B-mode1-llm-only."
+        ),
     )
     parser.add_argument(
         "--config-path",
@@ -108,6 +159,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="ViT input width, set this param to override config.yaml",
     )
+    parser.add_argument(
+        "--context-max-length",
+        "--context-length",
+        type=int,
+        default=None,
+        help=(
+            "LLM max context length for export; overrides "
+            "export.model.context_max_length and aligned draft cache lengths when present."
+        ),
+    )
     _add_bool_override_args(
         parser,
         dest="flash_attention",
@@ -145,16 +206,19 @@ def main() -> None:
 
     # quant
     if args.export_from_quanted_model:
+        config_overrides = {"quant": None}
+        _apply_model_name_override(config_overrides, args.model_name)
         quant_result = workflow.quant(
             output_dir=args.quant_output_dir,
             device=args.device,
             # 从已量化的 HF 模型导出，需要跳过量化阶段
-            config_overrides={"quant": None},
+            config_overrides=config_overrides,
         )
     else:
         config_overrides = {}
         if args.bits:
             config_overrides["quant.bits"] = args.bits
+        _apply_model_name_override(config_overrides, args.model_name)
         quant_result = workflow.quant(
             output_dir=args.quant_output_dir,
             device=args.device,
@@ -165,10 +229,16 @@ def main() -> None:
     # export
     _remove_output_dir_if_needed(args.export_output_dir, args.overwrite)
     config_overrides = {}
+    _apply_model_name_override(config_overrides, args.model_name)
     if args.max_size_h:
         config_overrides["export.model.visual_config.max_size_h"] = args.max_size_h
     if args.max_size_w:
         config_overrides["export.model.visual_config.max_size_w"] = args.max_size_w
+    _add_context_length_overrides(
+        config_overrides,
+        workflow.workflow_config.data,
+        args.context_max_length,
+    )
     if args.flash_attention is not None:
         config_overrides["export.model.flash_attention.enable"] = args.flash_attention
     if args.fuse_gdr_ops is not None:

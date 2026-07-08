@@ -59,3 +59,61 @@ def test_qwen35_quant_null_override_skips_quantization(tmp_path: Path):
     assert quant_result.skipped is True
     assert quant_result.raw_model_dir == str(hf_model_dir.resolve())
     assert quant_result.quanted_model_dir is None
+
+
+def test_qwen35_workflow_context_length_override_updates_target_and_draft_configs():
+    from examples_merak.llm.qwen3_5.qwen3_5_workflow import _add_context_length_overrides
+
+    workflow_data = {
+        "export": {
+            "model": {
+                "context_max_length": 2048,
+                "mtp_config": {"context_max_length": 2048},
+                "dflash_config": {"max_sequence_length": 2048},
+            }
+        }
+    }
+    overrides = {}
+
+    _add_context_length_overrides(overrides, workflow_data, 8192)
+
+    assert overrides == {
+        "export.model.context_max_length": 8192,
+        "export.model.mtp_config.context_max_length": 8192,
+        "export.model.dflash_config.max_sequence_length": 8192,
+    }
+
+
+def test_qwen35_workflow_context_length_override_skips_missing_optional_draft_configs():
+    from examples_merak.llm.qwen3_5.qwen3_5_workflow import _add_context_length_overrides
+
+    workflow_data = {"export": {"model": {"context_max_length": 2048}}}
+    overrides = {"export.model.visual_config.max_size_h": 896}
+
+    _add_context_length_overrides(overrides, workflow_data, 4096)
+
+    assert overrides == {
+        "export.model.visual_config.max_size_h": 896,
+        "export.model.context_max_length": 4096,
+    }
+
+
+def test_qwen35_workflow_parse_args_accepts_context_length_alias(monkeypatch):
+    from examples_merak.llm.qwen3_5.qwen3_5_workflow import parse_args
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "qwen3_5_workflow.py",
+            "--model-dir",
+            "hf",
+            "--config-path",
+            "config.yaml",
+            "--context-length",
+            "8192",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.context_max_length == 8192
