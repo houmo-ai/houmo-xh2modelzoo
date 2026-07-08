@@ -20,15 +20,20 @@ Qwen3-TTS 模型由 4 个子模型构成：Talker、CodePredictor、TextProjecti
 # 只导出模型
 ./qwen3tts_pipeline.sh --model 1_7B_voicedesign --export
 
+# 导出 1.7B-CustomVoice（可直接指定 Hugging Face cache snapshot）
+./qwen3tts_pipeline.sh --model 1_7B_customvoice --export \
+  --hf-model-dir /data01/home/she.gao/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe
+
 # 导出 0.6B-Base（voice-clone，需参考音频，脚本会自动下载 clone_1.wav）
 ./qwen3tts_pipeline.sh --model 0_6B_base --export --test-hmonnx
 
-# 同时处理多个模型（可选 1_7B_voicedesign / 0_6B_customvoice / 0_6B_base）
-./qwen3tts_pipeline.sh --model 1_7B_voicedesign,0_6B_customvoice,0_6B_base --export --test-hmonnx
+# 同时处理多个模型（可选 1_7B_voicedesign / 1_7B_customvoice / 0_6B_customvoice / 0_6B_base）
+./qwen3tts_pipeline.sh --model 1_7B_voicedesign,1_7B_customvoice,0_6B_customvoice,0_6B_base --export --test-hmonnx
 ```
 
-> `--model` 取值与 `--variant` 一致：`1_7B_voicedesign` / `0_6B_customvoice` / `0_6B_base`；
-> 也接受短别名 `1.7b` / `0.6b` / `0.6b-base`。
+> `--model` 取值与 `--variant` 一致：`1_7B_voicedesign` / `1_7B_customvoice` / `0_6B_customvoice` / `0_6B_base`；
+> 也接受短别名 `1.7b` / `1.7b-custom` / `0.6b` / `0.6b-base`。
+> `--hf-model-dir` 可覆盖默认模型目录，适合直接传 Hugging Face cache snapshot。
 
 **支持的操作**：
 - `--export`: 导出 HMONNX 模型（主链路 4 个子模型；`0_6B_base` 会额外导出 voice-clone frontend）
@@ -424,8 +429,8 @@ qwen3tts_eval_zh/
 
 ## HMONNX 导出和推理
 
-三个变体（1.7B-VoiceDesign / 0.6B-CustomVoice / 0.6B-Base）共用同一套导出/推理脚本和
-config，通过 `--variant {1_7B_voicedesign,0_6B_customvoice,0_6B_base}` 切换。导出脚本用 `--name` 指定产物目录名
+四个变体（1.7B-VoiceDesign / 1.7B-CustomVoice / 0.6B-CustomVoice / 0.6B-Base）共用同一套导出/推理脚本和
+config，通过 `--variant {1_7B_voicedesign,1_7B_customvoice,0_6B_customvoice,0_6B_base}` 切换。导出脚本用 `--name` 指定产物目录名
 （缺省为 config 文件名）。`--variant` 会把对应的 `hf_model` / `tts_mode` /
 （ref_audio/ref_text 或 tts_speaker 或 tts_instruct）注入到解析后的 config，
 具体取值集中维护在 `config/llm/_components.py` 的 `VARIANTS` / `WORKNAME` 表中。
@@ -471,6 +476,7 @@ python qwen3_tts_speech_tokenizer_export.py \
 ```
 
 其它变体把 `--variant` 和 `--name` 换成对应值即可（产物目录名见 `_components.py` 的 `WORKNAME`）：
+- **1.7B-CustomVoice**：`--variant 1_7B_customvoice`，`--name qwen3_tts_12hz_1_7B_customvoice_{talker_2k,code_predictor_2k,text_projection,speech_tokenizer}_xh2a`。如模型只在 HF cache 中，可额外传 `--hf-model-dir <snapshot_dir>`。
 - **1.7B-VoiceDesign**：`--variant 1_7B_voicedesign`，`--name qwen3_tts_12hz_1_7B_voicedesign_{talker_2k,code_predictor_2k}_xh2a` 及 `qwen3_tts_12hz_1_7B_{text_projection,speech_tokenizer}_xh2a`（注意 1.7B 的 text_projection/speech_tokenizer 命名不带 `voicedesign`）。
 - **0.6B-Base**：`--variant 0_6B_base`，`--name qwen3_tts_12hz_0_6B_base_{talker_2k,code_predictor_2k,text_projection,speech_tokenizer}_xh2a`；voice-clone 前端另导出到 `qwen3_tts_12hz_0_6B_base_frontend_xh2a`，包含 `speech_tokenizer.encode` 和 `speaker_encoder`。
 
@@ -682,6 +688,7 @@ python eval/qwen3_tts_streaming_demo.py \
 |------|--------|------|---------|------|
 | Qwen3-TTS-12Hz-0.6B-Base | 0.6B | Base | voice-clone | `./data/models/Qwen3-TTS-12Hz-0.6B-Base/` |
 | Qwen3-TTS-12Hz-0.6B-CustomVoice | 0.6B | CustomVoice | custom-voice | `./data/models/Qwen3-TTS-12Hz-0.6B-CustomVoice/` |
+| Qwen3-TTS-12Hz-1.7B-CustomVoice | 1.7B | CustomVoice | custom-voice | `./data/models/Qwen3-TTS-12Hz-1.7B-CustomVoice/` |
 | Qwen3-TTS-12Hz-1.7B-VoiceDesign | 1.7B | VoiceDesign | voice-design | `./data/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign/` |
 
 所有模型路径均为软链接，指向 HuggingFace cache 目录。

@@ -66,12 +66,18 @@ VARIANTS = {
         tts_mode="custom_voice",
         tts_speaker="vivian",
     ),
+    "1_7B_customvoice": dict(
+        hf_model_dir="./data/models/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        tts_mode="custom_voice",
+        tts_speaker="vivian",
+    ),
     "1_7B_voicedesign": dict(
         hf_model_dir="./data/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         tts_mode="voice_design",
         tts_instruct="体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。",
     ),
 }
+VARIANT_CHOICES = tuple(VARIANTS.keys())
 
 # Shared target text (identical across variants)
 TTS_TEXT = "基于先进的存算一体技术和存储工艺，后摩智能致力于突破芯片的性能与功耗瓶颈，加速人工智能技术的普惠落地"
@@ -96,6 +102,12 @@ WORKNAME = {
         "code_predictor": "qwen3_tts_12hz_0_6B_customvoice_code_predictor_2k_xh2a",
         "text_projection": "qwen3_tts_12hz_0_6B_customvoice_text_projection_xh2a",
         "speech_tokenizer": "qwen3_tts_12hz_0_6B_customvoice_speech_tokenizer_xh2a",
+    },
+    "1_7B_customvoice": {
+        "talker": "qwen3_tts_12hz_1_7B_customvoice_talker_2k_xh2a",
+        "code_predictor": "qwen3_tts_12hz_1_7B_customvoice_code_predictor_2k_xh2a",
+        "text_projection": "qwen3_tts_12hz_1_7B_customvoice_text_projection_xh2a",
+        "speech_tokenizer": "qwen3_tts_12hz_1_7B_customvoice_speech_tokenizer_xh2a",
     },
     "1_7B_voicedesign": {
         # Note: 1.7B talker/code_predictor carry "voicedesign", while
@@ -125,6 +137,16 @@ def apply_variant(cfg, variant):
     for k, val in v.items():
         if k not in ("hf_model_dir", "tts_mode"):
             cfg[k] = val
+    return cfg
+
+
+def apply_hf_model_dir_override(cfg, hf_model_dir):
+    """Override the HF model path after applying a variant."""
+    if not hf_model_dir:
+        return cfg
+    cfg.hf_model_dir = hf_model_dir
+    if "model" in cfg and cfg.model is not None and "hf_model" in cfg.model:
+        cfg.model.hf_model = hf_model_dir
     return cfg
 
 

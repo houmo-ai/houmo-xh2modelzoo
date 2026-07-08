@@ -219,6 +219,9 @@ def main(args: argparse.Namespace) -> None:
     if getattr(args, "variant", None):
         from config.llm._components import apply_variant_hmonnx
         apply_variant_hmonnx(cfg, args.variant)
+    if getattr(args, "hf_model_dir", None):
+        from config.llm._components import apply_hf_model_dir_override
+        apply_hf_model_dir_override(cfg, args.hf_model_dir)
     cfg.work_dir = args.work_dir
     cfg_name = Path(args.config).stem
     log_file = Path(cfg.work_dir) / f"{cfg_name}_debug.log"
@@ -254,8 +257,10 @@ if __name__ == "__main__":
         default="./config/llm/qwen3_tts_12hz_xh2a_hmonnx.py",
         help="HMONNX config (unified; pick variant with --variant)",
     )
-    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"], default=None,
+    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"], default=None,
                         help="TTS variant; injects work_dirs paths + hf_model/tts_mode into the parsed config")
+    parser.add_argument("--hf-model-dir", type=str, default=None,
+                        help="override HF model directory, e.g. a Hugging Face cache snapshot")
     parser.add_argument("--name", type=str, default=None,
                         help="scratch work_dir name; defaults to '<config stem>_<variant>' to avoid clashes")
     parser.add_argument("--seed", type=int, default=1024)

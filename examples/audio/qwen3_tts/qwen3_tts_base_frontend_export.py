@@ -321,7 +321,7 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", type=str, default="./config/llm/qwen3_tts_12hz_speech_tokenizer_xh2a.py")
-    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"], default="0_6B_base")
+    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"], default="0_6B_base")
     parser.add_argument("--hf-model-dir", type=str, default=None)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--work-dir", type=str, default=None)

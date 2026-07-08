@@ -292,6 +292,9 @@ def main(args: argparse.Namespace) -> None:
     if getattr(args, "variant", None):
         from config.llm._components import apply_variant
         apply_variant(cfg, args.variant)
+    if getattr(args, "hf_model_dir", None):
+        from config.llm._components import apply_hf_model_dir_override
+        apply_hf_model_dir_override(cfg, args.hf_model_dir)
     cfg.work_dir = args.work_dir
     cfg_name = Path(args.config).stem
     log_file = Path(cfg.work_dir) / f"{cfg_name}_debug.log"
@@ -334,8 +337,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--golden-device", type=str, default="cuda", help="device for golden inference"
     )
-    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"], default=None,
+    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"], default=None,
                         help="TTS variant; injects hf_model/tts_mode into the parsed config")
+    parser.add_argument("--hf-model-dir", type=str, default=None,
+                        help="override HF model directory, e.g. a Hugging Face cache snapshot")
     parser.add_argument("--name", type=str, default=None,
                         help="explicit work_dir name & product prefix; defaults to config stem")
 

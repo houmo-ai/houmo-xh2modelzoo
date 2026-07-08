@@ -461,8 +461,9 @@ def worker_hmonnx(rank: int, gpus_to_use: List[int], args: argparse.Namespace,
     # load config and model
     cfg = Config.fromfile(args.hmonnx_config)
     if getattr(args, "variant", None):
-        from config.llm._components import apply_variant_hmonnx
+        from config.llm._components import apply_hf_model_dir_override, apply_variant_hmonnx
         apply_variant_hmonnx(cfg, args.variant)
+        apply_hf_model_dir_override(cfg, args.hf_model)
     model = MODELS.build(cfg.model)
     assert isinstance(model, Qwen3TTSHMONNXInference)
     model.to(device)
@@ -706,7 +707,7 @@ def parse_arguments():
     parser.add_argument(
         "--variant",
         type=str,
-        choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"],
+        choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"],
         default=None,
         help="TTS variant; injects work_dirs paths into the unified hmonnx config"
     )

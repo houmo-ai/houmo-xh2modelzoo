@@ -68,6 +68,10 @@ VARIANT_ALIASES = {
     "cv": "0_6B_customvoice",
     "0_6b_customvoice": "0_6B_customvoice",
     "0_6B_customvoice": "0_6B_customvoice",
+    "1_7b_customvoice": "1_7B_customvoice",
+    "1_7B_customvoice": "1_7B_customvoice",
+    "1.7b-custom": "1_7B_customvoice",
+    "1.7b-customvoice": "1_7B_customvoice",
     "base": "0_6B_base",
     "voiceclone": "0_6B_base",
     "voice_clone": "0_6B_base",
@@ -869,10 +873,11 @@ def _build_stateful_decoder(args: argparse.Namespace, logger, device: str):
 
 def main(args: argparse.Namespace) -> None:
     cfg = Config.fromfile(args.config)
-    from config.llm._components import apply_variant_hmonnx
+    from config.llm._components import apply_hf_model_dir_override, apply_variant_hmonnx
 
     variant = _normalize_variant(args.variant)
     apply_variant_hmonnx(cfg, variant)
+    apply_hf_model_dir_override(cfg, args.hf_model_dir)
     cfg.work_dir = args.work_dir
     cfg_name = Path(args.config).stem
     log_file = Path(cfg.work_dir) / f"{cfg_name}_streaming_debug.log"
@@ -998,10 +1003,17 @@ if __name__ == "__main__":
             "voice_clone",
             "voice_design",
             "0_6B_customvoice",
+            "1_7B_customvoice",
             "0_6B_base",
             "1_7B_voicedesign",
         ],
         help="Qwen3-TTS variant/task family",
+    )
+    parser.add_argument(
+        "--hf-model-dir",
+        type=str,
+        default=None,
+        help="override HF model directory for the selected variant",
     )
     parser.add_argument(
         "--text",

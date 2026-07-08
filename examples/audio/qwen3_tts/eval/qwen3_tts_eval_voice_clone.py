@@ -579,7 +579,7 @@ def parse_arguments():
     parser.add_argument(
         "--variant",
         type=str,
-        choices=["0_6B_base", "0_6B_customvoice", "1_7B_voicedesign"],
+        choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"],
         default="0_6B_base",
         help="TTS variant; injects work_dirs paths into the unified hmonnx config"
     )
