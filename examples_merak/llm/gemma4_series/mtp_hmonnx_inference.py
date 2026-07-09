@@ -37,7 +37,6 @@ EXPECTED_DRAFT_INPUTS = [
     "valid_length",
     "current_length",
     "sliding_attention_mask",
-    "full_attention_mask",
     "shared_key_cache_sliding",
     "shared_value_cache_sliding",
     "shared_key_cache_full",
@@ -337,8 +336,6 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
             )
     if _onnx_value_shape(draft_model, "sliding_attention_mask")[-1] != target_shared_shapes["shared_key_cache_sliding"][2]:
         raise AssertionError(f"{preset.name}: draft sliding mask width does not match shared sliding KV length")
-    if _onnx_value_shape(draft_model, "full_attention_mask")[-1] != target_shared_shapes["shared_key_cache_full"][2]:
-        raise AssertionError(f"{preset.name}: draft full mask width does not match shared full KV length")
     kv_nodes = _kv_nodes(draft_model)
     if len(kv_nodes) != 4:
         raise AssertionError(f"{preset.name}: expected 4 KVcache nodes, got {len(kv_nodes)}")
@@ -515,7 +512,6 @@ class TorchAssistantDraftSession:
             "valid_length": SimpleNamespace(shape=(1,), dtype=torch.int32),
             "current_length": SimpleNamespace(shape=(1,), dtype=torch.int32),
             "sliding_attention_mask": SimpleNamespace(shape=(1, 1, input_sequence_length, shared_sliding), dtype=dtype),
-            "full_attention_mask": SimpleNamespace(shape=(1, 1, input_sequence_length, shared_full), dtype=dtype),
             "shared_key_cache_sliding": SimpleNamespace(
                 shape=(1, sliding_heads, shared_sliding, sliding_dim), dtype=dtype
             ),
@@ -556,7 +552,6 @@ class TorchAssistantDraftSession:
             feed["valid_length"],
             feed["current_length"],
             feed["sliding_attention_mask"],
-            feed["full_attention_mask"],
             feed["shared_key_cache_sliding"],
             feed["shared_value_cache_sliding"],
             feed["shared_key_cache_full"],
@@ -1057,7 +1052,6 @@ def _build_draft_masks(
     assistant_session: AssistantDraftSession,
     cache_valid_length: int | None = None,
     *,
-    full_valid_length: int | None = None,
     sliding_valid_length: int | None = None,
 ):
     import torch
@@ -1068,18 +1062,9 @@ def _build_draft_masks(
     model_config = target_model.meta_info.model_config
     sliding_window = int(getattr(target_model, "sliding_window", getattr(model_config, "sliding_window", 1024)) or 1024)
     sliding_width = int(assistant_session.input_infos["sliding_attention_mask"].shape[-1])
-    full_width = int(assistant_session.input_infos["full_attention_mask"].shape[-1])
-    full_mask = torch.full((1, 1, 1, full_width), neg, dtype=dtype, device=device)
     sliding_mask = torch.full((1, 1, 1, sliding_width), neg, dtype=dtype, device=device)
-    if full_valid_length is None:
-        full_valid_length = int(cache_valid_length or 0)
     if sliding_valid_length is None:
         sliding_valid_length = int(cache_valid_length or 0)
-
-    # Full/shared target KV is preallocated to context length.  MTP draft does
-    # not update that cache, so the padded tail must be masked externally.
-    full_valid = min(full_width, max(1, int(full_valid_length)))
-    full_mask[0, 0, 0, :full_valid] = 0
 
     # Sliding shared KV is already in LLMCache's compact local coordinates.
     # Expose the suffix ending at its HybridCacheTensor cache_valid_len.  This
@@ -1092,7 +1077,7 @@ def _build_draft_masks(
         sliding_mask[0, 0, 0, 0] = 0
     else:
         sliding_mask[0, 0, 0, sliding_start:sliding_end] = 0
-    return full_mask, sliding_mask
+    return sliding_mask
 
 
 def _hmonnx_shared_cache_valid_lengths(target_model, fallback_full_valid: int) -> tuple[int, int]:
@@ -1114,7 +1099,6 @@ def _build_assistant_inputs(
     position_index: int,
     cache_valid_length: int | None = None,
     *,
-    full_valid_length: int | None = None,
     sliding_valid_length: int | None = None,
 ):
     import torch
@@ -1123,22 +1107,21 @@ def _build_assistant_inputs(
     token = torch.tensor([[int(last_token_id)]], dtype=torch.long, device=device)
     token_embed = target_model.get_input_embeddings().to(device)(token).to(dtype=current_hidden.dtype)
     inputs_embeds = torch.cat([token_embed, current_hidden], dim=-1)
-    full_mask, sliding_mask = _build_draft_masks(
+    sliding_mask = _build_draft_masks(
         target_model,
         assistant_session,
         cache_valid_length,
-        full_valid_length=full_valid_length,
         sliding_valid_length=sliding_valid_length,
     )
+    draft_valid_length = max(int(position_index) - 1, 0)
     return {
         "inputs_embeds": inputs_embeds,
-        # Gemma4 assistant export uses DynamicSlice on RoPE tables keyed by
-        # this integer.  Match vLLM's MTP forward contract: each draft step
-        # receives the position of the token currently fed to the draft model.
-        "past_seq_length": torch.tensor([int(position_index)], dtype=torch.int32, device=device),
+        # Full-attention draft no longer feeds a context-length full mask.
+        # xhquant/compiler MaskedSoftmax exposes valid_length + 1 positions for
+        # q=1, so pass N-1 to expose the N valid keys already in the target KV.
+        "past_seq_length": torch.tensor([draft_valid_length], dtype=torch.int32, device=device),
         "current_length": torch.tensor([1], dtype=torch.int32, device=device),
         "sliding_attention_mask": sliding_mask,
-        "full_attention_mask": full_mask,
         **shared,
     }
 
@@ -1187,11 +1170,11 @@ def generate_with_mtp(
         draft_tokens: list[int] = []
         assistant_hidden = last_hidden
         assistant_last_token_id = int(current_token_id)
-        # The draft RoPE position is the position of the token currently fed to
-        # the assistant.  The target cache contains the prefix before that token,
-        # so after prefill length N the first sampled token is at position N.
+        # The draft full-attention MaskedSoftmax sees q=1 and exposes
+        # valid_length + 1 K positions, so the helper below passes
+        # (base_position + draft_step - 1) as the graph valid_length.
         base_position = max(int(past_seq_length), 0)
-        full_valid_length, sliding_valid_length = _hmonnx_shared_cache_valid_lengths(target_model, past_seq_length)
+        _, sliding_valid_length = _hmonnx_shared_cache_valid_lengths(target_model, past_seq_length)
         for draft_step in range(num_draft_tokens):
             round_inputs = _build_assistant_inputs(
                 target_model=target_model,
@@ -1200,7 +1183,6 @@ def generate_with_mtp(
                 current_hidden=assistant_hidden,
                 shared=shared,
                 position_index=base_position + draft_step,
-                full_valid_length=full_valid_length,
                 sliding_valid_length=sliding_valid_length,
             )
             draft_logits, assistant_hidden = assistant_session(**round_inputs)
@@ -1363,7 +1345,16 @@ def run_generate(args: argparse.Namespace) -> None:
     target_model_dir = args.target_model_dir or str(meta.get("model_config", {}).get("hf_model") or default_target_dir)
     assistant_model_dir = args.assistant_model_dir or default_assistant_dir
     if args.target_backend == "hmonnx":
-        target_model = AutoLLMHONNXModel.from_pretrained(str(meta_path))
+        target_model = AutoLLMHONNXModel.from_pretrained(
+            str(meta_path),
+            enable_cuda_graph=args.enable_cuda_graph,
+            enable_prefill_cuda_graph=False if args.disable_prefill_cuda_graph else None,
+            enable_decode_cuda_graph=False if args.disable_decode_cuda_graph else None,
+            enable_auto_offload=args.enable_auto_offload,
+            device_map=args.device_map,
+        )
+        if args.enable_auto_offload and hasattr(target_model, "enable_auto_offload"):
+            target_model.enable_auto_offload = True
         target_model.to(device)
         tokenizer = target_model.get_tokenizer(trust_remote_code=True)
     else:
@@ -1475,6 +1466,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_gen.add_argument("--max-new-tokens", type=int, default=32)
     p_gen.add_argument("--num-draft-tokens", type=int, default=4)
     p_gen.add_argument("--device", default="cuda:0")
+    p_gen.add_argument(
+        "--device-map",
+        nargs="+",
+        default=None,
+        help="Device map passed to target HMONNX runtime; e.g. --device-map cuda:0 cpu for auto offload.",
+    )
+    p_gen.add_argument(
+        "--enable-cuda-graph",
+        action="store_true",
+        help="Enable target HMONNX CUDA graph execution when supported by the selected runtime.",
+    )
+    p_gen.add_argument(
+        "--disable-prefill-cuda-graph",
+        action="store_true",
+        help="Keep target prefill out of CUDA graph while preserving --enable-cuda-graph for decode.",
+    )
+    p_gen.add_argument(
+        "--disable-decode-cuda-graph",
+        action="store_true",
+        help="Keep target decode out of CUDA graph while preserving --enable-cuda-graph for prefill.",
+    )
+    p_gen.add_argument(
+        "--enable-auto-offload",
+        action="store_true",
+        help="Enable target HMONNX auto offload; intended for HMONNXInferenceV2 large-model runs.",
+    )
     p_gen.add_argument("--target-backend", choices=["hmonnx", "torch"], default="hmonnx")
     p_gen.add_argument("--target-dtype", default="float16", help="dtype for --target-backend torch")
     p_gen.add_argument("--draft-backend", choices=["hmonnx", "torch"], default="hmonnx")

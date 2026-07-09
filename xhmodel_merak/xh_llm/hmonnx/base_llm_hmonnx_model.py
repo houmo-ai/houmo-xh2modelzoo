@@ -31,6 +31,8 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         enable_cuda_graph=False,
         enable_auto_offload=False,
         enable_golden=False,
+        enable_prefill_cuda_graph: bool | None = None,
+        enable_decode_cuda_graph: bool | None = None,
         enable_page_attention: bool = False,
         **kwargs,
     ):
@@ -58,11 +60,13 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             llm_loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
             prefill_graph = llm_loader.prefill_graph
             decode_graph = llm_loader.decode_graph
+        prefill_cuda_graph = enable_cuda_graph if enable_prefill_cuda_graph is None else enable_prefill_cuda_graph
+        decode_cuda_graph = enable_cuda_graph if enable_decode_cuda_graph is None else enable_decode_cuda_graph
 
         self.prefill_model = HMONNXModel(
             prefill_hmonnx,
             onnx_graph=prefill_graph,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_cuda_graph=prefill_cuda_graph,
             enable_auto_offload=enable_auto_offload,
             enable_golden=enable_golden,
             device_map=self._valid_devices,
@@ -76,7 +80,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             decode_hmonnx,
             onnx_graph=decode_graph,
             enable_golden=enable_golden,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_cuda_graph=decode_cuda_graph,
             enable_auto_offload=enable_auto_offload,
             device_map=self._valid_devices,
             layer_infos=layer_infos,
