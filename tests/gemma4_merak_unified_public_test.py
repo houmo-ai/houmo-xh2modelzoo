@@ -1212,17 +1212,16 @@ def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_
     inputs = model.prepare_inputs(None)
 
     assert captured["max_position_embeddings"] == 262144
-    assert model.export_cfg["input_names"][:5] == [
+    assert model.export_cfg["input_names"][:4] == [
         "inputs_embeds",
         "past_seq_length",
         "current_input_length",
         "sliding_attention_mask",
-        "full_attention_mask",
     ]
+    assert "full_attention_mask" not in model.export_cfg["input_names"]
     assert inputs[3].shape == (1, 1, 1, 1024)
-    assert inputs[4].shape == (1, 1, 1, 2048)
-    assert inputs[5].shape == (1, 2, 1024, 16)
-    assert inputs[7].shape == (1, 1, 2048, 32)
+    assert inputs[4].shape == (1, 2, 1024, 16)
+    assert inputs[6].shape == (1, 1, 2048, 32)
 
 
 
@@ -2075,22 +2074,74 @@ def test_gemma4_series_draft_mask_uses_shared_sliding_tail():
     assistant_session = SimpleNamespace(
         input_infos={
             "sliding_attention_mask": SimpleNamespace(shape=(1, 1, 1, 8)),
-            "full_attention_mask": SimpleNamespace(shape=(1, 1, 1, 16)),
         }
     )
 
-    full_mask, sliding_mask = _build_draft_masks(
+    sliding_mask = _build_draft_masks(
         target_model,
         assistant_session,
-        full_valid_length=8,
         sliding_valid_length=6,
     )
 
-    assert torch.all(full_mask[0, 0, 0, :8] == 0)
-    assert torch.all(full_mask[0, 0, 0, 8:] < 0)
     assert torch.all(sliding_mask[0, 0, 0, 2:6] == 0)
     assert torch.all(sliding_mask[0, 0, 0, :2] < 0)
     assert torch.all(sliding_mask[0, 0, 0, 6:] < 0)
+
+
+def test_gemma4_series_draft_inputs_use_masksoftmax_valid_length_minus_one():
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import _build_assistant_inputs
+
+    class TinyTarget:
+        dtype = torch.float16
+        device = torch.device("cpu")
+        sliding_window = 4
+        meta_info = SimpleNamespace(model_config=SimpleNamespace(sliding_window=4))
+
+        def get_input_embeddings(self):
+            embedding = nn.Embedding(16, 4)
+            with torch.no_grad():
+                embedding.weight.zero_()
+            return embedding
+
+    assistant_session = SimpleNamespace(
+        input_infos={
+            "sliding_attention_mask": SimpleNamespace(shape=(1, 1, 1, 8)),
+        }
+    )
+    shared = {
+        "shared_key_cache_sliding": torch.zeros((1, 1, 8, 2), dtype=torch.float16),
+        "shared_value_cache_sliding": torch.zeros((1, 1, 8, 2), dtype=torch.float16),
+        "shared_key_cache_full": torch.zeros((1, 1, 16, 2), dtype=torch.float16),
+        "shared_value_cache_full": torch.zeros((1, 1, 16, 2), dtype=torch.float16),
+    }
+
+    inputs = _build_assistant_inputs(
+        target_model=TinyTarget(),
+        assistant_session=assistant_session,
+        last_token_id=1,
+        current_hidden=torch.zeros((1, 1, 4), dtype=torch.float16),
+        shared=shared,
+        position_index=8,
+        sliding_valid_length=6,
+    )
+
+    assert inputs["past_seq_length"].item() == 7
+    assert inputs["current_length"].item() == 1
+    assert "full_attention_mask" not in inputs
+
+
+def test_gemma4_series_masked_softmax_q1_valid_length_exposes_n_keys():
+    from xhquant.nn import MaskedSoftmax
+
+    logits = torch.tensor([[[[0.0, 1.0, 2.0, 3.0, 4.0]]]], dtype=torch.float16)
+    output = MaskedSoftmax(dim=-1, attention_max_length=-1)(
+        logits,
+        torch.tensor([2], dtype=torch.int32),
+    )
+
+    expected = torch.softmax(logits[..., :3], dim=-1)
+    assert torch.allclose(output[..., :3], expected, atol=1e-3, rtol=1e-3)
+    assert torch.all(output[..., 3:] == 0)
 
 
 def test_gemma4_series_hmonnx_shared_cache_indices_use_cache_list_metadata():

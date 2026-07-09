@@ -453,18 +453,26 @@ class Gemma4AssistantBackbone(nn.Module):
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
         sliding_attention_mask: torch.Tensor,
-        full_attention_mask: torch.Tensor,
         shared_key_cache_sliding: torch.Tensor,
         shared_value_cache_sliding: torch.Tensor,
         shared_key_cache_full: torch.Tensor,
         shared_value_cache_full: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
-        full_pos = self._get_position_embeddings(past_seq_length, "full_attention")
-        sliding_pos = self._get_position_embeddings(past_seq_length, "sliding_attention")
+        # The MTP draft graph receives q=1.  For MaskedSoftmax, valid_length
+        # must be one less than the visible KV count because the compiler masks
+        # q=1 with valid_length + 1.  RoPE still needs the actual token position,
+        # so recover it with valid_length + current_length.
+        position_index = past_seq_length + current_input_length
+        full_pos = self._get_position_embeddings(position_index, "full_attention")
+        sliding_pos = self._get_position_embeddings(position_index, "sliding_attention")
         for layer in self.layers:
             if layer.layer_type == "full_attention":
-                attention_mask = full_attention_mask
+                # MTP draft decodes one token at a time and the read-only full
+                # KV cache is already bounded by past_seq_length.  Let
+                # MaskedSoftmax produce the decode mask instead of exporting a
+                # context-length full_attention_mask input.
+                attention_mask = None
                 position_embeddings = full_pos
                 shared_key_cache = shared_key_cache_full
                 shared_value_cache = shared_value_cache_full
@@ -577,7 +585,6 @@ class Gemma4AssistantDraftModule(nn.Module):
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
         sliding_attention_mask: torch.Tensor,
-        full_attention_mask: torch.Tensor,
         shared_key_cache_sliding: torch.Tensor,
         shared_value_cache_sliding: torch.Tensor,
         shared_key_cache_full: torch.Tensor,
@@ -589,7 +596,6 @@ class Gemma4AssistantDraftModule(nn.Module):
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
             sliding_attention_mask=sliding_attention_mask,
-            full_attention_mask=full_attention_mask,
             shared_key_cache_sliding=shared_key_cache_sliding,
             shared_value_cache_sliding=shared_value_cache_sliding,
             shared_key_cache_full=shared_key_cache_full,
@@ -623,7 +629,6 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                 "past_seq_length",
                 "current_input_length",
                 "sliding_attention_mask",
-                "full_attention_mask",
                 "shared_key_cache_sliding",
                 "shared_value_cache_sliding",
                 "shared_key_cache_full",
@@ -695,10 +700,6 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                     (1, 1, input_sequence_length, shared_sliding_cache_length),
                     dtype=dtype,
                 ),
-                full_attention_mask=torch.zeros(
-                    (1, 1, input_sequence_length, shared_full_cache_length),
-                    dtype=dtype,
-                ),
                 shared_key_cache_sliding=torch.zeros(
                     (
                         1,
@@ -732,7 +733,6 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
             data["past_seq_length"],
             data["current_input_length"],
             data["sliding_attention_mask"],
-            data["full_attention_mask"],
             data["shared_key_cache_sliding"],
             data["shared_value_cache_sliding"],
             data["shared_key_cache_full"],
