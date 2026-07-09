@@ -217,7 +217,8 @@ class LLMConverter:
 
             converter_cls = DeepSeekV2ConverterXH2a
         elif architecture == "Qwen3Embedding":
-            from .models.qwen3_embeding.qwen3_embeding_converter import Qwen3EmbeddingConverterXH2a
+            # from .models.qwen3_embeding.qwen3_embeding_converter import Qwen3EmbeddingConverterXH2a
+            from .models.qwen3_embedding.qwen3_embedding_converter import Qwen3EmbeddingConverterXH2a
 
             converter_cls = Qwen3EmbeddingConverterXH2a
         elif architecture == "FM9GForCausalLM":
