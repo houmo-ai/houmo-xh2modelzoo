@@ -15,8 +15,7 @@ from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_hmonnx_inference im
 )
 from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import _gemma4_runtime_prefill_length
 from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
-    DEFAULT_DENSE_CALIBRATION_JSONL,
-    DEFAULT_MOE_CALIBRATION_JSONL,
+    DEFAULT_AUTOROUND_DATASET,
 )
 
 
@@ -80,6 +79,26 @@ def test_gemma4_prefill_path_resolves_from_absolute_prefill_path():
         _gemma4_prefill_graph_hmonnx_from_meta(meta, "prefill_mm")
 
 
+def test_gemma4_mtp_resolve_model_path_uses_cwd_for_relative_paths(tmp_path, monkeypatch):
+    from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import resolve_model_path
+
+    project_dir = tmp_path / "customer_project"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+
+    assert resolve_model_path("weights/gemma-4-E2B-it-assistant") == (
+        project_dir / "weights/gemma-4-E2B-it-assistant"
+    ).resolve()
+
+
+def test_gemma4_mtp_resolve_model_path_preserves_absolute_paths(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import resolve_model_path
+
+    absolute_model_dir = tmp_path / "weights" / "gemma-4-E2B-it-assistant"
+
+    assert resolve_model_path(str(absolute_model_dir)) == absolute_model_dir.resolve()
+
+
 def test_gemma4_series_workflow_yamls_use_single_prefill_and_stable_autoround_jsonl():
     config_root = Path("configs_merak/workflows/xh2a/llm_models/gemma4_series")
     yaml_files = sorted(config_root.glob("*/*.yaml"))
@@ -94,12 +113,7 @@ def test_gemma4_series_workflow_yamls_use_single_prefill_and_stable_autoround_js
         if str(quant_cfg.get("method", "")).lower() == "autoround":
             calibration_cfg = quant_cfg["calibration"]
             assert "dataset" not in calibration_cfg, yaml_file.as_posix()
-            expected_jsonl = (
-                DEFAULT_MOE_CALIBRATION_JSONL
-                if "26b_a4b" in yaml_file.as_posix()
-                else DEFAULT_DENSE_CALIBRATION_JSONL
-            )
-            assert calibration_cfg["jsonl"] == expected_jsonl, yaml_file.as_posix()
+            assert calibration_cfg["jsonl"] == DEFAULT_AUTOROUND_DATASET, yaml_file.as_posix()
 
 
 def test_gemma4_series_workflow_help_and_template_use_single_prefill(tmp_path):

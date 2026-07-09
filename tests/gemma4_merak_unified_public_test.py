@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -12,6 +13,7 @@ def _local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     return dataset
 
@@ -24,6 +26,7 @@ def test_gemma4_autoround_default_dataset_finds_data_calib_data(tmp_path, monkey
     dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
     assert _resolve_autoround_dataset_value("NeelNanda/pile-10k") == str(dataset.resolve())
@@ -111,7 +114,7 @@ def test_gemma4_series_config_defaults_to_single_prefill_320_and_rejects_legacy_
     assert default_config.prefill_chunk_length == 320
     assert not hasattr(default_config, "mm_prefill_chunk_length")
 
-    for prefill_chunk_length in (280, 320):
+    for prefill_chunk_length in (256, 280, 320):
         configured = XHGemma4SeriesModelConfig(
             model_name=f"gemma4_single_prefill_{prefill_chunk_length}",
             model_type="Gemma4ForConditionalGeneration",
@@ -119,13 +122,14 @@ def test_gemma4_series_config_defaults_to_single_prefill_320_and_rejects_legacy_
             prefill_chunk_length=prefill_chunk_length,
         )
         assert configured.prefill_chunk_length == prefill_chunk_length
+        assert configured.bidirectional_vision_attention is False
 
-    with pytest.raises(ValueError, match="prefill_chunk_length must be >= 280"):
+    with pytest.raises(ValueError, match="prefill_chunk_length must be positive"):
         XHGemma4SeriesModelConfig(
-            model_name="gemma4_short_prefill",
+            model_name="gemma4_zero_prefill",
             model_type="Gemma4ForConditionalGeneration",
             hf_model=None,
-            prefill_chunk_length=256,
+            prefill_chunk_length=0,
         )
 
     with pytest.raises(ValueError, match="no longer supports mm_prefill_chunk_length/prefill_mm"):
@@ -136,6 +140,45 @@ def test_gemma4_series_config_defaults_to_single_prefill_320_and_rejects_legacy_
             prefill_chunk_length=320,
             mm_prefill_chunk_length=320,
         )
+
+
+def test_gemma4_series_config_rejects_short_prefill_for_bidirectional_vision(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.xh_gemma4_series_config import (
+        XHGemma4SeriesModelConfig,
+    )
+
+    model_dir = tmp_path / "gemma4_bidirectional"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "text_config": {
+                    "use_bidirectional_attention": "vision",
+                    "sliding_window": 1024,
+                },
+                "vision_config": {"hidden_size": 1152},
+                "image_token_id": 262144,
+                "video_token_id": 262145,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bidirectional vision attention requires prefill_chunk_length >= 280"):
+        XHGemma4SeriesModelConfig(
+            model_name="gemma4_bidirectional_short_prefill",
+            model_type="Gemma4ForConditionalGeneration",
+            hf_model=str(model_dir),
+            prefill_chunk_length=256,
+        )
+
+    configured = XHGemma4SeriesModelConfig(
+        model_name="gemma4_bidirectional_valid_prefill",
+        model_type="Gemma4ForConditionalGeneration",
+        hf_model=str(model_dir),
+        prefill_chunk_length=280,
+    )
+    assert configured.bidirectional_vision_attention is True
 
 
 def test_gemma4_series_bidirectional_vision_prefill_exports_no_full_attention_mask():
@@ -1375,7 +1418,10 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     (hm_dir / "prefill.onnx").write_text("prefill", encoding="utf-8")
     meta_path = hm_dir / "golden_meta_info.json"
     target_dir = tmp_path / "base"
+    assistant_dir = tmp_path / "assistant"
     target_dir.mkdir()
+    assistant_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
     (target_dir / "config.json").write_text(
         json.dumps({"text_config": {"max_position_embeddings": 262144}}),
         encoding="utf-8",
@@ -1392,8 +1438,8 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
                     "max_pe_length": 32768,
                     "num_draft_tokens": 4,
                     "mtp_config": {
-                        "assistant_hf_model": "/tmp/assistant",
-                        "target_hf_model": str(target_dir),
+                        "assistant_hf_model": "assistant",
+                        "target_hf_model": "base",
                         "input_sequence_length": 1,
                     },
                 },
@@ -1496,6 +1542,8 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
 
     assert draft_onnx is not None
     assert draft_onnx.parent == hm_dir / "mtp_draft_decode"
+    assert Path(created_models[0].kwargs["assistant_model_dir"]) == assistant_dir.resolve()
+    assert Path(created_models[0].kwargs["target_model_dir"]) == target_dir.resolve()
     wrap_cfg = created_models[0].kwargs["wrap_cfg"]
     assert wrap_cfg["context_length"] == 2048
     assert wrap_cfg["model_config"]["context_max_length"] == 2048

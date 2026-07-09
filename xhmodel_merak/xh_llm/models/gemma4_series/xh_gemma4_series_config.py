@@ -236,11 +236,6 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 "Gemma4 Series no longer supports mm_prefill_chunk_length/prefill_mm; "
                 "use prefill_chunk_length instead."
             )
-        if int(prefill_chunk_length) < 280:
-            raise ValueError(
-                "Gemma4 Series prefill_chunk_length must be >= 280 for image/frame atomic prefill; "
-                f"got {prefill_chunk_length}."
-            )
         self.spec_decode_mode = str(spec_decode_mode).lower() if spec_decode_mode is not None else None
         sliding_kv_cache_input_mode = self._normalize_sliding_kv_cache_input_mode(sliding_kv_cache_input_mode)
         if self.spec_decode_mode == "mtp" and sliding_kv_cache_input_mode != "slice_window":
@@ -253,9 +248,22 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self.output_post_norm_hidden = bool(output_post_norm_hidden)
         self.mtp_config = BaseConfig(**mtp_config) if isinstance(mtp_config, Mapping) else mtp_config
         hf_config = self._load_hf_config(hf_model)
+        text_config = hf_config.get("text_config", {})
         self._variant_spec: Gemma4SeriesVariantSpec = resolve_gemma4_series_variant(hf_config)
         self.variant = self._variant_spec.name
         self.capabilities = self._variant_spec.capabilities
+        self.use_bidirectional_attention: str | None = text_config.get("use_bidirectional_attention")
+        self.bidirectional_vision_attention: bool = self._variant_spec.bidirectional_vision_attention
+        if int(prefill_chunk_length) <= 0:
+            raise ValueError(
+                "Gemma4 Series prefill_chunk_length must be positive; "
+                f"got {prefill_chunk_length}."
+            )
+        if self.bidirectional_vision_attention and int(prefill_chunk_length) < 280:
+            raise ValueError(
+                "Gemma4 Series bidirectional vision attention requires prefill_chunk_length >= 280; "
+                f"got {prefill_chunk_length}."
+            )
 
         if isinstance(visual_config, dict):
             if "model_name" not in visual_config:
@@ -314,7 +322,6 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self.fallback_hf_model = fallback_hf_model or hf_model
         self.sliding_kv_cache_input_mode = sliding_kv_cache_input_mode
 
-        text_config = hf_config.get("text_config", {})
         layer_types = text_config.get("layer_types", [])
         self.enable_moe_block: bool = bool(text_config.get("enable_moe_block", False))
         self.image_token_id = hf_config.get("image_token_id", self.image_token_id)
@@ -322,8 +329,6 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self.audio_token_id = hf_config.get("audio_token_id", self.audio_token_id)
         self.boi_token_id = hf_config.get("boi_token_id", self.boi_token_id)
         self.eoi_token_id = hf_config.get("eoi_token_id", self.eoi_token_id)
-        self.use_bidirectional_attention: str | None = text_config.get("use_bidirectional_attention")
-        self.bidirectional_vision_attention: bool = self.use_bidirectional_attention == "vision"
         self.sliding_window: int | None = text_config.get("sliding_window")
         self.local_attention_window_size: int | None = text_config.get("sliding_window")
         self.global_attention_window_size: int | None = context_max_length

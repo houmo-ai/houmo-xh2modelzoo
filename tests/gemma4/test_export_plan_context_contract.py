@@ -6,17 +6,23 @@ from xhmodel_merak.xh_llm.models.gemma4_series.export_plan import Gemma4SeriesEx
 from xhmodel_merak.xh_llm.models.gemma4_series.variants import Gemma4SeriesVariantSpec
 
 
-def _plan(context_max_length: int, input_sequence_length: int = 320) -> Gemma4SeriesExportPlan:
+def _plan(
+    context_max_length: int,
+    input_sequence_length: int = 320,
+    *,
+    bidirectional_vision_attention: bool = True,
+) -> Gemma4SeriesExportPlan:
     return Gemma4SeriesExportPlan(
         variant=Gemma4SeriesVariantSpec(
-            name="gemma4-e2b",
+            name="e2b",
             topology="dense",
+            has_audio=True,
             has_image=True,
             has_video=True,
-            has_audio=True,
             has_per_layer_input=True,
             has_shared_kv_layers=True,
             attention_k_eq_v=False,
+            bidirectional_vision_attention=bidirectional_vision_attention,
             visual_hidden_size=1152,
             audio_feature_size=128,
             sliding_window=512,
@@ -44,12 +50,27 @@ def test_gemma4_export_contract_allows_any_context_not_smaller_than_prefill(
     _plan(context_max_length).validate_fixed_contract()
 
 
-@pytest.mark.parametrize("input_sequence_length", [0, 256, 279])
-def test_gemma4_export_contract_rejects_prefill_shorter_than_visual_atomic_range(
+@pytest.mark.parametrize("input_sequence_length", [256, 279])
+def test_gemma4_export_contract_rejects_short_prefill_only_for_bidirectional_vision(
     input_sequence_length: int,
 ):
-    with pytest.raises(ValueError, match="prefill/input length >= 280"):
-        _plan(2048, input_sequence_length=input_sequence_length).validate_fixed_contract()
+    with pytest.raises(ValueError, match="bidirectional vision attention requires prefill/input length >= 280"):
+        _plan(
+            2048,
+            input_sequence_length=input_sequence_length,
+            bidirectional_vision_attention=True,
+        ).validate_fixed_contract()
+
+    _plan(
+        2048,
+        input_sequence_length=input_sequence_length,
+        bidirectional_vision_attention=False,
+    ).validate_fixed_contract()
+
+
+def test_gemma4_export_contract_rejects_non_positive_prefill_for_all_variants():
+    with pytest.raises(ValueError, match="prefill/input length must be positive"):
+        _plan(2048, input_sequence_length=0, bidirectional_vision_attention=False).validate_fixed_contract()
 
 
 def test_gemma4_export_contract_rejects_context_shorter_than_prefill():
