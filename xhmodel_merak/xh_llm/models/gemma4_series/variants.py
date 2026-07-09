@@ -23,6 +23,7 @@ class Gemma4SeriesVariantSpec:
     has_per_layer_input: bool
     has_shared_kv_layers: bool
     attention_k_eq_v: bool
+    bidirectional_vision_attention: bool
     visual_hidden_size: int | None
     audio_feature_size: int | None
     sliding_window: int | None
@@ -70,6 +71,7 @@ def resolve_gemma4_series_variant(hf_config: Mapping[str, Any] | None) -> Gemma4
     hidden_size_per_layer_input = _as_int(text_config.get("hidden_size_per_layer_input"), 0)
     num_kv_shared_layers = _as_int(text_config.get("num_kv_shared_layers"), 0)
     attention_k_eq_v = bool(text_config.get("attention_k_eq_v", False))
+    bidirectional_vision_attention = text_config.get("use_bidirectional_attention") == "vision"
 
     if enable_moe:
         name: Gemma4SeriesVariantName = "26b_a4b"
@@ -97,6 +99,7 @@ def resolve_gemma4_series_variant(hf_config: Mapping[str, Any] | None) -> Gemma4
         has_per_layer_input=hidden_size_per_layer_input > 0,
         has_shared_kv_layers=num_kv_shared_layers > 0,
         attention_k_eq_v=attention_k_eq_v,
+        bidirectional_vision_attention=bidirectional_vision_attention,
         visual_hidden_size=vision_config.get("hidden_size") if vision_config else None,
         audio_feature_size=audio_config.get("feature_size") if audio_config else None,
         sliding_window=sliding_window,

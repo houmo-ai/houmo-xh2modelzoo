@@ -45,7 +45,9 @@ def is_mtp_manifest(meta: dict[str, Any]) -> bool:
 
 def resolve_model_path(path: str) -> Path:
     candidate = Path(path).expanduser()
-    return candidate if candidate.is_absolute() else _REPO_ROOT / candidate
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (Path.cwd() / candidate).resolve()
 
 
 def resolve_exported_dir(export_result: Any) -> Path:

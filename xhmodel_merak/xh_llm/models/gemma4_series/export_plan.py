@@ -55,9 +55,14 @@ class Gemma4SeriesExportPlan:
     def validate_fixed_contract(self) -> None:
         """Validate the Gemma4 Series public export contract."""
 
-        if self.input_sequence_length < MIN_INPUT_SEQUENCE_LENGTH:
+        if self.input_sequence_length <= 0:
             raise ValueError(
-                "Gemma4 Series exports must use prefill/input length >= "
+                "Gemma4 Series prefill/input length must be positive; "
+                f"got {self.input_sequence_length}"
+            )
+        if self.variant.bidirectional_vision_attention and self.input_sequence_length < MIN_INPUT_SEQUENCE_LENGTH:
+            raise ValueError(
+                "Gemma4 Series bidirectional vision attention requires prefill/input length >= "
                 f"{MIN_INPUT_SEQUENCE_LENGTH}, got {self.input_sequence_length}"
             )
         if self.context_max_length < self.input_sequence_length:
