@@ -222,6 +222,7 @@ def spec_decode_generate(
     cuda_graph_modules: str = "",
     cuda_graph_warmup_runs: int = 3,
     cuda_graph_graph_warmup_runs: int = 6,
+    golden: bool = False,
 ) -> HMONNXQuickTestResult:
     """Run MTP/DFlash speculative decoding and return acceptance metrics."""
     runtime, tokenizer, meta_info = _load_merak_spec_runtime(
@@ -258,6 +259,12 @@ def spec_decode_generate(
             presence_penalty=presence_penalty,
             stream_output=stream_output,
         )
+
+    if golden:
+        set_draft_golden = getattr(runtime, "set_spec_draft_golden", None)
+        if not callable(set_draft_golden):
+            raise RuntimeError(f"{type(runtime).__name__} does not support spec draft golden dumping.")
+        set_draft_golden(True, reset_step=True)
 
     timings: list[float] = []
     output_text = ""
@@ -539,7 +546,7 @@ def _load_merak_spec_runtime(
     import torch
     from transformers import AutoTokenizer
 
-    from xh_model_zoo.xh_llm.models.qwen3_5 import Qwen3_5SpecDecodeONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_spec_decode_onnx_model import Qwen3_5SpecDecodeONNXModel
 
     resolved_meta = Path(meta_file).resolve()
     model_dir = resolved_meta.parent

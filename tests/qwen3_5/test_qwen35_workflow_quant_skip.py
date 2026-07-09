@@ -117,3 +117,97 @@ def test_qwen35_workflow_parse_args_accepts_context_length_alias(monkeypatch):
     args = parse_args()
 
     assert args.context_max_length == 8192
+
+
+def test_qwen35_workflow_spec_decode_golden_uses_real_generate_source(monkeypatch, tmp_path: Path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.qwen3_5 import hmonnx_validation
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
+
+    meta_file = tmp_path / "hmquant_fake" / "golden_meta_info.json"
+    meta_file.parent.mkdir()
+    meta_file.write_text(
+        json.dumps({"spec_decode": {"mode": "dflash", "num_draft_tokens": 9}}),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_spec_decode_generate(**kwargs):
+        calls.append(kwargs)
+        return hmonnx_validation.HMONNXQuickTestResult(
+            meta_file=str(kwargs["meta_file"]),
+            output_text="ok",
+            output_tokens=2,
+            latency_s=1.0,
+            tokens_per_second=2.0,
+            spec_decode_mode="dflash",
+        )
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(hmonnx_validation, "spec_decode_generate", fake_spec_decode_generate)
+    workflow = Qwen35Workflow.__new__(Qwen35Workflow)
+    workflow._dump_spec_decode_golden(
+        str(meta_file),
+        "cuda:1",
+        [{"role": "user", "content": [{"type": "image", "image": "x.png"}, {"type": "text", "text": "hello"}]}],
+        logger=FakeLogger(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["meta_file"] == str(meta_file)
+    assert calls[0]["prompt"] == "hello"
+    assert calls[0]["device"] == "cuda:1"
+    assert calls[0]["exec_device"] == "cuda:1"
+    assert calls[0]["max_new_tokens"] == 11
+    assert calls[0]["warmup_runs"] == 0
+    assert calls[0]["benchmark_runs"] == 1
+    assert calls[0]["golden"] is True
+
+
+def test_qwen35_workflow_mtp_spec_decode_golden_stays_minimal(monkeypatch, tmp_path: Path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.qwen3_5 import hmonnx_validation
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
+
+    meta_file = tmp_path / "hmquant_fake" / "golden_meta_info.json"
+    meta_file.parent.mkdir()
+    meta_file.write_text(
+        json.dumps({"spec_decode": {"mode": "mtp", "num_draft_tokens": 4}}),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_spec_decode_generate(**kwargs):
+        calls.append(kwargs)
+        return hmonnx_validation.HMONNXQuickTestResult(
+            meta_file=str(kwargs["meta_file"]),
+            output_text="ok",
+            output_tokens=2,
+            latency_s=1.0,
+            tokens_per_second=2.0,
+            spec_decode_mode="mtp",
+        )
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(hmonnx_validation, "spec_decode_generate", fake_spec_decode_generate)
+    workflow = Qwen35Workflow.__new__(Qwen35Workflow)
+    workflow._dump_spec_decode_golden(
+        str(meta_file),
+        "cuda:0",
+        [{"role": "user", "content": "hello"}],
+        logger=FakeLogger(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["max_new_tokens"] == 2
+    assert calls[0]["golden"] is True

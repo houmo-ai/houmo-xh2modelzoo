@@ -419,7 +419,8 @@ def test_spec_decode_test_script_parses():
 def test_spec_decode_bench_script_parses():
     _parse(SPEC_BENCH)
 
-ONNX_RUNTIME_MODEL = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py"
+ONNX_RUNTIME_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py"
+SPEC_DECODE_RUNTIME_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_spec_decode_onnx_model.py"
 MERAK_HMONNX_INFERENCE = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py"
 MODEL_ZOO_CONVERT_CONFIG = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_convert_config.py"
 MODEL_ZOO_CONVERTER = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_converter.py"
@@ -558,7 +559,7 @@ def test_dense_qwen3_5_gdr_split_flags_keep_chunk_scan_io_contract():
 
 def test_dense_qwen3_5_dflash_uses_checkpoint_target_ids_and_guards_num_blocks():
     export_script_src = EXPORT_SCRIPT.read_text()
-    runtime_src = (REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5/qwen3_5_spec_decode_onnx_model.py").read_text()
+    runtime_src = SPEC_DECODE_RUNTIME_MODEL.read_text()
 
     assert "def _load_dflash_target_layer_ids" in export_script_src
     assert 'cfg.get("dflash_config", {}).get("target_layer_ids")' in export_script_src

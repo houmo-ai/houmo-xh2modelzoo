@@ -110,3 +110,52 @@ def test_spec_decode_stats_are_summarized_with_accept_rate(monkeypatch, tmp_path
     assert result.accept_rate == 0.35
     assert result.avg_accepted_per_round == 1.75
     assert result.stats["accepted_drafts_per_round"] == [2, 1, 3, 1]
+
+
+def test_spec_decode_generate_enables_draft_golden_after_warmup(monkeypatch, tmp_path: Path):
+    runtime = _load_runtime_module(monkeypatch)
+    events = []
+
+    class FakeRuntime:
+        block_size = 4
+
+        def set_spec_draft_golden(self, enable: bool, *, reset_step: bool = True) -> None:
+            events.append(("golden", enable, reset_step))
+
+    def fake_load_runtime(**kwargs):
+        return FakeRuntime(), object(), {"spec_decode": {"mode": "mtp", "block_size": 4}}
+
+    def fake_run_once(*args, **kwargs):
+        events.append(("run", kwargs["max_new_tokens"]))
+        return "ok", {"draft_tokens_total": 4, "accepted_drafts_total": 2}, 0.5, 2
+
+    monkeypatch.setattr(runtime, "_load_merak_spec_runtime", fake_load_runtime)
+    monkeypatch.setattr(runtime, "_run_spec_decode_once", fake_run_once)
+
+    result = runtime.spec_decode_generate(
+        meta_file=tmp_path / "golden_meta_info.json",
+        prompt="hello",
+        max_new_tokens=2,
+        warmup_runs=1,
+        benchmark_runs=1,
+        golden=True,
+    )
+
+    assert events == [("run", 2), ("golden", True, True), ("run", 2)]
+    assert result.spec_decode_mode == "mtp"
+    assert result.draft_tokens_total == 4
+    assert result.accepted_drafts_total == 2
+
+
+def test_merak_qwen35_hmonnx_validation_does_not_import_xh_model_zoo():
+    src = (REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/hmonnx_validation.py").read_text(encoding="utf-8")
+
+    assert "xh_model_zoo" not in src
+
+
+def test_qwen35_spec_runtime_uses_golden_session_wrapper():
+    src = (REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py").read_text(encoding="utf-8")
+
+    assert "HMONNXGraphGoldenInference" in src
+    assert "session = HMONNXGrapInference(onnx_path)" not in src
+    assert "session.initialize()" in src

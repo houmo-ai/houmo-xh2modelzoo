@@ -1,4 +1,6 @@
+import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from ...workflows.base import BaseLLMWorkflow
@@ -157,6 +159,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         output_text = decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         logger.info(f"{'-' * 20} Golden output {'-' * 20}")
         logger.info(f"{output_text}")
+        self._dump_spec_decode_golden(meta_file, device, messages, logger=logger)
         return meta_file
 
     def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
@@ -272,6 +275,92 @@ class Qwen35Workflow(BaseLLMWorkflow):
                     if isinstance(item, Mapping) and item.get("type") == "image":
                         return True
         return False
+
+    def _dump_spec_decode_golden(
+        self,
+        meta_file: str,
+        device: str,
+        messages: list[dict[str, Any]],
+        *,
+        logger: Any,
+    ) -> None:
+        mode = self._spec_decode_mode(meta_file)
+        if mode not in {"mtp", "dflash"}:
+            return
+
+        from .hmonnx_validation import spec_decode_generate
+
+        prompt = self._messages_text_prompt(messages)
+        max_new_tokens = self._spec_decode_golden_max_new_tokens(meta_file, mode)
+        logger.info(
+            f"Dumping {mode} draft golden via spec_decode_generate "
+            f"(max_new_tokens={max_new_tokens})."
+        )
+        result = spec_decode_generate(
+            meta_file=meta_file,
+            prompt=prompt,
+            device=device,
+            exec_device=device,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            enable_thinking=True,
+            warmup_runs=0,
+            benchmark_runs=1,
+            golden=True,
+        )
+        logger.info(f"{'-' * 20} Spec draft golden output {'-' * 20}")
+        logger.info(result.output_text)
+
+    @staticmethod
+    def _spec_decode_mode(meta_file: str) -> str | None:
+        meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))
+        spec_decode = meta.get("spec_decode")
+        if isinstance(spec_decode, Mapping):
+            mode = spec_decode.get("mode") or meta.get("spec_decode_mode")
+        else:
+            mode = meta.get("spec_decode_mode")
+        return str(mode).lower() if mode else None
+
+    @staticmethod
+    def _spec_decode_golden_max_new_tokens(meta_file: str, mode: str) -> int:
+        if mode != "dflash":
+            return 2
+
+        meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))
+        spec_decode = meta.get("spec_decode")
+        if not isinstance(spec_decode, Mapping):
+            return 2
+
+        num_draft_tokens = spec_decode.get("num_draft_tokens")
+        if num_draft_tokens is None:
+            block_size = spec_decode.get("block_size")
+            if block_size is not None:
+                num_draft_tokens = max(int(block_size) - 1, 0)
+        if num_draft_tokens is None:
+            return 2
+
+        # DFlash context_decode runs in the post-verify path. If all draft
+        # tokens are accepted, the generate loop reaches that path only after
+        # initial_token + all draft tokens have been emitted.
+        return max(2, int(num_draft_tokens) + 2)
+
+    @staticmethod
+    def _messages_text_prompt(messages: list[dict[str, Any]]) -> str:
+        text_parts: list[str] = []
+        for message in messages:
+            content = message.get("content") if isinstance(message, Mapping) else None
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, Mapping) and item.get("type") == "text":
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            text_parts.append(text)
+        prompt = "\n".join(part for part in text_parts if part).strip()
+        if not prompt:
+            raise ValueError("Qwen3.5 spec decode golden requires text content in input_messages.")
+        return prompt
 
 
 __all__ = ["Qwen35Workflow"]

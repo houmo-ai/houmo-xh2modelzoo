@@ -870,7 +870,7 @@ class XHBaseModel(DeviceMixin):
         """
         from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 
-        from xh_model_zoo.xh_llm.models.base_converter import gptqmodel_torch_qlinear_converter
+        from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
 
         hf_model = native_hf_model
         torch_linear_cls = [PackableQuantLinear]
