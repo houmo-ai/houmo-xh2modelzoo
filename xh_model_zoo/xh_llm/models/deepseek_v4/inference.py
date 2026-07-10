@@ -31,12 +31,25 @@ class DeepseekV4Inference(DeviceDtypeMixin):
         fast_mode: bool = True,
         device: str = "cuda",
         execution_device: str = "cuda",
+        pipeline_devices=None,
     ):
         super().__init__()
 
         self.fast_mode = fast_mode
         self._device = torch.device(device)
         self._set_exec_device(torch.device(execution_device))
+
+        # Pipeline-parallel (layer-split model parallel). When set, decoder
+        # layers are binned across these GPUs (weights resident, hidden
+        # states shipped at stage boundaries). Either pass explicitly or
+        # fall back to HMONNX_PIPELINE_DEVICES env var (handled inside
+        # HMONNXInference at parse time).
+        import os
+
+        if pipeline_devices is None:
+            pipeline_devices = os.getenv("HMONNX_PIPELINE_DEVICES")
+        self._pipeline_devices = pipeline_devices
+        self._pp_enabled = bool(pipeline_devices)
 
         model_dir = Path(model_config_file).parent
         meta_info = json.load(open(model_config_file, "r"))
@@ -112,6 +125,13 @@ class DeepseekV4Inference(DeviceDtypeMixin):
                 self.init_decode()
             self.input_sequence_length = 1
 
+    def _configure_session_pipeline(self, session):
+        """Apply pipeline-parallel config to a freshly built HMONNX session."""
+        if not self._pp_enabled:
+            return
+        if not session.pipeline_enabled:
+            session.configure_pipeline(self._pipeline_devices)
+
     def init_prefill(self):
         if self.prefill_session is not None:
             return
@@ -122,6 +142,7 @@ class DeepseekV4Inference(DeviceDtypeMixin):
         if self.fast_mode:
             self.prefill_session.to_fast_mode()
         self.prefill_session.exec_device = self.execution_device
+        self._configure_session_pipeline(self.prefill_session)
         self.prefill_session.to(self._device)
         self._ensure_aligned_mode(self.prefill_session)
 
@@ -146,6 +167,7 @@ class DeepseekV4Inference(DeviceDtypeMixin):
         if self.fast_mode:
             self.decode_session.to_fast_mode()
         self.decode_session.exec_device = self.execution_device
+        self._configure_session_pipeline(self.decode_session)
         self.decode_session.to(self._device)
         self._ensure_aligned_mode(self.decode_session)
 
@@ -206,6 +228,18 @@ class DeepseekV4Inference(DeviceDtypeMixin):
     #  Forward (dispatch to prefill/decode session)                    #
     # -------------------------------------------------------------- #
 
+    def _input_device(self):
+        """Device for model-level inputs (embed/lm_head live on stage 0).
+
+        In pipeline-parallel mode that is the first pipeline device; in
+        single-device mode it is the configured execution device.
+        """
+        if self._pp_enabled and self.prefill_session is not None and self.prefill_session.pipeline_enabled:
+            return self.prefill_session.pipeline_devices[0]
+        if self._pp_enabled and self.decode_session is not None and self.decode_session.pipeline_enabled:
+            return self.decode_session.pipeline_devices[0]
+        return self.execution_device
+
     def forward(
         self,
         inputs_embeds: Tensor,
@@ -218,13 +252,20 @@ class DeepseekV4Inference(DeviceDtypeMixin):
         session = self.prefill_session if self._phase_prefill else self.decode_session
         assert session is not None, "Session not initialized"
 
+        # Model-level inputs land on stage 0 (PP) / execution_device (single).
+        # Per-module routing inside the session ships hidden states onward.
+        if self._pp_enabled:
+            in_dev = self._input_device()
+        else:
+            in_dev = self._device
+
         if self._phase_prefill:
             out = session(
-                inputs_embeds.to(self._device),
-                position_ids.to(self._device),
-                past_seq_length.to(self._device),
-                current_input_length.to(self._device),
-                input_ids.to(self._device),
+                inputs_embeds.to(in_dev),
+                position_ids.to(in_dev),
+                past_seq_length.to(in_dev),
+                current_input_length.to(in_dev),
+                input_ids.to(in_dev),
                 *past_kv_caches,
             )
             # Prefill 输出: (logits, compressed_kv_2, ...)
@@ -240,11 +281,11 @@ class DeepseekV4Inference(DeviceDtypeMixin):
             # past_key_caches = [kv_0..kv_N, ckv_0..ckv_N]
             combined_caches = list(past_kv_caches) + self.compressed_kv_caches
             out = session(
-                inputs_embeds.to(self._device),
-                position_ids.to(self._device),
-                past_seq_length.to(self._device),
-                current_input_length.to(self._device),
-                input_ids.to(self._device),
+                inputs_embeds.to(in_dev),
+                position_ids.to(in_dev),
+                past_seq_length.to(in_dev),
+                current_input_length.to(in_dev),
+                input_ids.to(in_dev),
                 *combined_caches,
             )
             logits = out
