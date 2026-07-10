@@ -1,12 +1,19 @@
+import hashlib
+import tempfile
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 from transformers import AutoConfig, AutoTokenizer
 
 from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
 from xhquant.api import get_xhquant_logger
+from xhquant.core.hmfp_kv_cache import HMFPPagedKVCache
+from xhquant.xhonnxruntime.convert_to_page_attention import convert_to_page_attention
+from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2
 from xhquant.xhonnxruntime.llm_hmonnx_loader import LLMHMONNXLoader
+from xhquant.xhonnxruntime.parsers import PageAttention, PageAttentionContext
 
 from ..base_llm_model import BaseLLMModel, XHLLMModelProcessor
 from ..kv_cache_mixin import KVCacheMixin
@@ -19,7 +26,13 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
     LLM_MODEL_CLS: type[BaseLLMModel] = BaseLLMModel
 
     def __init__(
-        self, meta: LLMModelMeta, enable_cuda_graph=False, enable_auto_offload=False, enable_golden=False, **kwargs
+        self,
+        meta: LLMModelMeta,
+        enable_cuda_graph=False,
+        enable_auto_offload=False,
+        enable_golden=False,
+        enable_page_attention: bool = False,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.meta_info = meta
@@ -32,15 +45,22 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             meta.kv_cache if isinstance(meta.kv_cache, KVCacheConfig) else KVCacheConfig(**meta.kv_cache)
         )
         self.use_cache = self.kvcache_config.num_layers > 0
+        self.enable_page_attention = enable_page_attention
+        prefill_hmonnx = meta.prefill_hmonnx
+        decode_hmonnx = meta.decode_hmonnx
         prefill_graph = None
         decode_graph = None
+        if enable_page_attention:
+            # 对hmonnx做convert_to_page_attention转换
+            prefill_hmonnx = self._convert_to_page_attention_hmonnx(meta.prefill_hmonnx)
+            decode_hmonnx = self._convert_to_page_attention_hmonnx(meta.decode_hmonnx)
         if True:
-            llm_loader = LLMHMONNXLoader(meta.prefill_hmonnx, meta.decode_hmonnx)
+            llm_loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
             prefill_graph = llm_loader.prefill_graph
             decode_graph = llm_loader.decode_graph
 
         self.prefill_model = HMONNXModel(
-            meta.prefill_hmonnx,
+            prefill_hmonnx,
             onnx_graph=prefill_graph,
             enable_cuda_graph=enable_cuda_graph,
             enable_auto_offload=enable_auto_offload,
@@ -48,18 +68,182 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             device_map=self._valid_devices,
         )
 
+        layer_infos = None
+        if isinstance(self.prefill_model.hmonnx_session, HMONNXInferenceV2):
+            layer_infos = self.prefill_model.hmonnx_session.get_layer_infos()
+
         self.decode_model = HMONNXModel(
-            meta.decode_hmonnx,
+            decode_hmonnx,
             onnx_graph=decode_graph,
             enable_golden=enable_golden,
             enable_cuda_graph=enable_cuda_graph,
             enable_auto_offload=enable_auto_offload,
             device_map=self._valid_devices,
+            layer_infos=layer_infos,
         )
 
         self._data_processor = None
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)
+        self._sync_page_attention_mode_to_kvcache()
         self.pad_token_id = self.meta_info.pad_token_id
+
+    def _sync_page_attention_mode_to_kvcache(self) -> None:
+        if hasattr(self._kvcache_mixin, "enable_page_attention"):
+            self._kvcache_mixin.enable_page_attention = self.enable_page_attention
+
+    @staticmethod
+    def _convert_to_page_attention_hmonnx(hmonnx_path: str | Path) -> str:
+        input_path = Path(hmonnx_path)
+        digest = hashlib.sha256(str(input_path.resolve(strict=False)).encode("utf-8")).hexdigest()[:16]
+        output_name = f"{input_path.stem}_page_attention_{digest}{input_path.suffix}"
+        output_path = input_path.with_name(output_name)
+        try:
+            convert_to_page_attention(input_path, output_path)
+            return str(output_path)
+        except PermissionError:
+            logger = get_xhquant_logger()
+            logger.warning(
+                f"No permission to write page-attention HMONNX beside {input_path}; falling back to temp dir."
+            )
+
+        output_path = Path(tempfile.gettempdir()) / "xhmodel_merak_page_attention" / digest / output_name
+        convert_to_page_attention(input_path, output_path)
+        return str(output_path)
+
+    def _get_page_attention_modules(self, hmonnx_model: HMONNXModel) -> list[PageAttention]:
+        graph_module = hmonnx_model.hmonnx_session.graph_module
+        page_attention_modules = []
+        for node in hmonnx_model.hmonnx_session.graph_module.graph.nodes:
+            if node.op == "call_module":
+                m = graph_module.get_submodule(str(node.target))
+                if isinstance(m, PageAttention):
+                    page_attention_modules.append(m)
+        return page_attention_modules
+
+    def set_page_attention_context(
+        self, paged_kv_caches: list[HMFPPagedKVCache], block_ids: Tensor, slot_mapping: Tensor, block_size: int
+    ):
+        if paged_kv_caches is None:
+            raise ValueError("paged_kv_caches is required for page attention.")
+        if block_ids is None:
+            raise ValueError("block_ids is required for page attention.")
+        if slot_mapping is None:
+            raise ValueError("slot_mapping is required for page attention.")
+
+        if not isinstance(block_ids, torch.Tensor):
+            block_ids = torch.as_tensor(block_ids, dtype=torch.int64)
+        if not isinstance(slot_mapping, torch.Tensor):
+            slot_mapping = torch.as_tensor(slot_mapping, dtype=torch.int64)
+        block_size = int(block_size)
+
+        if block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {block_size}.")
+        if self._llm_prefill:
+            page_attention_modules = self._get_page_attention_modules(self.prefill_model)
+        else:
+            page_attention_modules = self._get_page_attention_modules(self.decode_model)
+
+        if len(page_attention_modules) != len(paged_kv_caches):
+            raise ValueError(
+                "PageAttention module/cache count mismatch: "
+                f"{len(page_attention_modules)} modules vs {len(paged_kv_caches)} caches."
+            )
+
+        contexts_by_device = BaseLLMHMONNXModel._stage_page_attention_context_by_device(
+            self,
+            paged_kv_caches,
+            block_ids,
+            slot_mapping,
+        )
+
+        for layer_idx, page_attn_m in enumerate(page_attention_modules):
+            paged_kv_cache = paged_kv_caches[layer_idx]
+            block_ids_tensor, slot_mapping_tensor = contexts_by_device[str(torch.device(paged_kv_cache.device))]
+            page_attn_context = PageAttentionContext(
+                paged_kv_cache=paged_kv_cache,
+                block_ids=block_ids_tensor,
+                slot_mapping=slot_mapping_tensor,
+                block_size=block_size,
+            )
+            page_attn_m.set_context(page_attn_context)
+
+    def _stage_page_attention_context_by_device(
+        self,
+        paged_kv_caches: list[HMFPPagedKVCache],
+        block_ids: Tensor,
+        slot_mapping: Tensor,
+    ) -> dict[str, tuple[Tensor, Tensor]]:
+        """Update model-local, fixed-address metadata buffers on each cache device."""
+        stage = "prefill" if self._llm_prefill else "decode"
+        buffers = getattr(self, "_page_attention_context_device_buffers", None)
+        if buffers is None:
+            buffers = {}
+            self._page_attention_context_device_buffers = buffers
+
+        capacities_by_device: dict[str, int] = {}
+        for paged_kv_cache in paged_kv_caches:
+            device_key = str(torch.device(paged_kv_cache.device))
+            capacities_by_device[device_key] = max(
+                capacities_by_device.get(device_key, 0),
+                int(paged_kv_cache.num_blocks),
+            )
+
+        staged = {}
+        invalidate_active_graph = False
+        block_ids_flat = block_ids.reshape(-1)
+        slot_mapping_flat = slot_mapping.reshape(-1)
+        for device_key, block_capacity in capacities_by_device.items():
+            device = torch.device(device_key)
+            key = (stage, device_key)
+            device_buffers = buffers.get(key)
+            if device_buffers is None:
+                device_buffers = {}
+                buffers[key] = device_buffers
+
+            block_buffer = device_buffers.get("block_ids")
+            if not isinstance(block_buffer, Tensor) or block_buffer.numel() < block_capacity:
+                invalidate_active_graph |= isinstance(block_buffer, Tensor)
+                block_buffer = torch.empty(block_capacity, dtype=torch.int64, device=device)
+                device_buffers["block_ids"] = block_buffer
+
+            slot_capacity = int(slot_mapping_flat.numel())
+            slot_buffer = device_buffers.get("slot_mapping")
+            if not isinstance(slot_buffer, Tensor) or slot_buffer.numel() < slot_capacity:
+                invalidate_active_graph |= isinstance(slot_buffer, Tensor)
+                slot_buffer = torch.empty(slot_capacity, dtype=torch.int64, device=device)
+                device_buffers["slot_mapping"] = slot_buffer
+
+            if block_ids_flat.numel() > block_buffer.numel():
+                raise ValueError(
+                    f"block_ids length {block_ids_flat.numel()} exceeds cache capacity {block_buffer.numel()} "
+                    f"on {device}."
+                )
+
+            if device.type == "cuda":
+                with torch.cuda.device(device):
+                    block_buffer.zero_()
+                    block_buffer[: block_ids_flat.numel()].copy_(block_ids_flat, non_blocking=True)
+                    slot_buffer.fill_(-1)
+                    slot_buffer[: slot_mapping_flat.numel()].copy_(slot_mapping_flat, non_blocking=True)
+            else:
+                block_buffer.zero_()
+                block_buffer[: block_ids_flat.numel()].copy_(block_ids_flat)
+                slot_buffer.fill_(-1)
+                slot_buffer[: slot_mapping_flat.numel()].copy_(slot_mapping_flat)
+            staged[device_key] = (block_buffer, slot_buffer)
+
+        if invalidate_active_graph:
+            BaseLLMHMONNXModel._clear_active_page_attention_cuda_graph(self)
+        return staged
+
+    def _clear_active_page_attention_cuda_graph(self) -> None:
+        """Clear only the prefill/decode HMONNX graph whose metadata pointer changed."""
+        active_model = self.prefill_model if self._llm_prefill else self.decode_model
+        session = getattr(active_model, "hmonnx_session", None)
+        interpreter = getattr(session, "interpreter", None)
+        clear = getattr(interpreter, "clear", None)
+        if callable(clear):
+            clear(clear_disabled_reason=True)
 
     @property
     def past_key_caches(self):
@@ -70,6 +254,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         return self._kvcache_mixin.past_value_caches
 
     def get_kvcache_mixin(self):
+        self._sync_page_attention_mode_to_kvcache()
         return self._kvcache_mixin
 
     def get_num_logits_to_keep(self) -> int:
@@ -93,8 +278,13 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
     def get_data_preprocessor(self) -> BaseLLMInputProcessor:
         if self._data_processor is None:
             self._data_processor = self._get_data_preprocessor()
+        self._sync_page_attention_context_to_processor()
         self._data_processor.to(self.device, self.dtype)
         return self._data_processor
+
+    def _sync_page_attention_context_to_processor(self) -> None:
+        if self._data_processor is not None:
+            self._data_processor.enable_page_attention = self.enable_page_attention
 
     def _get_data_preprocessor(self) -> BaseLLMInputProcessor:
         preprocessor = BaseLLMInputProcessor(
@@ -103,6 +293,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 input_sequence_length=self.get_input_sequence_length(),
                 past_key_caches=self.past_key_caches,
                 past_value_caches=self.past_value_caches,
+                enable_page_attention=self.enable_page_attention,
                 pad_token_id=self.pad_token_id,
             )
         )
