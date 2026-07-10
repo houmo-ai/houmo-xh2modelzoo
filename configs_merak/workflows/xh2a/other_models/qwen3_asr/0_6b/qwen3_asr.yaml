@@ -1,0 +1,36 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHQwen3ASRLLMModel
+    # hf_model仅用于占位，导出前会实时赋值
+    hf_model: null
+    wrap_cfg:
+      max_sequence_length: 2048
+      input_sequence_length: 216
+      use_cache: true
+      num_logits_to_keep: 1
+      kv_cache:
+        cache_axis: 2
+    quant_config: {}
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+        - past_key_cache
+        - past_value_cache
+      output_names:
+        - last_hidden_state
+  audio:
+    max_audio_length: 1500
+  components:
+    encoder:
+      enabled: true
+      quant_type: w8a8_sefp # 控制encoder导出精度
+    prefill_decode:
+      enabled: true
+      quant_type: w8a8_sefp # 控制prefill_decode导出精度
+      prefix_token_budget: 512

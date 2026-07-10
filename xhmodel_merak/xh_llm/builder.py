@@ -59,6 +59,18 @@ def get_model_class(cfg: BaseLLMModelConfig | dict) -> type[BaseLLMModel]:
     return register.get(model_type)
 
 
+def is_model_type_supported(model_type: str) -> bool:
+    if not isinstance(model_type, str) or not model_type:
+        return False
+    if model_type in XH_LLM_MODELS:
+        return True
+    try:
+        auto_load_library_for_model(model_type)
+    except (ImportError, ValueError):
+        return False
+    return model_type in XH_LLM_MODELS
+
+
 def _registered_model_needs_mapped_module(model_type: str, model_cls: type[BaseLLMModel]) -> bool:
     module_name = MODEL_TYPE_MAPPING_MODULES.get(model_type)
     if not module_name:

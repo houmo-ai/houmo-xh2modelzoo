@@ -1,0 +1,72 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model_name: Qwen3-TTS-12Hz-0.6B-CustomVoice
+  dtype: float16
+  tts_mode: custom_voice
+  tts_text: 基于先进的存算一体技术和存储工艺，后摩智能致力于突破芯片的性能与功耗瓶颈，加速人工智能技术的普惠落地
+  tts_speaker: vivian
+  components:
+    - talker
+    - code_predictor
+    - text_projection
+    - speech_tokenizer
+    - stateful_decoder
+  quant_types:
+    talker: w8a8h1_sefp
+    code_predictor: w8a8h1_sefp
+    text_projection: w8a8h1_sefp
+    speech_tokenizer: w8a8h1_sefp
+    base_frontend: w8a8h1_sefp
+    stateful_decoder: w8a8h1_sefp
+  model:
+    type: XHQwen3TTSTalker
+    hf_model: null
+    wrap_cfg:
+      max_sequence_length: 2048
+      input_sequence_length: 256
+      use_cache: true
+      num_logits_to_keep: 1
+      kv_cache:
+        cache_axis: 2
+      enable_rope: true
+    quant_config: {}
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+      output_names:
+        - logits
+        - past_hidden
+  code_predictor_model:
+    type: XHQwen3TTSCodePredictor
+    hf_model: null
+    wrap_cfg:
+      max_sequence_length: 18
+      input_sequence_length: 2
+      use_cache: true
+      num_logits_to_keep: 1
+      kv_cache:
+        cache_axis: 2
+      enable_rope: true
+    quant_config: {}
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+      output_names:
+        - logits
+  speech_tokenizer:
+    chunk_size: 300
+  stateful_decoder:
+    chunk_size: 12
+    head_dim: 64
+    dummy_batch: 1
+    dummy_history: 0
+    dummy_valid_frames: 12
+    opset: 18

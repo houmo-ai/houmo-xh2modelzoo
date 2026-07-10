@@ -1,19 +1,140 @@
-# Export an HMONNX-friendly stateful Qwen3-TTS speech tokenizer decoder.
-from __future__ import annotations
-
-import argparse
-import json
-import shutil
-import time
+import math
+import types
 from pathlib import Path
-from typing import Optional
 
 import onnx
 import torch
 import torch.nn as nn
 from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
-from xhquant.api import Config, convert_onnx_to_hmonnx, set_random_seed
-from xhquant.export.onnx.transforms import hmonnx_transforms
+from transformers.models.mimi.modeling_mimi import MimiConv1d, MimiEuclideanCodebook
+
+
+class SpeechTokenizerEncodeWrapper(nn.Module):
+    """Static tensor wrapper for Qwen3-TTS 12Hz speech_tokenizer.encode."""
+
+    def __init__(self, tokenizer_model: Qwen3TTSTokenizerV2Model):
+        super().__init__()
+        self.encoder = tokenizer_model.encoder.encoder
+        self.encoder_transformer = tokenizer_model.encoder.encoder_transformer
+        self.downsample = tokenizer_model.encoder.downsample
+        self.quantizer = tokenizer_model.encoder.quantizer
+        self.valid_num_quantizers = int(tokenizer_model.encoder_valid_num_quantizers)
+        self.encode_downsample_rate = int(tokenizer_model.encode_downsample_rate)
+        self.num_quantizers = int(tokenizer_model.encoder.config.num_quantizers)
+
+    def forward(self, input_values: torch.Tensor, padding_mask: torch.Tensor):
+        hidden = self.encoder(input_values.unsqueeze(1), padding_cache=None)
+        hidden = hidden.transpose(1, 2)
+
+        seq_len = hidden.shape[1]
+        device = hidden.device
+        cache_position = torch.arange(seq_len, device=device, dtype=torch.long)
+        position_ids = cache_position.unsqueeze(0)
+        q_idx = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(1)
+        kv_idx = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0)
+        causal_mask = torch.where(kv_idx <= q_idx, 0.0, -10000.0).unsqueeze(0).unsqueeze(0)
+
+        for layer in self.encoder_transformer.layers:
+            hidden = layer(
+                hidden,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_values=None,
+                output_attentions=False,
+                use_cache=False,
+                cache_position=cache_position,
+            )[0]
+
+        hidden = hidden.transpose(1, 2)
+        hidden = self.downsample(hidden, padding_cache=None)
+        audio_codes = self.quantizer.encode(hidden, self.num_quantizers)
+        audio_codes = audio_codes.transpose(0, 1)[:, : self.valid_num_quantizers].transpose(1, 2).to(torch.int32)
+        valid_samples = padding_mask.to(torch.int64).sum(dim=1)
+        valid_frames = ((valid_samples + self.encode_downsample_rate - 1) // self.encode_downsample_rate).to(torch.int32)
+        return audio_codes, valid_frames
+
+
+class SpeakerEncoderWrapper(nn.Module):
+    """Export the ECAPA speaker_encoder. Input is precomputed mel [B, T, 128]."""
+
+    def __init__(self, speaker_encoder: nn.Module):
+        super().__init__()
+        self.speaker_encoder = speaker_encoder
+
+    def forward(self, mels: torch.Tensor):
+        return self.speaker_encoder(mels)
+
+
+def patch_mimi_conv1d_static_padding(module: nn.Module) -> None:
+    """Use Python int padding for fixed-shape ONNX export."""
+
+    def static_forward(self, hidden_states, padding_cache=None):
+        if not self.causal and padding_cache is not None:
+            raise ValueError("`padding_cache` is not supported for non-causal convolutions.")
+        if padding_cache is not None:
+            layer_padding_cache = padding_cache.update(hidden_states, self.layer_idx)
+            hidden_states = torch.cat([layer_padding_cache, hidden_states], dim=2)
+            return self.conv(hidden_states)
+
+        length = int(hidden_states.shape[-1])
+        kernel_size = (self.conv.kernel_size[0] - 1) * self.conv.dilation[0] + 1
+        stride = self.conv.stride[0]
+        padding_total = kernel_size - stride
+        n_frames = math.ceil((length - kernel_size + padding_total) / stride + 1) - 1
+        ideal_length = n_frames * stride + kernel_size - padding_total
+        extra_padding = int(ideal_length - length)
+
+        if self.causal:
+            paddings = (padding_total, extra_padding)
+        else:
+            padding_right = padding_total // 2
+            padding_left = padding_total - padding_right
+            paddings = (padding_left, padding_right + extra_padding)
+
+        hidden_states = MimiConv1d._pad1d(hidden_states, paddings, mode=self.pad_mode)
+        return self.conv(hidden_states)
+
+    for submodule in module.modules():
+        if isinstance(submodule, MimiConv1d):
+            submodule.forward = types.MethodType(static_forward, submodule)
+
+
+def patch_mimi_codebook_matmul_distance(module: nn.Module) -> None:
+    """Replace cdist with an ONNX-friendly squared-distance matmul."""
+
+    def quantize_without_cdist(self, hidden_states):
+        hidden_states = hidden_states.float()
+        embed = self.embed.float()
+        hidden_norm = hidden_states.square().sum(dim=-1, keepdim=True)
+        embed_norm = embed.square().sum(dim=-1).unsqueeze(0)
+        dists = hidden_norm + embed_norm - 2.0 * hidden_states.matmul(embed.transpose(0, 1))
+        return dists.argmin(dim=-1)
+
+    for submodule in module.modules():
+        if isinstance(submodule, MimiEuclideanCodebook):
+            submodule.quantize = types.MethodType(quantize_without_cdist, submodule)
+
+
+def export_onnx(model, dummy_inputs, onnx_file: Path, input_names, output_names, opset: int, use_dynamo: bool = True):
+    export_kwargs = dict(
+        model=model,
+        args=dummy_inputs,
+        f=str(onnx_file),
+        input_names=input_names,
+        output_names=output_names,
+        opset_version=opset,
+    )
+    with torch.no_grad():
+        if use_dynamo:
+            try:
+                torch.onnx.export(**export_kwargs, dynamo=True)
+            except Exception as exc:
+                print(f"dynamo ONNX export failed for {onnx_file.name}, retry legacy tracer: {exc}")
+                torch.onnx.export(**export_kwargs, dynamo=False)
+        else:
+            torch.onnx.export(**export_kwargs, dynamo=False)
+    onnx_model = onnx.load(str(onnx_file))
+    onnx.save(onnx_model, str(onnx_file))
 
 
 class DecoderPart1PreConv(nn.Module):
@@ -191,48 +312,7 @@ class StatefulDecoderDynamoCombined(nn.Module):
         )
 
 
-def _load_cfg(config_path: Optional[str], variant: Optional[str]):
-    if config_path is None:
-        return None
-    cfg = Config.fromfile(config_path)
-    if variant:
-        from config.llm._components import apply_variant
-
-        apply_variant(cfg, variant)
-    return cfg
-
-
-def _resolve_model_dir(args: argparse.Namespace) -> str:
-    if args.hf_model_dir:
-        return args.hf_model_dir
-    cfg = _load_cfg(args.config, args.variant)
-    if cfg is None or not getattr(cfg, "hf_model_dir", None):
-        raise ValueError("provide --hf-model-dir or a --config that defines hf_model_dir")
-    return cfg.hf_model_dir
-
-
-def _resolve_target_device(args: argparse.Namespace) -> str:
-    if args.target_device:
-        return args.target_device
-    cfg = _load_cfg(args.config, args.variant)
-    if cfg is not None and getattr(cfg, "target_device", None):
-        return cfg.target_device
-    return "xh2a"
-
-
-def _resolve_work_dir(args: argparse.Namespace) -> Path:
-    if args.work_dir:
-        return Path(args.work_dir)
-    name = args.name or "qwen3_tts_stateful_decoder_xh2a"
-    return Path("./work_dirs") / name
-
-
-def _resolve_tokenizer_dir(model_dir: str) -> str:
-    speech_tokenizer_dir = Path(model_dir) / "speech_tokenizer"
-    return str(speech_tokenizer_dir if speech_tokenizer_dir.exists() else Path(model_dir))
-
-
-def _make_dummy_inputs(wrapper: StatefulDecoderDynamoCombined, num_heads: int, head_dim: int, args):
+def make_stateful_decoder_dummy_inputs(wrapper: StatefulDecoderDynamoCombined, num_heads: int, head_dim: int, args):
     batch = int(args.dummy_batch)
     frames = int(args.chunk_size)
     kv_valid_len = max(0, min(int(args.dummy_history), int(wrapper.kv_cache_window)))
@@ -249,24 +329,19 @@ def _make_dummy_inputs(wrapper: StatefulDecoderDynamoCombined, num_heads: int, h
         torch.zeros(batch, num_heads, wrapper.kv_cache_window, head_dim, dtype=torch.float32)
         for _ in range(wrapper.num_layers * 2)
     ]
-    return (audio_codes, pre_conv_history, latent_buffer, conv_history, is_last, kv_valid_len_tensor, valid_frames_tensor, *kv)
-
-
-def _make_dynamic_shapes(num_layers: int):
-    batch = torch.export.Dim("batch", min=1, max=8)
     return (
-        {0: batch},
-        {0: batch},
-        {0: batch},
-        {0: batch},
-        None,
-        None,
-        None,
-        tuple([{0: batch}] * (num_layers * 2)),
+        audio_codes,
+        pre_conv_history,
+        latent_buffer,
+        conv_history,
+        is_last,
+        kv_valid_len_tensor,
+        valid_frames_tensor,
+        *kv,
     )
 
 
-def _input_output_names(num_layers: int):
+def stateful_decoder_input_output_names(num_layers: int):
     input_names = [
         "audio_codes",
         "pre_conv_history",
@@ -288,124 +363,3 @@ def _input_output_names(num_layers: int):
     output_names.extend([f"next_key_{i}" for i in range(num_layers)])
     output_names.extend([f"next_value_{i}" for i in range(num_layers)])
     return input_names, output_names
-
-
-def main(args: argparse.Namespace) -> None:
-    set_random_seed(args.seed)
-    model_dir = _resolve_model_dir(args)
-    target_device = _resolve_target_device(args)
-    work_dir = _resolve_work_dir(args)
-    if work_dir.exists() and any(work_dir.iterdir()):
-        if not args.force:
-            raise FileExistsError(f"work_dir already exists and is not empty: {work_dir}; pass --force to overwrite")
-        shutil.rmtree(work_dir)
-    onnx_dir = work_dir / "onnx"
-    hmonnx_dir = work_dir / "hmonnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-    hmonnx_dir.mkdir(parents=True, exist_ok=True)
-
-    tokenizer_dir = _resolve_tokenizer_dir(model_dir)
-    model = Qwen3TTSTokenizerV2Model.from_pretrained(tokenizer_dir).float().cpu().eval()
-    if hasattr(model.config, "decoder_config"):
-        model.config.decoder_config._attn_implementation = "eager"
-        model.config.decoder_config.head_dim = args.head_dim
-    if hasattr(model.decoder.pre_transformer, "config"):
-        model.decoder.pre_transformer.config._attn_implementation = "eager"
-        model.decoder.pre_transformer.config.head_dim = args.head_dim
-
-    wrapper = StatefulDecoderDynamoCombined(model.decoder, chunk_size=args.chunk_size).float().cpu().eval()
-    cfg = model.decoder.config
-    num_layers = int(wrapper.num_layers)
-    num_heads = int(getattr(cfg, "num_key_value_heads", getattr(cfg, "num_attention_heads", 16)))
-    head_dim = int(getattr(cfg, "head_dim", args.head_dim))
-    dummy_inputs = _make_dummy_inputs(wrapper, num_heads, head_dim, args)
-    input_names, output_names = _input_output_names(num_layers)
-
-    onnx_file = onnx_dir / "qwen3_tts_decoder_stateful_static.onnx"
-    export_kwargs = dict(
-        model=wrapper,
-        args=dummy_inputs,
-        f=str(onnx_file),
-        input_names=input_names,
-        output_names=output_names,
-        opset_version=args.opset,
-        dynamo=True,
-    )
-    if args.dynamic_batch:
-        export_kwargs["dynamic_shapes"] = _make_dynamic_shapes(num_layers)
-    with torch.no_grad():
-        torch.onnx.export(**export_kwargs)
-
-    onnx_model = onnx.load(str(onnx_file))
-    hmonnx_transforms(onnx_model)
-    onnx.save(onnx_model, str(onnx_file))
-
-    hmonnx_file = hmonnx_dir / f"qwen3_tts_decoder_stateful_static_{target_device}.onnx"
-    if not args.onnx_only:
-        convert_onnx_to_hmonnx(
-            str(onnx_file),
-            [x.cpu() for x in dummy_inputs],
-            target_device,
-            str(hmonnx_file),
-        )
-
-    meta = {
-        "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-        "hf_model": model_dir,
-        "tokenizer_dir": tokenizer_dir,
-        "target_device": target_device,
-        "stateful_onnx": str(onnx_file.relative_to(work_dir)),
-        "stateful_hmonnx": str(hmonnx_file.relative_to(work_dir)),
-        "stateful_static_buffers": True,
-        "stateful_num_layers": num_layers,
-        "stateful_num_heads": num_heads,
-        "stateful_head_dim": head_dim,
-        "stateful_kv_cache_window": int(wrapper.kv_cache_window),
-        "stateful_chunk_size": int(args.chunk_size),
-        "stateful_samples_per_frame": int(wrapper.samples_per_frame),
-        "stateful_initial_output_skip_frames": int(wrapper.part3.lookahead_frames),
-        "stateful_dynamic_batch": bool(args.dynamic_batch),
-        "input_names": input_names,
-        "output_names": output_names,
-    }
-
-    if args.golden and not args.onnx_only:
-        import sys
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from _golden import run_hmonnx_golden
-
-        golden_dir = work_dir / "golden" / "stateful_decoder"
-        run_hmonnx_golden(str(hmonnx_file), golden_dir, tuple(x.cpu() for x in dummy_inputs), args.golden_device)
-        meta["stateful_golden_dir"] = str(golden_dir.relative_to(work_dir))
-
-    with open(work_dir / "meta.json", "w") as f:
-        json.dump(meta, f, indent=4)
-
-    print(f"stateful decoder ONNX saved to: {onnx_file}")
-    if not args.onnx_only:
-        print(f"stateful decoder HMONNX saved to: {hmonnx_file}")
-    print(f"meta saved to: {work_dir / 'meta.json'}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--config", type=str, default="./config/llm/qwen3_tts_12hz_speech_tokenizer_xh2a.py")
-    parser.add_argument("--variant", choices=["0_6B_base", "0_6B_customvoice", "1_7B_customvoice", "1_7B_voicedesign"], default=None)
-    parser.add_argument("--hf-model-dir", type=str, default=None)
-    parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--work-dir", type=str, default=None)
-    parser.add_argument("--target-device", type=str, default=None)
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--onnx-only", action="store_true")
-    parser.add_argument("--dynamic-batch", action="store_true", help="experimental: keep batch axis dynamic")
-    parser.add_argument("--golden", action="store_true")
-    parser.add_argument("--golden-device", type=str, default="cuda")
-    parser.add_argument("--seed", type=int, default=1024)
-    parser.add_argument("--opset", type=int, default=18)
-    parser.add_argument("--head-dim", type=int, default=64)
-    parser.add_argument("--chunk-size", type=int, default=12)
-    parser.add_argument("--dummy-batch", type=int, default=1)
-    parser.add_argument("--dummy-history", type=int, default=0)
-    parser.add_argument("--dummy-valid-frames", type=int, default=12)
-    main(parser.parse_args())

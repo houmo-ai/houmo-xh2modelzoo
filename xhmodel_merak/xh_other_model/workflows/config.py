@@ -137,14 +137,12 @@ class WorkflowConfig:
         if not isinstance(export, dict) or not export:
             raise ValueError(f"workflow config {source} field 'export' must be a non-empty mapping")
         
-        """
-        非LLM模型的config字段校验规则待定
-        """
-
-        # model = export.get("model")
-        # if not isinstance(model, dict) or not model:
-        #     raise ValueError(f"workflow config {source} must contain non-empty export.model")
-        # if not model.get("chip_arch"):
-        #     raise ValueError(f"workflow config {source} must specify export.model.chip_arch")
-        # if not model.get("model_type"):
-        #     raise ValueError(f"workflow config {source} must specify export.model.model_type")
+        target_device = export.get("target_device")
+        if not isinstance(target_device, str) or not target_device:
+            raise ValueError(f"workflow config {source} must specify export.target_device")
+        
+        model = export.get("model")
+        if not isinstance(model, dict) or not model:
+            raise ValueError(f"workflow config {source} must contain non-empty export.model")
+        if not isinstance(model.get("type"), str) or not model["type"]:
+            raise ValueError(f"workflow config {source} must specify non-empty export.model.type")
