@@ -146,6 +146,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         mix_search: bool = False,
         use_cache: bool = True,
         linear_chunk_size: int = 64,
+        flash_attention: Mapping | None = None,
         fuse_gdr_ops: bool = False,
         fuse_gdr_block_recurrent_ops: bool = False,
         split_conv_cache: bool = True,
@@ -188,6 +189,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.visual_config = visual_config
 
         self.linear_chunk_size = linear_chunk_size
+        self.flash_attention = flash_attention
         self.fuse_gdr_ops = fuse_gdr_ops
         self.fuse_gdr_block_recurrent_ops = fuse_gdr_block_recurrent_ops
         self.split_conv_cache = split_conv_cache

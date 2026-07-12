@@ -329,9 +329,9 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
             self.rope_deltas = rope_deltas
         else:
             assert self.rope_deltas is not None, f"rope_deltas is None, but past_seq_length is {past_seq_length}"
-            batch_size, seq_length, _ = inputs_embeds.shape
+            batch_size, padded_seq_length, _ = inputs_embeds.shape
             delta = past_seq_length + self.rope_deltas
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+            position_ids = torch.arange(padded_seq_length, device=inputs_embeds.device)
             position_ids = position_ids.view(1, -1).expand(batch_size, -1)
             delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
             position_ids = position_ids.add(delta)

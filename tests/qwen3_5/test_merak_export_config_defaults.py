@@ -688,8 +688,40 @@ def test_qwen3_5_moe_workflow_full_config_loads_expected_fields():
     assert cfg.quant.method == "autoround"
     assert cfg.quant.rotation is False
     assert cfg.quant.format == "auto_round:gptqmodel"
-    assert cfg.export.model.quant_scheme.quant_type == "w8a8h1_sefp"
-    assert cfg.export.model.quant_scheme.nodes.lm_head.quant_type == "w8a8h1_sefp"
+    assert cfg.export.model.quant_scheme.quant_type == "w8a16h1_sefp"
+    assert cfg.export.model.quant_scheme.nodes.lm_head.quant_type == "w8a16h1_sefp"
+    assert cfg.export.model.quant_scheme.ops.MatMul.act_scheme.bits == 16
+    assert cfg.export.model.quant_scheme.ops.MatMul.act_scheme.fp_mode == "sefp"
+    assert cfg.export.model.quant_scheme.ops.MatMul.act_schema_2.bits == 16
+    assert cfg.export.model.quant_scheme.ops.MatMul.act_schema_2.fp_mode == "sefp"
+    assert cfg.export.model.flash_attention.q_bits == 16
+    assert cfg.export.model.flash_attention.s_bits == 16
+    assert cfg.export.model.visual_config.quant_scheme.quant_type == "w8a16h1_sefp"
+    assert cfg.export.model.visual_config.quant_scheme.ops.MatMul.act_scheme.bits == 16
+    assert cfg.export.model.visual_config.quant_scheme.ops.MatMul.act_schema_2.bits == 16
+
+
+def test_qwen3_5_moe_a16_config_survives_flash_attention_workflow_override():
+    config_path = (
+        REPO_ROOT
+        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
+        / "qwen3_6_35b_a3b_full.yaml"
+    )
+
+    workflow_cfg = WorkflowConfig.from_file(str(config_path)).with_overrides(
+        {"export.model.flash_attention.enable": True}
+    )
+    model_cfg = Config(workflow_cfg.build_export_dict()).model
+
+    assert model_cfg.flash_attention.enable is True
+    assert model_cfg.flash_attention.q_bits == 16
+    assert model_cfg.flash_attention.s_bits == 16
+    assert model_cfg.quant_scheme.quant_type == "w8a16h1_sefp"
+    assert model_cfg.quant_scheme.ops.MatMul.act_scheme.bits == 16
+    assert model_cfg.quant_scheme.ops.MatMul.act_schema_2.bits == 16
+    assert model_cfg.visual_config.quant_scheme.quant_type == "w8a16h1_sefp"
+    assert model_cfg.visual_config.quant_scheme.ops.MatMul.act_scheme.bits == 16
+    assert model_cfg.visual_config.quant_scheme.ops.MatMul.act_schema_2.bits == 16
 
 
 def test_qwen3_5_moe_workflow_mtp_config_loads_expected_fields(monkeypatch):

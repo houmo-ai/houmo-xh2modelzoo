@@ -14,6 +14,27 @@ pip install -e .
 
 ### 1. [设计文档](https://houmo.feishu.cn/wiki/J5Vrw7DCHiJzhekbEJvcwquQnzf)
 
+### 2. Qwen3.6-35B-A3B FlashAttention 全 SEFP16 复现
+
+在仓库根目录执行以下完整命令。该配置使用 Linear/MatMul SEFP16，
+并将 FlashAttention 的 `q/k/v/s/p` 全部设为 16 bit，从现有量化模型
+直接导出 HMONNX：
+
+```bash
+QUANT_WEIGHT=/data01/home/yujy/work/xh2modelzoo/weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400
+CUDA_VISIBLE_DEVICES=0 /data01/home/yujy/miniconda3/envs/xhquant_55/bin/python \
+  examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "${QUANT_WEIGHT}" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_fa_all16.yaml \
+  --export-output-dir /data01/home/yujy/work/xh2modelzoo/work_dirs/qwen3_6_35b_a3b_fa_all16_export \
+  --device cuda:0 \
+  --export-from-quanted-model \
+  --overwrite
+```
+
+`QUANT_WEIGHT` 必须指向完整的已量化 Hugging Face/GPTQModel 目录。
+`--export-from-quanted-model` 会跳过量化阶段，不会重新量化原始模型。
+
 ## xhquant_llm 迁移指南
 
 ### 1. 配置

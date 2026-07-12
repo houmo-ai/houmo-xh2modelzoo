@@ -31,6 +31,7 @@ Combines:
 
 import math
 import types
+import warnings
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -51,7 +52,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 )
 
 from xhquant import nn as xhnn
-from xhquant.nn import BfpFlashAttention, LLMCacheV2, MaskedSoftmax, MatMul, RMSNorm
+from xhquant.nn import FlashAttention, LLMCacheV2, MaskedSoftmax, MatMul, RMSNorm
 from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils.registry import DynamicModule
 
@@ -545,8 +546,15 @@ class _Qwen3_5MoeAttention(DynamicModule):  # noqa: N801
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
-        if self.use_bfp_flash_attention:
-            attn_output = self.bfp_attn(query_states, key_states, value_states)
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                key_states,
+                value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+            )
+            attn_output = attn_output.reshape(bsz, q_len, self.attn_hidden_dim)
         else:
             query_states = query_states * self.kv_scale
             key_states = key_states.transpose(2, 3)
@@ -575,21 +583,32 @@ class _Qwen3_5MoeAttention(DynamicModule):  # noqa: N801
         if self.enable_rope:
             self.rope = xhnn.Rope()
 
-        bfp_flash_attention_cfg = cfg.get("bfp_flash_attention", None)
-        self.use_bfp_flash_attention = False
-        if bfp_flash_attention_cfg is not None:
-            self.use_bfp_flash_attention = bfp_flash_attention_cfg.enable
-            self.sefp_manbit = bfp_flash_attention_cfg.sefp_manbit
-            self.out_fp_manbit = bfp_flash_attention_cfg.out_fp_manbit
-            self.out_fp_expbit = bfp_flash_attention_cfg.out_fp_expbit
-        if self.use_bfp_flash_attention:
-            self.bfp_attn = BfpFlashAttention(
+        flash_attention_cfg = cfg.get("flash_attention", None)
+        if flash_attention_cfg is None and cfg.get("bfp_flash_attention", None) is not None:
+            warnings.warn(
+                "Qwen3.5-MoE `bfp_flash_attention` is deprecated and no longer enables FlashAttention. "
+                "Use `flash_attention.enable=True` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.use_flash_attention = bool(flash_attention_cfg and flash_attention_cfg.get("enable", False))
+        if self.use_flash_attention:
+            q_bits = flash_attention_cfg.get("q_bits", 8)
+            k_bits = flash_attention_cfg.get("k_bits", 8)
+            v_bits = flash_attention_cfg.get("v_bits", 8)
+            s_bits = flash_attention_cfg.get("s_bits", q_bits)
+            p_bits = flash_attention_cfg.get("p_bits", s_bits)
+            bits = {"q_bits": q_bits, "k_bits": k_bits, "v_bits": v_bits, "s_bits": s_bits, "p_bits": p_bits}
+            invalid = {name: value for name, value in bits.items() if value not in (8, 16)}
+            if invalid:
+                raise ValueError(f"flash_attention bits must be 8 or 16, got {invalid}")
+            self.flash_attn = FlashAttention(
                 self.attn_hidden_dim,
                 self.num_heads,
                 True,
-                self.sefp_manbit,
-                self.out_fp_expbit,
-                self.out_fp_manbit,
+                scale=1 / math.sqrt(self.head_dim),
+                num_kv_heads=self.num_key_value_heads,
+                **bits,
             )
 
         self.use_cache = cfg.use_cache

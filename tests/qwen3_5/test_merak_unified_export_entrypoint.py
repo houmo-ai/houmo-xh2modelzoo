@@ -156,7 +156,9 @@ def test_workflow_yamls_keep_autoround_llm_only_quant_contract():
             "seqlen": 2048,
         }
         assert quant["runtime"]["trust_remote_code"] is True
-        assert cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+
+    assert dense_cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+    assert moe_cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a16h1_sefp"
 
     assert dense_cfg["quant"]["format"] == "auto_gptq"
     assert dense_cfg["quant"]["runtime"]["batch_size"] == 8

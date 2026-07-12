@@ -598,18 +598,23 @@ class _Qwen3_5TextAttention(_Qwen3_5TextAttentionBase):  # noqa: N801
             legacy_manbit = cfg_get("sefp_manbit", 8)
             legacy_manbit = legacy_manbit + 1 if legacy_manbit <= 7 else legacy_manbit
             self.flash_q_bits = cfg_get("q_bits", cfg_get("q_manbit", legacy_manbit))
+            self.flash_k_bits = cfg_get("k_bits", cfg_get("k_manbit", 8))
+            self.flash_v_bits = cfg_get("v_bits", cfg_get("v_manbit", 8))
             self.flash_s_bits = cfg_get("s_bits", cfg_get("p_manbit", self.flash_q_bits))
-            flash_k_bits = cfg_get("k_bits", cfg_get("k_manbit", 8))
-            flash_v_bits = cfg_get("v_bits", cfg_get("v_manbit", 8))
-            if self.flash_q_bits not in (8, 16) or self.flash_s_bits not in (8, 16):
+            self.flash_p_bits = cfg_get("p_bits", cfg_get("p_manbit", self.flash_s_bits))
+            flash_bits = {
+                "q_bits": self.flash_q_bits,
+                "k_bits": self.flash_k_bits,
+                "v_bits": self.flash_v_bits,
+                "s_bits": self.flash_s_bits,
+                "p_bits": self.flash_p_bits,
+            }
+            invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
+            if invalid_bits:
+                invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
                 raise ValueError(
-                    "flash_attention q_bits/s_bits must be 8 or 16, "
-                    f"got q_bits={self.flash_q_bits}, s_bits={self.flash_s_bits}"
-                )
-            if flash_k_bits != 8 or flash_v_bits != 8:
-                raise ValueError(
-                    "flash_attention compiler ABI requires k_bits=v_bits=8, "
-                    f"got k_bits={flash_k_bits}, v_bits={flash_v_bits}"
+                    "flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, "
+                    f"got {invalid}"
                 )
         if self.use_flash_attention:
             self.flash_attn = FlashAttention(
@@ -619,7 +624,10 @@ class _Qwen3_5TextAttention(_Qwen3_5TextAttentionBase):  # noqa: N801
                 scale=1 / math.sqrt(self.head_dim),
                 num_kv_heads=self.num_key_value_heads,
                 q_bits=self.flash_q_bits,
+                k_bits=self.flash_k_bits,
+                v_bits=self.flash_v_bits,
                 s_bits=self.flash_s_bits,
+                p_bits=self.flash_p_bits,
             )
 
         self.use_cache = cfg.use_cache
