@@ -36,25 +36,19 @@ from .voxcpm2_hmonnx_sessions import (
 
 
 class _HostSideModules(nn.Module):
-    """Host-side modules that stay out of HMONNX graphs."""
+    """Modules intentionally kept on the host side."""
 
     def __init__(self, work_dir: Path, lm_meta: dict, hf_config: dict, device: torch.device, dtype: torch.dtype):
         super().__init__()
 
-        host_dir = (work_dir / Path(lm_meta["host_modules"]["token_embedding"])).parent
-
         hidden_size = int(hf_config["lm_config"]["hidden_size"])
         vocab_size = int(hf_config["lm_config"]["vocab_size"])
-        encoder_hidden = int(hf_config["encoder_config"]["hidden_dim"])
         dit_hidden = int(hf_config["dit_config"]["hidden_dim"])
         fsq_latent = int(hf_config["scalar_quantization_latent_dim"])
         fsq_scale = int(hf_config["scalar_quantization_scale"])
 
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
         self._load_state(self.token_embedding, work_dir / lm_meta["host_modules"]["token_embedding"])
-
-        self.enc_to_lm_proj = nn.Linear(encoder_hidden, hidden_size)
-        self._load_state(self.enc_to_lm_proj, work_dir / lm_meta["host_modules"]["enc_to_lm_proj"])
 
         self.lm_to_dit_proj = nn.Linear(hidden_size, dit_hidden)
         self._load_state(self.lm_to_dit_proj, work_dir / lm_meta["host_modules"]["lm_to_dit_proj"])
@@ -721,23 +715,17 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         text_embed = self.host.token_embedding(text_token) * self.scale_emb
         text_embed = text_embed.to(self.input_dtype)
 
-        # audio embed: feat_encoder + enc_to_lm_proj,host 侧循环 LocEnc
+        # LocEnc HMONNX already contains enc_to_lm_proj.
         L = audio_feat.shape[1]
         # LocEnc-Step 的 batch=1, T=1,host 这里按 token 位置循环(即使某位置是全 0
         # 的 text 位,也过一次,简单起见;后面通过 audio_mask 屏蔽)
-        feat_embed = self.locenc.encode_sequence(audio_feat)  # [1, L, H_enc] or [1, L, H_lm]
+        feat_embed = self.locenc.encode_sequence(audio_feat)  # [1, L, H_lm]
         feat_embed = feat_embed.to(self.input_dtype)
-        enc_in = self.host.enc_to_lm_proj.in_features
-        enc_out = self.host.enc_to_lm_proj.out_features
-        if feat_embed.shape[-1] == enc_in:
-            feat_embed = self.host.enc_to_lm_proj(feat_embed)
-        elif feat_embed.shape[-1] == enc_out:
-            # LocEnc 导出图已融合 enc_to_lm_proj（当前 voxcpm2 导出脚本默认行为）
-            pass
-        else:
+        hidden_size = int(self.hf_config["lm_config"]["hidden_size"])
+        if feat_embed.shape[-1] != hidden_size:
             raise RuntimeError(
                 f"Unexpected LocEnc hidden dim {feat_embed.shape[-1]} "
-                f"(expect {enc_in} or {enc_out})."
+                f"(expect fused LM hidden dim {hidden_size})."
             )
 
         # 混合
@@ -857,6 +845,13 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         # decode 必须从 valid_len 起步,与 PyTorch kv_cache.step() 对齐。
         past_seq_len_base = valid_len
         past_seq_len_residual = valid_len
+        available_decode_steps = self.cache_length - valid_len
+        if available_decode_steps <= 0:
+            raise RuntimeError(
+                f"Prompt length {valid_len} leaves no room in KV cache "
+                f"(cache_length={self.cache_length})."
+            )
+        max_len = min(max_len, available_decode_steps)
 
         # prefix_feat_cond 用 original audio_feat 最后一位(对应 VoxCPM2._inference 里 feat[:,-1,...])
         prefix_feat_cond = original_audio_feat[:, -1, ...]  # [1, P, D]

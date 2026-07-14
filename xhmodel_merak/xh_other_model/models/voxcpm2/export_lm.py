@@ -28,14 +28,14 @@ from xhquant.api import (
     ptq_quantize,
 )
 
-from xh_model_zoo.xh_llm.models.builder import MODELS
-from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
+from xhmodel_merak.xh_other_model.builder import MODELS
+from xhmodel_merak.xh_other_model.eval_model_type import EvalModelType
 
-from xh_model_zoo.xh_llm.models.voxcpm2 import (
+from xhmodel_merak.xh_other_model.models.voxcpm2 import (
     XHVoxCPM2BaseLMModel,
     XHVoxCPM2ResidualLMModel,
 )
-from xh_model_zoo.xh_llm.models.voxcpm2.voxcpm2_llm_model_impl import register_wrap_cls  # noqa: F401
+from xhmodel_merak.xh_other_model.models.voxcpm2.voxcpm2_llm_model_impl import register_wrap_cls  # noqa: F401
 
 try:
     from voxcpm import VoxCPM2Model
@@ -44,13 +44,15 @@ except ImportError:
 
 try:
     from .utils import (
+        activate_export_device,
         copy_hf_config_files,
         validate_cache_length,
         validate_prefill_length,
         write_json_file,
     )
 except ImportError:
-    from utils import (
+    from .utils import (
+        activate_export_device,
         copy_hf_config_files,
         validate_cache_length,
         validate_prefill_length,
@@ -479,17 +481,16 @@ def _export_single_lm(
 
 
 # ---------------------------------------------------------------------------
-# 保存 host 侧需要的小模块(投影层、fsq、stop_head 等)
+# 保存仍留在 host 侧的小模块
 # ---------------------------------------------------------------------------
 
 def _save_host_modules(voxcpm2: VoxCPM2Model, work_dir: Path, logger):
-    """把不进 HMONNX 的小模块保存为 .pt,host pipeline 加载使用。"""
+    """Save only modules that have not moved into HMONNX graphs."""
     host_dir = work_dir / "host_modules"
     host_dir.mkdir(exist_ok=True, parents=True)
 
     modules_to_save = {
         "token_embedding": voxcpm2.base_lm.embed_tokens,
-        "enc_to_lm_proj": voxcpm2.enc_to_lm_proj,
         "lm_to_dit_proj": voxcpm2.lm_to_dit_proj,
         "res_to_dit_proj": voxcpm2.res_to_dit_proj,
         "fusion_concat_proj": voxcpm2.fusion_concat_proj,
@@ -513,23 +514,38 @@ def _save_host_modules(voxcpm2: VoxCPM2Model, work_dir: Path, logger):
 def main(args):
     validate_prefill_length(args.prefill_length)
     validate_cache_length(args.cache_length)
+    if args.prefill_length > args.cache_length:
+        raise ValueError(
+            "prefill_length must not exceed the total KV cache length, "
+            f"but got prefill_length={args.prefill_length}, "
+            f"cache_length={args.cache_length}."
+        )
 
     model_path = str(Path(args.model).expanduser().resolve())
     model_name = Path(model_path).name
     target_device = "XH2a"
 
-    script_dir = Path(__file__).resolve().parent
-    work_root = script_dir / "work_dirs"
-    work_dir = work_root / f"{model_name}_{target_device}"
+    if getattr(args, "output_dir", None):
+        work_dir = Path(args.output_dir).expanduser().resolve()
+    else:
+        script_dir = Path(__file__).resolve().parent
+        work_root = script_dir / "work_dirs"
+        work_dir = work_root / f"{model_name}_{target_device}"
     work_dir.mkdir(exist_ok=True, parents=True)
     logger = get_root_logger()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = activate_export_device(getattr(args, "device", None))
     exec_device = device
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    logger.info("Using export device: %s", device)
 
     logger.info("Loading VoxCPM2 from %s", model_path)
-    voxcpm2 = VoxCPM2Model.from_local(model_path, optimize=False, training=False)
+    voxcpm2 = VoxCPM2Model.from_local(
+        model_path,
+        optimize=False,
+        training=False,
+        device=str(device),
+    )
     voxcpm2.to(device=device, dtype=dtype)
     voxcpm2.eval()
 
@@ -640,6 +656,7 @@ def main(args):
         create_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         model_name=model_name,
         target_device=target_device,
+        export_device=str(device),
         hf_model=model_path,
         hf_config=str(hf_config_dir.relative_to(work_dir)),
         input_dtype=str(dtype).replace("torch.", ""),
@@ -677,6 +694,7 @@ if __name__ == "__main__":
         "--quant_type", type=str, default="w8a8_sefp",
         help="量化类型(default: w8a8_sefp)",
     )
+    parser.add_argument("--device", default=None, help="Export device: cpu, cuda, or cuda:N")
     parser.add_argument(
         "--gen_golden", action="store_true",
         help="生成 golden 数据供端侧对拍",

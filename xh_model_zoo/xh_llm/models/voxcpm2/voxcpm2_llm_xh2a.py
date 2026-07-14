@@ -15,7 +15,7 @@
 # 运行时通过 CLI 覆盖的参数(默认值仅作为样板):
 # -----------------------------------------------------------------------------
 # - model.wrap_cfg.input_sequence_length  <= prefill 长度(base_lm prefill 用)
-# - model.wrap_cfg.max_sequence_length    <= prefill + cache_length 上限
+# - model.wrap_cfg.max_sequence_length    <= KV cache 总长度
 # - model.wrap_cfg.kv_cache.cache_axis    <= KV cache 时间维轴,base_lm 用 2
 # - model.cache_length                    <= decode 时 KV cache 可容纳长度
 # -----------------------------------------------------------------------------
@@ -45,8 +45,8 @@ _base_wrap_cfg = dict(
     use_cache=True,
     # input_sequence_length 默认等于 prefill_length(216),decode 图会覆盖为 1
     input_sequence_length=216,
-    # max_sequence_length = prefill_length + cache_length
-    max_sequence_length=216 + 1024,
+    # max_sequence_length 直接等于 KV cache 总长度
+    max_sequence_length=1024,
     # kv cache shape 在基类 prepare_kv_cache 里构造,这里只给 axis
     kv_cache=dict(
         cache_axis=2,  # [1, kv_heads, cache_len, head_dim] 的 cache_len 维

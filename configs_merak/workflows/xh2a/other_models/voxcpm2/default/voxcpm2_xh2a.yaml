@@ -1,0 +1,64 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model_name: VoxCPM2
+  dtype: float16
+  components:
+    - lm
+    - locenc
+    - locdit
+    - audiovae_encoder
+    - audiovae_decoder_stream
+    - audiovae_decoder_full
+    - audiovae_decoder_stateful
+  quant_types:
+    lm: w8a8_sefp
+    locenc: w8a8_sefp
+    locdit: w8a8_sefp
+    audiovae_encoder: w16a16_sefp
+    audiovae_decoder_stream: w8a8_sefp
+    audiovae_decoder_full: w8a8_sefp
+    audiovae_decoder_stateful: w8a8_sefp
+  model:
+    type: XHVoxCPM2Model
+    hf_model: null
+    wrap_cfg:
+      max_sequence_length: 1024
+      input_sequence_length: 256
+      use_cache: true
+      num_logits_to_keep: 0
+      kv_cache:
+        cache_axis: 2
+      enable_rope: true
+    quant_config: {}
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+      output_names:
+        - hidden
+  lm:
+    skip_verify: true
+  locenc:
+    cal_wav: null
+    num_cal_samples: 8
+    skip_verify: true
+  locdit:
+    skip_verify: true
+  audiovae_encoder:
+    num_patches: 128
+    audio: null
+    skip_verify: true
+  audiovae_decoder:
+    stream_num_patches: 3
+    full_num_patches: 128
+    skip_verify: true
+  audiovae_decoder_stateful:
+    num_patches: 1
+    seed: 0
+    verify_steps: 4
+    skip_hmonnx: false
+    skip_verify: true

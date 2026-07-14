@@ -29,8 +29,8 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from voxcpm.modules.minicpm4 import MiniCPMModel
 
-from ..base_llm_model import LLMBaseModel
-from ..builder import MODELS, wrap_llm_model
+from ...base_llm_model import LLMBaseModel
+from ...builder import register_other_model, wrap_llm_model
 from .voxcpm2_llm_model_impl import register_wrap_cls
 
 
@@ -262,7 +262,7 @@ class _XHVoxCPM2LMBase(LLMBaseModel):
 # base_lm wrap
 # ---------------------------------------------------------------------------
 
-@MODELS.register_module()
+@register_other_model("XHVoxCPM2BaseLMModel", master=False)
 class XHVoxCPM2BaseLMModel(_XHVoxCPM2LMBase):
     """VoxCPM2 base_lm 的 xh2modelzoo wrap。
 
@@ -279,7 +279,7 @@ class XHVoxCPM2BaseLMModel(_XHVoxCPM2LMBase):
 # residual_lm wrap
 # ---------------------------------------------------------------------------
 
-@MODELS.register_module()
+@register_other_model("XHVoxCPM2ResidualLMModel", master=False)
 class XHVoxCPM2ResidualLMModel(_XHVoxCPM2LMBase):
     """VoxCPM2 residual_lm 的 xh2modelzoo wrap。
 
