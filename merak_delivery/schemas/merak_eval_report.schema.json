@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xh2modelzoo/schemas/merak_eval_report.schema.json",
+  "title": "Merak Eval Report",
+  "type": "object",
+  "required": ["schema_version", "model_id", "version_id", "status", "tasks", "logs"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "model_id": {"type": "string"},
+    "version_id": {"type": "string"},
+    "status": {"type": "string", "enum": ["passed", "failed", "pending", "skipped"]},
+    "tasks": {"type": "array"},
+    "logs": {"type": "object"}
+  }
+}

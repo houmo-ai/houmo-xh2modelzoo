@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xh2modelzoo/schemas/merak_catalog.schema.json",
+  "title": "Merak Model Catalog",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "models"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "generated_at": {"type": "string"},
+    "models": {"type": "array"}
+  }
+}

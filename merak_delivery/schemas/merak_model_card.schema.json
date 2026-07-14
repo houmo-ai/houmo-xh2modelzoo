@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xh2modelzoo/schemas/merak_model_card.schema.json",
+  "title": "Merak Model Card",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model",
+    "source",
+    "workflow",
+    "runtime",
+    "frontend",
+    "release"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "display_name", "modality", "task", "tags"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9_]*$"},
+        "family": {"type": "string", "minLength": 1},
+        "display_name": {"type": "string", "minLength": 1},
+        "modality": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "enum": ["text", "image", "video", "audio", "embedding"]},
+          "uniqueItems": true
+        },
+        "task": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "name", "url", "license", "raw_model_path"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "url": {"type": "string"},
+        "license": {"type": "string"},
+        "raw_model_path": {"type": "string", "minLength": 1}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config_path", "model_dir", "class", "actions"],
+      "properties": {
+        "config_path": {"type": "string", "minLength": 1},
+        "model_dir": {"type": "string", "minLength": 1},
+        "class": {"type": "string", "minLength": 1},
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "enum": ["quant", "export", "dump_golden", "eval"]},
+          "uniqueItems": true
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "seed", "work_dir"],
+      "properties": {
+        "device": {"type": "string", "minLength": 1},
+        "seed": {"type": "integer", "minimum": 0},
+        "work_dir": {"type": "string", "minLength": 1}
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "inputs", "outputs", "demo", "limitations"],
+      "properties": {
+        "summary": {"type": "string"},
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/io_item"}
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/io_item"}
+        },
+        "demo": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind"],
+          "properties": {
+            "kind": {"type": "string", "minLength": 1}
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version_id", "target_status", "owner", "reviewer"],
+      "properties": {
+        "version_id": {"type": "string", "minLength": 1},
+        "target_status": {
+          "type": "string",
+          "enum": ["draft", "ready", "exported", "golden_ready", "accuracy_passed", "released"]
+        },
+        "owner": {"type": "string"},
+        "reviewer": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "io_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "description"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "required": {"type": "boolean"},
+        "description": {"type": "string"}
+      }
+    }
+  }
+}

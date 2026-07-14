@@ -1,0 +1,59 @@
+schema_version: 1
+
+model:
+  id: qwen3_5_9b
+  family: qwen3_5
+  display_name: Qwen3.5 9B
+  modality: [text, image]
+  task: [chat, vlm]
+  tags: [merak, xh2a, qwen3_5, multimodal]
+
+source:
+  provider: HuggingFace
+  name: Qwen/Qwen3.5-9B-Instruct
+  url: ""
+  license: ""
+  raw_model_path: /shared/models/qwen3_5_9b
+
+workflow:
+  config_path: configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml
+  model_dir: /shared/models/qwen3_5_9b
+  class: auto
+  actions: [quant, export, dump_golden, eval]
+
+runtime:
+  device: cuda:0
+  seed: 1024
+  work_dir: work_dirs/merak_delivery/qwen3_5_9b
+
+frontend:
+  summary: Qwen3.5 9B multimodal Merak HMONNX delivery sample for catalog and version-flow validation.
+  inputs:
+    - name: text
+      type: string
+      required: true
+      description: User prompt converted to token ids by processor chat template.
+    - name: image
+      type: image
+      required: false
+      description: Optional VLM image input used to build visual tensors.
+  outputs:
+    - name: text
+      type: string
+      description: Generated response text.
+    - name: logits
+      type: tensor
+      description: Prefill or decode next-token logits.
+  demo:
+    kind: chat_or_vlm
+    sample_text: 描述这张图片中的主要内容。
+    sample_image: data/images/qwen2_vl_demo.jpeg
+  limitations:
+    - Accuracy status must come from eval_report.json, not from smoke tests.
+    - Visual subgraph availability must be verified by artifact_check.json.
+
+release:
+  version_id: qwen3_5_9b_xh2a_w4a8_256_2k_20260708
+  target_status: accuracy_passed
+  owner: ""
+  reviewer: ""

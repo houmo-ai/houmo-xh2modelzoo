@@ -1,0 +1,67 @@
+schema_version: 1
+
+model:
+  id: gemma4_e4b
+  family: gemma4_series
+  display_name: Gemma4 E4B
+  modality: [text, image, video, audio]
+  task: [chat, vlm, multimodal]
+  tags: [merak, xh2a, gemma4, multimodal]
+
+source:
+  provider: HuggingFace
+  name: google/gemma-4-e4b-it
+  url: ""
+  license: ""
+  raw_model_path: /shared/models/gemma4_e4b
+
+workflow:
+  config_path: configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml
+  model_dir: /shared/models/gemma4_e4b
+  class: auto
+  actions: [quant, export, dump_golden, eval]
+
+runtime:
+  device: cuda:0
+  seed: 1024
+  work_dir: work_dirs/merak_delivery/gemma4_e4b
+
+frontend:
+  summary: Gemma4 E4B complex multimodal Merak HMONNX delivery sample for validating extension fields and gates.
+  inputs:
+    - name: text
+      type: string
+      required: true
+      description: User prompt converted by Gemma4 processor.
+    - name: image
+      type: image
+      required: false
+      description: Optional image input for the visual subgraph.
+    - name: video
+      type: video
+      required: false
+      description: Optional multi-frame input for the video visual subgraph.
+    - name: audio
+      type: audio
+      required: false
+      description: Optional audio input for the audio subgraph when exported.
+  outputs:
+    - name: text
+      type: string
+      description: Generated response text.
+    - name: logits
+      type: tensor
+      description: Prefill or decode next-token logits.
+  demo:
+    kind: multimodal_chat
+    sample_text: 请根据输入内容回答问题。
+    sample_image: data/images/qwen2_vl_demo.jpeg
+  limitations:
+    - Gemma4 acceptance requires full-chain validation instead of short prompt smoke tests.
+    - Video and audio gates must be backed by real generate evidence when those modalities are claimed.
+
+release:
+  version_id: gemma4_e4b_xh2a_w4a8_320_128k_20260708
+  target_status: accuracy_passed
+  owner: ""
+  reviewer: ""
