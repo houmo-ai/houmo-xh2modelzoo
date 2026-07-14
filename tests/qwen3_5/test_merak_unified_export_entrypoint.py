@@ -8,7 +8,8 @@ import types
 from pathlib import Path
 
 import pytest
-import yaml
+
+from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -103,8 +104,7 @@ def test_export_entrypoint_keeps_legacy_compat_flags(monkeypatch):
 
 
 def _load_yaml(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as fin:
-        return yaml.safe_load(fin)
+    return WorkflowConfig.from_file(str(path)).data
 
 
 def test_hf_config_copy_excludes_weight_index():
@@ -150,15 +150,15 @@ def test_workflow_yamls_keep_autoround_llm_only_quant_contract():
         assert quant["iters"] == 200
         assert quant["seed"] == 42
         assert quant["quant_nontext_module"] is False
-        assert quant["calibration"] == {
-            "dataset": "NeelNanda/pile-10k",
-            "nsamples": 128,
-            "seqlen": 2048,
-        }
+        assert quant["calibration"]["nsamples"] == 128
+        assert quant["calibration"]["seqlen"] == 2048
         assert quant["runtime"]["trust_remote_code"] is True
 
+    assert dense_cfg["quant"]["calibration"]["dataset"] == "NeelNanda/pile-10k"
+    assert moe_cfg["quant"]["calibration"]["jsonl"] == ("xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl")
+
     assert dense_cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
-    assert moe_cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a16h1_sefp"
+    assert moe_cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
 
     assert dense_cfg["quant"]["format"] == "auto_gptq"
     assert dense_cfg["quant"]["runtime"]["batch_size"] == 8
@@ -204,9 +204,7 @@ def test_workflow_yamls_include_gptq_companion_configs():
 
     assert dense_cfg["quant"]["calibration"]["jsonl"].endswith("Qwen3.5-27B.jsonl")
     assert dense_cfg["quant"]["calibration"]["nsamples"] == 256
-    assert moe_cfg["quant"]["calibration"]["jsonl"].endswith(
-        "Qwen3-Next-80B-A3B-Instruct.jsonl"
-    )
+    assert moe_cfg["quant"]["calibration"]["jsonl"].endswith("Qwen3-Next-80B-A3B-Instruct.jsonl")
     assert moe_cfg["quant"]["calibration"]["nsamples"] == 512
     assert moe_cfg["quant"]["moe"]["attn_bits"] == 8
     assert moe_cfg["quant"]["moe"]["shared_expert_bits"] == 8

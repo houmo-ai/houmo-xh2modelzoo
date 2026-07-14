@@ -111,9 +111,26 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         return str(output_path)
 
     def _get_page_attention_modules(self, hmonnx_model: HMONNXModel) -> list[PageAttention]:
-        graph_module = hmonnx_model.hmonnx_session.graph_module
+        session = hmonnx_model.hmonnx_session
+        if not hasattr(session, "graph_module"):
+            # Legacy eager HMONNX wraps the real graph session and creates it
+            # lazily on the first forward. Page-attention context has to be
+            # attached before that forward, so initialize and unwrap it here.
+            initialize = getattr(session, "initialize", None)
+            if callable(initialize):
+                initialize()
+            session = getattr(session, "_session", session)
+        graph_module = getattr(session, "graph_module", None)
+        if graph_module is None:
+            node_modules = getattr(session, "node_modules", None)
+            if node_modules is not None:
+                return [module for module in node_modules if isinstance(module, PageAttention)]
+            raise RuntimeError(
+                f"HMONNX session {type(session).__name__} exposes neither graph_module "
+                "nor node_modules for PageAttention context binding"
+            )
         page_attention_modules = []
-        for node in hmonnx_model.hmonnx_session.graph_module.graph.nodes:
+        for node in graph_module.graph.nodes:
             if node.op == "call_module":
                 m = graph_module.get_submodule(str(node.target))
                 if isinstance(m, PageAttention):

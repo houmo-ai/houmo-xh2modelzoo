@@ -4,12 +4,14 @@ Verifies that the merak export produces golden_meta_info.json fields
 compatible with qwen3_5_xh2a_spec_decode_test.py and bench.py scripts.
 No GPU / no weights / no network required.
 """
+
 from __future__ import annotations
 
 import ast
 import importlib.util
 import json
 from pathlib import Path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MERAK_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"
@@ -116,11 +118,7 @@ def _assert_golden_export_layout(export_dir: Path) -> None:
         assert visual_hmonnx.startswith("visual/")
 
     spec_decode = meta.get("spec_decode", {})
-    spec_path_values = [
-        value
-        for key, value in spec_decode.items()
-        if key.endswith("_onnx") and isinstance(value, str)
-    ]
+    spec_path_values = [value for key, value in spec_decode.items() if key.endswith("_onnx") and isinstance(value, str)]
     for path_value in spec_path_values:
         top_dir = path_value.split("/", 1)[0]
         assert top_dir in SPEC_DECODE_DIRS or top_dir in {"prefill", "decode"}
@@ -351,8 +349,8 @@ def test_release_layout_validator_checks_onnx_external_data_location(tmp_path):
 def test_get_export_cfg_handles_split_conv_cache():
     """Verify get_export_cfg generates split conv cache names."""
     src = MERAK_MODEL.read_text()
-    assert 'past_conv_cache_{branch}_{cache_idx}' in src
-    assert 'conv_cache_out_{branch}_{cache_idx}' in src
+    assert "past_conv_cache_{branch}_{cache_idx}" in src
+    assert "conv_cache_out_{branch}_{cache_idx}" in src
 
 
 def test_get_export_cfg_handles_verify_intermediates():
@@ -360,7 +358,7 @@ def test_get_export_cfg_handles_verify_intermediates():
     src = MERAK_MODEL.read_text()
     assert "verify_output_intermediates" in src
     assert "verify_steps" in src
-    assert 'conv_cache_out_{cache_idx}_{step_idx}' in src
+    assert "conv_cache_out_{cache_idx}_{step_idx}" in src
 
 
 def test_get_export_cfg_handles_spec_decode_outputs():
@@ -372,11 +370,10 @@ def test_get_export_cfg_handles_spec_decode_outputs():
     assert "output_post_norm_hidden" in src
 
 
-def test_visual_export_uses_release_spec_stage_suffix():
-    """Visual branch names must follow <release_prefix>_visual_* under visual/."""
+def test_visual_export_uses_release_prefix_and_resolution_suffix():
+    """Visual branch names must stay release-scoped and resolution-specific."""
     src = MERAK_MODEL.read_text()
-    assert 'self.visual.config.model_name = f"{exported_info.model_name}_visual"' in src
-    assert "self.visual.config.max_size_w}x{self.visual.config.max_size_h}" not in src
+    assert ('f"{exported_info.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"') in src
 
 
 def test_spec_decode_export_uses_release_spec_stage_suffixes():
@@ -418,6 +415,7 @@ def test_spec_decode_test_script_parses():
 
 def test_spec_decode_bench_script_parses():
     _parse(SPEC_BENCH)
+
 
 ONNX_RUNTIME_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py"
 SPEC_DECODE_RUNTIME_MODEL = REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_spec_decode_onnx_model.py"
@@ -512,48 +510,59 @@ def test_dense_qwen3_5_split_cache_dims_prefer_actual_split_modules():
 
 
 def test_dense_qwen3_5_merak_and_demo_expose_split_and_merged_modes():
-    merak_impl_src = MERAK_MODEL.with_name("_llm_model_impl.py").read_text()
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        HybridGatedDeltaNetMixin,
+    )
+
+    shared_gdn_src = MERAK_MODEL.with_name("_hybrid_gated_delta_net.py").read_text()
     export_script_src = EXPORT_SCRIPT.read_text()
 
-    assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in merak_impl_src
-    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in merak_impl_src
-    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in merak_impl_src
-    assert 'self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)' in merak_impl_src
+    assert _llm_model_impl._Qwen3_5GatedDeltaNet._setup is HybridGatedDeltaNetMixin._setup
+    assert _llm_model_impl._Qwen3_5GatedDeltaNet.forward is HybridGatedDeltaNetMixin.forward
+    assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in shared_gdn_src
+    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in shared_gdn_src
+    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in shared_gdn_src
+    assert 'self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)' in shared_gdn_src
     assert 'cfg.model.wrap_cfg.split_conv_cache = getattr(args, "split_conv_cache", True)' in export_script_src
-    assert 'default=True' in export_script_src
+    assert "default=True" in export_script_src
     assert 'dest="split_conv_cache"' in export_script_src
     assert '"--split_conv_cache"' in export_script_src
     assert '"--no_split_conv_cache"' in export_script_src
     assert 'action="store_false"' in export_script_src
     assert 'cfg.model.wrap_cfg.fuse_gdr_ops = getattr(args, "fuse_gdr_ops", False)' in export_script_src
-    assert 'default=False' in export_script_src
+    assert "default=False" in export_script_src
     assert 'normalize_force_fp32 = getattr(args, "normalize_force_fp32", False)' in export_script_src
-    assert 'cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(' in export_script_src
+    assert "cfg.model.wrap_cfg.use_manual_depthwise_conv1d = getattr(" in export_script_src
 
 
 def test_dense_qwen3_5_gdr_split_flags_keep_chunk_scan_io_contract():
     config_src = CONFIG_FILE.read_text()
     merak_model_src = MERAK_MODEL.read_text()
-    merak_impl_src = MERAK_MODEL.with_name("_llm_model_impl.py").read_text()
+    shared_gdn_src = MERAK_MODEL.with_name("_hybrid_gated_delta_net.py").read_text()
     hmonnx_src = MERAK_HMONNX_INFERENCE.read_text()
 
     assert "fuse_gdr_block_recurrent_ops: bool = False" in config_src
     assert "self.fuse_gdr_block_recurrent_ops = fuse_gdr_block_recurrent_ops" in config_src
     assert 'self.wrap_cfg["fuse_gdr_block_recurrent_ops"] = self.config.fuse_gdr_block_recurrent_ops' in merak_model_src
 
-    setup_body = merak_impl_src.split("# GDR fused ops.", 1)[1].split("return self", 1)[0]
+    setup_body = shared_gdn_src.split("# GDR fused ops.", 1)[1].split("return self", 1)[0]
     assert "if self.fuse_gdr_block_recurrent_ops:" in setup_body
     assert "self.block_tri_inverse_op = GDRBlockTriInverse" in setup_body
     assert "self.recurrent_scan_op = GDRRecurrentScan" in setup_body
     assert "if self.fuse_gdr_ops:" in setup_body
     assert "self.chunk_scan_op = GDRChunkScan" in setup_body
 
-    prefill_contract_body = merak_model_src.split("def _prefill_recurrent_state_uses_cache_tensor", 1)[1].split("def _enforce_split_conv_cache_wrap_cfg", 1)[0]
+    prefill_contract_body = merak_model_src.split("def _prefill_recurrent_state_uses_cache_tensor", 1)[1].split(
+        "def _enforce_split_conv_cache_wrap_cfg", 1
+    )[0]
     assert 'wrap_cfg.get("fuse_gdr_ops", getattr(config, "fuse_gdr_ops", False))' in prefill_contract_body
     assert "fuse_gdr_block_recurrent_ops" not in prefill_contract_body
 
-    hmonnx_contract_body = hmonnx_src.split("def _model_config_prefill_recurrent_state_uses_cache", 1)[1].split("class", 1)[0]
-    assert 'getattr(model_config, "fuse_gdr_ops", False)' in hmonnx_contract_body
+    hmonnx_contract_body = hmonnx_src.split("def _model_config_prefill_recurrent_state_uses_cache", 1)[1].split(
+        "class", 1
+    )[0]
+    assert "model_config_prefill_recurrent_state_uses_cache(model_config)" in hmonnx_contract_body
     assert "fuse_gdr_block_recurrent_ops" not in hmonnx_contract_body
 
 
@@ -570,8 +579,6 @@ def test_dense_qwen3_5_dflash_uses_checkpoint_target_ids_and_guards_num_blocks()
     assert "dflash_config.target_layer_ids" in runtime_src
 
 
-
-
 def test_dense_qwen3_5_demo_runtime_accepts_current_golden_meta_fields():
     runtime_src = DEMO_RUNTIME.read_text()
 
@@ -580,12 +587,13 @@ def test_dense_qwen3_5_demo_runtime_accepts_current_golden_meta_fields():
     assert 'or meta_info.get("quant_embedding")' in runtime_src
     assert 'or "quant_embedding.pt"' in runtime_src
 
+
 def test_spec_decode_export_cfg_keeps_split_conv_mtp_dflash_input_names():
     src = MERAK_MODEL.read_text()
 
-    assert 'self._decode_input_sequence_length = self.config.num_draft_tokens + 1' in src
+    assert "self._decode_input_sequence_length = self.config.num_draft_tokens + 1" in src
     assert '"verify_output_intermediates": True' in src
     assert 'for branch in ("q", "k", "v")' in src
     assert 'f"past_conv_cache_{branch}_{cache_idx}"' in src
     assert 'f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"' in src
-    assert 'hidden_output_name = (\n                "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"\n            )' in src
+    assert ('hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"') in src

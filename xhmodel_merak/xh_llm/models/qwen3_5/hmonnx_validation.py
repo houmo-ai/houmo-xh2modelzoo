@@ -116,6 +116,7 @@ def hmonnx_generate(
     min_output_tokens: int = 0,
     auto_offload: bool = False,
     cuda_graph: bool = False,
+    page_attention: bool = False,
     device_map: None = None,
 ) -> HMONNXQuickTestResult:
     """Run a lightweight HMONNX generate smoke test for full or visual exports."""
@@ -133,6 +134,7 @@ def hmonnx_generate(
         resolved_meta,
         enable_golden=golden,
         enable_cuda_graph=cuda_graph,
+        enable_page_attention=page_attention,
         enable_auto_offload=auto_offload,
         device_map=device_map,
     )

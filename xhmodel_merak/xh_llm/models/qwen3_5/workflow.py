@@ -24,9 +24,12 @@ _QWEN35_MODEL_CONFIG_CLS_NAMES = {
 }
 
 
-
 class Qwen35Workflow(BaseLLMWorkflow):
     """Merak HMONNX workflow for Qwen3.5/Qwen3.6 dense, MoE, and visual exports."""
+
+    expected_model_cls_names = _QWEN35_MODEL_CLS_NAMES
+    expected_model_config_cls_names = _QWEN35_MODEL_CONFIG_CLS_NAMES
+    family_label = "Qwen3.5/Qwen3.6"
 
     @classmethod
     def from_config(
@@ -57,8 +60,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         artifact_format = self._resolve_artifact_format(quant_cfg)
         if artifact_format != "gptqmodel_hf":
             raise ValueError(
-                "Qwen35Workflow.quant requires artifact_format/output_format='gptqmodel_hf'; "
-                f"got {artifact_format!r}."
+                f"Qwen35Workflow.quant requires artifact_format/output_format='gptqmodel_hf'; got {artifact_format!r}."
             )
 
         export_model_cfg = workflow_config.export["model"]
@@ -271,12 +273,14 @@ class Qwen35Workflow(BaseLLMWorkflow):
         model_cls_name = model_cls.__name__
         config_cls = getattr(model_cls, "CONFIG_CLS", None)
         config_cls_name = getattr(config_cls, "__name__", None)
-        if model_cls_name not in _QWEN35_MODEL_CLS_NAMES or config_cls_name not in _QWEN35_MODEL_CONFIG_CLS_NAMES:
+        if (
+            model_cls_name not in self.expected_model_cls_names
+            or config_cls_name not in self.expected_model_config_cls_names
+        ):
             raise TypeError(
-                "Qwen35Workflow only supports Qwen3.5/Qwen3.6 dense, MoE, and visual model classes; "
+                f"{type(self).__name__} only supports {self.family_label} model classes; "
                 f"got model={model_cls_name}, config={config_cls_name}."
             )
-
 
     def _quant_autoround_api(
         self,
@@ -357,10 +361,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
 
         prompt = self._messages_text_prompt(messages)
         max_new_tokens = self._spec_decode_golden_max_new_tokens(meta_file, mode)
-        logger.info(
-            f"Dumping {mode} draft golden via spec_decode_generate "
-            f"(max_new_tokens={max_new_tokens})."
-        )
+        logger.info(f"Dumping {mode} draft golden via spec_decode_generate (max_new_tokens={max_new_tokens}).")
         result = spec_decode_generate(
             meta_file=meta_file,
             prompt=prompt,

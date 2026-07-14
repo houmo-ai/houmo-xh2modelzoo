@@ -5,17 +5,20 @@ from xhmodel_merak.xh_llm.utils import unfold_args
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
+from ..qwen3_5.hybrid_cache_runtime import (
+    commit_hybrid_cache_outputs,
+    get_spec_decode_verify_steps,
+    model_config_prefill_recurrent_state_uses_cache,
+)
 from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
-from ..qwen3_5.split_conv_cache_utils import _regroup_flat_split_conv_cache
 from .data_preprocess import Qwen3_5_DataPreprocess
 
 
 def _model_config_prefill_recurrent_state_uses_cache(model_config) -> bool:
-    explicit = getattr(model_config, "prefill_recurrent_state_uses_cache", None)
-    if explicit is not None:
-        return bool(explicit)
-    return bool(getattr(model_config, "fuse_gdr_ops", False))
+    """Compatibility alias for the shared hybrid-cache contract helper."""
+
+    return model_config_prefill_recurrent_state_uses_cache(model_config)
 
 
 class VisualHMONNXModel(HMONNXModel):
@@ -55,19 +58,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         return self
 
     def _get_spec_decode_verify_steps(self) -> int:
-        spec_decode = getattr(self.meta_info, "spec_decode", None)
-        if spec_decode is None:
-            return 1
-        if isinstance(spec_decode, dict):
-            mode = spec_decode.get("mode")
-            num_draft_tokens = spec_decode.get("num_draft_tokens")
-        else:
-            mode = getattr(spec_decode, "mode", None)
-            num_draft_tokens = getattr(spec_decode, "num_draft_tokens", None)
-
-        if mode in {"mtp", "dflash"} and num_draft_tokens is not None:
-            return int(num_draft_tokens) + 1
-        return 1
+        return get_spec_decode_verify_steps(self.meta_info)
 
     def _prefill_recurrent_state_uses_cache(self) -> bool:
         return _model_config_prefill_recurrent_state_uses_cache(self.meta_info.model_config)
@@ -101,71 +92,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         args = [arg.to(torch.int32) if arg.dtype == torch.int64 else arg for arg in args]
         outs = super().forward(*args)
 
-        logits, *linear_caches = outs
-        past_conv_caches = self._kvcache_mixin.past_conv_caches
-        past_recurrent_states = self._kvcache_mixin.past_recurrent_states
-        verify_steps = 1 if getattr(self, "_llm_prefill", True) else self._get_spec_decode_verify_steps()
-        conv_cache_out_per_step = (
-            len(past_conv_caches) * 3 if self._kvcache_mixin.split_conv_cache else len(past_conv_caches)
-        )
-        prefill_recurrent_state_uses_cache = (
-            getattr(self, "_llm_prefill", True) and self._prefill_recurrent_state_uses_cache()
-        )
-        recurrent_state_out_per_step = 0 if prefill_recurrent_state_uses_cache else len(past_recurrent_states)
-        conv_cache_out_count = conv_cache_out_per_step * verify_steps
-        recurrent_state_out_count = recurrent_state_out_per_step * verify_steps
-        expected_linear_cache_outputs = conv_cache_out_count + recurrent_state_out_count
-        if len(linear_caches) < expected_linear_cache_outputs:
-            raise RuntimeError(
-                "HMONNX output cache count mismatch: "
-                f"expected at least {expected_linear_cache_outputs} linear cache outputs "
-                f"({conv_cache_out_count} conv + {recurrent_state_out_count} recurrent "
-                f"across {verify_steps} step(s)), got {len(linear_caches)}"
-            )
-        raw_conv_cache_out_list = linear_caches[:conv_cache_out_count]
-        raw_recurrent_state_out_list = linear_caches[
-            conv_cache_out_count : conv_cache_out_count + recurrent_state_out_count
-        ]
-
-        # Spec-decode target verification exports cache outputs for every verified token.
-        # The runtime cache must advance to the final verified token only.
-        if verify_steps > 1:
-            conv_cache_out_list = []
-            if self._kvcache_mixin.split_conv_cache:
-                for layer_idx in range(len(past_conv_caches)):
-                    layer_offset = layer_idx * 3 * verify_steps
-                    q_out = raw_conv_cache_out_list[layer_offset + verify_steps - 1]
-                    k_out = raw_conv_cache_out_list[layer_offset + 2 * verify_steps - 1]
-                    v_out = raw_conv_cache_out_list[layer_offset + 3 * verify_steps - 1]
-                    conv_cache_out_list.extend([q_out, k_out, v_out])
-            else:
-                for layer_idx in range(len(past_conv_caches)):
-                    conv_cache_out_list.append(raw_conv_cache_out_list[layer_idx * verify_steps + verify_steps - 1])
-            recurrent_state_out_list = [
-                raw_recurrent_state_out_list[layer_idx * verify_steps + verify_steps - 1]
-                for layer_idx in range(len(past_recurrent_states))
-            ]
-        else:
-            conv_cache_out_list = raw_conv_cache_out_list
-            recurrent_state_out_list = raw_recurrent_state_out_list
-
-        # 更新cache
-        if self._kvcache_mixin.split_conv_cache:
-            grouped_conv_cache_out_list = _regroup_flat_split_conv_cache(conv_cache_out_list)
-            for (pq, pk, pv), (oq, ok, ov) in zip(past_conv_caches, grouped_conv_cache_out_list, strict=True):
-                pq[:] = oq[:]
-                pk[:] = ok[:]
-                pv[:] = ov[:]
-        else:
-            for past_conv_cache, conv_cache_out in zip(past_conv_caches, conv_cache_out_list, strict=True):
-                past_conv_cache[:] = conv_cache_out[:]
-
-        if recurrent_state_out_list:
-            for past_recurrent_state, recurrent_state_out in zip(
-                past_recurrent_states, recurrent_state_out_list, strict=True
-            ):
-                past_recurrent_state[:] = recurrent_state_out[:]
-        return logits, conv_cache_out_list, recurrent_state_out_list
+        return commit_hybrid_cache_outputs(self, outs, model_label="Qwen3.5-MoE")
 
     def _get_data_preprocessor(self) -> Qwen3_5_DataPreprocess:
         input_sequence_length = self.get_input_sequence_length()

@@ -30,8 +30,7 @@ MERAK_EXPORT_SCRIPT = REPO_ROOT / "examples_merak/llm/qwen3_5/debug_scripts/qwen
 DFLASH_WORKFLOW_CONFIGS = [
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml",
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_dflash.yaml",
-    REPO_ROOT
-    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml",
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml",
 ]
 
 
@@ -216,47 +215,53 @@ def test_qwen3_5_dflash_restore_prefill_wrap_cfg_without_post_norm_hidden():
 
 
 def test_qwen3_5_split_conv_cache_impl_imports_torch_nn():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import (
+        _hybrid_gated_delta_net as shared_gdn,
+    )
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        HybridGatedDeltaNetMixin,
+    )
 
-    assert _llm_model_impl.nn.Linear is not None
+    assert _llm_model_impl._Qwen3_5GatedDeltaNet._setup is HybridGatedDeltaNetMixin._setup
+    assert shared_gdn.nn.Linear is not None
 
 
 def test_qwen3_5_split_conv_cache_helpers_round_trip_flat_inputs():
-    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _flatten_split_conv_cache_outputs,
         _regroup_flat_split_conv_cache,
     )
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _flatten_split_conv_cache_outputs as flatten_canonical,
+    )
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _regroup_flat_split_conv_cache as regroup_canonical,
+    )
 
     flat = list(range(6))
 
-    grouped = _llm_model_impl._regroup_flat_split_conv_cache(flat)
+    grouped = regroup_canonical(flat)
     assert grouped == [(0, 1, 2), (3, 4, 5)]
-    assert _llm_model_impl._flatten_split_conv_cache_outputs(grouped) == flat
+    assert flatten_canonical(grouped) == flat
 
-    hmonnx_grouped = _regroup_flat_split_conv_cache(flat)
-    assert hmonnx_grouped == grouped
-    assert _flatten_split_conv_cache_outputs(hmonnx_grouped) == flat
-
-    moe_grouped = _moe_model._regroup_flat_split_conv_cache(flat)
-    assert moe_grouped == grouped
-    assert _moe_model._flatten_split_conv_cache_outputs(moe_grouped) == flat
+    assert _regroup_flat_split_conv_cache is regroup_canonical
+    assert _flatten_split_conv_cache_outputs is flatten_canonical
 
 
 def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
-    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _flatten_split_conv_cache_outputs,
     )
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _flatten_split_conv_cache_outputs as flatten_canonical,
+    )
 
     composite = [tuple(range(15))]
     expected = list(range(15))
 
-    assert _llm_model_impl._flatten_split_conv_cache_outputs(composite) == expected
-    assert _flatten_split_conv_cache_outputs(composite) == expected
-    assert _moe_model._flatten_split_conv_cache_outputs(composite) == expected
+    assert flatten_canonical(composite) == expected
+    assert _flatten_split_conv_cache_outputs is flatten_canonical
 
 
 def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv_requirement():
@@ -273,39 +278,37 @@ def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv
 
 
 def test_qwen3_5_split_conv_cache_helpers_reject_bad_flat_length():
-    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _regroup_flat_split_conv_cache,
     )
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _regroup_flat_split_conv_cache as regroup_canonical,
+    )
 
     with pytest.raises(RuntimeError, match="divisible by 3"):
-        _llm_model_impl._regroup_flat_split_conv_cache([0, 1])
-    with pytest.raises(RuntimeError, match="divisible by 3"):
-        _regroup_flat_split_conv_cache([0, 1])
-    with pytest.raises(RuntimeError, match="divisible by 3"):
-        _moe_model._regroup_flat_split_conv_cache([0, 1])
+        regroup_canonical([0, 1])
+    assert _regroup_flat_split_conv_cache is regroup_canonical
 
 
 def test_qwen3_5_split_conv_cache_helpers_do_not_bool_test_proxy_like_inputs():
-    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import (
         _regroup_flat_split_conv_cache,
     )
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
         _regroup_flat_split_conv_cache as regroup_runtime_cache,
     )
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+    from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
+        _regroup_flat_split_conv_cache as regroup_canonical,
+    )
 
     class ProxyLike:
         def __bool__(self):
             raise AssertionError("proxy-like inputs must not be used in Python truth tests")
 
     proxy_like = ProxyLike()
-    assert _llm_model_impl._regroup_flat_split_conv_cache(proxy_like) is proxy_like
-    assert _regroup_flat_split_conv_cache(proxy_like) is proxy_like
+    assert regroup_canonical(proxy_like) is proxy_like
+    assert _regroup_flat_split_conv_cache is regroup_canonical
     assert regroup_runtime_cache(proxy_like) is proxy_like
-    assert _moe_model._regroup_flat_split_conv_cache(proxy_like) is proxy_like
 
 
 def test_qwen3_5_hmonnx_split_conv_cache_mixin_uses_flat_export_signature():
@@ -355,20 +358,25 @@ def test_qwen3_5_export_cfg_honors_split_conv_cache_even_when_mixin_was_stale():
 
 def test_qwen3_5_dense_text_model_setup_splits_child_linear_attn_modules():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_text_model import (
+        HybridTextModelMixin,
+    )
 
-    source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel._setup)
+    source = inspect.getsource(HybridTextModelMixin._setup)
 
+    assert issubclass(_llm_model_impl._Qwen3_5TextModel, HybridTextModelMixin)
+    assert _llm_model_impl._Qwen3_5TextModel._setup is HybridTextModelMixin._setup
     assert "if self.split_conv_cache:" in source
     assert 'self.layer_types[idx_layer] != "linear_attention"' in source
     assert "linear_attn.split_conv_cache = True" in source
-    assert 'not hasattr(linear_attn, "in_proj_q")' in source
+    assert 'linear_attn, "conv1d_q"' in source
     assert "linear_attn._setup(cfg)" in source
 
 
 def test_qwen3_5_mrope_masks_follow_rotary_embedding_device():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
 
-    source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel._setup)
+    source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel._setup_position_embeddings)
 
     assert "mask_device = self.rotary_emb.inv_freq.device" in source
     assert "torch.ones(half_dim, device=mask_device)" in source
@@ -642,14 +650,19 @@ def test_qwen3_5_moe_hmonnx_forward_uses_final_spec_decode_merged_cache_step(mon
 
 
 def test_qwen3_5_moe_text_model_setup_splits_child_linear_attn_modules():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_text_model import (
+        HybridTextModelMixin,
+    )
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
-    source = inspect.getsource(_moe_model._Qwen3_5MoeTextModel._setup)
+    source = inspect.getsource(HybridTextModelMixin._setup)
 
+    assert issubclass(_moe_model._Qwen3_5MoeTextModel, HybridTextModelMixin)
+    assert _moe_model._Qwen3_5MoeTextModel._setup is HybridTextModelMixin._setup
     assert "if self.split_conv_cache:" in source
     assert 'self.layer_types[idx_layer] != "linear_attention"' in source
     assert "linear_attn.split_conv_cache = True" in source
-    assert 'not hasattr(linear_attn, "in_proj_q")' in source
+    assert 'linear_attn, "conv1d_q"' in source
     assert "linear_attn._setup(cfg)" in source
 
 
@@ -669,14 +682,12 @@ def test_qwen3_5_moe_wraped_post_reenforces_split_conv_cache_wrap_cfg():
     assert "_enforce_split_conv_cache_wrap_cfg(language_model, self.wrap_cfg)" in source
 
 
-def test_qwen3_5_moe_workflow_full_config_loads_expected_fields():
+def test_qwen3_5_moe_workflow_all16_config_loads_expected_fields():
     config_path = (
-        REPO_ROOT
-        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
-        / "qwen3_6_35b_a3b_full.yaml"
+        REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b" / "qwen3_6_35b_a3b_full_fa_all16.yaml"
     )
 
-    cfg = Config.fromfile(str(config_path))
+    cfg = Config(WorkflowConfig.from_file(str(config_path)).data)
 
     assert cfg.export.model.model_name == "qwen3_6_35b_a3b"
     assert "naming" not in cfg.export
@@ -703,9 +714,7 @@ def test_qwen3_5_moe_workflow_full_config_loads_expected_fields():
 
 def test_qwen3_5_moe_a16_config_survives_flash_attention_workflow_override():
     config_path = (
-        REPO_ROOT
-        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
-        / "qwen3_6_35b_a3b_full.yaml"
+        REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b" / "qwen3_6_35b_a3b_full_fa_all16.yaml"
     )
 
     workflow_cfg = WorkflowConfig.from_file(str(config_path)).with_overrides(
@@ -726,9 +735,7 @@ def test_qwen3_5_moe_a16_config_survives_flash_attention_workflow_override():
 
 def test_qwen3_5_moe_workflow_mtp_config_loads_expected_fields(monkeypatch):
     config_path = (
-        REPO_ROOT
-        / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
-        / "qwen3_6_35b_a3b_full_mtp.yaml"
+        REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b" / "qwen3_6_35b_a3b_full_mtp.yaml"
     )
 
     workflow_cfg = WorkflowConfig.from_file(str(config_path))
@@ -747,31 +754,30 @@ def test_qwen3_5_moe_workflow_mtp_config_loads_expected_fields(monkeypatch):
 
 
 def test_qwen3_5_moe_gated_delta_net_sets_up_split_qkv_cache_path():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        HybridGatedDeltaNetMixin,
+    )
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
-    source = inspect.getsource(_moe_model._Qwen3_5MoeGatedDeltaNet)
+    gdn_cls = _moe_model._Qwen3_5MoeGatedDeltaNet
 
-    assert 'self.split_conv_cache = cfg.get("split_conv_cache", True)' in source
-    assert "self.in_proj_q = nn.Linear" in source
-    assert "self.conv1d_q = nn.Conv1d" in source
-    assert "del self.in_proj_qkv" in source
-    assert "del self.conv1d" in source
+    assert issubclass(gdn_cls, HybridGatedDeltaNetMixin)
+    assert gdn_cls._setup is HybridGatedDeltaNetMixin._setup
+    assert gdn_cls.forward is HybridGatedDeltaNetMixin.forward
+    assert gdn_cls._uses_packed_input_projections is False
 
 
 def test_qwen3_5_moe_gated_delta_net_wires_fused_gdr_ops():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        HybridGatedDeltaNetMixin,
+    )
     from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
 
-    source = inspect.getsource(_moe_model._Qwen3_5MoeGatedDeltaNet)
+    gdn_cls = _moe_model._Qwen3_5MoeGatedDeltaNet
 
-    assert 'self.fuse_gdr_ops = cfg.get("fuse_gdr_ops", False)' in source
-    assert 'self.fuse_gdr_block_recurrent_ops = cfg.get("fuse_gdr_block_recurrent_ops", False)' in source
-    assert "self.block_tri_inverse_op = GDRBlockTriInverse" in source
-    assert "self.chunk_scan_op = GDRChunkScan" in source
-    assert "self.recurrent_scan_op = GDRRecurrentScan" in source
-    assert "block_tri_inverse_op=self.block_tri_inverse_op" in source
-    assert "chunk_scan_op=self.chunk_scan_op" in source
-    assert "recurrent_scan_op=self.recurrent_scan_op" in source
-    assert "self.chunk_scan_op.num_chunks = num_chunks" in source
+    assert gdn_cls._setup is HybridGatedDeltaNetMixin._setup
+    assert gdn_cls.forward is HybridGatedDeltaNetMixin.forward
+    assert gdn_cls._update_cfg is HybridGatedDeltaNetMixin._update_cfg
 
 
 def test_qwen3_5_moe_gated_delta_net_setup_creates_fused_gdr_ops():

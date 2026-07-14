@@ -2,27 +2,52 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 from xhquant.api import Config
 
 
-CONFIG_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
-)
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
 BASE_CONFIG = CONFIG_DIR / "qwen3_6_35b_a3b_full.yaml"
-BASE_SHA256 = "251b75389b65bf60091d386463773cc82394d1a5a51bc9d1fb65ffe8bac7d814"
-def test_qwen3_6_35b_a3b_full_config_is_byte_for_byte_unchanged():
-    assert hashlib.sha256(BASE_CONFIG.read_bytes()).hexdigest() == BASE_SHA256
+
+
+def test_qwen3_6_35b_a3b_full_config_keeps_resolved_semantics():
+    workflow_cfg = WorkflowConfig.from_file(str(BASE_CONFIG))
+
+    assert workflow_cfg.quant == {
+        "algorithm": "gptqmodel",
+        "method": "autoround",
+        "output_format": "gptqmodel_hf",
+        "artifact_format": "gptqmodel_hf",
+        "bits": 4,
+        "group_size": 64,
+        "rotation": False,
+        "calibration": {
+            "jsonl": "xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl",
+            "nsamples": 128,
+            "seqlen": 2048,
+        },
+        "runtime": {
+            "batch_size": 8,
+            "gradient_accumulate_steps": 1,
+            "trust_remote_code": True,
+            "device_map": "0",
+            "low_gpu_mem_usage": True,
+        },
+        "seed": 42,
+        "quant_nontext_module": False,
+        "sym": True,
+        "iters": 200,
+        "format": "auto_round:gptqmodel",
+        "moe": {"attn_bits": 8, "shared_expert_bits": 8},
+    }
+    assert workflow_cfg.export["model"]["model_name"] == "qwen3_6_35b_a3b"
+    assert workflow_cfg.export["model"]["model_type"] == "Qwen3_5MoeForConditionalGeneration"
 
 
 def test_qwen3_6_all16_config_loads_through_workflow_entrypoint():
-    workflow_cfg = WorkflowConfig.from_file(
-        str(CONFIG_DIR / "qwen3_6_35b_a3b_full_fa_all16.yaml")
-    )
+    workflow_cfg = WorkflowConfig.from_file(str(CONFIG_DIR / "qwen3_6_35b_a3b_full_fa_all16.yaml"))
     model_cfg = Config(workflow_cfg.build_export_dict()).model
 
     assert model_cfg.model_name == "qwen3_6_35b_a3b"

@@ -7,8 +7,6 @@ signature: ``q0, k0, v0, q1, k1, v1, ...``.
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 def _is_nested_split_conv_cache(cache_list) -> bool:
     return isinstance(cache_list, (list, tuple)) and len(cache_list) > 0 and isinstance(cache_list[0], (list, tuple))
@@ -55,7 +53,7 @@ def _layers_use_split_conv_cache(layers) -> bool:
     try:
         for decoder_layer in layers:
             linear_attn = getattr(decoder_layer, "linear_attn", None)
-            if linear_attn is not None and hasattr(linear_attn, "in_proj_q"):
+            if linear_attn is not None and (hasattr(linear_attn, "in_proj_q") or hasattr(linear_attn, "conv1d_q")):
                 return True
     except Exception:
         return False

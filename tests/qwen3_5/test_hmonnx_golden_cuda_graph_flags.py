@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -194,7 +196,11 @@ def test_qwen3_5_hmonnx_forward_splits_split_conv_outputs_by_cache_counts(monkey
     for model_cls in (qwen35_module.XHQwen3_5_HMONNXModel, qwen35_moe_module.XHQwen3_5MoeHMONNXModel):
         model = model_cls.__new__(model_cls)
         model._kvcache_mixin = _FakeKVCacheMixin()
-        monkeypatch.setattr(model, "_prefill_recurrent_state_uses_cache", lambda: False)
+        model._llm_prefill = True
+        model.meta_info = SimpleNamespace(
+            model_config=SimpleNamespace(prefill_recurrent_state_uses_cache=False),
+            spec_decode=None,
+        )
 
         out_logits, out_conv, out_recurrent = model.forward()
 

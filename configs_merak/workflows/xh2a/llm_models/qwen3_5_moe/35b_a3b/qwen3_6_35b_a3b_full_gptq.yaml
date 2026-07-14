@@ -1,3 +1,39 @@
+export:
+  model:
+    chip_arch: XH2a
+    hf_model: null
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_chunk_size: 64
+    split_conv_cache: true
+    normalize_force_fp32: false
+    use_manual_depthwise_conv1d: false
+    fuse_gdr_ops: false
+    fuse_gdr_block_recurrent_ops: false
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    model_type: Qwen3_5MoeForConditionalGeneration
+    model_name: qwen3_6_35b_a3b
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    linear_attention_mode: auto
+    flash_attention:
+      enable: false
+      q_bits: 8
+      s_bits: 8
+    visual_config:
+      max_size_w: 448
+      max_size_h: 448
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
 quant:
   algorithm: gptqmodel
   method: gptq
@@ -29,41 +65,3 @@ quant:
     expert_bits: 4
     expert_down_bits: 5
     routing: bypass
-export:
-  model:
-    chip_arch: XH2a
-    model_type: Qwen3_5MoeForConditionalGeneration
-    # 该字段仅用作占位，实际会在导出前实时覆盖
-    hf_model: null
-    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
-    model_name: qwen3_6_35b_a3b
-    context_max_length: 2048
-    prefill_chunk_length: 256
-    max_pe_length: 262144
-    support_long_context_over_fp16_limit: true
-    use_cache: true
-    num_logits_to_keep: 1
-    linear_attention_mode: auto
-    linear_chunk_size: 64
-    flash_attention:
-      enable: false
-      q_bits: 8
-      s_bits: 8
-    split_conv_cache: true
-    normalize_force_fp32: false
-    use_manual_depthwise_conv1d: false
-    fuse_gdr_ops: false
-    fuse_gdr_block_recurrent_ops: false
-    quant_scheme:
-      quant_type: w8a8h1_sefp
-      nodes:
-        lm_head:
-          quant_type: w8a8h1_sefp
-      ops: {}
-    visual_config:
-      max_size_w: 448
-      max_size_h: 448
-      quant_scheme:
-        quant_type: w8a8h1_sefp
-        ops: {}
-    only_first_block: false

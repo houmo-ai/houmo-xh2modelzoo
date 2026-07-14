@@ -5,15 +5,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from xhmodel_merak.xh_llm.models.qwen3_5 import (
+    _hybrid_gated_delta_net as shared_impl,
+)
 from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl as impl
 from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model as moe_impl
 from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
 
-CONFIG_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
-)
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
 
 
 class _Cfg(dict):
@@ -28,10 +28,14 @@ def _build_attention(monkeypatch, bits, *, enable=True):
             super().__init__()
             captured.update(kwargs)
 
-    monkeypatch.setattr(impl, "FlashAttention", _CapturedFlashAttention)
+    monkeypatch.setattr(shared_impl, "FlashAttention", _CapturedFlashAttention)
     attention = impl._Qwen3_5TextAttention.__new__(impl._Qwen3_5TextAttention)
     torch.nn.Module.__init__(attention)
-    attention.config = SimpleNamespace(num_key_value_heads=2, num_attention_heads=4)
+    attention.config = SimpleNamespace(
+        num_key_value_heads=2,
+        num_attention_heads=4,
+        partial_rotary_factor=0.5,
+    )
     attention.head_dim = 8
     attention.q_proj = torch.nn.Linear(1, 1, bias=False)
     cfg = _Cfg(
@@ -51,10 +55,14 @@ def _build_moe_attention(monkeypatch, bits, *, enable=True):
             super().__init__()
             captured.update(kwargs)
 
-    monkeypatch.setattr(moe_impl, "FlashAttention", _CapturedFlashAttention)
+    monkeypatch.setattr(shared_impl, "FlashAttention", _CapturedFlashAttention)
     attention = moe_impl._Qwen3_5MoeAttention.__new__(moe_impl._Qwen3_5MoeAttention)
     torch.nn.Module.__init__(attention)
-    attention.config = SimpleNamespace(num_key_value_heads=2, num_attention_heads=4)
+    attention.config = SimpleNamespace(
+        num_key_value_heads=2,
+        num_attention_heads=4,
+        partial_rotary_factor=0.5,
+    )
     attention.head_dim = 8
     attention.q_proj = torch.nn.Linear(1, 1, bias=False)
     cfg = _Cfg(enable_rope=False, use_cache=False, flash_attention={"enable": enable, **bits})
@@ -140,9 +148,7 @@ def test_moe_flash_attention_defaults_all_precision_fields(monkeypatch):
 
 
 def test_all16_config_resolves_to_five_bits(monkeypatch):
-    workflow_cfg = WorkflowConfig.from_file(
-        str(CONFIG_DIR / "qwen3_6_35b_a3b_full_fa_all16.yaml")
-    )
+    workflow_cfg = WorkflowConfig.from_file(str(CONFIG_DIR / "qwen3_6_35b_a3b_full_fa_all16.yaml"))
     flash_cfg = workflow_cfg.build_export_dict()["model"]["flash_attention"]
     attention, captured = _build_attention(monkeypatch, flash_cfg)
 

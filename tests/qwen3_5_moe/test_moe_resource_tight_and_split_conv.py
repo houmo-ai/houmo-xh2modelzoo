@@ -5,10 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List
 
+import onnx
 import pytest
 import torch
 import torch.nn as nn
-import onnx
 from onnx import TensorProto, helper
 
 from xh_model_zoo.xh_llm.models.qwen3_5_moe import inference as moe_inference
@@ -16,9 +16,9 @@ from xh_model_zoo.xh_llm.models.qwen3_5_moe.qwen3_5_moe_convert_config import (
     Qwen3_5MoeConvertConfig,
 )
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MOE_CONVERTER = REPO_ROOT / "xh_model_zoo/xh_llm/models/qwen3_5_moe/qwen3_5_moe_converter.py"
-
 
 
 def _load_function_from_source(path: Path, name: str):
@@ -74,6 +74,85 @@ def test_qwen3_5_moe_config_preserves_split_conv_cache_modes():
     assert default_cfg.use_manual_depthwise_conv1d is False
     assert getattr(default_cfg, "fuse_gdr_ops", False) is False
     assert getattr(default_cfg, "fuse_gdr_block_recurrent_ops", False) is False
+
+
+def test_merak_qwen3_5_moe_preserves_split_cache_helper_reexports():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import split_conv_cache_utils
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+
+    assert _moe_model._regroup_split_conv_cache_inputs is split_conv_cache_utils._regroup_flat_split_conv_cache
+    assert _moe_model._flatten_split_conv_cache_outputs is split_conv_cache_utils._flatten_split_conv_cache_outputs
+
+
+@pytest.mark.parametrize("wrapper_kind", ["causal", "conditional"])
+@pytest.mark.parametrize("with_extra_hidden", [False, True])
+def test_merak_qwen3_5_moe_top_level_wrappers_use_shared_inputs_embeds_keyword(
+    wrapper_kind,
+    with_extra_hidden,
+):
+    """Both text and VL wrappers must match HybridTextModelMixin.forward."""
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe._moe_model import (
+        _Qwen3_5MoeForCausalLM,
+        _Qwen3_5MoeForConditionalGeneration,
+    )
+
+    class RecordingTextModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.received_inputs_embeds = None
+
+        def forward(
+            self,
+            inputs_embeds=None,
+            time_position_ids=None,
+            hight_position_ids=None,
+            width_position_ids=None,
+            past_seq_length=None,
+            current_input_length=None,
+            linear_attn_mask=None,
+            past_key_cache=None,
+            past_value_cache=None,
+            past_conv_cache=None,
+            past_recurrent_state=None,
+        ):
+            del (
+                time_position_ids,
+                hight_position_ids,
+                width_position_ids,
+                past_seq_length,
+                current_input_length,
+                linear_attn_mask,
+                past_key_cache,
+                past_value_cache,
+                past_conv_cache,
+                past_recurrent_state,
+            )
+            self.received_inputs_embeds = inputs_embeds
+            outputs = (inputs_embeds, [], [])
+            if with_extra_hidden:
+                outputs += (inputs_embeds + 1,)
+            return outputs
+
+    text_model = RecordingTextModel()
+    if wrapper_kind == "causal":
+        wrapper = _Qwen3_5MoeForCausalLM.__new__(_Qwen3_5MoeForCausalLM)
+        nn.Module.__init__(wrapper)
+        wrapper.model = text_model
+    else:
+        wrapper = _Qwen3_5MoeForConditionalGeneration.__new__(_Qwen3_5MoeForConditionalGeneration)
+        nn.Module.__init__(wrapper)
+        holder = nn.Module()
+        holder.language_model = text_model
+        wrapper.model = holder
+    wrapper.lm_head = nn.Identity()
+    wrapper._has_extra_hidden_output = with_extra_hidden
+
+    inputs_embeds = torch.randn(1, 2, 8)
+    outputs = wrapper(inputs_embeds=inputs_embeds)
+
+    assert text_model.received_inputs_embeds is inputs_embeds
+    assert outputs[0] is inputs_embeds
+    assert len(outputs) == (4 if with_extra_hidden else 3)
 
 
 def test_qwen3_5_moe_flatten_cache_outputs_splits_logits_but_keeps_pre_split_cache_outputs():
@@ -134,9 +213,7 @@ def test_qwen3_5_moe_patch_hmonnx_standard_add_ops_moves_default_add_to_xh2a(tmp
     assert patch_adds(model_path) == 0
 
 
-def test_qwen3_5_moe_load_meta_artifacts_accepts_release_golden_meta_fallbacks(
-    monkeypatch, tmp_path
-):
+def test_qwen3_5_moe_load_meta_artifacts_accepts_release_golden_meta_fallbacks(monkeypatch, tmp_path):
     meta_file = tmp_path / "golden_meta_info.json"
     (tmp_path / "prefill").mkdir()
     (tmp_path / "decode").mkdir()
@@ -182,9 +259,7 @@ def test_qwen3_5_moe_load_meta_artifacts_accepts_release_golden_meta_fallbacks(
     assert artifacts["max_context_tokens"] == 512
 
 
-def test_qwen3_5_moe_load_meta_artifacts_merges_structural_sidecar_for_golden_meta(
-    monkeypatch, tmp_path
-):
+def test_qwen3_5_moe_load_meta_artifacts_merges_structural_sidecar_for_golden_meta(monkeypatch, tmp_path):
     release_dir = tmp_path / "release"
     release_dir.mkdir()
     (release_dir / "prefill").mkdir()
@@ -435,9 +510,7 @@ def test_qwen3_5_moe_forward_accepts_and_updates_legacy_and_qkv_conv_cache_names
     engine._device = torch.device("cpu")
 
     captured = {}
-    output_tensors = {
-        name: torch.full((1,), float(idx + 10)) for idx, name in enumerate(output_names)
-    }
+    output_tensors = {name: torch.full((1,), float(idx + 10)) for idx, name in enumerate(output_names)}
 
     def fake_run_hmonnx(session, feed):
         captured.update(feed)
@@ -464,9 +537,7 @@ def test_qwen3_5_moe_forward_accepts_and_updates_legacy_and_qkv_conv_cache_names
     )
 
     assert tuple(logits.shape) == (1, 1, 2)
-    assert [captured[name] for name in input_names] == [
-        original_caches[idx] for idx in expected_cache_ids
-    ]
+    assert [captured[name] for name in input_names] == [original_caches[idx] for idx in expected_cache_ids]
     for list_idx, out_name in enumerate(output_names):
         assert torch.equal(conv_caches[list_idx], output_tensors[out_name])
 

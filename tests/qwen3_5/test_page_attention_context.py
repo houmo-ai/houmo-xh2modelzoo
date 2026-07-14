@@ -56,6 +56,51 @@ def _set_context(model, caches, block_ids, slot_mapping):
     )
 
 
+def test_page_attention_modules_initialize_and_unwrap_legacy_eager_session(monkeypatch):
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model.PageAttention",
+        _FakePageAttention,
+    )
+    module = _FakePageAttention()
+    graph_module = SimpleNamespace(
+        graph=SimpleNamespace(
+            nodes=[SimpleNamespace(op="call_module", target="page_attention")]
+        ),
+        get_submodule=lambda target: module,
+    )
+
+    class LazySession:
+        def __init__(self):
+            self._session = None
+
+        def initialize(self):
+            self._session = SimpleNamespace(graph_module=graph_module)
+
+    hmonnx_model = SimpleNamespace(hmonnx_session=LazySession())
+
+    modules = BaseLLMHMONNXModel._get_page_attention_modules(None, hmonnx_model)
+
+    assert modules == [module]
+
+
+def test_page_attention_modules_support_legacy_interpreter_node_list(monkeypatch):
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model.PageAttention",
+        _FakePageAttention,
+    )
+    module = _FakePageAttention()
+    eager_interpreter = SimpleNamespace(node_modules=[object(), module])
+    wrapper = SimpleNamespace(
+        _session=None,
+        initialize=lambda: setattr(wrapper, "_session", eager_interpreter),
+    )
+    hmonnx_model = SimpleNamespace(hmonnx_session=wrapper)
+
+    modules = BaseLLMHMONNXModel._get_page_attention_modules(None, hmonnx_model)
+
+    assert modules == [module]
+
+
 def test_page_attention_context_shares_stable_device_buffers_across_layers_and_requests(monkeypatch):
     """One model/stage/device owns stable metadata buffers shared by its PA layers."""
     monkeypatch.setattr(
