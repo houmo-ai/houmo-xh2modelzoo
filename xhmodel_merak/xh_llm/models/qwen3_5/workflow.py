@@ -1,7 +1,10 @@
+import gc
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import torch
 
 from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
@@ -93,6 +96,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
+        self._validate_lora_export(config_overrides)
         self._validate_export_model(config_overrides)
         return super().export(
             quant_result=quant_result,
@@ -101,66 +105,127 @@ class Qwen35Workflow(BaseLLMWorkflow):
             config_overrides=config_overrides,
         )
 
+    def _validate_lora_export(self, config_overrides: Mapping[str, Any] | None) -> None:
+        """Fail before creating an output directory or loading the base model."""
+
+        from .lora import inspect_lora_adapters
+
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        model_cfg = workflow_config.export["model"]
+        lora_cfg = model_cfg.get("lora")
+        if lora_cfg is not None and str(model_cfg.get("model_type", "")).endswith("_visual"):
+            raise ValueError("Qwen3.5 ViT/visual export does not support LoRA")
+        visual_cfg = model_cfg.get("visual_config")
+        if isinstance(visual_cfg, Mapping) and visual_cfg.get("lora") is not None:
+            raise ValueError(
+                "Qwen3.5 visual_config does not support LoRA; configure language-model adapters "
+                "under export.model.lora only"
+            )
+        inspect_lora_adapters(lora_cfg)
+
     def dump_golden(
         self,
         export_result: ExportResult,
         device: str,
         input_messages: Any,
     ) -> str:
+        from xhquant.api import get_xhquant_logger
+
+        root_meta_file = self._find_golden_meta_file(export_result)
+        messages = self.build_input_message(input_messages)
+        logger = get_xhquant_logger()
+        for meta_file in self._collect_golden_meta_files(root_meta_file):
+            logger.info(f"Dumping Qwen3.5 golden for model view: {meta_file}")
+            try:
+                self._dump_golden_for_meta(meta_file, device, messages, logger=logger)
+            finally:
+                # Collect after the per-model call frame has unwound.  Its
+                # context managers and HF-compatible wrapper may otherwise
+                # keep the previous HMONNX model alive while loading LoRA.
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        return root_meta_file
+
+    def _dump_golden_for_meta(
+        self,
+        meta_file: str,
+        device: str,
+        messages: list[dict[str, Any]],
+        *,
+        logger: Any,
+    ) -> None:
         from transformers import TextStreamer
 
         from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
-        from xhquant.api import get_xhquant_logger
         from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
-        meta_file = self._find_golden_meta_file(export_result)
-        logger = get_xhquant_logger()
         hmonnx_model = AutoLLMHONNXModel.from_pretrained(meta_file)
-        messages = self.build_input_message(input_messages)
+        try:
+            if self._messages_have_image(messages):
+                processor = hmonnx_model.get_tf_processor()
+                tokenizer = processor.tokenizer
+                model_inputs = processor.apply_chat_template(messages).to(device)
+                decode = processor.batch_decode
+            else:
+                tokenizer = hmonnx_model.get_tokenizer()
+                text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=True,
+                )
+                model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(device)
+                decode = tokenizer.batch_decode
 
-        if self._messages_have_image(messages):
-            processor = hmonnx_model.get_tf_processor()
-            tokenizer = processor.tokenizer
-            model_inputs = processor.apply_chat_template(messages).to(device)
-            decode = processor.batch_decode
-        else:
-            tokenizer = hmonnx_model.get_tokenizer()
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(device)
-            decode = tokenizer.batch_decode
+            streamer = TextStreamer(tokenizer)
+            hmonnx_model.to(device)
+            hmonnx_model.enable_golden = True
+            logger.warning("Golden outputs should be generated in aligned precision for stability.")
 
-        streamer = TextStreamer(tokenizer)
-        hmonnx_model.to(device)
-        hmonnx_model.enable_golden = True
-        logger.warning("Golden outputs should be generated in aligned precision for stability.")
+            contexts = [
+                TimeProfiler("hmonnx_generate_golden", logger),
+                MemoryTracker(device=device, name="generate_golden", logger=logger),
+                LLMInferenceContextManager(hmonnx_model),
+            ]
+            with ContextManagers(contexts):
+                generated_ids = hmonnx_model.generate(
+                    **model_inputs,
+                    max_new_tokens=2,
+                    streamer=streamer,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
 
-        contexts = [
-            TimeProfiler("hmonnx_generate_golden", logger),
-            MemoryTracker(device=device, name="generate_golden", logger=logger),
-            LLMInferenceContextManager(hmonnx_model),
-        ]
-        with ContextManagers(contexts):
-            generated_ids = hmonnx_model.generate(
-                **model_inputs,
-                max_new_tokens=2,
-                streamer=streamer,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            generated_ids_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
+            ]
+            output_text = decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            logger.info(f"{'-' * 20} Golden output {'-' * 20}")
+            logger.info(f"{output_text}")
+        finally:
+            del hmonnx_model
 
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
-        ]
-        output_text = decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-        logger.info(f"{'-' * 20} Golden output {'-' * 20}")
-        logger.info(f"{output_text}")
         self._dump_spec_decode_golden(meta_file, device, messages, logger=logger)
-        return meta_file
+
+    @staticmethod
+    def _collect_golden_meta_files(root_meta_file: str) -> list[str]:
+        root_meta_path = Path(root_meta_file)
+        root_meta = json.loads(root_meta_path.read_text(encoding="utf-8"))
+        adapters = root_meta.get("lora_adapters", [])
+        if not isinstance(adapters, list):
+            raise TypeError("golden_meta_info.json field 'lora_adapters' must be a list")
+
+        meta_files = [str(root_meta_path)]
+        for entry in adapters:
+            if not isinstance(entry, Mapping) or not isinstance(entry.get("meta_file"), str):
+                raise TypeError("Every lora_adapters entry must contain a string meta_file")
+            child_meta_path = root_meta_path.parent / entry["meta_file"]
+            if not child_meta_path.is_file():
+                raise FileNotFoundError(f"LoRA golden metadata does not exist: {child_meta_path}")
+            meta_files.append(str(child_meta_path))
+        return meta_files
 
     def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
         if isinstance(input_messages, list):

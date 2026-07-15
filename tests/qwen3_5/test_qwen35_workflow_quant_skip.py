@@ -211,3 +211,48 @@ def test_qwen35_workflow_mtp_spec_decode_golden_stays_minimal(monkeypatch, tmp_p
     assert len(calls) == 1
     assert calls[0]["max_new_tokens"] == 2
     assert calls[0]["golden"] is True
+
+
+def test_qwen35_workflow_collects_base_and_lora_golden_metadata(tmp_path: Path):
+    import json
+
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
+
+    root_meta = tmp_path / "hmquant_model" / "golden_meta_info.json"
+    adapter_meta = root_meta.parent / "lora" / "adapter" / "golden_meta_info.json"
+    adapter_meta.parent.mkdir(parents=True)
+    adapter_meta.write_text("{}", encoding="utf-8")
+    root_meta.write_text(
+        json.dumps({"lora_adapters": [{"name": "adapter", "meta_file": "lora/adapter/golden_meta_info.json"}]}),
+        encoding="utf-8",
+    )
+
+    assert Qwen35Workflow._collect_golden_meta_files(str(root_meta)) == [
+        str(root_meta),
+        str(adapter_meta),
+    ]
+
+
+def test_qwen35_workflow_releases_each_golden_model_before_loading_next(monkeypatch):
+    from xhmodel_merak.xh_llm.models.qwen3_5 import workflow as workflow_module
+
+    events = []
+    workflow = workflow_module.Qwen35Workflow.__new__(workflow_module.Qwen35Workflow)
+    workflow._find_golden_meta_file = lambda _result: "root-meta"
+    workflow.build_input_message = lambda _messages: []
+    workflow._collect_golden_meta_files = lambda _root: ["base-meta", "lora-meta"]
+    workflow._dump_golden_for_meta = lambda meta, *_args, **_kwargs: events.append(f"dump:{meta}")
+
+    monkeypatch.setattr(workflow_module.gc, "collect", lambda: events.append("gc"))
+    monkeypatch.setattr(workflow_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(workflow_module.torch.cuda, "empty_cache", lambda: events.append("empty_cache"))
+
+    assert workflow.dump_golden(object(), "cuda:0", {}) == "root-meta"
+    assert events == [
+        "dump:base-meta",
+        "gc",
+        "empty_cache",
+        "dump:lora-meta",
+        "gc",
+        "empty_cache",
+    ]

@@ -4,6 +4,7 @@ from xhmodel_merak.configuration_utils import HFModelConfig
 from xhquant.api import QuantScheme
 
 from ...vision_llm_model import VisionLLMModelConfig
+from .lora import XHQwen3_5LoRAConfig, coerce_lora_config
 
 
 DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
@@ -45,8 +46,11 @@ class XHQwen3_5_VisualConfig(HFModelConfig):  # noqa: N801
         max_size_t: int = 2,
         patch_size: int = 16,
         temporal_patch_size: int = 2,
+        lora: Mapping[str, object] | None = None,
         **kwargs,
     ):
+        if lora is not None:
+            raise ValueError("Qwen3.5 ViT/visual export does not support LoRA")
         super().__init__(**kwargs)
         self.max_size_w = max_size_w
         self.max_size_h = max_size_h
@@ -162,8 +166,14 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         mtp_head_k: int | None = None,
         reranked_repo_dir: str | None = None,
         force_rerank: bool = False,
+        lora: dict | XHQwen3_5LoRAConfig | None = None,
         **kwargs,
     ):
+        if isinstance(visual_config, Mapping) and visual_config.get("lora") is not None:
+            raise ValueError(
+                "Qwen3.5 visual_config does not support LoRA; configure language-model adapters "
+                "under export.model.lora only"
+            )
         super().__init__(
             model_name=model_name,
             chip_arch=chip_arch,
@@ -210,6 +220,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.mtp_head_k = mtp_head_k
         self.reranked_repo_dir = reranked_repo_dir
         self.force_rerank = force_rerank
+        self.lora = coerce_lora_config(lora)
 
         if isinstance(mtp_config, Mapping):
             mtp_config = dict(mtp_config)

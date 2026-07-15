@@ -9,6 +9,7 @@ summarize MTP/DFlash speculative-decoding acceptance metrics.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -424,8 +425,11 @@ def _parse_auto_offload_max_memory(max_memory_json: str | None) -> dict[Any, Any
 def _resolve_path(base_dir: Path, path_str: str) -> Path:
     path = Path(path_str)
     if not path.is_absolute():
-        path = (base_dir / path).resolve()
-    return path
+        path = base_dir / path
+    # Keep the metadata-visible path (including file symlinks) so golden
+    # output stays beside the selected model view.  realpath/resolve is only
+    # appropriate for validating the symlink target, not for runtime identity.
+    return Path(os.path.abspath(path))
 
 
 def _load_token_embedding(embed_path: Path):

@@ -59,6 +59,13 @@ from ...utils import get_cpu_memory_mb
 from ...vision_llm_model import VisionLLMModel
 from ._gdr_ops import GDRChunkScan
 from .data_preprocess import Qwen3_5_DataPreprocess
+from .lora import (
+    LoRAAdapterSpec,
+    apply_lora_to_frontend,
+    attach_lora_buffers,
+    finalize_lora_metadata,
+    inspect_lora_adapters,
+)
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForConditionalGeneration
 from .modeling_qwen3_5_patch import qwen3_5_patch
@@ -906,10 +913,115 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         export_data.str_datetime = str_datetime
         return export_data
 
+    def _quantize_wrap_variant(
+        self,
+        wrap_model: nn.Module,
+        adapter: LoRAAdapterSpec | None = None,
+    ) -> ModelSwitcher:
+        """Trace and quantize one base/LoRA target pair without reloading HF weights."""
+
+        self._state = LLMModelState.WRAP
+        self._wrap_model = wrap_model
+        # The previous target export finishes in decode mode and may leave
+        # spec-decode-only values in wrap_cfg.  Each structural variant must
+        # trace its prefill graph from the canonical prefill configuration.
+        self._restore_prefill_wrap_cfg()
+        if adapter is not None:
+            attach_lora_buffers(wrap_model, adapter)
+
+        frontend_model = self._to_fronted(wrap_model)
+        self._frontend_model = frontend_model
+        self.release_wraped_model()
+        self._state = LLMModelState.FRONTED
+
+        if adapter is not None:
+            lora_config = self.config.lora
+            assert lora_config is not None
+            apply_lora_to_frontend(frontend_model, adapter, lora_config.w_schema)
+
+        quanted_model = self._to_quanted(frontend_model, LLMModelState.QUANTED_ALIGNED)
+        self._quanted_model = quanted_model
+        del self._frontend_model
+        self._frontend_model = None
+        self._state = LLMModelState.QUANTED_ALIGNED
+        quanted_model.prefill.fixed()
+        quanted_model.decode.fixed()
+        return quanted_model
+
+    def _configure_spec_decode_target_export(self) -> None:
+        spec_decode_mode = self.config.spec_decode_mode
+        if spec_decode_mode not in ("mtp", "dflash"):
+            return
+
+        self._decode_input_sequence_length = self.config.num_draft_tokens + 1
+        self._decode_wrap_cfg_overrides = {
+            "verify_output_intermediates": True,
+        }
+        self.wrap_cfg["num_logits_to_keep"] = 0
+        if spec_decode_mode == "mtp":
+            self.wrap_cfg["output_post_norm_hidden"] = True
+
+        def _apply_spec_decode_flags(module):
+            if hasattr(module, "num_logits_to_keep"):
+                module.num_logits_to_keep = 0
+            if hasattr(module, "output_post_norm_hidden") and spec_decode_mode == "mtp":
+                module.output_post_norm_hidden = True
+
+        self._quanted_model.prefill.apply(_apply_spec_decode_flags)
+        self._quanted_model.decode.apply(_apply_spec_decode_flags)
+
+    def _export_lora_variants(
+        self,
+        exported_info: ExportData,
+        wrap_template: nn.Module,
+        adapters: list[LoRAAdapterSpec],
+    ) -> list[tuple[LoRAAdapterSpec, ExportData]]:
+        logger = get_xhquant_logger()
+        exported_adapters: list[tuple[LoRAAdapterSpec, ExportData]] = []
+        root_dir = Path(exported_info.exported_dir)
+
+        # The root/base quant graph has already been exported and can be
+        # released before processing the first adapter.
+        del self._quanted_model
+        self._quanted_model = None
+        gc.collect()
+
+        for adapter in adapters:
+            logger.info(
+                f"Start exporting Qwen3.5 LoRA adapter {adapter.name!r} "
+                f"({len(adapter.pairs)} target Linear modules)"
+            )
+            adapter_wrap_model = _copy_model_shared_params(wrap_template)
+            self._quantize_wrap_variant(adapter_wrap_model, adapter)
+            self._configure_spec_decode_target_export()
+
+            adapter_dir = root_dir / "lora" / adapter.name
+            adapter_dir.mkdir(parents=True, exist_ok=False)
+            adapter_meta = copy.deepcopy(exported_info.meta)
+            adapter_export = ExportData()
+            adapter_export.exported_dir = str(adapter_dir)
+            adapter_export.meta = adapter_meta
+            adapter_export.model_name = f"{exported_info.model_name}_{adapter.name}"
+            adapter_export.str_datetime = exported_info.str_datetime
+            self._export_hmonnx(adapter_export)
+            exported_adapters.append((adapter, adapter_export))
+
+            del self._quanted_model
+            self._quanted_model = None
+            gc.collect()
+            logger.info(f"Finished exporting Qwen3.5 LoRA adapter {adapter.name!r} to {adapter_dir}")
+
+        return exported_adapters
+
     @log_function_call()
     def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
         logger = get_xhquant_logger()
         self.work_dir = str(output_dir)
+
+        # Inspect every adapter before loading/tracing the base model.  This
+        # rejects unsupported PEFT features and visual/VIT tensors before any
+        # partial LoRA artifacts are created.
+        lora_adapters = inspect_lora_adapters(getattr(self.config, "lora", None))
 
         self.to_wrap()
 
@@ -943,35 +1055,39 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage after exporting visual hmonnx: {str(memory_info)}")
 
-        if self._state != LLMModelState.QUANTED_ALIGNED:
-            self.to_quanted_aligned()
-        self._quanted_model.prefill.fixed()
-        self._quanted_model.decode.fixed()
+        wrap_template = None
+        if lora_adapters:
+            # Keep one structural template with shared base tensors.  Base and
+            # adapter frontends are traced from independent structural clones,
+            # so applying one adapter cannot mutate another graph.
+            wrap_template = self._wrap_model
+            base_wrap_model = _copy_model_shared_params(wrap_template)
+            self._quantize_wrap_variant(base_wrap_model)
+        else:
+            if self._state != LLMModelState.QUANTED_ALIGNED:
+                self.to_quanted_aligned()
+            self._quanted_model.prefill.fixed()
+            self._quanted_model.decode.fixed()
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage after quantization: {str(memory_info)}")
 
         self.config.model_name = exported_info.model_name
 
         spec_decode_mode = self.config.spec_decode_mode
-        if spec_decode_mode in ("mtp", "dflash"):
-            self._decode_input_sequence_length = self.config.num_draft_tokens + 1
-            self._decode_wrap_cfg_overrides = {
-                "verify_output_intermediates": True,
-            }
-            self.wrap_cfg["num_logits_to_keep"] = 0
-            if spec_decode_mode == "mtp":
-                self.wrap_cfg["output_post_norm_hidden"] = True
-
-            def _apply_spec_decode_flags(module):
-                if hasattr(module, "num_logits_to_keep"):
-                    module.num_logits_to_keep = 0
-                if hasattr(module, "output_post_norm_hidden") and spec_decode_mode == "mtp":
-                    module.output_post_norm_hidden = True
-
-            self._quanted_model.prefill.apply(_apply_spec_decode_flags)
-            self._quanted_model.decode.apply(_apply_spec_decode_flags)
+        self._configure_spec_decode_target_export()
 
         self._export_hmonnx(exported_info)
+
+        exported_lora_adapters: list[tuple[LoRAAdapterSpec, ExportData]] = []
+        if lora_adapters:
+            assert wrap_template is not None
+            exported_lora_adapters = self._export_lora_variants(
+                exported_info,
+                wrap_template,
+                lora_adapters,
+            )
+            del wrap_template
+            gc.collect()
 
         # 导出 draft 模型 (MTP / DFlash)
         spec_decode_mode = self.config.spec_decode_mode
@@ -1094,6 +1210,11 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                     spec_decode_section["draft_decode_onnx"] = meta_info.dflash_decode_config.hmonnx
                     spec_decode_section["dflash_draft_decode_onnx"] = meta_info.dflash_decode_config.hmonnx
             meta_info.spec_decode = spec_decode_section
+
+        if exported_lora_adapters:
+            lora_config = self.config.lora
+            assert lora_config is not None
+            finalize_lora_metadata(meta_info, exported_info, exported_lora_adapters, lora_config)
 
         json.dump(
             meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4

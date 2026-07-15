@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 
+
 STAGE_SUFFIXES = {
     "prefill": "prefill",
     "decode": "decode",
@@ -86,17 +87,41 @@ def _failures_for_onnx_external_data(onnx_path: Path, expected_external_data_nam
 
 def ensure_step_artifact_links(export_dir: Path) -> None:
     """Ensure every existing step_* directory links to its stage HMONNX artifacts."""
-    release_prefix = export_dir.name
-    for stage_name, stage_suffix in STAGE_SUFFIXES.items():
+    meta_path = export_dir / "golden_meta_info.json"
+    if not meta_path.is_file():
+        return
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    stage_models: dict[str, Path] = {}
+
+    def _add_model(value) -> None:
+        if not isinstance(value, str) or not value:
+            return
+        relative_path = Path(value)
+        if relative_path.is_absolute() or len(relative_path.parts) < 2:
+            return
+        stage_name = relative_path.parts[0]
+        if stage_name in STAGE_SUFFIXES:
+            stage_models.setdefault(stage_name, export_dir / relative_path)
+
+    _add_model(meta.get("prefill_hmonnx"))
+    _add_model(meta.get("decode_hmonnx"))
+    visual_config = meta.get("visual_config")
+    if isinstance(visual_config, dict):
+        _add_model(visual_config.get("hmonnx"))
+    spec_decode = meta.get("spec_decode")
+    if isinstance(spec_decode, dict):
+        for key, value in spec_decode.items():
+            if key.endswith("_onnx"):
+                _add_model(value)
+
+    for stage_name, onnx in stage_models.items():
         stage_dir = export_dir / stage_name
-        if not stage_dir.is_dir():
+        if not stage_dir.is_dir() or not onnx.is_file():
             continue
-        onnx = stage_dir / f"{release_prefix}_{stage_suffix}_with_act.onnx"
-        external_data = stage_dir / f"{release_prefix}_{stage_suffix}_external_data"
-        if not onnx.exists() or not external_data.exists():
-            continue
+        artifacts = [onnx, *sorted(path for path in stage_dir.glob("*external_data") if path.is_file())]
         for step_dir in sorted(path for path in stage_dir.rglob("step_*") if path.is_dir()):
-            for artifact in (onnx, external_data):
+            for artifact in artifacts:
                 link = step_dir / artifact.name
                 if link.exists() or link.is_symlink():
                     continue
