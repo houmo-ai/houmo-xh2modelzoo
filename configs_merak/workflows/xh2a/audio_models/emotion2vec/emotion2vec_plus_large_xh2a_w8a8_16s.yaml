@@ -1,0 +1,18 @@
+# emotion2vec 的 W8A8 PTQ 在模型 export_hmonnx 状态链内完成，
+# 因此 workflow 外部权重量化阶段设为 null。
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Emotion2vecForSequenceEmbedding
+    # 该字段仅用作占位，导出前由 workflow 使用 --model-dir 覆盖。
+    hf_model: null
+    model_name: emotion2vec_plus_large
+    model_id: iic/emotion2vec_plus_large
+    sampling_rate: 16000
+    window_samples: 256000
+    feature_dim: 1024
+    use_cache: false
+    quant_scheme:
+      quant_type: w8a8h1_sefp
