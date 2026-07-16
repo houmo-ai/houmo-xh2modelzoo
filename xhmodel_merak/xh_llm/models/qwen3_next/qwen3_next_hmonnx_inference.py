@@ -6,11 +6,11 @@ from xhquant.core.hmfp_kv_cache import allocate_hmfp_paged_kv_cache
 
 from ...hmonnx import TextLLMHMONNXModel
 from ...types import LLMModelMeta
-from ...utils import unfold_args
 from ..qwen3_5.hybrid_cache_runtime import (
     commit_hybrid_cache_outputs,
     get_spec_decode_verify_steps,
     model_config_prefill_recurrent_state_uses_cache,
+    normalize_hybrid_hmonnx_args,
 )
 from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
 from .data_preprocess import Qwen3NextDataPreprocess
@@ -107,8 +107,7 @@ class XHQwen3NextHMONNXModel(TextLLMHMONNXModel):
         return self._get_spec_decode_verify_steps()
 
     def forward(self, *args):
-        args = unfold_args(args)
-        args = [arg.to(torch.int32) if arg.dtype == torch.int64 else arg for arg in args]
+        args = normalize_hybrid_hmonnx_args(args)
         outputs = super().forward(*args)
         return commit_hybrid_cache_outputs(self, outputs, model_label="Qwen3-Next")
 

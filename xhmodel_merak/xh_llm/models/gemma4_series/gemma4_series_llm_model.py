@@ -6,6 +6,7 @@ import copy
 import gc
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -27,20 +28,24 @@ from .data_preprocess import (
     Gemma4MoeDataPreprocess,
     Gemma4PerLayerInputEmbedding,
 )
-from .llm_text import (
-    Gemma4KVCacheMixin,
-    _Gemma4DecodeNoFullMaskBridge,
-    _Gemma4DecodeNoFullMaskMTPBridge,
-    _Gemma4TextExportBridgePLE,
-    _Gemma4TextExportBridgePLEMTPDecode,
-    _copy_model_shared_params,
-    _gemma4_cache_seq_len_for_layer,
-    _make_text_export_bridge_if_needed,
-    build_gemma4_hf_compatible_model,
-)
 from .gemma4_series_audio_model import XHGemma4SeriesAudioModel
 from .gemma4_series_hmonnx_inference import XHGemma4SeriesHMONNXModel
 from .gemma4_series_vision_model import XHGemma4SeriesVisionModel
+from .llm_text import (
+    Gemma4KVCacheMixin,
+    _copy_model_shared_params,
+    _gemma4_cache_seq_len_for_layer,
+    _Gemma4DecodeNoFullMaskBridge,
+    _Gemma4DecodeNoFullMaskMTPBridge,
+    _Gemma4FlashAttentionBridge,
+    _Gemma4FlashAttentionBridgeNoMM,
+    _Gemma4FlashAttentionBridgePLE,
+    _Gemma4FlashAttentionBridgePLENoMM,
+    _Gemma4TextExportBridgePLE,
+    _Gemma4TextExportBridgePLEMTPDecode,
+    _make_text_export_bridge_if_needed,
+    build_gemma4_hf_compatible_model,
+)
 from .xh_gemma4_series_config import Gemma4SeriesModelMeta, XHGemma4SeriesModelConfig
 
 
@@ -84,6 +89,7 @@ def _mtp_draft_head_weight_bits(cfg: Any, default: int = 4) -> int:
     lm_head_quant_type = _cfg_get_value(mtp_config, "lm_head_quant_type", None) if mtp_config is not None else None
     return _quant_type_weight_bits(lm_head_quant_type, default)
 
+
 def _strip_default_llmcache_only_handle_old_cache_attrs(onnx_file: str | Path) -> int:
     """Remove explicit default-false LLMCache attrs from exported ONNX.
 
@@ -121,6 +127,331 @@ def _strip_default_llmcache_only_handle_old_cache_attrs(onnx_file: str | Path) -
     return removed
 
 
+def _build_gemma4_layer_cache_layout(
+    *,
+    layers: Any,
+    layer_types: list[str],
+    context_max_length: int,
+    sliding_window: int,
+    input_seq_len: int,
+    sliding_kv_cache_input_mode: str,
+) -> tuple[list[list[int]], list[str], list[int], list[int]]:
+    """Build physical cache shapes and the per-attention-layer cache map."""
+
+    layer_kv_shapes: list[list[int]] = []
+    layer_cache_types: list[str] = []
+    layer_cache_owner_indices: list[int] = []
+    owner_layer_to_cache_index: dict[int, int] = {}
+    for layer_idx, layer in enumerate(layers):
+        attn = layer.self_attn
+        if getattr(attn, "is_kv_shared_layer", False):
+            continue
+        layer_type = layer_types[layer_idx]
+        cache_seq_len = _gemma4_cache_seq_len_for_layer(
+            layer_type=layer_type,
+            context_max_length=context_max_length,
+            sliding_window=sliding_window,
+            input_seq_len=input_seq_len,
+            sliding_kv_cache_input_mode=sliding_kv_cache_input_mode,
+        )
+        cache_idx = len(layer_kv_shapes)
+        owner_layer_to_cache_index[layer_idx] = cache_idx
+        layer_cache_owner_indices.append(layer_idx)
+        layer_cache_types.append(layer_type)
+        num_key_value_heads = attn.k_proj.out_features // attn.head_dim
+        layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
+
+    layer_cache_indices: list[int] = []
+    for layer_idx, layer in enumerate(layers):
+        attn = layer.self_attn
+        owner_layer_idx = int(attn.kv_shared_layer_index) if getattr(attn, "is_kv_shared_layer", False) else layer_idx
+        if owner_layer_idx not in owner_layer_to_cache_index:
+            raise ValueError(
+                "Gemma4 layer cache mapping references a non-owning layer: "
+                f"layer {layer_idx} -> owner layer {owner_layer_idx}."
+            )
+        cache_idx = owner_layer_to_cache_index[owner_layer_idx]
+        if layer_cache_types[cache_idx] != layer_types[layer_idx]:
+            raise ValueError(
+                "Gemma4 shared KV cache type mismatch: "
+                f"layer {layer_idx} ({layer_types[layer_idx]!r}) -> cache {cache_idx} "
+                f"({layer_cache_types[cache_idx]!r})."
+            )
+        layer_cache_indices.append(cache_idx)
+
+    return layer_kv_shapes, layer_cache_types, layer_cache_owner_indices, layer_cache_indices
+
+
+def _onnx_value_shape(value_info: onnx.ValueInfoProto) -> list[int | str]:
+    shape: list[int | str] = []
+    for dim in value_info.type.tensor_type.shape.dim:
+        if dim.HasField("dim_value"):
+            shape.append(int(dim.dim_value))
+        else:
+            shape.append(dim.dim_param or "?")
+    return shape
+
+
+_ATTENTION_PROVENANCE_PATTERN = re.compile(
+    r"(?:^|[./_])(?:attention|attn|self_attn|qk|query|key)(?:$|[./_])",
+    re.IGNORECASE,
+)
+
+
+def _known_onnx_value_shapes(model: onnx.ModelProto) -> dict[str, list[int | str]]:
+    shapes = {
+        value.name: _onnx_value_shape(value)
+        for values in (model.graph.input, model.graph.value_info, model.graph.output)
+        for value in values
+        if value.name
+    }
+    shapes.update({initializer.name: [int(dim) for dim in initializer.dims] for initializer in model.graph.initializer})
+    return shapes
+
+
+def _is_attention_qk_matmul(
+    matmul: onnx.NodeProto,
+    softmax: onnx.NodeProto,
+    value_shapes: Mapping[str, list[int | str]],
+) -> bool:
+    """Distinguish batched QK score products from linear/router MatMul nodes."""
+
+    provenance = [matmul.name, softmax.name, *matmul.input, *matmul.output, *softmax.output]
+    if any(_ATTENTION_PROVENANCE_PATTERN.search(value) for value in provenance if value):
+        return True
+
+    operand_shapes = [value_shapes.get(name) for name in matmul.input[:2]]
+    return len(operand_shapes) == 2 and all(shape is not None and len(shape) >= 3 for shape in operand_shapes)
+
+
+def validate_gemma4_flash_attention_graph(
+    path: str | Path,
+    meta: Mapping[str, Any],
+) -> dict[str, int]:
+    """Validate a contract-v2 Gemma4 graph without loading external weights."""
+
+    graph_path = Path(path)
+    model = onnx.load(str(graph_path), load_external_data=False)
+    inputs = {value.name: value for value in model.graph.input}
+
+    def resolve_input_name(semantic_name: str, aliases: tuple[str, ...]) -> str:
+        matches = [name for name in aliases if name in inputs]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{graph_path}: contract-v2 graph requires exactly one {semantic_name} input "
+                f"from aliases {aliases}, found {matches}"
+            )
+        return matches[0]
+
+    if "sliding_attention_mask" in inputs:
+        raise ValueError(f"{graph_path}: contract-v2 graph retains sliding_attention_mask")
+    for name in ("kv_window_start_abs", "kv_valid_length"):
+        if name not in inputs:
+            raise ValueError(f"{graph_path}: contract-v2 graph missing {name}")
+    bidirectional_vision = bool(meta.get("bidirectional_vision_attention"))
+    if bidirectional_vision and "mm_prefix_ranges" not in inputs:
+        raise ValueError(f"{graph_path}: bidirectional vision graph missing mm_prefix_ranges")
+    if not bidirectional_vision and "mm_prefix_ranges" in inputs:
+        raise ValueError(f"{graph_path}: non-bidirectional graph retains mm_prefix_ranges")
+    embedding_input = resolve_input_name("input embeddings", ("inputs_embeds", "input_1"))
+    past_length_input = resolve_input_name("past sequence length", ("past_seq_length", "valid_length"))
+    current_length_input = resolve_input_name(
+        "current input length",
+        ("current_input_length", "current_length"),
+    )
+    has_per_layer_inputs = bool(meta.get("per_layer_input_embedding"))
+    if not has_per_layer_inputs and "per_layer_inputs" in inputs:
+        raise ValueError(f"{graph_path}: graph unexpectedly retains per_layer_inputs")
+    expected_external_prefix = [embedding_input, past_length_input, current_length_input]
+    if bidirectional_vision:
+        expected_external_prefix.append("mm_prefix_ranges")
+    expected_external_prefix.extend(["kv_window_start_abs", "kv_valid_length"])
+    if has_per_layer_inputs:
+        expected_external_prefix.append("per_layer_inputs")
+    actual_external_prefix = [value.name for value in model.graph.input[: len(expected_external_prefix)]]
+    if actual_external_prefix != expected_external_prefix:
+        raise ValueError(
+            f"{graph_path}: external input prefix={actual_external_prefix}, expected {expected_external_prefix}"
+        )
+
+    layer_types = list(meta.get("layer_types") or [])
+    expected_sliding_flash_v2 = int(meta.get("attention_contract_version") or 1) >= 2 and any(
+        layer_type == "sliding_attention" for layer_type in layer_types
+    )
+    actual_sliding_flash_v2 = meta.get("uses_sliding_flash_attention_v2")
+    if actual_sliding_flash_v2 is not expected_sliding_flash_v2:
+        raise ValueError(
+            f"{graph_path}: uses_sliding_flash_attention_v2={actual_sliding_flash_v2!r}, "
+            f"expected {expected_sliding_flash_v2!r}"
+        )
+    layer_cache_indices = list(meta.get("layer_cache_indices") or [])
+    layer_cache_owner_indices = list(meta.get("layer_cache_owner_indices") or [])
+    layer_cache_types = list(meta.get("layer_cache_types") or [])
+    layer_kv_shapes = list(meta.get("layer_kv_shapes") or [])
+    attention_count = len(layer_types)
+    cache_count = len(layer_kv_shapes)
+    if not attention_count:
+        raise ValueError(f"{graph_path}: contract-v2 metadata has no layer_types")
+    if len(layer_cache_indices) != attention_count:
+        raise ValueError(
+            f"{graph_path}: layer_cache_indices count={len(layer_cache_indices)}, expected {attention_count}"
+        )
+    if not layer_cache_owner_indices and layer_cache_indices == list(range(cache_count)):
+        layer_cache_owner_indices = list(range(cache_count))
+    if not cache_count or not layer_cache_owner_indices:
+        raise ValueError(f"{graph_path}: contract-v2 metadata has no layer_cache_indices")
+    if len(layer_cache_types) != cache_count or len(layer_cache_owner_indices) != cache_count:
+        raise ValueError(
+            f"{graph_path}: cache metadata counts disagree: owners={len(layer_cache_owner_indices)}, "
+            f"types={len(layer_cache_types)}, shapes={cache_count}"
+        )
+    for layer_idx, cache_idx in enumerate(layer_cache_indices):
+        if not isinstance(cache_idx, int) or not 0 <= cache_idx < cache_count:
+            raise ValueError(f"{graph_path}: layer {layer_idx} maps to invalid physical cache {cache_idx!r}")
+        if layer_cache_types[cache_idx] != layer_types[layer_idx]:
+            raise ValueError(
+                f"{graph_path}: layer {layer_idx} type={layer_types[layer_idx]!r} maps to "
+                f"cache {cache_idx} type={layer_cache_types[cache_idx]!r}"
+            )
+    if set(layer_cache_indices) != set(range(cache_count)):
+        raise ValueError(f"{graph_path}: layer_cache_indices do not cover all {cache_count} physical caches")
+    for cache_idx, owner_layer_idx in enumerate(layer_cache_owner_indices):
+        if not isinstance(owner_layer_idx, int) or not 0 <= owner_layer_idx < attention_count:
+            raise ValueError(f"{graph_path}: cache {cache_idx} has invalid owner layer {owner_layer_idx!r}")
+        if layer_cache_indices[owner_layer_idx] != cache_idx:
+            raise ValueError(
+                f"{graph_path}: cache {cache_idx} owner layer {owner_layer_idx} maps to "
+                f"cache {layer_cache_indices[owner_layer_idx]}"
+            )
+
+    flash_nodes = [node for node in model.graph.node if node.op_type == "FlashAttention"]
+    if len(flash_nodes) != attention_count:
+        raise ValueError(f"{graph_path}: FlashAttention count={len(flash_nodes)}, expected {attention_count}")
+
+    sliding_nodes = 0
+    full_nodes = 0
+    configured_window = int(meta.get("sliding_window") or 0)
+    for layer_idx, (node, layer_type) in enumerate(zip(flash_nodes, layer_types, strict=True)):
+        node_fact = node.name or f"FlashAttention[{layer_idx}]"
+        attributes = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
+        if "sliding_window" not in attributes:
+            raise ValueError(f"{graph_path}: {node_fact} missing sliding_window attribute")
+        node_scale = float(attributes.get("scale", float("nan")))
+        if node_scale != 1.0:
+            raise ValueError(
+                f"{graph_path}: FlashAttention {node_fact} has scale={node_scale}, expected 1.0 for Gemma4"
+            )
+        node_window = int(attributes["sliding_window"])
+        if layer_type == "sliding_attention":
+            if node_window <= 0 or (configured_window > 0 and node_window != configured_window):
+                expected_window = configured_window if configured_window > 0 else "positive"
+                raise ValueError(
+                    f"{graph_path}: sliding_attention layer {layer_idx} has "
+                    f"sliding_window={node_window}, expected {expected_window}"
+                )
+            sliding_nodes += 1
+        elif layer_type == "full_attention":
+            if node_window != -1:
+                raise ValueError(
+                    f"{graph_path}: full_attention layer {layer_idx} has sliding_window={node_window}, expected -1"
+                )
+            full_nodes += 1
+        else:
+            raise ValueError(f"{graph_path}: unsupported layer_types[{layer_idx}]={layer_type!r}")
+
+        expected_inputs = {4: past_length_input, 5: current_length_input}
+        if layer_type == "sliding_attention":
+            expected_inputs.update({8: "kv_window_start_abs", 9: "kv_valid_length"})
+            if bidirectional_vision:
+                expected_inputs[7] = "mm_prefix_ranges"
+            elif len(node.input) > 7 and node.input[7]:
+                raise ValueError(
+                    f"{graph_path}: non-bidirectional sliding FlashAttention layer {layer_idx} "
+                    f"carries input[7]={node.input[7]!r}"
+                )
+        else:
+            if bidirectional_vision:
+                expected_inputs[7] = "mm_prefix_ranges"
+            elif len(node.input) > 7 and node.input[7]:
+                raise ValueError(
+                    f"{graph_path}: non-bidirectional full FlashAttention layer {layer_idx} "
+                    f"carries input[7]={node.input[7]!r}"
+                )
+            if any(node.input[8:]):
+                raise ValueError(f"{graph_path}: full_attention layer {layer_idx} carries sliding metadata")
+        for input_pos, input_name in expected_inputs.items():
+            actual = node.input[input_pos] if input_pos < len(node.input) else None
+            if actual != input_name:
+                raise ValueError(f"{graph_path}: {node_fact} input[{input_pos}]={actual!r}, expected {input_name!r}")
+
+    for layer_idx, node in enumerate(flash_nodes):
+        cache_idx = layer_cache_indices[layer_idx]
+        owner_layer_idx = layer_cache_owner_indices[cache_idx]
+        owner_node = flash_nodes[owner_layer_idx]
+        if list(node.input[1:3]) != list(owner_node.input[1:3]):
+            raise ValueError(
+                f"{graph_path}: FlashAttention layer {layer_idx} maps to cache {cache_idx} owned by "
+                f"layer {owner_layer_idx}, but K/V inputs {list(node.input[1:3])} != "
+                f"{list(owner_node.input[1:3])}"
+            )
+
+    def cache_inputs(cache_kind: str) -> list[onnx.ValueInfoProto]:
+        source_pattern = re.compile(rf"^past_{cache_kind}_cache_(\d+)$")
+        exported_suffix = "kcache_input" if cache_kind == "key" else "vcache_input"
+        candidates = [
+            value
+            for value in model.graph.input
+            if source_pattern.fullmatch(value.name) or value.name.endswith(exported_suffix)
+        ]
+        if len(candidates) != cache_count:
+            raise ValueError(
+                f"{graph_path}: {cache_kind} cache graph input count={len(candidates)}, expected {cache_count}"
+            )
+        return candidates
+
+    key_cache_inputs = cache_inputs("key")
+    value_cache_inputs = cache_inputs("value")
+    kv_nodes = [node for node in model.graph.node if node.op_type == "KVcache"]
+    kv_consumers = {name for node in kv_nodes for name in node.input if name}
+    for cache_pos, raw_shape in enumerate(layer_kv_shapes):
+        expected_shape = [int(dim) for dim in raw_shape]
+        for cache_values in (key_cache_inputs, value_cache_inputs):
+            value_info = cache_values[cache_pos]
+            input_name = value_info.name
+            exported_match = re.search(r"model_layers_(\d+)_.*[kv]cache_input$", input_name)
+            if exported_match is not None and int(exported_match.group(1)) != cache_pos:
+                raise ValueError(
+                    f"{graph_path}: {input_name} layer index={exported_match.group(1)}, "
+                    f"expected physical cache index {cache_pos}"
+                )
+            actual_shape = _onnx_value_shape(value_info)
+            if actual_shape != expected_shape:
+                raise ValueError(f"{graph_path}: {input_name} shape={actual_shape}, expected {expected_shape}")
+            if input_name not in kv_consumers:
+                raise ValueError(f"{graph_path}: {input_name} is not consumed by a KVcache node")
+
+    producer_by_output = {output: node for node in model.graph.node for output in node.output if output}
+    value_shapes = _known_onnx_value_shapes(model)
+    for node in model.graph.node:
+        if node.op_type != "Softmax" or not node.input:
+            continue
+        producer = producer_by_output.get(node.input[0])
+        if (
+            producer is not None
+            and producer.op_type == "MatMul"
+            and _is_attention_qk_matmul(producer, node, value_shapes)
+        ):
+            node_fact = node.name or (node.output[0] if node.output else "unnamed")
+            producer_fact = producer.name or (producer.output[0] if producer.output else "unnamed")
+            raise ValueError(f"{graph_path}: attention Softmax {node_fact} remains after QK MatMul {producer_fact}")
+
+    return {
+        "flash_attention_nodes": len(flash_nodes),
+        "sliding_nodes": sliding_nodes,
+        "full_nodes": full_nodes,
+    }
+
+
 @register_llm_model("Gemma4ForConditionalGeneration", force=True)
 class XHGemma4SeriesModel(VisionLLMModel):
     """Single public Gemma4 entry for E4B, 31B dense, and 26B-A4B MoE.
@@ -154,21 +485,11 @@ class XHGemma4SeriesModel(VisionLLMModel):
         # implementation site.
         VisionLLMModel.__init__(self, config)
         self.config = cast(XHGemma4SeriesModelConfig, self.config)
-        self.visual = (
-            XHGemma4SeriesVisionModel(config.visual_config)
-            if config.visual_config is not None
-            else None
-        )
+        self.visual = XHGemma4SeriesVisionModel(config.visual_config) if config.visual_config is not None else None
         self.video_visual = (
-            XHGemma4SeriesVisionModel(config.video_visual_config)
-            if config.video_visual_config is not None
-            else None
+            XHGemma4SeriesVisionModel(config.video_visual_config) if config.video_visual_config is not None else None
         )
-        self.audio = (
-            XHGemma4SeriesAudioModel(config.audio_config)
-            if config.audio_config is not None
-            else None
-        )
+        self.audio = XHGemma4SeriesAudioModel(config.audio_config) if config.audio_config is not None else None
         self.per_layer_input_embedding: Gemma4PerLayerInputEmbedding | None = None
         self._kvcache_config = KVCacheConfig()
         self._kvcache_config.use_cache = self.config.use_cache
@@ -210,9 +531,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             context_max_length=self.config.context_max_length,
             sliding_window=self.sliding_window,
             input_seq_len=self._prefill_cache_input_length(),
-            sliding_kv_cache_input_mode=getattr(
-                self.config, "sliding_kv_cache_input_mode", "slice_window"
-            ),
+            sliding_kv_cache_input_mode=getattr(self.config, "sliding_kv_cache_input_mode", "slice_window"),
         )
 
     def _mtp_target_decode_sliding_output_length(self) -> int:
@@ -431,9 +750,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
         def _q4_0_quant_weight(tensor: Any, target_shape: tuple[int, ...]) -> torch.Tensor:
             blocks = np.asarray(tensor.data).view(np.uint8).reshape(-1, 18)
             _, qs = np.hsplit(blocks, [2])
-            qcodes = qs.reshape((blocks.shape[0], -1, 1, 16)) >> np.array(
-                [0, 4], dtype=np.uint8
-            ).reshape((1, 1, 2, 1))
+            qcodes = qs.reshape((blocks.shape[0], -1, 1, 16)) >> np.array([0, 4], dtype=np.uint8).reshape((1, 1, 2, 1))
             qcodes = (qcodes & np.uint8(0x0F)).reshape((blocks.shape[0], -1)).astype(np.int8) - np.int8(8)
             qcodes = qcodes.reshape(gguf_quants.quant_shape_from_byte_shape(tensor.data.shape, tensor.tensor_type))
             qcodes = _reshape_gguf_array(qcodes, tensor.name, target_shape)
@@ -449,7 +766,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             if not isinstance(module, nn.Linear):
                 return False
             if hasattr(module, "quant_weight"):
-                setattr(module, "quant_weight", quant_weight)
+                module.quant_weight = quant_weight
             else:
                 module.register_buffer("quant_weight", quant_weight, persistent=False)
             return True
@@ -531,8 +848,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
         if meta_missing:
             preview = ", ".join(meta_missing[:20])
             raise RuntimeError(
-                f"Gemma4 GGUF load left {len(meta_missing)} HF tensors on meta device. "
-                f"First missing tensors: {preview}"
+                f"Gemma4 GGUF load left {len(meta_missing)} HF tensors on meta device. First missing tensors: {preview}"
             )
         logger.info(
             "Loaded Gemma4 GGUF weights from %s%s; loaded=%d, skipped=%d, attached_quant_weights=%d",
@@ -794,6 +1110,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
             hf_model,
             self.config.num_logits_to_keep,
             enable_mtp_outputs=self.config.enable_mtp_outputs,
+            attention_contract_version=getattr(self.config, "attention_contract_version", 1),
+            bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
         )
         return super().init_wrap_model(hf_model)
 
@@ -824,29 +1142,22 @@ class XHGemma4SeriesModel(VisionLLMModel):
         if getattr(llm_model.config, "hidden_size_per_layer_input", 0):
             self.per_layer_input_embedding = Gemma4PerLayerInputEmbedding.from_language_model(llm_model)
 
-        layer_kv_shapes: list[list[int]] = []
-        layer_cache_types: list[str | None] = []
-        layer_cache_indices: list[int] = []
-        for layer_idx, layer in enumerate(llm_model.layers):
-            attn = layer.self_attn
-            if getattr(attn, "is_kv_shared_layer", False):
-                continue
-            num_key_value_heads = attn.k_proj.out_features // attn.head_dim
-            layer_type = self.layer_types[layer_idx] if layer_idx < len(self.layer_types) else None
-            cache_seq_len = _gemma4_cache_seq_len_for_layer(
-                layer_type=layer_type,
-                context_max_length=self.config.context_max_length,
-                sliding_window=self.sliding_window,
-                input_seq_len=self._prefill_cache_input_length(),
-                sliding_kv_cache_input_mode=getattr(
-                    self.config, "sliding_kv_cache_input_mode", "slice_window"
-                ),
-            )
-            layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
-            layer_cache_types.append(layer_type)
-            layer_cache_indices.append(layer_idx)
+        (
+            layer_kv_shapes,
+            layer_cache_types,
+            layer_cache_owner_indices,
+            layer_cache_indices,
+        ) = _build_gemma4_layer_cache_layout(
+            layers=llm_model.layers,
+            layer_types=self.layer_types,
+            context_max_length=self.config.context_max_length,
+            sliding_window=self.sliding_window,
+            input_seq_len=self._prefill_cache_input_length(),
+            sliding_kv_cache_input_mode=getattr(self.config, "sliding_kv_cache_input_mode", "slice_window"),
+        )
         self._kvcache_mixin.set_layer_kv_shapes(layer_kv_shapes)
         self.layer_cache_types = layer_cache_types
+        self.layer_cache_owner_indices = layer_cache_owner_indices
         self.layer_cache_indices = layer_cache_indices
 
     def _get_data_preprocessor(self):
@@ -861,6 +1172,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
             audio_token_id=self.config.audio_token_id or -1,
             video_token_id=self.config.video_token_id or -1,
             bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
+            attention_contract_version=getattr(self.config, "attention_contract_version", 1),
+            max_mm_ranges_per_chunk=getattr(self.config, "max_mm_ranges_per_chunk", 1),
             # Full-attention layers receive None and use xhquant.nn.MaskedSoftmax's
             # causal path.  Only sliding attention consumes the explicit mask.
             emit_full_attention_mask=False,
@@ -904,7 +1217,15 @@ class XHGemma4SeriesModel(VisionLLMModel):
         self.set_prefill()
         decode_wrap_model = _copy_model_shared_params(wrap_model)
 
-        if isinstance(wrap_model, _Gemma4TextExportBridgePLE):
+        compact_bridge_types = (
+            _Gemma4FlashAttentionBridge,
+            _Gemma4FlashAttentionBridgeNoMM,
+            _Gemma4FlashAttentionBridgePLE,
+            _Gemma4FlashAttentionBridgePLENoMM,
+        )
+        if isinstance(wrap_model, compact_bridge_types):
+            prefill_wrap_model = wrap_model
+        elif isinstance(wrap_model, _Gemma4TextExportBridgePLE):
             prefill_wrap_model = wrap_model
         else:
             prefill_wrap_model = _Gemma4DecodeNoFullMaskBridge(
@@ -915,7 +1236,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 enable_mtp_outputs=self.config.enable_mtp_outputs,
             )
 
-        if self._is_mtp_export() and isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
+        if isinstance(decode_wrap_model, compact_bridge_types):
+            pass
+        elif self._is_mtp_export() and isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
             decode_wrap_model.__class__ = _Gemma4TextExportBridgePLEMTPDecode
         elif not isinstance(decode_wrap_model, _Gemma4TextExportBridgePLE):
             decode_num_logits_to_keep = 0 if self._is_mtp_export() else self.config.num_logits_to_keep
@@ -1002,16 +1325,40 @@ class XHGemma4SeriesModel(VisionLLMModel):
         quanted_model.set_activate_model("prefill")
         return quanted_model
 
-    def get_export_cfg(self) -> dict[str, list[str]]:
+    def _uses_compact_attention_contract(self) -> bool:
+        return (
+            int(getattr(self.config, "attention_contract_version", 1)) >= 2
+            and not self._is_mtp_export()
+            and not bool(getattr(self.config, "enable_mtp_outputs", False))
+        )
+
+    def _gemma4_v2_compact_input_names(self) -> list[str]:
         input_names = [
             "inputs_embeds",
             "past_seq_length",
             "current_input_length",
         ]
-        input_names.append("sliding_attention_mask")
+        if bool(getattr(self.config, "bidirectional_vision_attention", False)):
+            input_names.append("mm_prefix_ranges")
+        input_names.extend(["kv_window_start_abs", "kv_valid_length"])
         if self.per_layer_input_embedding is not None or getattr(self.config, "hidden_size_per_layer_input", 0):
-            # E4B PLE belongs with the text payload, immediately before KV caches.
             input_names.append("per_layer_inputs")
+        return input_names
+
+    def get_export_cfg(self) -> dict[str, list[str]]:
+        if self._uses_compact_attention_contract():
+            input_names = self._gemma4_v2_compact_input_names()
+        else:
+            input_names = [
+                "inputs_embeds",
+                "past_seq_length",
+                "current_input_length",
+                "sliding_attention_mask",
+            ]
+            if self.per_layer_input_embedding is not None or getattr(self.config, "hidden_size_per_layer_input", 0):
+                # Contract-v1 E4B PLE belongs with the text payload,
+                # immediately before KV caches.
+                input_names.append("per_layer_inputs")
         export_cfg = {
             "input_names": input_names,
             "output_names": ["logits"],
@@ -1026,15 +1373,137 @@ class XHGemma4SeriesModel(VisionLLMModel):
             export_cfg["input_names"].append(f"past_value_cache_{layer_idx}")
         return export_cfg
 
+    def _validate_v2_export_metadata(
+        self,
+        *,
+        layer_types: list[str],
+        layer_cache_types: list[str],
+        layer_cache_owner_indices: list[int],
+        layer_cache_indices: list[int],
+        layer_kv_shapes: list[list[int]],
+    ) -> None:
+        supported_layer_types = {"full_attention", "sliding_attention"}
+        unknown_layer_types = sorted(set(layer_types) - supported_layer_types)
+        if unknown_layer_types:
+            raise ValueError(f"Gemma4 contract-v2 layer_types contain unsupported values: {unknown_layer_types}.")
+
+        cache_count = len(layer_cache_types)
+        if len(layer_cache_owner_indices) != cache_count or len(layer_kv_shapes) != cache_count:
+            raise ValueError(
+                "Gemma4 contract-v2 cache metadata list lengths are inconsistent: "
+                f"layer_cache_types={cache_count}, "
+                f"layer_cache_owner_indices={len(layer_cache_owner_indices)}, "
+                f"layer_kv_shapes={len(layer_kv_shapes)}."
+            )
+        if len(layer_cache_indices) != len(layer_types):
+            raise ValueError(
+                "Gemma4 contract-v2 layer_cache_indices must map every attention layer: "
+                f"indices={len(layer_cache_indices)}, layer_types={len(layer_types)}."
+            )
+        expected_cache_indices = set(range(cache_count))
+        actual_cache_indices = set(layer_cache_indices)
+        if actual_cache_indices != expected_cache_indices:
+            raise ValueError(
+                "Gemma4 contract-v2 layer_cache_indices must cover every physical cache: "
+                f"got {sorted(actual_cache_indices)}, expected {sorted(expected_cache_indices)}."
+            )
+        for cache_pos, (cache_type, owner_layer_idx) in enumerate(
+            zip(layer_cache_types, layer_cache_owner_indices, strict=True)
+        ):
+            if cache_type not in supported_layer_types:
+                raise ValueError(
+                    "Gemma4 contract-v2 layer_cache_types contain unsupported value "
+                    f"{cache_type!r} at cache {cache_pos}."
+                )
+            if not isinstance(owner_layer_idx, int) or not 0 <= owner_layer_idx < len(layer_types):
+                raise ValueError(
+                    "Gemma4 contract-v2 layer_cache_owner_indices contain an invalid layer index: "
+                    f"{owner_layer_idx!r} at cache {cache_pos}."
+                )
+            if layer_cache_indices[owner_layer_idx] != cache_pos:
+                raise ValueError(
+                    "Gemma4 contract-v2 cache owner does not map to its physical cache: "
+                    f"owner layer {owner_layer_idx} maps to {layer_cache_indices[owner_layer_idx]}, "
+                    f"expected {cache_pos}."
+                )
+            if layer_types[owner_layer_idx] != cache_type:
+                raise ValueError(
+                    "Gemma4 contract-v2 cache type does not match its layer type: "
+                    f"cache {cache_pos} is owned by layer {owner_layer_idx}, "
+                    f"but {cache_type!r} != {layer_types[owner_layer_idx]!r}."
+                )
+        for layer_idx, cache_idx in enumerate(layer_cache_indices):
+            if not isinstance(cache_idx, int) or not 0 <= cache_idx < cache_count:
+                raise ValueError(
+                    "Gemma4 contract-v2 layer_cache_indices contain an invalid physical cache index: "
+                    f"{cache_idx!r} at layer {layer_idx}."
+                )
+            if layer_cache_types[cache_idx] != layer_types[layer_idx]:
+                raise ValueError(
+                    "Gemma4 contract-v2 layer cache type mismatch: "
+                    f"layer {layer_idx} ({layer_types[layer_idx]!r}) maps to cache {cache_idx} "
+                    f"({layer_cache_types[cache_idx]!r})."
+                )
+
+        sliding_window = int(self.sliding_window)
+        if sliding_window <= 0:
+            raise ValueError(f"Gemma4 contract-v2 sliding_window must be positive; got {sliding_window}.")
+        prefill_chunk_length = int(self.config.prefill_chunk_length)
+        if prefill_chunk_length < 280:
+            raise ValueError(
+                "Gemma4 contract-v2 prefill_chunk_length must be at least 280 so a visual "
+                f"token range remains atomic; got {prefill_chunk_length}."
+            )
+
+        expected_sliding_width = ((sliding_window + 320 + 15) // 16) * 16
+        for cache_pos, (cache_type, shape) in enumerate(zip(layer_cache_types, layer_kv_shapes, strict=True)):
+            if not isinstance(shape, (list, tuple)) or len(shape) < 3:
+                raise ValueError(
+                    "Gemma4 contract-v2 layer_kv_shapes must contain rank-3-or-higher shapes; "
+                    f"got {shape!r} at cache {cache_pos}."
+                )
+            if cache_type == "sliding_attention" and int(shape[2]) != expected_sliding_width:
+                raise ValueError(
+                    "Gemma4 contract-v2 layer_kv_shapes sliding width must equal "
+                    f"align16(sliding_window + 320)={expected_sliding_width}; "
+                    f"got {shape[2]} at cache {cache_pos}."
+                )
+
     def _extra_export_metadata(self, output_dir: str, meta_info):
+        layer_types = list(getattr(self, "layer_types", []) or [])
+        layer_cache_types = list(getattr(self, "layer_cache_types", []) or [])
+        layer_cache_owner_indices = list(getattr(self, "layer_cache_owner_indices", []) or [])
+        layer_cache_indices = list(getattr(self, "layer_cache_indices", []) or [])
+        if not layer_cache_owner_indices and layer_cache_indices == list(range(len(layer_cache_types))):
+            # Compatibility for dense test stubs and old in-memory models. The
+            # serialized contract remains explicit; shared-KV layouts cannot
+            # take this identity-only fallback.
+            layer_cache_owner_indices = list(range(len(layer_cache_types)))
+        layer_kv_shapes = [list(shape) for shape in (getattr(self._kvcache_mixin, "layer_kv_shapes", []) or [])]
+        if self._uses_compact_attention_contract():
+            self._validate_v2_export_metadata(
+                layer_types=layer_types,
+                layer_cache_types=layer_cache_types,
+                layer_cache_owner_indices=layer_cache_owner_indices,
+                layer_cache_indices=layer_cache_indices,
+                layer_kv_shapes=layer_kv_shapes,
+            )
+
         meta_info.variant = getattr(self.config, "variant", None)
         meta_info.capabilities = dict(getattr(self.config, "capabilities", {}) or {})
-        meta_info.layer_types = self.layer_types
-        meta_info.layer_kv_shapes = self._kvcache_mixin.layer_kv_shapes
-        meta_info.layer_cache_types = list(getattr(self, "layer_cache_types", []) or [])
-        meta_info.layer_cache_indices = list(getattr(self, "layer_cache_indices", []) or [])
-        meta_info.sliding_window = self.sliding_window
+        meta_info.attention_contract_version = int(getattr(self.config, "attention_contract_version", 1))
+        meta_info.uses_sliding_flash_attention_v2 = meta_info.attention_contract_version >= 2 and any(
+            layer_type == "sliding_attention" for layer_type in layer_types
+        )
+        meta_info.layer_types = layer_types
+        meta_info.layer_kv_shapes = layer_kv_shapes
+        meta_info.layer_cache_types = layer_cache_types
+        meta_info.layer_cache_owner_indices = layer_cache_owner_indices
+        meta_info.layer_cache_indices = layer_cache_indices
+        meta_info.sliding_window = int(self.sliding_window)
         meta_info.prefill_chunk_length = int(self.config.prefill_chunk_length)
+        meta_info.bidirectional_vision_attention = bool(getattr(self.config, "bidirectional_vision_attention", False))
+        meta_info.max_mm_ranges_per_chunk = int(getattr(self.config, "max_mm_ranges_per_chunk", 1))
         meta_info.prefill_graphs = {
             "prefill": {
                 "input_sequence_length": int(self.config.prefill_chunk_length),
@@ -1042,9 +1511,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             },
         }
         meta_info.sliding_cache_storage_length = self._mtp_shared_sliding_cache_length()
-        meta_info.sliding_kv_cache_input_mode = getattr(
-            self.config, "sliding_kv_cache_input_mode", "slice_window"
-        )
+        meta_info.sliding_kv_cache_input_mode = getattr(self.config, "sliding_kv_cache_input_mode", "slice_window")
         if self._is_mtp_export():
             block_size = self._mtp_num_draft_tokens()
             verify_length = self._mtp_verify_length()
@@ -1090,6 +1557,17 @@ class XHGemma4SeriesModel(VisionLLMModel):
     def _export_hmonnx(self, exported_info: ExportData):
         exported_info = super()._export_hmonnx(exported_info)
         meta_info = exported_info.meta
+        if int(getattr(meta_info, "attention_contract_version", 1)) >= 2:
+            meta = meta_info.to_dict()
+            export_dir = Path(exported_info.exported_dir)
+            for graph_key in ("prefill_hmonnx", "decode_hmonnx"):
+                graph_value = getattr(meta_info, graph_key, None)
+                if not graph_value:
+                    raise ValueError(f"{export_dir}: contract-v2 export metadata missing {graph_key}")
+                graph_path = Path(graph_value)
+                if not graph_path.is_absolute():
+                    graph_path = export_dir / graph_path
+                validate_gemma4_flash_attention_graph(graph_path, meta)
         if hasattr(meta_info, "prefill_graphs") and isinstance(meta_info.prefill_graphs, dict):
             meta_info.prefill_graphs["prefill"]["hmonnx"] = meta_info.prefill_hmonnx
         return exported_info

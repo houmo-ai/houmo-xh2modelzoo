@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,10 @@ from ...kv_cache_mixin import KVCacheMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import KVCacheConfig
 from .data_preprocess import Gemma4DataPreprocess
+
+
+if TYPE_CHECKING:
+    from .gemma4_series_llm_model import XHGemma4Model
 
 
 @dataclass(frozen=True)
@@ -329,8 +333,11 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         past_value_cache,
         per_layer_inputs=None,
         accepted_count=None,
+        mm_prefix_ranges=None,
+        kv_window_start_abs=None,
+        kv_valid_length=None,
     ):
-        outputs = self.language_model(
+        language_model_kwargs = dict(
             inputs_embeds=inputs_embeds,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
@@ -341,6 +348,16 @@ class _Gemma4TextExportBridgeBase(nn.Module):
             per_layer_inputs=per_layer_inputs,
             accepted_count=accepted_count,
         )
+        # Contract-v1 language-model call sites must remain byte-for-byte
+        # compatible with their old keyword set.  Contract-v2 always supplies
+        # the two window scalars, while mm_prefix_ranges is capability-gated.
+        if kv_window_start_abs is not None or kv_valid_length is not None:
+            language_model_kwargs.update(
+                mm_prefix_ranges=mm_prefix_ranges,
+                kv_window_start_abs=kv_window_start_abs,
+                kv_valid_length=kv_valid_length,
+            )
+        outputs = self.language_model(**language_model_kwargs)
         if self.enable_mtp_outputs:
             hidden_states = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
         elif self.language_model_returns_tensor:
@@ -358,6 +375,118 @@ class _Gemma4TextExportBridgeBase(nn.Module):
         if self.enable_mtp_outputs:
             return logits, hidden_states
         return logits
+
+
+class _Gemma4FlashAttentionBridge(_Gemma4TextExportBridgeBase):
+    """Contract-v2 bridge for multimodal sliding FlashAttention graphs."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        mm_prefix_ranges,
+        kv_window_start_abs,
+        kv_valid_length,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=None,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            mm_prefix_ranges=mm_prefix_ranges,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
+        )
+
+
+class _Gemma4FlashAttentionBridgeNoMM(_Gemma4TextExportBridgeBase):
+    """Contract-v2 bridge without the statically-unused visual range input."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        kv_window_start_abs,
+        kv_valid_length,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=None,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
+        )
+
+
+class _Gemma4FlashAttentionBridgePLE(_Gemma4TextExportBridgeBase):
+    """Contract-v2 multimodal bridge with E4B per-layer embeddings."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        mm_prefix_ranges,
+        kv_window_start_abs,
+        kv_valid_length,
+        per_layer_inputs,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=None,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            per_layer_inputs=per_layer_inputs,
+            mm_prefix_ranges=mm_prefix_ranges,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
+        )
+
+
+class _Gemma4FlashAttentionBridgePLENoMM(_Gemma4TextExportBridgeBase):
+    """Contract-v2 nonvisual bridge with E4B per-layer embeddings."""
+
+    def forward(
+        self,
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        kv_window_start_abs,
+        kv_valid_length,
+        per_layer_inputs,
+        past_key_cache=None,
+        past_value_cache=None,
+    ):
+        return self._run(
+            inputs_embeds=inputs_embeds,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            full_attention_mask=None,
+            sliding_attention_mask=None,
+            past_key_cache=past_key_cache,
+            past_value_cache=past_value_cache,
+            per_layer_inputs=per_layer_inputs,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
+        )
 
 
 class _Gemma4DecodeNoFullMaskBridge(_Gemma4TextExportBridgeBase):
@@ -475,8 +604,31 @@ def _make_text_export_bridge_if_needed(
     num_logits_to_keep: int | None = 0,
     *,
     enable_mtp_outputs: bool = False,
+    attention_contract_version: int = 1,
+    bidirectional_vision_attention: bool = False,
 ):
     text_config = hf_model.config.get_text_config()
+    if int(attention_contract_version) >= 2 and not enable_mtp_outputs:
+        has_ple = bool(getattr(text_config, "hidden_size_per_layer_input", 0))
+        if has_ple:
+            bridge_cls = (
+                _Gemma4FlashAttentionBridgePLE
+                if bidirectional_vision_attention
+                else _Gemma4FlashAttentionBridgePLENoMM
+            )
+        else:
+            bridge_cls = (
+                _Gemma4FlashAttentionBridge
+                if bidirectional_vision_attention
+                else _Gemma4FlashAttentionBridgeNoMM
+            )
+        return bridge_cls(
+            hf_model,
+            num_logits_to_keep=num_logits_to_keep,
+            language_model_keeps_last_logit=(int(num_logits_to_keep or 0) == 1),
+            language_model_returns_tensor=True,
+            enable_mtp_outputs=False,
+        )
     if getattr(text_config, "hidden_size_per_layer_input", 0):
         return _Gemma4TextExportBridgePLE(
             hf_model,

@@ -152,6 +152,9 @@ class Gemma4SeriesModelMeta(VLLMModelMeta):
         per_layer_input_embedding: str | None = None,
         variant: str | None = None,
         capabilities: Mapping[str, bool] | None = None,
+        attention_contract_version: int = 1,
+        max_mm_ranges_per_chunk: int = 1,
+        uses_sliding_flash_attention_v2: bool = False,
         **kwargs,
     ):
         super().__init__(visual_config=visual_config, **kwargs)
@@ -160,6 +163,9 @@ class Gemma4SeriesModelMeta(VLLMModelMeta):
         self.per_layer_input_embedding = per_layer_input_embedding
         self.variant = variant
         self.capabilities = dict(capabilities or {})
+        self.attention_contract_version = int(attention_contract_version)
+        self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
+        self.uses_sliding_flash_attention_v2 = bool(uses_sliding_flash_attention_v2)
         if "_meta_path_" in kwargs:
             meta_path = Path(kwargs["_meta_path_"]).parent
             if self.visual_config is not None and getattr(self.visual_config, "onnx", None):
@@ -214,6 +220,8 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         video_visual_config: dict | XHGemma4SeriesVisualConfig | None = None,
         audio_config: dict | XHGemma4SeriesAudioConfig | None = None,
         sliding_kv_cache_input_mode: str = "slice_window",
+        attention_contract_version: int = 1,
+        max_mm_ranges_per_chunk: int = 1,
         **kwargs,
     ):
         super().__init__(
@@ -243,6 +251,16 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             )
         self.spec_decode_mode = str(spec_decode_mode).lower() if spec_decode_mode is not None else None
         sliding_kv_cache_input_mode = self._normalize_sliding_kv_cache_input_mode(sliding_kv_cache_input_mode)
+        self.attention_contract_version = int(attention_contract_version)
+        self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
+        if self.attention_contract_version not in (1, 2):
+            raise ValueError("Gemma4 attention_contract_version must be 1 or 2")
+        if self.max_mm_ranges_per_chunk <= 0:
+            raise ValueError("Gemma4 max_mm_ranges_per_chunk must be positive")
+        if self.attention_contract_version >= 2 and self.spec_decode_mode == "mtp":
+            raise ValueError("Gemma4 contract-v2 PageAttention does not support MTP in phase one")
+        if self.attention_contract_version >= 2 and sliding_kv_cache_input_mode != "slice_window":
+            raise ValueError("Gemma4 contract-v2 requires sliding_kv_cache_input_mode='slice_window'")
         if self.spec_decode_mode == "mtp" and sliding_kv_cache_input_mode != "slice_window":
             raise ValueError(
                 "Gemma4 Series MTP requires sliding_kv_cache_input_mode='slice_window'; "
@@ -316,6 +334,9 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
 
         text_config = hf_config.get("text_config", {})
         layer_types = text_config.get("layer_types", [])
+        self.uses_sliding_flash_attention_v2 = self.attention_contract_version >= 2 and any(
+            layer_type == "sliding_attention" for layer_type in layer_types
+        )
         self.enable_moe_block: bool = bool(text_config.get("enable_moe_block", False))
         self.image_token_id = hf_config.get("image_token_id", self.image_token_id)
         self.video_token_id = hf_config.get("video_token_id", self.video_token_id)

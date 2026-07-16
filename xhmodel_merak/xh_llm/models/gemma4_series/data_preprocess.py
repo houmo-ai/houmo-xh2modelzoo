@@ -106,6 +106,8 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         per_layer_input_embedding: Gemma4PerLayerInputEmbedding | None = None,
         sliding_window: int = 1024,
         bidirectional_vision_attention: bool = False,
+        attention_contract_version: int = 1,
+        max_mm_ranges_per_chunk: int = 1,
         emit_full_attention_mask: bool | None = None,
         emit_accepted_count_input: bool = False,
     ):
@@ -126,6 +128,12 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         self.per_layer_input_embedding = per_layer_input_embedding
         self.sliding_window = sliding_window
         self.bidirectional_vision_attention = bool(bidirectional_vision_attention)
+        self.attention_contract_version = int(attention_contract_version)
+        self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
+        if self.attention_contract_version not in (1, 2):
+            raise ValueError("Gemma4 attention_contract_version must be 1 or 2")
+        if self.max_mm_ranges_per_chunk <= 0:
+            raise ValueError("Gemma4 max_mm_ranges_per_chunk must be positive")
         if emit_full_attention_mask:
             raise ValueError(
                 "Gemma4 Series no longer emits full_attention_mask; full-attention layers use "
@@ -185,8 +193,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         if token_positions.numel() == 0:
             if flat_features.shape[0] != 0:
                 raise ValueError(
-                    f"Received {feature_name} features for token id {token_id}, "
-                    "but prompt does not contain that token."
+                    f"Received {feature_name} features for token id {token_id}, but prompt does not contain that token."
                 )
             return inputs_embeds
         if token_positions.shape[0] != flat_features.shape[0]:
@@ -270,6 +277,50 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
 
         return full_mask, sliding_mask
 
+    def _build_compact_attention_metadata(
+        self,
+        current_input_length: int,
+        past_seq_length: int,
+        mm_token_type_ids: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        p = max(0, int(past_seq_length))
+        c = max(0, int(current_input_length))
+        q = int(self.input_sequence_length)
+        w = int(self.sliding_window)
+        if not 0 <= c <= q:
+            raise ValueError(f"current_input_length must be in [0, {q}], got {c}")
+        if w <= 0:
+            raise ValueError(f"sliding_window must be positive, got {w}")
+
+        retained = min(p, w - 1)
+        start = p - retained
+        width = self._aligned(w + q - 1, 16)
+        valid = min(width, retained + c)
+
+        ranges: list[tuple[int, int]] = []
+        if self.bidirectional_vision_attention:
+            mm = mm_token_type_ids[:c] > 0
+            range_start = None
+            for idx in range(c):
+                if bool(mm[idx]) and range_start is None:
+                    range_start = idx
+                if range_start is not None and (idx == c - 1 or not bool(mm[idx + 1])):
+                    ranges.append((p + range_start, p + idx))
+                    range_start = None
+
+        if len(ranges) > self.max_mm_ranges_per_chunk:
+            raise ValueError(
+                f"Gemma4 current chunk has {len(ranges)} multimodal ranges, "
+                f"exceeding max_mm_ranges_per_chunk={self.max_mm_ranges_per_chunk}"
+            )
+        padded_ranges = ranges + [(0, 0)] * (self.max_mm_ranges_per_chunk - len(ranges))
+        return (
+            torch.tensor([start], dtype=torch.int64, device=device),
+            torch.tensor([valid], dtype=torch.int64, device=device),
+            torch.tensor([padded_ranges], dtype=torch.int32, device=device),
+        )
+
     def forward(self, data: dict | tuple | list):
         assert isinstance(data, dict)
         device = self._device
@@ -323,24 +374,44 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         past_seq_length = int(data["past_seq_length"])
         current_input_length = int(seq_length)
 
-        full_attention_mask, sliding_attention_mask = self._build_attention_masks(
-            current_input_length=current_input_length,
-            past_seq_length=past_seq_length,
-            mm_token_type_ids=mm_token_type_ids,
-            device=device,
-        )
+        past_seq_tensor = torch.tensor([past_seq_length], dtype=torch.int32, device=device)
+        current_len_tensor = torch.tensor([current_input_length], dtype=torch.int32, device=device)
+        output = [inputs_embeds, past_seq_tensor, current_len_tensor]
 
-        output = [
-            inputs_embeds,
-            torch.tensor([past_seq_length], dtype=torch.int32, device=device),
-            torch.tensor([current_input_length], dtype=torch.int32, device=device),
-        ]
-        if self.emit_full_attention_mask:
-            output.append(full_attention_mask)
-        output.append(sliding_attention_mask)
+        if self.enable_page_attention:
+            if self.attention_contract_version < 2:
+                raise RuntimeError("Gemma4 PageAttention requires attention_contract_version=2")
+            # convert_to_page_attention removes compact FlashAttention metadata
+            # and KV-cache graph inputs.  PageAttention receives those values
+            # through its runtime context, so only graph-resident text payloads
+            # remain in the positional HMONNX input tuple.
+            if per_layer_inputs is not None:
+                output.append(per_layer_inputs)
+            return tuple(output)
+
+        if self.attention_contract_version >= 2:
+            kv_window_start_abs, kv_valid_length, mm_prefix_ranges = self._build_compact_attention_metadata(
+                current_input_length=current_input_length,
+                past_seq_length=past_seq_length,
+                mm_token_type_ids=mm_token_type_ids,
+                device=device,
+            )
+            if self.bidirectional_vision_attention:
+                output.append(mm_prefix_ranges)
+            output.extend([kv_window_start_abs, kv_valid_length])
+        else:
+            full_attention_mask, sliding_attention_mask = self._build_attention_masks(
+                current_input_length=current_input_length,
+                past_seq_length=past_seq_length,
+                mm_token_type_ids=mm_token_type_ids,
+                device=device,
+            )
+            if self.emit_full_attention_mask:
+                output.append(full_attention_mask)
+            output.append(sliding_attention_mask)
         if per_layer_inputs is not None:
             output.append(per_layer_inputs)
-        if self.emit_accepted_count_input:
+        if self.attention_contract_version == 1 and self.emit_accepted_count_input:
             accepted_count = data.get("accepted_count", 0)
             if torch.is_tensor(accepted_count):
                 accepted_count = accepted_count.to(device=device, dtype=torch.int32).reshape(1)

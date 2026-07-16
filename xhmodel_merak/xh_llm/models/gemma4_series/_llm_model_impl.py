@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import types
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -42,8 +42,6 @@ def _register_or_replace_traceable(cls_to_key):
         return dm_class
 
     return decorator
-
-
 
 
 def _move_parameter_to_meta(module: nn.Module, parameter_name: str) -> None:
@@ -121,9 +119,7 @@ def _pack_defused_experts_to_moeblock(moe_block: MoeBlock, experts: nn.Module) -
                 if has_quant_weight:
                     quant_weight = getattr(linear, "quant_weight", None)
                     if not torch.is_tensor(quant_weight):
-                        raise RuntimeError(
-                            f"Gemma4 MoE expert {expert_idx} {linear_name} is missing quant_weight"
-                        )
+                        raise RuntimeError(f"Gemma4 MoE expert {expert_idx} {linear_name} is missing quant_weight")
                     if tuple(quant_weight.shape) != tuple(weight.shape):
                         raise RuntimeError(
                             f"Gemma4 MoE expert {expert_idx} {linear_name}.quant_weight shape "
@@ -249,6 +245,12 @@ class _Gemma4TextRotaryEmbedding(DynamicModule):
 class _Gemma4TextAttention(DynamicModule):
     def _setup(self, cfg=None):
         self.use_cache = bool(_cfg_get(cfg, "use_cache", True))
+        self.use_flash_attention_v2 = int(_cfg_get(cfg, "attention_contract_version", 1)) >= 2
+        self.layer_type = getattr(self, "layer_type", None)
+        if self.layer_type not in ("full_attention", "sliding_attention"):
+            raise ValueError(
+                f"Gemma4 attention layer_type must be 'full_attention' or 'sliding_attention', got {self.layer_type!r}"
+            )
         self.rotary_half_dim = self.head_dim // 2
         self.num_attention_heads = self.q_proj.weight.shape[0] // self.head_dim
         k_proj = getattr(self, "k_proj", None)
@@ -261,37 +263,65 @@ class _Gemma4TextAttention(DynamicModule):
             # after reading shared KV by attention type.
             layer_type = getattr(self, "layer_type", None)
             config = getattr(self, "config", None)
-            use_global_kv = (
-                layer_type == "full_attention"
-                and bool(getattr(config, "attention_k_eq_v", False))
-            )
+            use_global_kv = layer_type == "full_attention" and bool(getattr(config, "attention_k_eq_v", False))
             if use_global_kv and getattr(config, "num_global_key_value_heads", None):
                 self.num_key_value_heads = int(config.num_global_key_value_heads)
             else:
-                self.num_key_value_heads = int(getattr(config, "num_key_value_heads"))
+                self.num_key_value_heads = int(config.num_key_value_heads)
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
         for norm_name in ("q_norm", "k_norm", "v_norm"):
             norm = getattr(self, norm_name, None)
             if norm is not None and not getattr(norm, "with_scale", True):
                 norm._head_dim_hint = self.head_dim
         self.rope = xhnn.Rope()
-        self.k_repeat_interleave = xhnn.RepeatInterleave()
-        self.v_repeat_interleave = xhnn.RepeatInterleave()
-        self.qk_matmul = xhnn.MatMul()
-        self.pv_matmul = xhnn.MatMul()
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
-        attention_max_length = getattr(self, "sliding_window", None)
-        attention_max_length = int(attention_max_length) if attention_max_length is not None else -1
-        self.is_sliding_attention = attention_max_length > 0
+        raw_sliding_window = getattr(self, "sliding_window", None)
+        if self.use_flash_attention_v2:
+            if self.layer_type == "sliding_attention":
+                if type(raw_sliding_window) is not int or raw_sliding_window <= 0:
+                    raise ValueError(
+                        "Gemma4 contract-v2 sliding_attention requires sliding_window "
+                        f"to be a positive integer, got {raw_sliding_window!r}"
+                    )
+                attention_max_length = raw_sliding_window
+                self.is_sliding_attention = True
+            else:
+                if raw_sliding_window is not None:
+                    raise ValueError(
+                        f"Gemma4 contract-v2 full_attention requires sliding_window=None, got {raw_sliding_window!r}"
+                    )
+                attention_max_length = -1
+                self.is_sliding_attention = False
+        else:
+            attention_max_length = int(raw_sliding_window) if raw_sliding_window is not None else -1
+            self.is_sliding_attention = attention_max_length > 0
         self.enable_accepted_count_input = False
-        # Target full-attention decode/prefill intentionally uses the standard
-        # causal MaskedSoftmax path by passing attention_mask=None.  MTP draft
-        # full layers can still receive an explicit assistant-side mask to hide
-        # invalid padded cache slots.
-        self.masked_add = MaskedAdd()
-        self.softmax = SoftmaxPlus(dim=-1)
-        self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
+        if self.use_flash_attention_v2:
+            self.flash_attn = xhnn.FlashAttention(
+                embed_dim=self.num_attention_heads * self.head_dim,
+                num_heads=self.num_attention_heads,
+                batch_first=True,
+                # Gemma4's Q/K RMSNorm contract already uses the model's
+                # explicit attention scaling (1.0).  Applying the generic
+                # 1/sqrt(head_dim) factor here changes every v2 layer.
+                scale=1.0,
+                num_kv_heads=self.num_key_value_heads,
+                is_causal=True,
+                sliding_window=attention_max_length if self.is_sliding_attention else None,
+            )
+        else:
+            self.k_repeat_interleave = xhnn.RepeatInterleave()
+            self.v_repeat_interleave = xhnn.RepeatInterleave()
+            self.qk_matmul = xhnn.MatMul()
+            self.pv_matmul = xhnn.MatMul()
+            # Target full-attention decode/prefill intentionally uses the standard
+            # causal MaskedSoftmax path by passing attention_mask=None.  MTP draft
+            # full layers can still receive an explicit assistant-side mask to hide
+            # invalid padded cache slots.
+            self.masked_add = MaskedAdd()
+            self.softmax = SoftmaxPlus(dim=-1)
+            self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
         if self.use_cache:
             cache_axis = cfg.kv_cache.cache_axis
             self.k_cache = LLMCacheV2(axis=cache_axis, attention_max_length=attention_max_length)
@@ -336,6 +366,9 @@ class _Gemma4TextAttention(DynamicModule):
         past_v_cache: Optional[Tensor] = None,
         accepted_count: Optional[Tensor] = None,
         shared_kv: Optional[dict[int | str, tuple[torch.Tensor, torch.Tensor]]] = None,
+        mm_prefix_ranges: Optional[Tensor] = None,
+        kv_window_start_abs: Optional[Tensor] = None,
+        kv_valid_length: Optional[Tensor] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         del kwargs
@@ -397,17 +430,30 @@ class _Gemma4TextAttention(DynamicModule):
             if layer_type is not None:
                 shared_kv[layer_type] = (key_states, value_states)
 
-        key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
-        value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
-
-        attn_weights = self.qk_matmul(query_states, key_states)
-        if attention_mask is not None:
-            attn_weights = self.masked_add(attn_weights, attention_mask)
-            attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        if getattr(self, "use_flash_attention_v2", False):
+            attn_output = self.flash_attn(
+                query_states,
+                key_states,
+                value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                mm_prefix_range=mm_prefix_ranges,
+                kv_window_start_abs=kv_window_start_abs if self.is_sliding_attention else None,
+                kv_valid_length=kv_valid_length if self.is_sliding_attention else None,
+            )
+            attn_weights = None
         else:
-            attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
+            key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
+            value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
 
-        attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
+            attn_weights = self.qk_matmul(query_states, key_states)
+            if attention_mask is not None:
+                attn_weights = self.masked_add(attn_weights, attention_mask)
+                attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+            else:
+                attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
+
+            attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.attn_output_cast(attn_output)
         attn_output = self.o_proj(attn_output)
@@ -499,6 +545,9 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         past_v_cache: Optional[Tensor] = None,
         accepted_count: Optional[Tensor] = None,
         shared_kv: Optional[dict[int, tuple[torch.Tensor, torch.Tensor]]] = None,
+        mm_prefix_ranges: Optional[Tensor] = None,
+        kv_window_start_abs: Optional[Tensor] = None,
+        kv_valid_length: Optional[Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         del kwargs
@@ -515,6 +564,9 @@ class _Gemma4TextDecoderLayer(DynamicModule):
             past_v_cache=past_v_cache,
             accepted_count=accepted_count,
             shared_kv=shared_kv,
+            mm_prefix_ranges=mm_prefix_ranges,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
@@ -644,9 +696,7 @@ class _Gemma4TextModel(DynamicModule):
             sin_slice = xhnn.DynamicSlice([self.input_sequence_length], [2], [1])
 
             def _slice_update_cfg(slice_self, new_cfg=None):
-                slice_self.valid_length = [
-                    int(_cfg_get(new_cfg, "input_sequence_length", self.input_sequence_length))
-                ]
+                slice_self.valid_length = [int(_cfg_get(new_cfg, "input_sequence_length", self.input_sequence_length))]
 
             cos_slice._update_cfg = types.MethodType(_slice_update_cfg, cos_slice)
             sin_slice._update_cfg = types.MethodType(_slice_update_cfg, sin_slice)
@@ -698,6 +748,9 @@ class _Gemma4TextModel(DynamicModule):
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
         accepted_count: Optional[Tensor] = None,
+        mm_prefix_ranges: Optional[Tensor] = None,
+        kv_window_start_abs: Optional[Tensor] = None,
+        kv_valid_length: Optional[Tensor] = None,
     ):
         if inputs_embeds is None:
             raise ValueError("Gemma4 text graph requires inputs_embeds.")
@@ -755,6 +808,9 @@ class _Gemma4TextModel(DynamicModule):
                 past_v_cache=layer_past_value_cache,
                 accepted_count=accepted_count,
                 shared_kv=shared_kv,
+                mm_prefix_ranges=mm_prefix_ranges,
+                kv_window_start_abs=kv_window_start_abs,
+                kv_valid_length=kv_valid_length,
             )
             if self.only_first_block:
                 break
@@ -769,6 +825,7 @@ class _Gemma4TextModel(DynamicModule):
             return hidden_states
         return hidden_states
 
+
 @_register_or_replace_traceable({Gemma4ForConditionalGeneration: "Gemma4ForConditionalGeneration"})
 class _Gemma4ForConditionalGeneration(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
@@ -777,9 +834,7 @@ class _Gemma4ForConditionalGeneration(DynamicModule):
             self.enable_mtp_outputs = False
         elif hasattr(cfg, "get"):
             self.num_logits_to_keep = int(cfg.get("num_logits_to_keep", 0) or 0)
-            self.enable_mtp_outputs = bool(
-                cfg.get("enable_mtp_outputs", False) or cfg.get("spec_decode_mode") == "mtp"
-            )
+            self.enable_mtp_outputs = bool(cfg.get("enable_mtp_outputs", False) or cfg.get("spec_decode_mode") == "mtp")
         else:
             self.num_logits_to_keep = int(getattr(cfg, "num_logits_to_keep", 0) or 0)
             self.enable_mtp_outputs = bool(

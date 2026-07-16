@@ -1,0 +1,59 @@
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  preset: mode1
+  rotation: null
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  iters: 200
+  seed: 42
+  format: auto_gptq
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    trust_remote_code: true
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4ForConditionalGeneration
+    # 该字段仅用作占位，实际会在导出前实时覆盖
+    hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: gemma_4_31b
+    context_max_length: 262144
+    prefill_chunk_length: 320
+    attention_contract_version: 2
+    max_mm_ranges_per_chunk: 1
+    use_cache: true
+    num_logits_to_keep: 1
+    sliding_kv_cache_input_mode: slice_window
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      export_mode: padded
+      image_seq_length: 280
+      max_patches: 2520
+      patch_size: 16
+      pooling_kernel_size: 3
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+      input_modality: image
+    only_first_block: false
+    video_visual_config:
+      export_mode: padded
+      image_seq_length: 70
+      max_patches: 630
+      patch_size: 16
+      pooling_kernel_size: 3
+      input_modality: video
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}

@@ -431,7 +431,8 @@ def _resolve_calibration_jsonl(topology: str, calibration_cfg: Mapping[str, Any]
     if dataset and str(dataset).strip().lower() not in {"wikitext", "wikitext2", "wikitext-2-raw-v1"}:
         return None
 
-    return _resolve_calibration_value(DEFAULT_MOE_CALIBRATION_JSONL if topology == "moe" else DEFAULT_DENSE_CALIBRATION_JSONL)
+    default_jsonl = DEFAULT_MOE_CALIBRATION_JSONL if topology == "moe" else DEFAULT_DENSE_CALIBRATION_JSONL
+    return _resolve_calibration_value(default_jsonl)
 
 
 def _resolve_calibration_value(value: Any) -> str:
@@ -506,8 +507,8 @@ def _repo_resource_candidates(relative_path: str) -> list[Path]:
     if env_root:
         candidates.append(Path(env_root).expanduser() / relative_path)
 
-    candidates.append(_repo_root() / relative_path)
     candidates.append(Path.cwd() / relative_path)
+    candidates.append(_repo_root() / relative_path)
     return candidates
 
 
@@ -616,7 +617,9 @@ def _result_output_dir(recipe_result: Any, fallback: str) -> str:
         return fallback
     if isinstance(recipe_result, Mapping):
         return str(recipe_result.get("output_dir") or recipe_result.get("quanted_model_dir") or fallback)
-    return str(getattr(recipe_result, "output_dir", None) or getattr(recipe_result, "quanted_model_dir", None) or fallback)
+    output_dir = getattr(recipe_result, "output_dir", None)
+    quanted_model_dir = getattr(recipe_result, "quanted_model_dir", None)
+    return str(output_dir or quanted_model_dir or fallback)
 
 
 def _validate_artifact_format(quant_cfg: Mapping[str, Any]) -> None:

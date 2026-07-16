@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import torch
 
-from xhquant.core import HybridCacheTensor
 from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheMixin
 from xhmodel_merak.xh_llm.utils import unfold_args
+from xhquant.core import HybridCacheTensor
+from xhquant.xhonnxruntime.parsers import PageAttentionContext
 
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
@@ -78,6 +80,7 @@ def _select_gemma4_prefill_graph_name(requested_input_sequence_length: int, grap
         f"{requested}; available={{'prefill': {prefill_len}}}."
     )
 
+
 def _gemma4_meta_base_dir(meta_info) -> Path | None:
     meta_path = getattr(meta_info, "_meta_path_", None)
     if meta_path:
@@ -106,10 +109,7 @@ def _gemma4_resolve_meta_path(meta_info, value: str | None) -> str | None:
 
 def _gemma4_prefill_graph_hmonnx_from_meta(meta_info, graph_name: str) -> str | None:
     if graph_name != "prefill":
-        raise ValueError(
-            "Gemma4 Series runtime only supports the single 'prefill' graph; "
-            f"got {graph_name!r}."
-        )
+        raise ValueError(f"Gemma4 Series runtime only supports the single 'prefill' graph; got {graph_name!r}.")
     raw_graphs = getattr(meta_info, "prefill_graphs", None) or {}
     value = raw_graphs.get("prefill") if isinstance(raw_graphs, dict) else None
     if isinstance(value, dict) and (value.get("hmonnx") or value.get("path")):
@@ -206,22 +206,33 @@ class Gemma4KVCacheMixinHMONNX(KVCacheMixin):
             full_cache_len = max(int(shape[2]) for shape in self.layer_kv_shapes if len(shape) > 2)
         for shape in self.layer_kv_shapes:
             cache_type = (
-                HybridCacheTensor
-                if len(shape) > 2 and int(shape[2]) < full_cache_len
-                else self.CACHCE_TENSOR_TYPE
+                HybridCacheTensor if len(shape) > 2 and int(shape[2]) < full_cache_len else self.CACHCE_TENSOR_TYPE
             )
             self.past_key_caches.append(cache_type(torch.zeros(shape, dtype=dtype)))
             self.past_value_caches.append(cache_type(torch.zeros(shape, dtype=dtype)))
 
 
 class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
+    _PAGE_ATTENTION_EAGER_REASON = "Gemma4 PageAttention eager execution explicitly requested"
+
     def __init__(self, meta_info: VLLMModelMeta, **kwargs):
+        enable_cuda_graph = bool(kwargs.get("enable_cuda_graph", False))
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
-        self.visual = Gemma4VisualHMONNXModel(self.visual_meta.hmonnx) if self.visual_meta is not None else None
+        self.visual = (
+            Gemma4VisualHMONNXModel(
+                self.visual_meta.hmonnx,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            if self.visual_meta is not None
+            else None
+        )
         self.video_visual_meta = getattr(meta_info, "video_visual_config", None)
         self.video_visual = (
-            Gemma4VisualHMONNXModel(self.video_visual_meta.hmonnx)
+            Gemma4VisualHMONNXModel(
+                self.video_visual_meta.hmonnx,
+                enable_cuda_graph=enable_cuda_graph,
+            )
             if self.video_visual_meta is not None and getattr(self.video_visual_meta, "hmonnx", None)
             else None
         )
@@ -239,9 +250,7 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         )
         per_layer_artifact = getattr(meta_info, "per_layer_input_embedding", None)
         self.per_layer_input_embedding = (
-            Gemma4PerLayerInputEmbedding.from_artifact(per_layer_artifact)
-            if per_layer_artifact is not None
-            else None
+            Gemma4PerLayerInputEmbedding.from_artifact(per_layer_artifact) if per_layer_artifact is not None else None
         )
 
         layer_kv_shapes = getattr(meta_info, "layer_kv_shapes", None) or getattr(
@@ -261,6 +270,171 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         self.sliding_window = getattr(meta_info, "sliding_window", 1024)
         self._validate_mtp_sliding_kv_cache_input_mode()
 
+    def _attention_contract_version(self) -> int:
+        model_config = getattr(self.meta_info, "model_config", None)
+        return int(
+            getattr(
+                self.meta_info,
+                "attention_contract_version",
+                getattr(model_config, "attention_contract_version", 1),
+            )
+        )
+
+    def _active_page_attention_model(self) -> HMONNXModel:
+        if self.is_prefill():
+            return self._active_prefill_model
+        return self.decode_model
+
+    def set_page_attention_context(
+        self,
+        paged_kv_caches=None,
+        block_ids=None,
+        slot_mapping=None,
+        block_size: int | None = None,
+        *,
+        contexts_by_cache_index: dict[int, PageAttentionContext] | None = None,
+    ) -> None:
+        """Bind Gemma4 contract-v2 contexts by exported layer cache index.
+
+        The positional arguments remain available only as a Gemma-local
+        compatibility delegation.  Qwen continues to own and call the base
+        contract-v1 implementation unchanged.
+        """
+
+        if contexts_by_cache_index is None:
+            return super().set_page_attention_context(
+                paged_kv_caches=paged_kv_caches,
+                block_ids=block_ids,
+                slot_mapping=slot_mapping,
+                block_size=block_size,
+            )
+        if self._attention_contract_version() < 2:
+            raise RuntimeError("Gemma4 contexts_by_cache_index requires attention contract-v2")
+
+        page_attention_modules = self._get_page_attention_modules(self._active_page_attention_model())
+        cache_indices = self._page_attention_cache_index_by_layer(
+            len(page_attention_modules), set(contexts_by_cache_index)
+        )
+        for page_attention_module, cache_index in zip(page_attention_modules, cache_indices, strict=True):
+            # Preserve the exact context object.  In particular, layers that
+            # repeat a local cache index share its typed cache handle and staged
+            # metadata, while full/local cache indices remain independent.
+            page_attention_module.set_context(contexts_by_cache_index[cache_index])
+
+    def _page_attention_cache_index_by_layer(
+        self,
+        module_count: int,
+        available_cache_indices: set[int],
+    ) -> list[int]:
+        """Return the exported physical cache index for every attention layer.
+
+        Contract-v2 makes ``layer_cache_indices`` the authoritative per-layer
+        mapping.  Repeated values express shared caches directly; runtime must
+        not infer sharing from attention type or from a shorter owner list.
+        """
+
+        authoritative = [int(index) for index in self.layer_cache_indices]
+        layer_types = [str(value) for value in self.layer_types]
+        if len(authoritative) != module_count or len(layer_types) != module_count:
+            raise ValueError(
+                "Gemma4 contract-v2 requires one physical cache index per "
+                "PageAttention layer: "
+                f"modules={module_count}, layer_cache_indices={len(authoritative)}, "
+                f"layer_types={len(layer_types)}"
+            )
+        if any(index < 0 for index in authoritative):
+            raise ValueError(
+                "Gemma4 contract-v2 layer_cache_indices must contain only "
+                f"non-negative physical cache indices, got {authoritative}"
+            )
+        expected_cache_indices = set(authoritative)
+        if available_cache_indices != expected_cache_indices:
+            raise ValueError(
+                "Gemma4 contexts_by_cache_index does not match physical caches "
+                "declared by authoritative per-layer layer_cache_indices: "
+                f"expected={sorted(expected_cache_indices)}, "
+                f"got={sorted(available_cache_indices)}"
+            )
+        return authoritative
+
+    def _active_page_attention_interpreter(self) -> Any | None:
+        active_model = self._active_page_attention_model()
+        session = getattr(active_model, "hmonnx_session", None)
+        return getattr(session, "interpreter", None)
+
+    def set_page_attention_execution_mode(self, mode: str) -> None:
+        """Select eager visual execution or HMONNX V2 CUDA Graph execution."""
+
+        if mode not in {"eager", "cuda_graph"}:
+            raise ValueError(f"Gemma4 PageAttention execution mode must be 'eager' or 'cuda_graph', got {mode!r}")
+        interpreter = self._active_page_attention_interpreter()
+        active_model = self._active_page_attention_model()
+        if getattr(active_model, "enable_cuda_graph", False) and interpreter is None:
+            raise RuntimeError("Gemma4 dynamic PageAttention execution mode requires the HMONNXInferenceV2 interpreter")
+        if getattr(active_model, "enable_cuda_graph", False) and not hasattr(interpreter, "_capture_disabled_reason"):
+            raise RuntimeError(
+                "Gemma4 dynamic PageAttention execution mode requires a "
+                "single-stage HMONNXInferenceV2 CUDA Graph interpreter"
+            )
+
+        stage = "prefill" if self.is_prefill() else "decode"
+        clear_counts = getattr(self, "_page_attention_graph_clear_counts", None)
+        if clear_counts is None:
+            clear_counts = {"prefill": 0, "decode": 0}
+            self._page_attention_graph_clear_counts = clear_counts
+
+        if interpreter is not None:
+            if mode == "eager":
+                prior_disabled_reason = getattr(interpreter, "_capture_disabled_reason", None)
+                clear = getattr(interpreter, "clear", None)
+                if callable(clear):
+                    # Drop captured/replay state without erasing a genuine V2
+                    # capture failure. Gemma owns only its exact eager marker.
+                    clear(clear_disabled_reason=False)
+                    clear_counts[stage] += 1
+                if prior_disabled_reason in {
+                    None,
+                    self._PAGE_ATTENTION_EAGER_REASON,
+                }:
+                    interpreter._capture_disabled_reason = self._PAGE_ATTENTION_EAGER_REASON
+            elif getattr(interpreter, "_capture_disabled_reason", None) == self._PAGE_ATTENTION_EAGER_REASON:
+                # Re-enable capture without discarding a stable graph owned by
+                # another range-free step.  Genuine capture failures remain.
+                interpreter._capture_disabled_reason = None
+        self._page_attention_execution_modes = getattr(self, "_page_attention_execution_modes", {})
+        self._page_attention_execution_modes[stage] = mode
+
+    @staticmethod
+    def _read_interpreter_state(interpreter: Any, name: str, default: Any) -> Any:
+        value = getattr(interpreter, name, default)
+        return value() if callable(value) else value
+
+    def get_page_attention_execution_state(self) -> dict[str, Any]:
+        """Return the minimal active-stage capture/replay/clear evidence."""
+
+        stage = "prefill" if self.is_prefill() else "decode"
+        active_model = self._active_page_attention_model()
+        interpreter = self._active_page_attention_interpreter()
+        modes = getattr(self, "_page_attention_execution_modes", {})
+        clear_counts = getattr(self, "_page_attention_graph_clear_counts", {})
+        return {
+            "stage": stage,
+            "requested_mode": modes.get(stage),
+            "cuda_graph_enabled": bool(getattr(active_model, "enable_cuda_graph", False)),
+            "has_captured_graph": bool(
+                self._read_interpreter_state(interpreter, "has_captured_graph", False)
+                if interpreter is not None
+                else False
+            ),
+            "replay_active": bool(getattr(interpreter, "_replay_logged", False) if interpreter is not None else False),
+            "clear_count": int(clear_counts.get(stage, 0)),
+            "capture_disabled_reason": (
+                self._read_interpreter_state(interpreter, "capture_disabled_reason", None)
+                if interpreter is not None
+                else None
+            ),
+        }
+
     def _is_mtp_export(self) -> bool:
         return _is_mtp_mode(getattr(self.meta_info, "spec_decode_mode", None))
 
@@ -274,11 +448,7 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         ).lower()
 
     def _uses_target_verify_decode_accepted_count(self) -> bool:
-        return (
-            self._is_mtp_export()
-            and self._sliding_kv_cache_input_mode() == "slice_window"
-            and self.is_decode()
-        )
+        return self._is_mtp_export() and self._sliding_kv_cache_input_mode() == "slice_window" and self.is_decode()
 
     def _validate_mtp_sliding_kv_cache_input_mode(self) -> None:
         if self._is_mtp_export() and self._sliding_kv_cache_input_mode() != "slice_window":
@@ -335,7 +505,6 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             self.per_layer_input_embedding.to(dtype=dtype)
         return self
 
-
     def _select_prefill_graph_for_length(self, input_sequence_length: int) -> str:
         graph_name = _select_gemma4_prefill_graph_name(input_sequence_length, self.prefill_graph_lengths)
         self._active_prefill_graph_name = graph_name
@@ -382,12 +551,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         if self.audio_meta is not None:
             processor.config.audio_feature_length = getattr(self.audio_meta, "input_feature_length", None)
             processor.config.audio_attention_chunk_size = getattr(self.audio_meta, "attention_chunk_size", 12) or 12
-            processor.config.audio_attention_context_left = (
-                getattr(self.audio_meta, "attention_context_left", 13) or 13
-            )
-            processor.config.audio_attention_context_right = (
-                getattr(self.audio_meta, "attention_context_right", 0) or 0
-            )
+            processor.config.audio_attention_context_left = getattr(self.audio_meta, "attention_context_left", 13) or 13
+            processor.config.audio_attention_context_right = getattr(self.audio_meta, "attention_context_right", 0) or 0
         return processor
 
     def get_data_preprocessor(self):
@@ -416,6 +581,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             per_layer_input_embedding=self.per_layer_input_embedding,
             sliding_window=self.sliding_window,
             bidirectional_vision_attention=bidirectional_vision_attention,
+            attention_contract_version=self._attention_contract_version(),
+            max_mm_ranges_per_chunk=int(getattr(self.meta_info, "max_mm_ranges_per_chunk", 1)),
             emit_full_attention_mask=False,
             emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
         )

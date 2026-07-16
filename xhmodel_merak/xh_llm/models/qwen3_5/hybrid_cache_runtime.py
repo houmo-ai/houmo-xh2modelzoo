@@ -13,11 +13,36 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import torch
+
 from .split_conv_cache_utils import _regroup_flat_split_conv_cache
 
 
 _CONV_OUTPUT_RE = re.compile(r"^conv_cache_out_(?:(q|k|v)_)?(\d+)(?:_(\d+))?$")
 _RECURRENT_OUTPUT_RE = re.compile(r"^recurrent_state_out_(\d+)(?:_(\d+))?$")
+
+
+def normalize_hybrid_hmonnx_args(args: Sequence[Any]) -> list[Any]:
+    """Flatten the hybrid-cache ABI and cast ONNX integer inputs to int32.
+
+    Transformers may wrap ``past_key_values`` in more than one tuple layer.
+    HMONNX graphs expose those caches as flat tensor inputs, so normalization
+    must recurse instead of assuming the legacy one-level tuple layout.
+    """
+
+    normalized: list[Any] = []
+
+    def append_flat(value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            for nested in value:
+                append_flat(nested)
+            return
+        if isinstance(value, torch.Tensor) and value.dtype == torch.int64:
+            value = value.to(torch.int32)
+        normalized.append(value)
+
+    append_flat(args)
+    return normalized
 
 
 def model_config_prefill_recurrent_state_uses_cache(model_config: Any) -> bool:
@@ -63,24 +88,13 @@ def _graph_output_names(runtime: Any, output_count: int) -> list[str] | None:
     )
     if active_model is None:
         return None
-    candidates: list[Any] = [getattr(active_model, "_onnx_graph", None)]
     session = getattr(active_model, "hmonnx_session", None)
-    candidates.extend(
-        [
-            getattr(session, "onnx_graph", None),
-            getattr(session, "graph", None),
-            getattr(session, "graph_module", None),
-        ]
-    )
-    for candidate in candidates:
-        graph = getattr(candidate, "graph", candidate)
-        graph_outputs = getattr(graph, "output", None)
-        if graph_outputs is None:
-            continue
-        names = [str(getattr(item, "name", item)) for item in graph_outputs]
-        if len(names) == output_count:
-            return names
 
+    # Runtime/session APIs are the authoritative output ABI.  They must be
+    # consulted before graph introspection because HMONNX sessions expose
+    # unknown attributes as dynamic ONNX operators; probing ``graph`` or
+    # ``output`` on that namespace emits false registration errors on every
+    # decode step.
     for owner in (session, active_model):
         get_names = getattr(owner, "get_output_names", None)
         if callable(get_names):
@@ -92,6 +106,23 @@ def _graph_output_names(runtime: Any, output_count: int) -> list[str] | None:
             names = [str(name) for name in names]
             if len(names) == output_count:
                 return names
+
+    candidates: list[Any] = [getattr(active_model, "_onnx_graph", None)]
+    candidates.extend(
+        [
+            getattr(session, "onnx_graph", None),
+            getattr(session, "graph", None),
+            getattr(session, "graph_module", None),
+        ]
+    )
+    for candidate in candidates:
+        graph = getattr(candidate, "graph", candidate)
+        graph_outputs = getattr(graph, "output", None)
+        if graph_outputs is None or callable(graph_outputs):
+            continue
+        names = [str(getattr(item, "name", item)) for item in graph_outputs]
+        if len(names) == output_count:
+            return names
     return None
 
 

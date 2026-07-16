@@ -29,9 +29,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
+from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (  # noqa: E402
     find_mtp_draft_onnx as _find_mtp_draft_onnx,
-    update_manifest_with_draft as _update_manifest_with_draft,
+)
+from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (  # noqa: E402
+    update_manifest_with_draft as _update_manifest_with_draft,  # noqa: F401
 )
 
 
@@ -222,6 +224,41 @@ def _jsonable_dataclass(value: Any) -> dict[str, Any]:
     return safe_result
 
 
+def _find_single_golden_meta(work_dir: str | Path) -> Path:
+    root = Path(work_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Export work_dir does not exist or is not a directory: {root}")
+    candidates = sorted(root.rglob("golden_meta_info.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No golden_meta_info.json found beneath {root}")
+    if len(candidates) != 1:
+        raise ValueError(f"Expected one golden_meta_info.json beneath {root}, found {len(candidates)}: {candidates}")
+    return candidates[0]
+
+
+def _validate_flash_attention_export_result(export_result: Any) -> dict[str, dict[str, int]] | None:
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        validate_gemma4_flash_attention_graph,
+    )
+
+    meta_path = _find_single_golden_meta(export_result.work_dir)
+    with meta_path.open(encoding="utf-8") as file:
+        meta = json.load(file)
+    if int(meta.get("attention_contract_version", 1)) < 2:
+        return None
+
+    facts: dict[str, dict[str, int]] = {}
+    for graph_key in ("prefill_hmonnx", "decode_hmonnx"):
+        graph_value = meta.get(graph_key)
+        if not graph_value:
+            raise ValueError(f"{meta_path}: contract-v2 metadata missing {graph_key}")
+        graph_path = Path(graph_value)
+        if not graph_path.is_absolute():
+            graph_path = meta_path.parent / graph_path
+        facts[graph_key] = validate_gemma4_flash_attention_graph(graph_path, meta)
+    return facts
+
+
 def main(args: argparse.Namespace) -> None:
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
@@ -258,6 +295,7 @@ def main(args: argparse.Namespace) -> None:
         device=args.export_device or args.device,
         config_overrides=config_overrides,
     )
+    flash_attention_validation = _validate_flash_attention_export_result(export_result)
 
     draft_onnx = _find_mtp_draft_onnx(export_result)
 
@@ -274,6 +312,7 @@ def main(args: argparse.Namespace) -> None:
         "export_result": _jsonable_dataclass(export_result),
         "mtp_draft_onnx": str(draft_onnx) if draft_onnx is not None else None,
         "golden_meta_file": golden_meta_file,
+        "flash_attention_validation": flash_attention_validation,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

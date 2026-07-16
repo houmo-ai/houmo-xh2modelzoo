@@ -1,7 +1,5 @@
 import torch
 
-from xhmodel_merak.xh_llm.utils import unfold_args
-
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
@@ -9,6 +7,7 @@ from ..qwen3_5.hybrid_cache_runtime import (
     commit_hybrid_cache_outputs,
     get_spec_decode_verify_steps,
     model_config_prefill_recurrent_state_uses_cache,
+    normalize_hybrid_hmonnx_args,
 )
 from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
@@ -88,8 +87,7 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         return self
 
     def forward(self, *args):
-        args = unfold_args(args)
-        args = [arg.to(torch.int32) if arg.dtype == torch.int64 else arg for arg in args]
+        args = normalize_hybrid_hmonnx_args(args)
         outs = super().forward(*args)
 
         return commit_hybrid_cache_outputs(self, outs, model_label="Qwen3.5-MoE")

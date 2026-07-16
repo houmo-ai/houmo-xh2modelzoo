@@ -27,6 +27,7 @@ from typing import Iterable
 from PIL import Image, ImageDraw
 from transformers import AutoTokenizer
 
+
 try:
     import onnx
 except ImportError:  # pragma: no cover - surfaced only when MTP ONNX validation runs.
@@ -208,6 +209,8 @@ def _validate_mtp_hmonnx_contract(meta_path: Path, meta: dict, context: int, pre
     KV inputs keep the prefill-owned physical slice-window length.
     """
 
+    if int(meta.get("attention_contract_version", 1)) >= 2:
+        return
     model_cfg = meta.get("model_config", {})
     spec_decode = meta.get("spec_decode") or {}
     is_mtp = meta.get("spec_decode_mode") == "mtp" or bool(model_cfg.get("enable_mtp_outputs"))
@@ -244,8 +247,7 @@ def _validate_mtp_hmonnx_contract(meta_path: Path, meta: dict, context: int, pre
     decode_mask = _onnx_tensor_dims(decode_model, "sliding_attention_mask")
     if prefill_mask != expected_prefill_mask:
         raise ValueError(
-            f"{prefill_path}: sliding_attention_mask shape={prefill_mask}, "
-            f"expected {expected_prefill_mask}"
+            f"{prefill_path}: sliding_attention_mask shape={prefill_mask}, expected {expected_prefill_mask}"
         )
     if decode_mask != expected_decode_mask:
         raise ValueError(
@@ -282,6 +284,29 @@ def _validate_mtp_hmonnx_contract(meta_path: Path, meta: dict, context: int, pre
             )
 
 
+def _validate_flash_hmonnx_contract(meta_path: Path, meta: dict) -> dict[str, dict[str, int]]:
+    """Validate contract-v2 compact inputs and emitted FlashAttention nodes."""
+
+    if int(meta.get("attention_contract_version", 1)) < 2:
+        return {}
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        validate_gemma4_flash_attention_graph,
+    )
+
+    facts: dict[str, dict[str, int]] = {}
+    for graph_key in ("prefill_hmonnx", "decode_hmonnx"):
+        graph_value = meta.get(graph_key)
+        if not graph_value:
+            raise ValueError(f"{meta_path}: contract-v2 meta missing {graph_key}")
+        graph_path = Path(graph_value)
+        if not graph_path.is_absolute():
+            graph_path = meta_path.parent / graph_path
+        if not graph_path.exists():
+            raise FileNotFoundError(f"{meta_path}: {graph_key} does not exist: {graph_path}")
+        facts[graph_key] = validate_gemma4_flash_attention_graph(graph_path, meta)
+    return facts
+
+
 def validate_meta(meta_path: Path, expected_preset: str) -> dict:
     meta = _load_json(meta_path)
     model_cfg = meta.get("model_config", {})
@@ -293,6 +318,7 @@ def validate_meta(meta_path: Path, expected_preset: str) -> dict:
         raise ValueError(f"{meta_path}: prefill/input length={prefill}, expected {REQUIRED_PREFILL}")
     _validate_sliding_cache_shapes(meta_path, meta, context, prefill)
     _validate_mtp_hmonnx_contract(meta_path, meta, context, prefill)
+    _validate_flash_hmonnx_contract(meta_path, meta)
     model_type = model_cfg.get("model_type")
     if model_type != "Gemma4ForConditionalGeneration":
         raise ValueError(f"{meta_path}: model_type={model_type!r}, expected Gemma4ForConditionalGeneration")
@@ -333,18 +359,9 @@ def _long_prompt(preset: str, modality: str) -> str:
         )
     media_questions = {
         "text": "",
-        "image": (
-            " 同时请观察随附图片，回答图片里有哪些文字、颜色和几何形状，"
-            "不要忽略图像内容。"
-        ),
-        "video": (
-            " 同时请观察随附多帧视频，回答绿色矩形如何随帧移动以及画面中有哪些文字，"
-            "不要把视频当成单张图片。"
-        ),
-        "audio": (
-            " 同时请聆听随附音频，概括你听到的人声/语音内容；如果不是语音，"
-            "请说明可听到的声音特征。"
-        ),
+        "image": (" 同时请观察随附图片，回答图片里有哪些文字、颜色和几何形状，不要忽略图像内容。"),
+        "video": (" 同时请观察随附多帧视频，回答绿色矩形如何随帧移动以及画面中有哪些文字，不要把视频当成单张图片。"),
+        "audio": (" 同时请聆听随附音频，概括你听到的人声/语音内容；如果不是语音，请说明可听到的声音特征。"),
     }
     question = (
         f"请只根据以上资料回答：当前 preset={preset} 的 {modality} 验收为什么必须使用"
@@ -377,9 +394,7 @@ def validate_prompt(meta_path: Path, meta: dict, prompt: str, max_new_tokens: in
     if token_count < MIN_PROMPT_TOKENS:
         raise ValueError(f"Prompt has {token_count} tokens, expected >= {MIN_PROMPT_TOKENS}")
     if token_count + max_new_tokens > REQUIRED_CONTEXT:
-        raise ValueError(
-            f"Prompt tokens {token_count} + max_new_tokens {max_new_tokens} exceeds {REQUIRED_CONTEXT}"
-        )
+        raise ValueError(f"Prompt tokens {token_count} + max_new_tokens {max_new_tokens} exceeds {REQUIRED_CONTEXT}")
     return token_count
 
 
@@ -510,7 +525,9 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
     parser.add_argument("--run", action="store_true", help="Execute real generate.py commands sequentially.")
-    parser.add_argument("--print-full-commands", action="store_true", help="Print full commands including long prompts.")
+    parser.add_argument(
+        "--print-full-commands", action="store_true", help="Print full commands including long prompts."
+    )
     args = parser.parse_args()
 
     planned = list(iter_cases(args))
@@ -534,7 +551,7 @@ def main() -> None:
 def _summarize_command(cmd: list[str], case: Case) -> str:
     parts: list[str] = []
     skip_next = False
-    for idx, part in enumerate(cmd):
+    for part in cmd:
         if skip_next:
             skip_next = False
             continue

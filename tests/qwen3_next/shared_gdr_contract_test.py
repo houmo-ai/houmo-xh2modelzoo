@@ -139,6 +139,23 @@ def test_dense_moe_and_next_text_models_share_the_canonical_cache_loop():
         assert model_cls._setup is HybridTextModelMixin._setup
 
 
+def test_hybrid_hmonnx_args_are_recursively_flattened_before_dtype_normalization():
+    from xhmodel_merak.xh_llm.models.qwen3_5.hybrid_cache_runtime import (
+        normalize_hybrid_hmonnx_args,
+    )
+
+    int64_input = torch.tensor([1], dtype=torch.int64)
+    float_input = torch.tensor([2.0], dtype=torch.float16)
+    nested_int64_cache = torch.tensor([3], dtype=torch.int64)
+
+    normalized = normalize_hybrid_hmonnx_args((int64_input, (float_input, (nested_int64_cache,))))
+
+    assert len(normalized) == 3
+    assert normalized[0].dtype is torch.int32
+    assert normalized[1] is float_input
+    assert normalized[2].dtype is torch.int32
+
+
 def test_qwen3_next_model_config_propagates_both_fuse_flags_into_wrap_cfg():
     from xhmodel_merak.xh_llm.models.qwen3_next import (
         XHQwen3NextModel,
@@ -622,3 +639,60 @@ def test_legacy_fused_prefill_without_state_is_cache_metadata_keeps_recurrent_ou
 
     assert [item.item() for item in recurrent] == [7.0]
     assert recurrent_cache.item() == 7.0
+
+
+def test_runtime_skips_callable_graph_output_and_uses_session_output_names():
+    from xhmodel_merak.xh_llm.models.qwen3_5.hybrid_cache_runtime import (
+        _graph_output_names,
+    )
+
+    session = SimpleNamespace(
+        get_output_names=lambda: ["logits", "conv_cache_out_0", "recurrent_state_out_0"],
+        onnx_graph=None,
+        graph=None,
+        graph_module=None,
+    )
+    active_model = SimpleNamespace(
+        _onnx_graph=SimpleNamespace(
+            graph=SimpleNamespace(output=lambda result: result),
+        ),
+        hmonnx_session=session,
+    )
+    runtime = SimpleNamespace(
+        prefill_model=active_model,
+        is_prefill=lambda: True,
+    )
+
+    assert _graph_output_names(runtime, 3) == [
+        "logits",
+        "conv_cache_out_0",
+        "recurrent_state_out_0",
+    ]
+
+
+def test_runtime_prefers_session_output_api_without_probing_dynamic_ops():
+    from xhmodel_merak.xh_llm.models.qwen3_5.hybrid_cache_runtime import (
+        _graph_output_names,
+    )
+
+    class DynamicOpSession:
+        def get_output_names(self):
+            return ["logits", "conv_cache_out_0", "recurrent_state_out_0"]
+
+        def __getattr__(self, name):
+            raise AssertionError(f"dynamic HMONNX op namespace was probed: {name}")
+
+    active_model = SimpleNamespace(
+        _onnx_graph=None,
+        hmonnx_session=DynamicOpSession(),
+    )
+    runtime = SimpleNamespace(
+        prefill_model=active_model,
+        is_prefill=lambda: True,
+    )
+
+    assert _graph_output_names(runtime, 3) == [
+        "logits",
+        "conv_cache_out_0",
+        "recurrent_state_out_0",
+    ]

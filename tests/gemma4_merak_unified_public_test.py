@@ -169,6 +169,7 @@ def test_gemma4_series_bidirectional_vision_prefill_exports_no_full_attention_ma
 
     model = object.__new__(XHGemma4SeriesModel)
     model.config = SimpleNamespace(
+        attention_contract_version=1,
         bidirectional_vision_attention=True,
         hidden_size_per_layer_input=0,
         spec_decode_mode=None,
@@ -206,7 +207,11 @@ def test_gemma4_series_export_cfg_places_ple_before_kv_cache_names():
 
     model = object.__new__(XHGemma4SeriesModel)
     model.per_layer_input_embedding = object()
-    model.config = SimpleNamespace(hidden_size_per_layer_input=256, bidirectional_vision_attention=False)
+    model.config = SimpleNamespace(
+        attention_contract_version=1,
+        hidden_size_per_layer_input=256,
+        bidirectional_vision_attention=False,
+    )
     model._kvcache_config = SimpleNamespace(num_layers=2)
 
     cfg = XHGemma4SeriesModel.get_export_cfg(model)
@@ -225,7 +230,11 @@ def test_gemma4_series_export_cfg_places_ple_before_kv_cache_names():
     ]
 
     model.per_layer_input_embedding = None
-    model.config = SimpleNamespace(hidden_size_per_layer_input=0, bidirectional_vision_attention=True)
+    model.config = SimpleNamespace(
+        attention_contract_version=1,
+        hidden_size_per_layer_input=0,
+        bidirectional_vision_attention=True,
+    )
     cfg = XHGemma4SeriesModel.get_export_cfg(model)
     assert cfg["input_names"][:4] == [
         "inputs_embeds",
@@ -351,9 +360,7 @@ def test_gemma4_series_visual_pooling_matrix_matches_gather_mean_math():
 def test_gemma4_series_visual_export_uses_pooling_matrix_not_gather_indices():
     from pathlib import Path
 
-    src = Path("xhmodel_merak/xh_llm/models/gemma4_series/gemma4_series_vision_model.py").read_text(
-        encoding="utf-8"
-    )
+    src = Path("xhmodel_merak/xh_llm/models/gemma4_series/gemma4_series_vision_model.py").read_text(encoding="utf-8")
     assert "pooling_matrix" in src
     assert "position_embedding_x" in src
     assert "position_embedding_y" in src
@@ -496,8 +503,8 @@ def test_gemma4_series_autoround_mode1_has_separate_quant_template(tmp_path):
         DEFAULT_MOE_CALIBRATION_JSONL,
     )
     from xhmodel_merak.xh_llm.models.gemma4_series.workflow import (
-        dump_autoround_moe_mode1_quant_config_template,
         dump_autoround_mode1_quant_config_template,
+        dump_autoround_moe_mode1_quant_config_template,
         dump_quant_config_template,
     )
 
@@ -582,6 +589,7 @@ def test_gemma4_series_autoround_mode1_builds_moe_script_command(tmp_path, monke
 
 def test_gemma4_series_workflow_model_names_follow_hf_name_contract():
     import re
+
     import yaml
 
     config_paths = sorted(Path("configs_merak/workflows/xh2a/llm_models/gemma4_series").glob("*/*.yaml"))
@@ -818,7 +826,6 @@ export:
     )
 
     gemma4_series_quant_export._validate_mtp_config_complete(args, config_overrides)
-
 
 
 def test_gemma4_series_mtp_resolves_target_mpe_from_model_config_fallback(tmp_path):
@@ -1079,11 +1086,10 @@ def test_gemma4_series_mtp_rejects_missing_target_mpe(tmp_path):
 def test_gemma4_series_mtp_wrapper_rejects_invalid_pre_resolved_mpe(tmp_path):
     import json
 
-    from xhquant.api import ConfigDict
-
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
         XHGemma4SeriesAssistantDraftModel,
     )
+    from xhquant.api import ConfigDict
 
     assistant_dir = tmp_path / "assistant"
     target_dir = tmp_path / "target"
@@ -1107,7 +1113,6 @@ def test_gemma4_series_mtp_wrapper_rejects_invalid_pre_resolved_mpe(tmp_path):
 
     with pytest.raises(ValueError, match="wrap_cfg.target_max_pe_length.*positive integer"):
         model.init_wrap_model()
-
 
 
 def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_path):
@@ -1142,9 +1147,7 @@ def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_
         def __init__(self, **kwargs):
             super().__init__()
             captured.update(kwargs)
-            self.target_config_dict = json.loads(
-                (target_dir / "config.json").read_text(encoding="utf-8")
-            )
+            self.target_config_dict = json.loads((target_dir / "config.json").read_text(encoding="utf-8"))
             self.backbone_hidden_size = 8
 
         def forward(self, *args, **kwargs):
@@ -1180,7 +1183,6 @@ def test_gemma4_series_mtp_wrapper_uses_target_mpe_not_context(monkeypatch, tmp_
     assert inputs[4].shape == (1, 1, 1, 2048)
     assert inputs[5].shape == (1, 2, 1024, 16)
     assert inputs[7].shape == (1, 1, 2048, 32)
-
 
 
 def test_gemma4_series_manifest_resolved_mpe_ignores_base_default(tmp_path):
@@ -1462,9 +1464,8 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
         def release_wraped_model(self):
             pass
 
-    fake_mtp_model = types.ModuleType(
-        "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model"
-    )
+    fake_mtp_model = types.ModuleType("xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model")
+
     def fake_resolve_target_max_pe_length(
         target_model_dir,
         model_cfg=None,
@@ -1507,13 +1508,9 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     assert spec_decode["draft_decode_onnx"].startswith("mtp_draft_decode/")
     assert spec_decode["context_length"] == 2048
     assert spec_decode["draft_rope_max_pe_length"] == 262144
-    assert spec_decode["target_max_pe_length_source"] == (
-        "target_config.text_config.max_position_embeddings"
-    )
+    assert spec_decode["target_max_pe_length_source"] == ("target_config.text_config.max_position_embeddings")
     assert updated["model_config"]["max_pe_length"] == 262144
-    assert updated["model_config"]["max_pe_length_source"] == (
-        "target_config.text_config.max_position_embeddings"
-    )
+    assert updated["model_config"]["max_pe_length_source"] == ("target_config.text_config.max_position_embeddings")
     assert updated["draft_decode_onnx_file"].startswith("mtp_draft_decode/")
 
 
@@ -1670,7 +1667,6 @@ def test_gemma4_series_workflow_demo_presets_use_relative_weight_paths():
 
 def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():
     from xhmodel_merak.xh_llm.models.gemma4_series.quant_adapter import (
-        DEFAULT_DENSE_CALIBRATION_JSONL,
         build_gptqmodel_recipe_kwargs,
     )
 
@@ -1716,9 +1712,7 @@ def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():
     )
 
     assert dense_kwargs["topology"] == "dense"
-    assert dense_kwargs["calibration_jsonl"].endswith(
-        "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
-    )
+    assert dense_kwargs["calibration_jsonl"].endswith("quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl")
     assert "calibration_dataset" not in dense_kwargs
     assert moe_kwargs["topology"] == "moe"
     assert moe_kwargs["calibration_jsonl"].endswith(
@@ -1884,6 +1878,39 @@ def test_gemma4_series_atomic_multimodal_chunk_planner_cases():
         )
 
 
+def test_gemma4_series_atomic_multimodal_280_span_moves_to_next_320_chunk():
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import (
+        plan_gemma4_atomic_prefill_chunks,
+    )
+
+    mm_token_type_ids = torch.zeros(700, dtype=torch.long)
+    mm_token_type_ids[100:380] = 1
+
+    chunks = plan_gemma4_atomic_prefill_chunks(
+        700,
+        mm_token_type_ids,
+        prefill_chunk_length=320,
+    )
+
+    bounds = [(chunk.start, chunk.end) for chunk in chunks]
+    assert bounds == [(0, 100), (100, 420), (420, 700)]
+    assert all(chunk.end - chunk.start <= 320 for chunk in chunks)
+    assert all(not (chunk.start < 100 < chunk.end < 380) for chunk in chunks)
+
+
+def test_gemma4_series_atomic_multimodal_span_over_320_fails():
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import (
+        plan_gemma4_atomic_prefill_chunks,
+    )
+
+    with pytest.raises(ValueError, match="exceeds prefill_chunk_length"):
+        plan_gemma4_atomic_prefill_chunks(
+            321,
+            torch.ones(321, dtype=torch.long),
+            prefill_chunk_length=320,
+        )
+
+
 def test_gemma4_series_decode_preprocess_skips_full_attention_mask():
     from xhmodel_merak.xh_llm.models.gemma4_series.data_preprocess import Gemma4DataPreprocess
     from xhmodel_merak.xh_llm.types import CacheList
@@ -1948,7 +1975,6 @@ def test_gemma4_series_mtp_decode_keeps_accepted_count_rank_one():
     assert captured["args"][4].shape == (1,)
 
 
-
 def test_gemma4_series_mtp_eos_reads_exported_generation_config(tmp_path):
     from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
         _generation_config_candidates,
@@ -1977,6 +2003,7 @@ def test_gemma4_series_mtp_eos_reads_exported_generation_config(tmp_path):
     eos_token_ids = _resolve_eos_token_ids(Tokenizer(), *_generation_config_candidates(meta))
 
     assert eos_token_ids == {1, 106, 50}
+
 
 def test_gemma4_series_mtp_sliding_mask_uses_compact_cache_tail():
     from xhmodel_merak.xh_llm.models.gemma4_series.data_preprocess import Gemma4DataPreprocess
@@ -2090,9 +2117,8 @@ def test_gemma4_series_hmonnx_shared_cache_indices_fall_back_to_kv_shapes():
 
 
 def test_gemma4_series_hmonnx_partial_commit_keeps_compact_cache_prefix_only():
-    from xhquant.core import CacheTensor, HybridCacheTensor
-
     from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import _commit_hmonnx_verified_cache
+    from xhquant.core import CacheTensor, HybridCacheTensor
 
     before_sliding = HybridCacheTensor(torch.arange(8, dtype=torch.float16).view(1, 1, 8, 1))
     before_sliding.cache_valid_len = 8
