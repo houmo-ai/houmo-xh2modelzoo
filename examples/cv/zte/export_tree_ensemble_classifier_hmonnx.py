@@ -10,7 +10,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from onnx import numpy_helper
+from onnx import TensorProto, numpy_helper
 
 from xhquant.api import (
     DeviceType,
@@ -27,7 +27,7 @@ def _zipmap_to_array(values, labels: list[int]) -> np.ndarray:
     return np.asarray([[row[label] for label in labels] for row in values], dtype=np.float32)
 
 
-def _restore_fp32_thresholds(source_onnx: Path, hmonnx_path: Path, output_path: Path) -> int:
+def _restore_fp32_tree_comparison(source_onnx: Path, hmonnx_path: Path, output_path: Path) -> int:
     source_model = onnx.load(source_onnx)
     classifier = next(
         node
@@ -38,15 +38,38 @@ def _restore_fp32_thresholds(source_onnx: Path, hmonnx_path: Path, output_path: 
 
     hmonnx_model = onnx.load(hmonnx_path)
     replaced = 0
+    threshold_names: set[str] = set()
     for index, initializer in enumerate(hmonnx_model.graph.initializer):
         if "thresholds" not in initializer.name.lower() or list(initializer.dims) != [thresholds.size]:
             continue
         hmonnx_model.graph.initializer[index].CopyFrom(
             numpy_helper.from_array(thresholds, name=initializer.name)
         )
+        threshold_names.add(initializer.name)
         replaced += 1
     if replaced == 0:
         raise RuntimeError("No lowered tree threshold initializer was found in HMONNX")
+
+    value_infos = [
+        *hmonnx_model.graph.input,
+        *hmonnx_model.graph.output,
+        *hmonnx_model.graph.value_info,
+    ]
+    value_info_by_name = {value_info.name: value_info for value_info in value_infos}
+    graph_input_names = {value_info.name for value_info in hmonnx_model.graph.input}
+    for input_name in graph_input_names:
+        value_info_by_name[input_name].type.tensor_type.elem_type = TensorProto.FLOAT
+    for threshold_name in threshold_names:
+        if threshold_name in value_info_by_name:
+            value_info_by_name[threshold_name].type.tensor_type.elem_type = TensorProto.FLOAT
+    for node in hmonnx_model.graph.node:
+        is_feature_gather = node.op_type == "GatherElements" and node.input[0] in graph_input_names
+        is_threshold_gather = node.op_type == "Gather" and node.input[0] in threshold_names
+        if not is_feature_gather and not is_threshold_gather:
+            continue
+        for output_name in node.output:
+            if output_name in value_info_by_name:
+                value_info_by_name[output_name].type.tensor_type.elem_type = TensorProto.FLOAT
 
     external_data_name = f"{output_path.stem}_external_data"
     onnx.save_model(
@@ -131,7 +154,7 @@ def main() -> None:
         output_names=[output.name for output in model.graph.output],
         simplify=False,
     )
-    replaced = _restore_fp32_thresholds(source_onnx, temporary_path, output_path)
+    replaced = _restore_fp32_tree_comparison(source_onnx, temporary_path, output_path)
     print(f"Restored {replaced} FP32 threshold tensors")
     print(f"HMONNX saved to: {output_path}")
 
