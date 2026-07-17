@@ -388,6 +388,17 @@ License File:   licenses/LLaMA-Factory/LICENSE
 --------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
+Component Name: LingBot-Video
+Version:        a638721cf2271804d02738b69f2ad788c4a559fc
+Upstream URL:   https://github.com/Robbyant/lingbot-video
+License:        Apache-2.0
+License File:   licenses/lingbot-video/LICENSE
+Usage:          Merak wrappers, HMONNX component adapters, and example workflows
+                under xhmodel_merak/xh_other_model/models/lingbot_video and
+                examples_merak/aigc/lingbot_video
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 Component Name: MiniCPM-V
 Version:        20250527
 Upstream URL:   https://github.com/OpenBMB/MiniCPM-V/archive/refs/tags/20250527.tar.gz

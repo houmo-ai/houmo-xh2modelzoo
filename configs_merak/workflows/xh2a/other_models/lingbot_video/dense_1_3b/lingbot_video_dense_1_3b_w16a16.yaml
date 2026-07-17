@@ -1,0 +1,88 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHLingBotVideoModel
+
+  geometry:
+    mode: t2i
+    height: 480
+    width: 832
+    num_frames: 1
+    num_inference_steps: 40
+    guidance_scale: 3.0
+    shift: 3.0
+    seed: 42
+
+  components:
+    text_encoder:
+      enabled: true
+      quant_type: w16a16h1_sefp
+      sequence_length: 2048
+      nodes: {}
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+
+    visual_encoder:
+      enabled: true
+      quant_type: w16a16h1_sefp
+      max_size_w: 448
+      max_size_h: 448
+      max_size_t: 2
+      patch_size: 16
+      temporal_patch_size: 2
+      nodes: {}
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+
+    transformer:
+      enabled: true
+      quant_type: w16a16h1_sefp
+      frontend_type: TorchFX
+      text_sequence_length: 2048
+      flash_attention:
+        enable: true
+        q_bits: 16
+        k_bits: 16
+        v_bits: 16
+        s_bits: 16
+        p_bits: 16
+      nodes: {}
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+
+    vae_encoder:
+      enabled: true
+      quant_type: w16a16h1_sefp
+      num_frames: 1
+      nodes: {}
+      ops:
+        Normalize:
+          force_fp32: true
+
+    vae_decoder:
+      enabled: true
+      quant_type: w16a16h1_sefp
+      nodes: {}
+      ops:
+        Normalize:
+          force_fp32: true
