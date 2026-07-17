@@ -5,7 +5,7 @@ quant: null
 export:
   model:
     chip_arch: XH2a
-    model_type: Emotion2vecForSequenceEmbedding
+    model_type: Emotion2vecForEmotionRecognition
     # 该字段仅用作占位，导出前由 workflow 使用 --model-dir 覆盖。
     hf_model: null
     model_name: emotion2vec_plus_large
@@ -13,6 +13,7 @@ export:
     sampling_rate: 16000
     window_samples: 256000
     feature_dim: 1024
+    num_labels: 9
     use_cache: false
     quant_scheme:
       quant_type: w8a8h1_sefp

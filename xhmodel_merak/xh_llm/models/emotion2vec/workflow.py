@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,13 @@ import numpy as np
 import torch
 
 from ...workflows import BaseLLMWorkflow, ExportResult, QuantResult
+from .audio_utils import emotion2vec_frame_count, normalize_padded_waveform
 from .configuration_emotion2vec import Emotion2vecModelMeta
-from .modeling_emotion2vec import Emotion2vecExportBridge, load_funasr_emotion2vec_model
+from .modeling_emotion2vec import (
+    Emotion2vecReferenceModel,
+    classify_utterance_feature,
+    load_funasr_emotion2vec_model,
+)
 
 
 class Emotion2vecWorkflow(BaseLLMWorkflow):
@@ -66,23 +72,38 @@ class Emotion2vecWorkflow(BaseLLMWorkflow):
 
         padded = np.zeros(meta.window_samples, dtype=np.float32)
         padded[: waveform.size] = waveform
-        bridge = Emotion2vecExportBridge(
-            load_funasr_emotion2vec_model(self.model_dir),
-            window_samples=meta.window_samples,
-        ).eval()
-        bridge = bridge.to(device)
+        normalized = normalize_padded_waveform(padded, int(waveform.size))
+        hmonnx_waveform = torch.from_numpy(normalized).unsqueeze(0).to(torch.float16)
+        valid_frames = torch.tensor([emotion2vec_frame_count(int(waveform.size))], dtype=torch.int32)
+
+        golden_dir = Path(export_result.work_dir) / "golden"
+        if golden_dir.exists():
+            shutil.rmtree(golden_dir)
+        golden_dir.mkdir(parents=True)
+        self._dump_hmonnx_operator_golden(
+            hmonnx_file=Path(meta.hmonnx),
+            golden_dir=golden_dir,
+            device=device,
+            inputs=[hmonnx_waveform, valid_frames],
+        )
+
+        native_model = load_funasr_emotion2vec_model(self.model_dir).to(device).eval()
+        reference_model = Emotion2vecReferenceModel(native_model, window_samples=meta.window_samples).to(device).eval()
         with torch.no_grad():
-            features, padding_mask = bridge(
+            features, padding_mask, utterance_feature = reference_model(
                 torch.from_numpy(padded).unsqueeze(0).to(device),
                 torch.tensor([waveform.size], dtype=torch.int32, device=device),
             )
+            logits, probabilities = classify_utterance_feature(utterance_feature, native_model.proj)
         valid_features = features[0, ~padding_mask[0]].float().cpu().numpy()
 
-        golden_dir = Path(export_result.work_dir) / "golden"
-        golden_dir.mkdir(parents=True, exist_ok=True)
-        np.save(golden_dir / "frame_features.npy", valid_features)
-        np.save(golden_dir / "utterance_feature.npy", valid_features.mean(axis=0))
-        (golden_dir / "golden_meta.json").write_text(
+        reference_dir = golden_dir / "reference"
+        reference_dir.mkdir(parents=True, exist_ok=True)
+        np.save(reference_dir / "frame_features.npy", valid_features)
+        np.save(reference_dir / "utterance_feature.npy", utterance_feature[0].float().cpu().numpy())
+        np.save(reference_dir / "logits.npy", logits[0].float().cpu().numpy())
+        np.save(reference_dir / "probabilities.npy", probabilities[0].float().cpu().numpy())
+        (reference_dir / "reference_meta.json").write_text(
             json.dumps(
                 {
                     "audio": str(Path(audio_file).resolve()),
@@ -90,7 +111,11 @@ class Emotion2vecWorkflow(BaseLLMWorkflow):
                     "valid_samples": int(waveform.size),
                     "frame_count": int(valid_features.shape[0]),
                     "feature_dim": int(valid_features.shape[1]),
+                    "num_labels": int(logits.shape[-1]),
+                    "labels": meta.labels,
+                    "predicted_label": meta.labels[int(probabilities[0].argmax())],
                     "dtype": str(valid_features.dtype),
+                    "hmonnx_operator_golden": str(golden_dir / "step_0"),
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -98,6 +123,25 @@ class Emotion2vecWorkflow(BaseLLMWorkflow):
             encoding="utf-8",
         )
         return str(golden_dir)
+
+    @staticmethod
+    def _dump_hmonnx_operator_golden(
+        *,
+        hmonnx_file: Path,
+        golden_dir: Path,
+        device: str,
+        inputs: list[torch.Tensor],
+    ) -> None:
+        from xhquant.api import HMONNXGoldenInference
+
+        if not hmonnx_file.is_file():
+            raise FileNotFoundError(f"emotion2vec HMONNX not found: {hmonnx_file}")
+        session = HMONNXGoldenInference(str(hmonnx_file))
+        session.to(device if torch.cuda.is_available() and str(device).startswith("cuda") else "cpu")
+        session.save_golden = True
+        session.golden_dir = str(golden_dir)
+        session.step = 0
+        session(*inputs)
 
     @staticmethod
     def _resolve_golden_audio(input_messages: Any) -> str:

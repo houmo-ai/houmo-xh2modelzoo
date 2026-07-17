@@ -7,13 +7,10 @@ import torch
 from torch import nn
 
 from xhquant.nn import (
-    Add,
-    Div,
     Gelu,
     Less,
     MatMul,
     Softmax,
-    Sub,
     XHConv1d,
     XHLinear,
 )
@@ -40,43 +37,16 @@ def _copy_linear(source: nn.Linear) -> XHLinear:
 
 
 class XHEmotion2vecFrameMask(nn.Module):
-    FEATURE_ENCODER_SPEC = ((10, 5), (3, 2), (3, 2), (3, 2), (3, 2), (2, 2), (2, 2))
-
-    def __init__(self, frame_count: int = 799, feature_encoder_spec: Sequence[tuple[int, int]] | None = None):
+    def __init__(self, frame_count: int = 799):
         super().__init__()
         self.frame_count = int(frame_count)
         self.less = Less()
-        feature_encoder_spec = feature_encoder_spec or self.FEATURE_ENCODER_SPEC
-        self.length_stages = nn.ModuleList(
-            [_XHConvOutputLength(kernel_size, stride) for kernel_size, stride in feature_encoder_spec]
-        )
-        self.register_buffer("frame_positions", torch.arange(self.frame_count, dtype=torch.int64).unsqueeze(0))
         self.register_buffer(
-            "frame_positions_one_based", torch.arange(1, self.frame_count + 1, dtype=torch.int64).unsqueeze(0)
+            "frame_positions_one_based", torch.arange(1, self.frame_count + 1, dtype=torch.int32).unsqueeze(0)
         )
 
-    def output_lengths(self, valid_samples: torch.Tensor) -> torch.Tensor:
-        lengths = valid_samples.to(torch.int32)
-        for stage in self.length_stages:
-            lengths = stage(lengths)
-        return lengths
-
-    def forward(self, valid_samples: torch.Tensor) -> torch.Tensor:
-        return self.less(self.output_lengths(valid_samples).unsqueeze(1), self.frame_positions_one_based)
-
-
-class _XHConvOutputLength(nn.Module):
-    def __init__(self, kernel_size: int, stride: int):
-        super().__init__()
-        self.sub = Sub()
-        self.div = Div()
-        self.add = Add()
-        self.register_buffer("kernel_size", torch.tensor(kernel_size, dtype=torch.int32))
-        self.register_buffer("stride", torch.tensor(stride, dtype=torch.int32))
-        self.register_buffer("one", torch.tensor(1, dtype=torch.int32))
-
-    def forward(self, lengths: torch.Tensor) -> torch.Tensor:
-        return self.add(self.div(self.sub(lengths, self.kernel_size), self.stride), self.one)
+    def forward(self, valid_frames: torch.Tensor) -> torch.Tensor:
+        return self.less(valid_frames.unsqueeze(1), self.frame_positions_one_based)
 
 
 class _XHFeatureStage(nn.Module):
@@ -265,10 +235,7 @@ class XHEmotion2vecGraphModel(nn.Module):
         frame_count = self.window_samples
         for kernel_size, stride in feature_encoder_spec:
             frame_count = (frame_count - kernel_size) // stride + 1
-        self.frame_mask = XHEmotion2vecFrameMask(
-            frame_count=frame_count,
-            feature_encoder_spec=feature_encoder_spec,
-        )
+        self.frame_mask = XHEmotion2vecFrameMask(frame_count=frame_count)
         self.feature_encoder = XHEmotion2vecFeatureEncoder.from_funasr(audio.local_encoder)
         self.project_norm = _copy_layer_norm(audio.project_features[1])
         self.project = _copy_linear(audio.project_features[2])
@@ -292,8 +259,8 @@ class XHEmotion2vecGraphModel(nn.Module):
     def from_funasr(cls, native_model: nn.Module, window_samples: int = 256000):
         return cls(native_model, window_samples=window_samples)
 
-    def forward(self, waveform: torch.Tensor, valid_samples: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        frame_padding_mask = self.frame_mask(valid_samples)
+    def forward(self, waveform: torch.Tensor, valid_frames: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        frame_padding_mask = self.frame_mask(valid_frames)
         x = self.feature_encoder(waveform)
         x = self.project(self.project_norm(x.transpose(1, 2)))
         x = x + self.position_encoder(x)
@@ -307,4 +274,6 @@ class XHEmotion2vecGraphModel(nn.Module):
         for block in self.blocks:
             x = block(x, additive_padding_mask, self.alibi_bias)
         x = x[:, self.num_extra_tokens :]
-        return x, frame_padding_mask
+        valid_frame_weights = (~frame_padding_mask).unsqueeze(-1).to(x.dtype)
+        utterance_feature = (x * valid_frame_weights).sum(dim=1) / valid_frame_weights.sum(dim=1).clamp_min(1.0)
+        return x, frame_padding_mask, utterance_feature

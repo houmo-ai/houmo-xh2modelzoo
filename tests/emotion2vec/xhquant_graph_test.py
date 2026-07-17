@@ -8,13 +8,13 @@ import soundfile as sf
 import torch
 
 
-def test_xhquant_frame_mask_matches_official_convolution_lengths():
+def test_xhquant_frame_mask_uses_precomputed_valid_frames():
     from xhmodel_merak.xh_llm.models.emotion2vec.xhquant_graph import XHEmotion2vecFrameMask
 
     frame_mask = XHEmotion2vecFrameMask(frame_count=799)
 
-    short = frame_mask(torch.tensor([65666], dtype=torch.int64))
-    full = frame_mask(torch.tensor([256000], dtype=torch.int64))
+    short = frame_mask(torch.tensor([204], dtype=torch.int32))
+    full = frame_mask(torch.tensor([799], dtype=torch.int32))
 
     assert short.shape == (1, 799)
     assert short.dtype == torch.bool
@@ -44,6 +44,12 @@ def test_xhquant_graph_module_uses_xhquant_wrappers_for_core_layers():
     assert isinstance(attention.softmax, Softmax)
 
 
+def test_xhquant_graph_exports_backbone_without_classification_head():
+    from xhmodel_merak.xh_llm.models.emotion2vec.xhquant_graph import XHEmotion2vecGraphModel
+
+    assert "classification_head" not in XHEmotion2vecGraphModel.forward.__code__.co_names
+
+
 def test_xhquant_graph_expects_externally_normalized_waveform():
     from xhmodel_merak.xh_llm.models.emotion2vec.xhquant_graph import XHEmotion2vecGraphModel
 
@@ -62,7 +68,7 @@ def test_alibi_shape_supports_plus_large_heads_and_dynamic_frames():
 @pytest.mark.skipif(not Path("data/models/emotion2vec_plus_large/model.pt").exists(), reason="model missing")
 def test_xhquant_graph_matches_official_plus_large_short_audio():
     from xhmodel_merak.xh_llm.models.emotion2vec.modeling_emotion2vec import (
-        Emotion2vecExportBridge,
+        Emotion2vecReferenceModel,
         load_funasr_emotion2vec_model,
     )
     from xhmodel_merak.xh_llm.models.emotion2vec.xhquant_graph import XHEmotion2vecGraphModel
@@ -74,15 +80,16 @@ def test_xhquant_graph_matches_official_plus_large_short_audio():
     padded = np.zeros(256000, dtype=np.float32)
     padded[: waveform.size] = waveform
     valid_samples = torch.tensor([waveform.size], dtype=torch.int64)
+    valid_frames = torch.tensor([204], dtype=torch.int32)
     graph_input = torch.nn.functional.layer_norm(torch.from_numpy(padded[: waveform.size]), (waveform.size,))
     normalized = torch.zeros_like(torch.from_numpy(padded))
     normalized[: waveform.size] = graph_input
 
     with torch.no_grad():
-        expected, expected_mask = Emotion2vecExportBridge(native)(
+        expected, expected_mask, expected_utterance = Emotion2vecReferenceModel(native)(
             torch.from_numpy(padded).unsqueeze(0), valid_samples
         )
-        actual, actual_mask = graph(normalized.unsqueeze(0), valid_samples)
+        actual, actual_mask, actual_utterance = graph(normalized.unsqueeze(0), valid_frames)
 
     expected = expected[0, ~expected_mask[0]].float()
     actual = actual[0, ~actual_mask[0]].float()
@@ -91,3 +98,4 @@ def test_xhquant_graph_matches_official_plus_large_short_audio():
     assert graph.blocks[0].attn.num_heads == 16
     assert graph.alibi_bias.shape == (1, 16, 809, 809)
     assert cosine.item() >= 0.99
+    torch.testing.assert_close(actual_utterance, expected_utterance, rtol=2e-2, atol=2e-2)

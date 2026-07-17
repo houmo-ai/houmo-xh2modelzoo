@@ -38,19 +38,21 @@ def extract_mask_from_result(result: Any, *, frame_count: int) -> torch.Tensor:
     return torch.zeros(1, frame_count, dtype=torch.bool)
 
 
-class Emotion2vecExportBridge(nn.Module):
+class Emotion2vecReferenceModel(nn.Module):
+    """Official FunASR FP32 feature reference; not used to build the HMONNX graph."""
+
     def __init__(self, native_model: Any, *, sampling_rate: int = 16000, window_samples: int = 256000):
         super().__init__()
         self.native_model = native_model
         self.sampling_rate = int(sampling_rate)
         self.window_samples = int(window_samples)
 
-    def forward(self, waveform: torch.Tensor, valid_samples: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, waveform: torch.Tensor, valid_samples: torch.Tensor) -> tuple[torch.Tensor, ...]:
         if not torch.jit.is_tracing():
             if waveform.ndim != 2 or waveform.shape[0] != 1 or waveform.shape[1] != self.window_samples:
-                raise ValueError("emotion2vec export bridge expects batch size 1 and fixed waveform length")
+                raise ValueError("emotion2vec reference model expects batch size 1 and fixed waveform length")
             if valid_samples.ndim != 1 or valid_samples.shape[0] != 1:
-                raise ValueError("emotion2vec export bridge expects valid_samples with shape [1]")
+                raise ValueError("emotion2vec reference model expects valid_samples with shape [1]")
 
         valid = valid_samples.to(torch.int64)
         positions = torch.arange(self.window_samples, device=waveform.device).unsqueeze(0)
@@ -76,7 +78,20 @@ class Emotion2vecExportBridge(nn.Module):
         # Keep the mask graph-connected so ONNX constant folding does not drop
         # the named output before xhquant imports the graph.
         frame_padding_mask = frame_padding_mask | torch.isnan(frame_features[..., 0])
-        return frame_features, frame_padding_mask
+        valid_frame_weights = (~frame_padding_mask).unsqueeze(-1).to(frame_features.dtype)
+        utterance_feature = (frame_features * valid_frame_weights).sum(dim=1) / valid_frame_weights.sum(
+            dim=1
+        ).clamp_min(1.0)
+        return frame_features, frame_padding_mask, utterance_feature
+
+
+def classify_utterance_feature(
+    utterance_feature: torch.Tensor,
+    projection: nn.Linear,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the official classification head outside the feature/HMONNX graph."""
+    logits = projection(utterance_feature)
+    return logits, torch.softmax(logits, dim=-1)
 
 
 def load_funasr_emotion2vec_model(model_dir: str):

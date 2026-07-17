@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dump-golden",
         action="store_true",
-        help="Dump official PyTorch golden data after HMONNX export.",
+        help="Dump per-operator HMONNX golden data and official PyTorch reference outputs.",
     )
     parser.add_argument(
         "--golden-audio",

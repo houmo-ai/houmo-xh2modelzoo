@@ -6,10 +6,11 @@
 
 - 输入：单声道 16 kHz 波形；
 - 固定 HMONNX 窗口：16 秒，即 `[1, 256000]`；
-- 输出：帧级 1024 维特征和对应 padding mask；
+- HMONNX 输出：帧级特征、padding mask 和句级特征；
+- 分类头：官方 `proj` 独立保存为 `hmquant/quant_embedding.pt`；
 - 默认量化类型：`w8a8h1_sefp`；
 - 波形归一化：图外 FP32；
-- HMONNX 神经网络输入：FP16 波形和 INT32 `valid_samples`；
+- HMONNX 神经网络输入：FP16 波形和图外预计算的 INT32 `valid_frames`；
 - 神经网络主体：xhquant-native Conv、Linear、MatMul、Softmax 等算子。
 
 ## 文件职责
@@ -26,7 +27,7 @@
 - `XHEmotion2vecModel`
 - `XHEmotion2vecGraphModel`
 - `Emotion2vecHMONNXModel`
-- `Emotion2vecExportBridge`
+- `Emotion2vecReferenceModel`
 - `Emotion2vecModelMeta`
 
 ### `audio_utils.py`
@@ -77,6 +78,7 @@ $$
 `Emotion2vecModelMeta` 描述导出产物，包括：
 
 - HMONNX 相对路径；
+- `hmquant/quant_embedding.pt` 相对路径和 MD5；
 - 采样率和窗口长度；
 - 输出特征维度；
 - 校准音频路径；
@@ -92,15 +94,18 @@ $$
 
 - 通过 FunASR `AutoModel` 加载官方 emotion2vec checkpoint；
 - 从不同形式的官方返回值中提取 frame features 和 padding mask；
-- 使用 `Emotion2vecExportBridge` 构造官方浮点参考输出；
+- 使用 `Emotion2vecReferenceModel` 构造官方浮点特征参考输出；
+- 使用独立的 `classify_utterance_feature()` 在特征图外执行官方 `proj → softmax`；
 - 为 Golden 对齐提供 PyTorch FP32 基准。
 
-`Emotion2vecExportBridge` 保留官方模型调用协议，例如：
+`Emotion2vecReferenceModel` 保留官方模型调用协议，例如：
 
 - `features_only=True`；
 - `remove_extra_tokens=True`；
 - 根据 `valid_samples` 生成 sample padding mask；
-- 返回帧级特征和 frame padding mask。
+- 只返回帧级特征、frame padding mask 和句级特征，与 HMONNX 三输出契约保持一致。
+
+官方分类 `proj → softmax` 由 `classify_utterance_feature()` 显式执行，仅用于生成 FP32 reference；该函数不参与 HMONNX graph 构建。
 
 该文件主要用于加载官方权重和产生参考结果，不是最终 HMONNX 内部的神经网络实现。
 
@@ -112,7 +117,7 @@ $$
 
 主要组件：
 
-- `XHEmotion2vecFrameMask`：使用 INT32 `valid_samples` 计算卷积后有效帧数和 frame padding mask；
+- `XHEmotion2vecFrameMask`：使用图外预计算的 INT32 `valid_frames`，通过一次 `Less` 生成 frame padding mask；
 - `XHEmotion2vecFeatureEncoder`：七层 xhquant `XHConv1d` 音频特征编码器；
 - `XHEmotion2vecPositionEncoder`：卷积相对位置编码器；
 - `XHEmotion2vecSelfAttention`：基于 `XHLinear`、`MatMul` 和 `Softmax` 的多头注意力；
@@ -123,17 +128,13 @@ $$
 
 这个文件假设输入波形已经在图外完成 FP32 归一化，不再在图中计算波形均值和方差。
 
-`valid_samples` 在图中保持 INT32，仅用于：
-
-1. 逐层计算卷积输出长度；
-2. 生成 frame padding mask；
-3. 屏蔽无效音频帧。
+`valid_samples` 仅在图外用于波形归一化和有效帧数计算。图外根据七层卷积参数计算 `valid_frames`，HMONNX 内只使用 `valid_frames` 生成 frame padding mask 并屏蔽无效音频帧。
 
 ### `emotion2vec_model.py`
 
 Merak 模型封装和 HMONNX 导出入口。
 
-`XHEmotion2vecModel` 通过 `register_llm_model()` 注册为 `Emotion2vecForSequenceEmbedding`，使 `AutoLLMConfig`、`AutoLLMModel` 和 `AutoLLMWorkflow` 能按配置自动找到它。
+`XHEmotion2vecModel` 通过 `register_llm_model()` 注册为 `Emotion2vecForEmotionRecognition`，使 `AutoLLMConfig`、`AutoLLMModel` 和 `AutoLLMWorkflow` 能按配置自动找到它。
 
 主要职责：
 
@@ -143,6 +144,7 @@ Merak 模型封装和 HMONNX 导出入口。
 - 使用图外 processor 对 calibration waveform 做 FP32 归一化；
 - 通过临时 ONNX 将 PyTorch/xhquant wrapper 转成 xhquant frontend graph；
 - 执行 Merak 状态链：wrap、frontend、W8A8 aligned PTQ、export graph、HMONNX；
+- 将官方顶层 `proj` state dict 保存到 `hmquant/quant_embedding.pt`；
 - 创建 `Emotion2vecModelMeta`。
 
 这里的临时 ONNX 只是 xhquant frontend 中转格式。最终交付产物仍是经过 xhquant PTQ 和 export graph 转换的 HMONNX。
@@ -159,7 +161,8 @@ emotion2vec 的标准 workflow 编排类。
 - 校验最终配置类必须是 `XHEmotion2vecConfig`；
 - 校验最终模型类必须是 `XHEmotion2vecModel`；
 - 在导出完成后写出 `emotion2vec_meta.json`；
-- 通过统一的 `dump_golden()` API 加载官方 FunASR FP32 模型并生成帧级和句级 Golden。
+- 通过统一的 `dump_golden()` API 运行 `HMONNXGoldenInference`，在 `golden/step_0/` 保存每个算子的输出；
+- 在 `golden/reference/` 额外保存官方 FunASR FP32 特征、logits 和 probabilities，供精度比较使用。
 
 对应 checked-in YAML 位于：
 
@@ -177,11 +180,13 @@ HMONNX 运行时封装。
 - 初始化 `HMONNXInferenceV2` 或兼容的 Golden runtime；
 - 将长音频切成固定窗口；
 - 对每个窗口执行图外 FP32 归一化；
-- 将 waveform 转为 FP16、`valid_samples` 转为 INT32；
+- 将 waveform 转为 FP16，并在图外将 `valid_samples` 转换成 INT32 `valid_frames`；
 - 调用 HMONNX；
 - 删除 padding frames；
 - 拼接多个窗口的有效帧；
-- 对全部有效帧求均值，得到 utterance embedding。
+- 对全部有效帧求均值，得到 utterance embedding；
+- 加载 `hmquant/quant_embedding.pt`，对全局 utterance embedding 执行分类并计算 probabilities；
+- 按官方 FunASR 逻辑过滤 `unuse_*`，返回 labels、scores 和预测标签；`<unk>` 保留。
 
 它是实际部署或离线提取特征时使用的主入口。
 
@@ -211,7 +216,9 @@ flowchart LR
     F --> G[W8A8 aligned PTQ]
     G --> H[export graph]
     H --> I[HMONNX]
-    I --> J[emotion2vec_meta.json]
+    A --> J[hmquant/quant_embedding.pt]
+    I --> K[emotion2vec_meta.json]
+    J --> K
 ```
 
 标准导出入口为：
@@ -230,7 +237,7 @@ flowchart LR
     A[单声道 16 kHz 音频] --> B[固定窗口分块和补零]
     B --> C[有效区域 FP32 归一化]
     C --> D[FP16 waveform]
-    B --> E[INT32 valid_samples]
+    B --> E[图外计算 INT32 valid_frames]
     D --> F[W8A8 HMONNX]
     E --> F
     F --> G[帧级 1024 维特征]
@@ -239,6 +246,9 @@ flowchart LR
     H --> I
     I --> J[mean pooling]
     J --> K[1024 维 utterance embedding]
+    L[hmquant/quant_embedding.pt] --> M[linear + softmax]
+    K --> M
+    M --> N[9 维 logits/probabilities]
 ```
 
 ## 关键精度与类型边界
@@ -248,10 +258,11 @@ flowchart LR
 | 音频读取 | FP32 | 图外处理 |
 | 波形归一化 | FP32 | 只统计有效采样区域 |
 | HMONNX waveform 输入 | FP16 | 固定形状 `[1, 256000]` |
-| HMONNX `valid_samples` 输入 | INT32 | 不转换为 FP16 |
+| HMONNX `valid_frames` 输入 | INT32 | 图外根据卷积参数预计算 |
 | Conv、Linear、MatMul 主体 | 默认 W8A8 | `w8a8h1_sefp` |
 | frame padding mask | BOOL | 屏蔽补零产生的无效帧 |
 | utterance pooling | FP32 | 图外对有效帧求均值 |
+| 官方 `proj` 分类头 | FP32 state dict | 图外加载 `hmquant/quant_embedding.pt` |
 
 ## 与 examples 目录的关系
 

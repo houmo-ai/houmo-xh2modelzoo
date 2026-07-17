@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from .audio_utils import (
     chunk_waveform,
@@ -24,6 +25,7 @@ class Emotion2vecHMONNXModel:
         self.meta_info = meta_info
         self._session = None
         self._hmonnx_model = None
+        self._classification_head = None
         if meta_info.hmonnx and Path(meta_info.hmonnx).exists():
             if os.getenv("ENABLE_HMINFERENCE_V2", "").lower() in {"1", "true", "yes", "on"}:
                 from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
@@ -47,16 +49,40 @@ class Emotion2vecHMONNXModel:
     def session(self, value):
         self._session = value
 
-    def _run_session(self, waveform: torch.Tensor, valid_samples: torch.Tensor):
+    def _run_session(self, waveform: torch.Tensor, valid_frames: torch.Tensor):
         session = self.session
         if session is None:
             raise ValueError("emotion2vec HMONNX session is not initialized")
         if self._session is None and torch.cuda.is_available():
             waveform = waveform.cuda()
-            valid_samples = valid_samples.cuda()
+            valid_frames = valid_frames.cuda()
         if hasattr(session, "forward"):
-            return session.forward(waveform, valid_samples)
-        return session(waveform, valid_samples)
+            return session.forward(waveform, valid_frames)
+        return session(waveform, valid_frames)
+
+    def _load_classification_head(self) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self._classification_head is not None:
+            return self._classification_head
+        if not self.meta_info.quant_embedding:
+            raise FileNotFoundError("emotion2vec metadata does not contain hmquant/quant_embedding.pt")
+        head_path = Path(self.meta_info.quant_embedding)
+        if not head_path.is_file():
+            raise FileNotFoundError(f"emotion2vec classification head not found: {head_path}")
+        try:
+            state_dict = torch.load(head_path, map_location="cpu", weights_only=True)
+        except TypeError:  # pragma: no cover - compatibility with older torch
+            state_dict = torch.load(head_path, map_location="cpu")
+        weight = state_dict["weight"].float()
+        bias = state_dict.get("bias")
+        if bias is not None:
+            bias = bias.float()
+        if weight.shape != (self.meta_info.num_labels, self.meta_info.feature_dim):
+            raise ValueError(
+                "emotion2vec classification head shape mismatch: "
+                f"expected {(self.meta_info.num_labels, self.meta_info.feature_dim)}, got {tuple(weight.shape)}"
+            )
+        self._classification_head = (weight, bias)
+        return self._classification_head
 
     def extract_waveform(self, waveform: np.ndarray, sampling_rate: int) -> dict[str, Any]:
         validate_audio_inputs(waveform, sampling_rate, expected_sampling_rate=self.meta_info.sampling_rate)
@@ -70,13 +96,13 @@ class Emotion2vecHMONNXModel:
         for chunk in chunks:
             normalized = normalize_padded_waveform(chunk.waveform, chunk.valid_samples)
             chunk_waveform_tensor = torch.from_numpy(normalized).unsqueeze(0).to(torch.float16)
-            valid_samples = torch.tensor([chunk.valid_samples], dtype=torch.int32)
-            result = self._run_session(chunk_waveform_tensor, valid_samples)
+            valid_frames = torch.tensor([emotion2vec_frame_count(chunk.valid_samples)], dtype=torch.int32)
+            result = self._run_session(chunk_waveform_tensor, valid_frames)
             if isinstance(result, dict):
                 frame_features = result["frame_features"]
                 frame_mask = result["frame_padding_mask"]
             else:
-                frame_features, frame_mask = result
+                frame_features, frame_mask, _ = result
             frame_features_numpy = frame_features.cpu().numpy()
             frame_mask_numpy = frame_mask.to(torch.bool).cpu().numpy()
             if chunk.valid_samples < self.meta_info.window_samples and not frame_mask_numpy.any():
@@ -89,10 +115,26 @@ class Emotion2vecHMONNXModel:
         frame_features = torch.cat(valid_features, dim=0)
         frame_padding_mask = torch.zeros(frame_features.shape[0], dtype=torch.bool)
         utterance_feature = frame_features.float().mean(dim=0)
+        head_weight, head_bias = self._load_classification_head()
+        logits = F.linear(utterance_feature, head_weight, head_bias)
+        probabilities = torch.softmax(logits, dim=-1)
+        active_indices = [
+            index
+            for index, label in enumerate(self.meta_info.labels)
+            if not label.startswith("unuse")
+        ]
+        labels = [self.meta_info.labels[index] for index in active_indices]
+        scores = [float(probabilities[index]) for index in active_indices]
+        predicted_index = max(active_indices, key=lambda index: float(probabilities[index]))
         return {
             "frame_features": frame_features,
             "frame_padding_mask": frame_padding_mask,
             "utterance_feature": utterance_feature,
+            "logits": logits,
+            "probabilities": probabilities,
+            "labels": labels,
+            "scores": scores,
+            "predicted_label": self.meta_info.labels[predicted_index],
             "chunk_count": len(chunks),
             "valid_frame_count": int(frame_features.shape[0]),
         }
