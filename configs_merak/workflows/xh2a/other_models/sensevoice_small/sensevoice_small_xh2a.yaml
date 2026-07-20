@@ -1,0 +1,34 @@
+# SenseVoiceSmall starts from the original FunASR checkpoint.  PTQ is integrated
+# into the ONNX -> HMONNX export, so there is no standalone quantized checkpoint.
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHSenseVoiceSmallModel
+
+  onnx:
+    enabled: true
+    device: cpu
+    max_seq_len: 512
+    opset: 14
+    static: true
+    simplify: true
+    layer_norm_scale: 32.0
+    verbose: false
+
+  hmonnx:
+    enabled: true
+    quant_type: w8a8h1_sefp
+    calib_metric: minmax
+    force_fp32_ops:
+      - LayerNorm
+    calibration:
+      source: hf_dataset
+      file: null
+      hf_dataset: openslr/librispeech_asr
+      hf_config: clean
+      hf_split: validation
+      hf_audio_field: audio
+      hf_streaming: true
+      samples: 128

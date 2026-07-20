@@ -65,6 +65,7 @@ export:
     lora:
       path:
         - work_dirs/3.5-35B-lora/checkpoint-9000
+        - work_dirs/3.5-35B-lora/checkpoint-9000-noise
       w_schema:
         bits: 8
         fp_mode: sefp
