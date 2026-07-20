@@ -1,6 +1,6 @@
 import copy
 import json
-from typing import Optional
+from typing import Any, Optional
 
 from addict import Dict as AttrDict
 
@@ -19,6 +19,12 @@ class BaseConfig:
     """
     以下划线开头的属性,不会出现在json中
     """
+
+    def get(self, attr: Any, default: Optional[Any] = None) -> Any:
+        if hasattr(self, attr):
+            return getattr(self, attr)
+        else:
+            return default
 
     def to_dict(self):
         output = copy.deepcopy(self.__dict__)

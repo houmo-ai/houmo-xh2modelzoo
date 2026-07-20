@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Registry-free canonical hybrid GatedDeltaNet implementation.
-
 Both Qwen3.5-MoE and Qwen3-Next wrappers inherit this mixin.  Model-family
 classes provide only the packed/separate input-projection hook; convolution,
 cache, delta-rule, fused-op, and dynamic-config behavior lives here.
@@ -65,14 +64,12 @@ class HybridGatedAttentionMixin:
         rotary_dim = cos.shape[-1]
         q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
         k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
-
         if self.enable_rope:
             q_embed = self.rope(q_rot, cos, sin)
             k_embed = self.rope(k_rot, cos, sin)
         else:
             q_embed = (q_rot * cos) + (self.rotate_half(q_rot) * sin)
             k_embed = (k_rot * cos) + (self.rotate_half(k_rot) * sin)
-
         q_embed = torch.cat([q_embed, q_pass], dim=-1)
         k_embed = torch.cat([k_embed, k_pass], dim=-1)
         return q_embed, k_embed
@@ -89,27 +86,21 @@ class HybridGatedAttentionMixin:
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
-
         q_proj = self.q_proj(hidden_states)
         q_proj = q_proj.view(bsz, q_len, self.num_heads, self.head_dim * 2)
         query_states, gate = torch.split(q_proj, self.head_dim, dim=-1)
         gate = gate.reshape(bsz, q_len, -1)
-
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-
         query_states = self.q_norm(query_states.view(bsz, q_len, self.num_heads, self.head_dim)).transpose(1, 2)
         key_states = self.k_norm(key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
         if position_embeddings is not None:
             cos, sin = position_embeddings
             query_states, key_states = self.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
-
         if self.use_cache:
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
-
         if self.use_flash_attention:
             attn_output = self.flash_attn(
                 query_states,
@@ -129,20 +120,17 @@ class HybridGatedAttentionMixin:
             value_states = torch.repeat_interleave(value_states, self.num_key_value_groups, dim=1)
             attn_output = torch.matmul(attn_weights, value_states)
             attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.attn_hidden_dim)
-
         attn_output = attn_output * torch.sigmoid(gate)
         attn_output = self.o_proj(attn_output)
-        return attn_output, None, None
+        return attn_output
 
     def _setup(self, cfg: Optional[Dict] = None):
         if not hasattr(self, "num_key_value_heads"):
             self.num_key_value_heads = self.config.num_key_value_heads
         if not hasattr(self, "num_heads"):
             self.num_heads = self.config.num_attention_heads
-
         self.attn_hidden_dim = self.head_dim * self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-
         rotary_dim = int(self.config.partial_rotary_factor * self.head_dim)
         self.rotate_half_slice_1 = xhnn.Slice([0], [rotary_dim // 2], [3], [1])
         self.rotate_half_slice_2 = xhnn.Slice([rotary_dim // 2], [sys.maxsize], [3], [1])
@@ -150,7 +138,6 @@ class HybridGatedAttentionMixin:
         self.enable_rope = cfg.get("enable_rope", True)
         if self.enable_rope:
             self.rope = xhnn.Rope()
-
         flash_attention_cfg = cfg.get("flash_attention", None)
         if flash_attention_cfg is None and cfg.get("bfp_flash_attention", None) is not None:
             warnings.warn(
@@ -196,7 +183,6 @@ class HybridGatedAttentionMixin:
                 s_bits=self.flash_s_bits,
                 p_bits=self.flash_p_bits,
             )
-
         self.use_cache = cfg.use_cache
         if self.use_cache:
             cache_axis = cfg.kv_cache.cache_axis
@@ -205,7 +191,6 @@ class HybridGatedAttentionMixin:
         else:
             self.k_cache = None
             self.v_cache = None
-
         kv_scale = 1 / math.sqrt(self.head_dim)
         kv_scale_dtype = self.q_proj.weight.dtype
         self.register_buffer(
@@ -233,7 +218,6 @@ class HybridDecoderLayerMixin:
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
         if self.layer_type == "linear_attention":
             hidden_states, conv_cache_out, recurrent_state_out = self.linear_attn(
                 hidden_states=hidden_states,
@@ -243,15 +227,18 @@ class HybridDecoderLayerMixin:
                 current_input_length=current_input_length,
             )
         else:
-            hidden_states, _, _ = self.self_attn(
+            # for fx trace
+            cos, sin = position_embeddings
+            position_embeddings = (cos, sin)
+            hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
+                attention_mask=None,
                 position_embeddings=position_embeddings,
                 past_k_cache=past_k_cache,
                 past_v_cache=past_v_cache,
             )
-
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -259,7 +246,6 @@ class HybridDecoderLayerMixin:
         if isinstance(hidden_states, tuple):
             hidden_states = hidden_states[0]
         hidden_states = residual + hidden_states
-
         if self.layer_type == "linear_attention":
             return hidden_states, conv_cache_out, recurrent_state_out
         return hidden_states
@@ -271,16 +257,13 @@ class HybridDecoderLayerMixin:
 
 def _resolve_python_int_length(value) -> Optional[int]:
     """Best-effort convert ``current_input_length`` to python int.
-
     During TorchFX tracing this can be a Proxy and must not be materialized.
     """
     if value is None:
         return None
-
     proxy_type_name = value.__class__.__name__
     if proxy_type_name in {"Proxy", "Attribute"}:
         return None
-
     if isinstance(value, Tensor):
         if value.numel() == 0:
             return None
@@ -292,7 +275,6 @@ def _resolve_python_int_length(value) -> Optional[int]:
             return int(elem.item())
         except Exception:
             return None
-
     try:
         return int(value)
     except Exception:
@@ -356,7 +338,6 @@ def _manual_depthwise_conv1d_tail(
     output_length: int,
 ) -> Tensor:
     """Compute the kept tail of a depthwise Conv1d directly with slices.
-
     Equivalent to:
     ``F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, groups=conv_dim)[:, :, -output_length:]``
     when ``weight`` is shaped ``[conv_dim, kernel_size]``.
@@ -367,9 +348,7 @@ def _manual_depthwise_conv1d_tail(
         weight = weight.squeeze(1)
     elif weight.dim() != 2:
         raise ValueError(f"Expected weight rank 2 or 3, got {weight.dim()}")
-
     kernel_size = weight.shape[-1]
-
     output = hidden_states_new[:, :, 1 : 1 + output_length] * weight[:, 0].view(1, -1, 1)
     for kernel_idx in range(1, kernel_size):
         output = output + hidden_states_new[:, :, 1 + kernel_idx : 1 + kernel_idx + output_length] * weight[
@@ -391,7 +370,6 @@ def _split_linear_qkv_tensor(
 
 class HybridGatedDeltaNetMixin:
     """Canonical convolution/cache/GDR implementation for hybrid Qwen MoE.
-
     Qwen3.5 owns the default separate projection implementation below.
     Qwen3-Next overrides :meth:`_project_qkvzba` because its checkpoint keeps
     Q/K/V/Z and B/A interleaved in two packed (potentially GPTQ QuantLinear)
@@ -435,16 +413,12 @@ class HybridGatedDeltaNetMixin:
     ):
         mask = linear_attn_mask.to(hidden_states.dtype)
         mask = mask.unsqueeze(-1)
-
         batch_size, seq_len, _ = hidden_states.shape
-
         query, key, value, z, b, a = self._project_qkvzba(hidden_states)
-
         use_recurrent = self.linear_attention_mode == "recurrent"
         if self.linear_attention_mode == "auto" and current_input_length is not None:
             resolved_len = _resolve_python_int_length(current_input_length)
             use_recurrent = (resolved_len == 1) if resolved_len is not None else False
-
         _verify_intermediates = getattr(self, "_verify_output_intermediates", False)
         resolved_seq_len = _resolve_python_int_length(seq_len)
         # Speculative/MTP verification can feed one hidden-state seed while
@@ -455,17 +429,14 @@ class HybridGatedDeltaNetMixin:
             _verify_intermediates and self.input_sequence_length > 1 and use_recurrent and resolved_seq_len == 1
         )
         attn_seq_len = self.input_sequence_length if _expand_verify_tokens else seq_len
-
         if self.split_conv_cache:
             # === Split conv_cache path (3 separate q/k/v tensors) ===
             query_states = query.reshape(batch_size, seq_len, self.key_dim)
             key_states = key.reshape(batch_size, seq_len, self.key_dim)
             value_states = value.reshape(batch_size, seq_len, self.value_dim)
-
             query_states = query_states.transpose(1, 2)
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
-
             if isinstance(conv_cache, (list, tuple)):
                 if len(conv_cache) != 3:
                     raise RuntimeError(f"Expected 3 conv caches for linear attention, got {len(conv_cache)}")
@@ -492,7 +463,6 @@ class HybridGatedDeltaNetMixin:
             query_states_new = torch.cat([conv_cache_q, query_states], dim=-1).to(self.conv1d_q.weight.dtype)
             key_states_new = torch.cat([conv_cache_k, key_states], dim=-1).to(self.conv1d_k.weight.dtype)
             value_states_new = torch.cat([conv_cache_v, value_states], dim=-1).to(self.conv1d_v.weight.dtype)
-
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
                 conv_cache_out = (
@@ -506,7 +476,6 @@ class HybridGatedDeltaNetMixin:
                     self.conv_cache_slice(key_states_new, current_input_length),
                     self.conv_cache_slice(value_states_new, current_input_length),
                 )
-
             if self.use_manual_depthwise_conv1d:
                 query_states = _manual_depthwise_conv1d_tail(
                     query_states_new,
@@ -539,7 +508,6 @@ class HybridGatedDeltaNetMixin:
             query_states = query_states * mask_qkv
             key_states = key_states * mask_qkv
             value_states = value_states * mask_qkv
-
             query = query_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
             key = key_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
             value = value_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
@@ -553,7 +521,6 @@ class HybridGatedDeltaNetMixin:
                 ),
                 dim=-1,
             ).transpose(1, 2)
-
             conv_cache, recurrent_state = _align_linear_cache_args(
                 conv_cache,
                 recurrent_state,
@@ -565,7 +532,6 @@ class HybridGatedDeltaNetMixin:
             assert conv_cache is not None, "conv_cache is required"
             conv_cache = _normalize_linear_conv_cache_rank(conv_cache)
             hidden_states_new = torch.cat([conv_cache, mixed_qkv], dim=-1).to(self.conv1d.weight.dtype)
-
             if _verify_intermediates and self.input_sequence_length > 1 and use_recurrent:
                 _kernel = int(self.conv_kernel_size)
                 conv_cache_out = tuple(
@@ -573,7 +539,6 @@ class HybridGatedDeltaNetMixin:
                 )
             else:
                 conv_cache_out = self.conv_cache_slice(hidden_states_new, current_input_length)
-
             if self.use_manual_depthwise_conv1d:
                 conv_out = _manual_depthwise_conv1d_tail(
                     hidden_states_new,
@@ -588,16 +553,13 @@ class HybridGatedDeltaNetMixin:
             mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
             mask_qkv = linear_attn_mask.unsqueeze(1)
             mixed_qkv = mixed_qkv * mask_qkv
-
             mixed_qkv = mixed_qkv.transpose(1, 2)
             query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             query = query.reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
             key = key.reshape(batch_size, attn_seq_len, -1, self.head_k_dim)
             value = value.reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
-
         beta = b.sigmoid()
         g = self.A_log_exp * F.softplus(a + self.dt_bias)
-
         mask_qkv = linear_attn_mask.unsqueeze(-1).unsqueeze(-1)
         value = value * mask_qkv
         beta = beta * mask
@@ -606,11 +568,9 @@ class HybridGatedDeltaNetMixin:
             beta = beta.repeat_interleave(self.input_sequence_length, dim=1)
             g = g.repeat_interleave(self.input_sequence_length, dim=1)
             mask_qkv = mask_qkv.repeat_interleave(self.input_sequence_length, dim=1)
-
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-
         if use_recurrent:
             if _verify_intermediates and self.input_sequence_length > 1:
                 _recurrent_snapshots = []
@@ -690,7 +650,6 @@ class HybridGatedDeltaNetMixin:
                 block_tri_inverse_op=self.block_tri_inverse_op,
                 chunk_scan_op=self.chunk_scan_op,
             )
-
         # GDRChunkScan variants whose ``state_is_cache`` metadata is true
         # update the CacheTensor input in place.  Exporting the same state as
         # an additional graph output would duplicate the cache contract and
@@ -707,7 +666,6 @@ class HybridGatedDeltaNetMixin:
             recurrent_state_out = tuple(_recurrent_snapshots)
         else:
             recurrent_state_out = last_recurrent_state if last_recurrent_state is not None else recurrent_state
-
         # b_sz, s, n, h = z.shape
         # core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         # z = z.reshape(-1, z.shape[-1])
@@ -716,7 +674,6 @@ class HybridGatedDeltaNetMixin:
         core_attn_out = self.norm(core_attn_out, z)
         # core_attn_out = core_attn_out.reshape(b_sz, s, n, h)
         core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
-
         core_attn_out = core_attn_out.to(self.out_proj.weight.dtype)
         output = self.out_proj(core_attn_out)
         output = output * mask
@@ -740,7 +697,6 @@ class HybridGatedDeltaNetMixin:
         # slice/mul/add manual unroll is no longer needed. Set True to fall
         # back to the legacy _manual_depthwise_conv1d_tail.
         self.use_manual_depthwise_conv1d = cfg.get("use_manual_depthwise_conv1d", False)
-
         # Convert nn.Parameter to buffer for FX graph compatibility
         if "dt_bias" in self._parameters:
             _dt_bias_data = self.dt_bias.data.clone()
@@ -750,7 +706,6 @@ class HybridGatedDeltaNetMixin:
             _a_log_data = self.A_log.data.clone()
             del self._parameters["A_log"]
             self.register_buffer("A_log", _a_log_data, persistent=False)
-
         # Split in_proj_qkv into separate q/k/v projections if requested
         if self.split_conv_cache and not self._uses_packed_input_projections and not hasattr(self, "in_proj_q"):
             proj_has_bias = self.in_proj_qkv.bias is not None
@@ -797,7 +752,6 @@ class HybridGatedDeltaNetMixin:
                 self.in_proj_k.bias.data.copy_(k_bias)
                 self.in_proj_v.bias.data.copy_(v_bias)
             del self.in_proj_qkv
-
         # Split conv1d into separate q/k/v conv layers if requested
         if self.split_conv_cache and not hasattr(self, "conv1d_q"):
             conv_has_bias = self.conv1d.bias is not None
@@ -853,7 +807,6 @@ class HybridGatedDeltaNetMixin:
                 self.conv1d_k.bias.data.copy_(k_bias)
                 self.conv1d_v.bias.data.copy_(v_bias)
             del self.conv1d
-
         # Pre-compute head dimensions for TorchFX tracing compatibility
         self.chunk_num_heads = self.num_v_heads
         self.chunk_k_head_dim = self.head_k_dim
@@ -868,10 +821,8 @@ class HybridGatedDeltaNetMixin:
             ),
             persistent=False,
         )
-
         a_log_exp = (-self.A_log.exp()).to(device=self.A_log.device, dtype=self.dt_bias.dtype)
         self.register_buffer("A_log_exp", a_log_exp, persistent=False)
-
         if self.split_conv_cache:
             self.register_buffer(
                 "conv1d_q_manual_weight",
@@ -916,16 +867,13 @@ class HybridGatedDeltaNetMixin:
                     self.conv1d.bias.detach().clone(),
                     persistent=False,
                 )
-
         # Conv cache slice: extract last conv_kernel_size elements along time dim
         self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])
-
         # Pre-create triangular masks for TorchFX tracing
         chunk_size = self.linear_chunk_size
         idx = torch.arange(chunk_size, dtype=torch.long, device=self.A_log.device)
         mask_incl = (idx[:, None] >= idx[None, :]).to(target_dtype)
         mask_strict = (idx[:, None] > idx[None, :]).to(target_dtype)
-
         num_chunks = (self.input_sequence_length + chunk_size - 1) // chunk_size
         flat_batch_size = self.batch_size * self.num_v_heads * num_chunks
         eye_matrix = (
@@ -939,9 +887,7 @@ class HybridGatedDeltaNetMixin:
         self.register_buffer("chunk_mask_strict", mask_strict, persistent=False)
         self.register_buffer("chunk_eye_matrix", eye_matrix, persistent=False)
         self.register_buffer("chunk_cumsum_matrix", cumsum_matrix, persistent=False)
-
         self.cumsum_matmul = MatMul()
-
         # Pre-compute row masks for Method 4 forward substitution
         chunk_row_masks = (
             torch.eye(chunk_size, dtype=target_dtype, device=self.A_log.device)
@@ -950,7 +896,6 @@ class HybridGatedDeltaNetMixin:
             .contiguous()
         )
         self.register_buffer("chunk_row_masks", chunk_row_masks, persistent=False)
-
         # Pre-computed 8x8 identity for block Neumann inverse (BHN*nb, 8, 8)
         block_size = 8
         nb = chunk_size // block_size
@@ -961,7 +906,6 @@ class HybridGatedDeltaNetMixin:
             .contiguous()
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
-
         # GDR fused ops. ``fuse_gdr_ops`` only enables GDRChunkScan because
         # that op changes the prefill recurrent-state I/O contract.
         # ``fuse_gdr_block_recurrent_ops`` enables the contract-preserving
@@ -972,7 +916,6 @@ class HybridGatedDeltaNetMixin:
         else:
             self.block_tri_inverse_op = None
             self.recurrent_scan_op = None
-
         if self.fuse_gdr_ops:
             self.chunk_scan_op = GDRChunkScan(
                 num_chunks=num_chunks,
@@ -983,7 +926,6 @@ class HybridGatedDeltaNetMixin:
             )
         else:
             self.chunk_scan_op = None
-
         return self
 
     def _update_cfg(self, cfg: Optional[Dict] = None):
@@ -1019,7 +961,6 @@ class HybridGatedDeltaNetMixin:
             "suppress_recurrent_state_outputs",
             getattr(self, "suppress_recurrent_state_outputs", False),
         )
-
         # Update eye_matrix for new batch/seq config
         chunk_size = self.linear_chunk_size
         num_chunks = (self.input_sequence_length + chunk_size - 1) // chunk_size
@@ -1035,7 +976,6 @@ class HybridGatedDeltaNetMixin:
             .contiguous()
         )
         self.register_buffer("chunk_eye_matrix", eye_matrix, persistent=False)
-
         # Update 8x8 identity for block Neumann inverse
         block_size = 8
         nb = chunk_size // block_size
@@ -1046,9 +986,7 @@ class HybridGatedDeltaNetMixin:
             .contiguous()
         )
         self.register_buffer("chunk_eye_8_batched", eye_8_batched, persistent=False)
-
         # Update GDR fused op buffers
         if getattr(self, "chunk_scan_op", None) is not None:
             self.chunk_scan_op.num_chunks = num_chunks
-
         self.conv_cache_slice = xhnn.DynamicSlice([self.conv_kernel_size], [2], [1])

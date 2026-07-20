@@ -20,6 +20,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import os
 from dataclasses import dataclass
 from itertools import chain
 
@@ -27,6 +28,20 @@ import torch
 import torch.nn as nn
 
 from xhquant.utils.registry import DynamicModule
+
+
+HUGE_MODEL_EXPORT_ENABLED_ENV = "HUGE_MODEL_EXPORT_ENABLED"
+
+
+def is_huge_model_export_enabled(value: str | None = None) -> bool:
+    """Return whether huge-model placeholder export is enabled.
+
+    Controlled by the ``HUGE_MODEL_EXPORT_ENABLED`` environment variable.
+    Accepted truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
+    """
+    if value is None:
+        value = os.environ.get(HUGE_MODEL_EXPORT_ENABLED_ENV, "")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_module_device(module: nn.Module, default: str | torch.device = "cpu") -> torch.device:

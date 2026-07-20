@@ -21,10 +21,8 @@
 # File: _llm_model_impl.py
 # Description:
 #   Qwen3.5 LLM model adapted for the xh2 model zoo (xh2modelzoo).
-
 """
 Qwen3.5 LLM model implementation for xhquant framework.
-
 Combines:
 - Qwen3VL's M-RoPE position encoding (separate T/H/W cos/sin with interleaved masks)
 - Qwen3Next's GatedDeltaNet linear attention (chunk/recurrent)
@@ -106,18 +104,13 @@ def _compute_qwen3_5_rotary_cache(
 
 # noqa: E402
 ensure_hybrid_fused_rms_norm_registered()
-
-
 # ============================================================================
 # RMSNorm wrappers
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5TextRMSNormBase(DynamicModule, Qwen3_5RMSNorm):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5TextRMSNormBase = DynamicModule
 
@@ -130,13 +123,10 @@ class _Qwen3_5TextRMSNorm(HybridRMSNormMixin, _Qwen3_5TextRMSNormBase):  # noqa:
 
 
 _rms_norm_gated_registry = _with_hf_alias(Qwen3_5RMSNormGated, "Qwen3_5RMSNormGated")
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5RMSNormGatedBase(DynamicModule, Qwen3_5RMSNormGated):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5RMSNormGatedBase = DynamicModule
 
@@ -151,13 +141,10 @@ class _Qwen3_5RMSNormGated(HybridRMSNormGatedMixin, _Qwen3_5RMSNormGatedBase):  
 # ============================================================================
 # Rotary Embedding
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5TextRotaryEmbeddingBase(DynamicModule, Qwen3_5TextRotaryEmbedding):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5TextRotaryEmbeddingBase = DynamicModule
 
@@ -165,7 +152,6 @@ else:
 @XHLLM_TRACEABLE_MODULES.register_module(_with_hf_alias(Qwen3_5TextRotaryEmbedding, "Qwen3_5TextRotaryEmbedding"))
 class _Qwen3_5TextRotaryEmbedding(_Qwen3_5TextRotaryEmbeddingBase):  # noqa: N801
     """Pre-compute cos/sin cache for M-RoPE.
-
     Unlike the HF model which applies interleaved mrope at forward time,
     here we pre-compute per-position cos/sin (without interleaving).
     The interleaving is handled by T/H/W masks in ``_Qwen3_5TextModel``.
@@ -195,7 +181,6 @@ class _Qwen3_5TextRotaryEmbedding(_Qwen3_5TextRotaryEmbeddingBase):  # noqa: N80
 
     def _compute_cos_sin(self, max_seq_len=2048):
         """Compute cos/sin embeddings per position without interleaving.
-
         Returns:
             cos: (1, max_seq_len, 1, rotary_dim)
             sin: (1, max_seq_len, 1, rotary_dim)
@@ -211,13 +196,10 @@ class _Qwen3_5TextRotaryEmbedding(_Qwen3_5TextRotaryEmbeddingBase):  # noqa: N80
 # ============================================================================
 # Full Attention (with gating + partial rotary)
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5TextAttentionBase(DynamicModule, Qwen3_5Attention):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5TextAttentionBase = DynamicModule
 
@@ -226,19 +208,34 @@ else:
 class _Qwen3_5TextAttention(HybridGatedAttentionMixin, _Qwen3_5TextAttentionBase):  # noqa: N801
     """Registered adapter for the shared hybrid gated-attention path."""
 
-    pass
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_seq_length: Optional[Tensor] = None,
+        current_input_length: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        past_k_cache: Optional[Tensor] = None,
+        past_v_cache: Optional[Tensor] = None,
+    ) -> torch.Tensor:
+        return super().forward(
+            hidden_states=hidden_states,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            past_k_cache=past_k_cache,
+            past_v_cache=past_v_cache,
+        )
 
 
 # ============================================================================
 # GatedDeltaNet (linear attention)
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5GatedDeltaNetBase(DynamicModule, Qwen3_5GatedDeltaNet):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5GatedDeltaNetBase = DynamicModule
 
@@ -253,13 +250,10 @@ class _Qwen3_5GatedDeltaNet(HybridGatedDeltaNetMixin, _Qwen3_5GatedDeltaNetBase)
 # ============================================================================
 # Decoder Layer
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5DecoderLayerBase(DynamicModule, Qwen3_5DecoderLayer):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5DecoderLayerBase = DynamicModule
 
@@ -274,13 +268,10 @@ class _Qwen3_5DecoderLayer(HybridDecoderLayerMixin, _Qwen3_5DecoderLayerBase):  
 # ============================================================================
 # TextModel (with M-RoPE masks)
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5TextModelBase(DynamicModule, Qwen3_5TextModel):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5TextModelBase = DynamicModule
 
@@ -293,7 +284,6 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
         self.support_long_context_over_fp16_limit = cfg.get("support_long_context_over_fp16_limit", True)
         self.cos = Cos()
         self.sin = Sin()
-
         rope_parameters = self.config.rope_parameters
         if isinstance(rope_parameters, dict):
             mrope_section = rope_parameters.get("mrope_section", [11, 11, 10])
@@ -305,7 +295,6 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
         mask_device = self.rotary_emb.inv_freq.device
         h_ids = torch.arange(1, mrope_section[1] * 3, 3, device=mask_device)
         w_ids = torch.arange(2, mrope_section[2] * 3, 3, device=mask_device)
-
         time_mask = torch.ones(half_dim, device=mask_device)
         time_mask[h_ids] = 0
         time_mask[w_ids] = 0
@@ -319,7 +308,6 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
         width_mask[w_ids] = 1
         width_mask = torch.cat([width_mask, width_mask], 0).unsqueeze(0).unsqueeze(0)
         self.rotary_emb.register_buffer("width_mask", width_mask.half(), persistent=False)
-
         if self.support_long_context_over_fp16_limit:
             if not hasattr(self.rotary_emb, "cos_cached"):
                 self.rotary_emb.setup_after_callback = self._setup_cos_sin_embeding
@@ -386,7 +374,6 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
         if use_precomputed_cache:
             if cos_cached is None or sin_cached is None:
                 raise ValueError("cos_cached and sin_cached are required when use_precomputed_cache=True")
-
             time_cos = cos_cached[time_position_ids]
             time_sin = sin_cached[time_position_ids]
             hight_cos = cos_cached[hight_position_ids]
@@ -403,17 +390,14 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
             width_cos, width_sin = self._compute_qwen3_5_rotary_from_position_ids(
                 width_position_ids, inv_freq, attention_scaling
             )
-
         time_cos = time_cos * time_mask
         time_sin = time_sin * time_mask
         hight_cos = hight_cos * hight_mask
         hight_sin = hight_sin * hight_mask
         width_cos = width_cos * width_mask
         width_sin = width_sin * width_mask
-
         combined_cos = time_cos + hight_cos + width_cos
         combined_sin = time_sin + hight_sin + width_sin
-
         combined_cos = combined_cos.squeeze(1).unsqueeze(0).unsqueeze(0)
         combined_sin = combined_sin.squeeze(1).unsqueeze(0).unsqueeze(0)
         return combined_cos, combined_sin
@@ -422,13 +406,10 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
 # ============================================================================
 # Model wrapper (Qwen3_5Model has .visual + .language_model)
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5ModelBase(DynamicModule, Qwen3_5Model):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5ModelBase = DynamicModule
 
@@ -474,13 +455,10 @@ class _Qwen3_5Model(_Qwen3_5ModelBase):  # noqa: N801
 # ============================================================================
 # ForConditionalGeneration (top-level wrapper)
 # ============================================================================
-
-
 if TYPE_CHECKING:
 
     class _Qwen3_5ForConditionalGenerationBase(DynamicModule, Qwen3_5ForConditionalGeneration):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5ForConditionalGenerationBase = DynamicModule
 
@@ -537,7 +515,6 @@ if TYPE_CHECKING:
 
     class _Qwen3_5ForCausalLMBase(DynamicModule, Qwen3_5ForCausalLM):  # type: ignore[misc]
         ...
-
 else:
     _Qwen3_5ForCausalLMBase = DynamicModule
 

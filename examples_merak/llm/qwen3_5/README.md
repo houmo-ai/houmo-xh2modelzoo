@@ -43,7 +43,17 @@ CEval 口径：EvalScope / 官方 prompt，5-shot，1346 题，生成长度 4096
 
 量化 HF/GPTQModel 目录的统一约定：把 `model.hf_model` 指向量化后的 HF repo，`model.quant_weight` 保持为空。`quant_weight` 只保留给“浮点 HF 结构 + 独立 torch checkpoint 权重文件/目录”的旧式检查点恢复。
 
-模型配置新增：enable_layer_tag, 如果enable_layer_tag为True，导出HMONNX时，会在每个layer层结束时插入Tag作为标记，方便PP并行分配GPU以及按Layer切hmonnx。
+模型配置支持 `enable_layer_tag`。开启后，导出 HMONNX 时会在每个 layer 结束处插入 Tag，方便 PP 并行分配 GPU 以及按 layer 切分 HMONNX。
+
+也可以通过环境变量临时开启，无需修改模型配置：
+
+```bash
+export LAYER_TAG_ENABLE=1
+```
+
+环境变量支持的真值为 `1`、`true`、`yes`、`on`；开启后会在 wrap 配置中注入
+`enable_layer_tag=True`。
+
 ## 导出 HMONNX
 
 ```bash
@@ -53,6 +63,20 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_x
 
 CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py \
   --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_spec_mtp_xh2a_2k.py \
+  --force
+```
+
+导出 **Qwen3.5-122B-A10B** 时必须先开启超大模型分层导出：
+
+```bash
+export HUGE_MODEL_EXPORT_ENABLED=1
+# 可选真值：1 / true / yes / on
+
+# 可选：并行导出 placeholder 子图（默认 1）。多卡时可按可见 GPU 数设置。
+export XH2MODELZOO_EXPORT_WORKERS=4
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_export_hmonnx.py \
+  --config configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_moe_122b_a10b_instruct_xh2a_2k.py \
   --force
 ```
 

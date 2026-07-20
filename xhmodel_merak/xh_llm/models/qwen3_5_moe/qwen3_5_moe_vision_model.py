@@ -71,6 +71,7 @@ class XHQwen3_5MoeVisionModel(XHQwen3_5VisionModel):  # noqa: N801
     transformers_min_version = "5.2.0"
     HF_MODEL_CLS = XHQwen3_5MoeForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
+    VISUAL_HF_MODEL_CLS = HFQwen3_5MoeVisionModel
     # HMONNXINFERENCE_CLS = Qwen3HMONNXModel
     BUILD_HF_COMPATIBLE_FUNC = build_qwen3_5_moe_visual_hf_compatible_model
 
@@ -87,7 +88,10 @@ class XHQwen3_5MoeVisionModel(XHQwen3_5VisionModel):  # noqa: N801
         from ._vision_model_impl import register_wrap_cls as vision_register_wrap_cls
 
         vision_register_wrap_cls(hf_model)
-        visual = hf_model.model.visual
+        if isinstance(hf_model, self.VISUAL_HF_MODEL_CLS):
+            visual = hf_model
+        else:
+            visual = hf_model.model.visual
         # self.config = visual.config
         wraped_model = super(BaseVisionModel, self).init_wrap_model(visual)
         return wraped_model

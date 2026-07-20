@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.fx import Proxy
 
 from xhquant.core import CacheTensor
+from xhquant.ops.xh.xh_pragram_op import xh_pragma_fx
 
 
 def _vp_matmul_8x8(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -242,7 +243,27 @@ def torch_chunk_gated_delta_rule(
     # chunk decay - use matmul instead of cumsum for better hardware compatibility
     # cumsum via upper triangular matrix multiplication: g @ cumsum_matrix
     if cumsum_matmul is not None and cumsum_matrix is not None:
+        xh_pragma_fx(
+            g,
+            {
+                "type": "quanted",
+                "action": "start",
+                "qconfig": {
+                    "act_schema": {
+                        "bits": 16,
+                        "fp_mode": "sefp",
+                    },
+                },
+            },
+        )
         g = cumsum_matmul(g, cumsum_matrix.to(g.dtype))
+        xh_pragma_fx(
+            g,
+            {
+                "type": "quanted",
+                "action": "end",
+            },
+        )
     else:
         g = g.cumsum(dim=-1)
     decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)) * mask_incl).exp() * mask_incl
@@ -270,10 +291,7 @@ def torch_chunk_gated_delta_rule(
 
     if chunk_scan_op is not None:
         chunk_scan_state_is_cache = bool(getattr(chunk_scan_op, "state_is_cache", False))
-        if (
-            chunk_scan_state_is_cache
-            and not isinstance(last_recurrent_state, (CacheTensor, Proxy))
-        ):
+        if chunk_scan_state_is_cache and not isinstance(last_recurrent_state, (CacheTensor, Proxy)):
             last_recurrent_state = CacheTensor(last_recurrent_state)
         chunk_scan_result = chunk_scan_op(
             query,

@@ -17,10 +17,8 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-
 """
 Qwen3.5-MoE model implementation for xhquant framework.
-
 Combines:
 - Qwen3.5's M-RoPE position encoding (separate T/H/W cos/sin with interleaved masks)
 - Qwen3.5's GatedDeltaNet linear attention (chunk/recurrent, separate projections)
@@ -64,15 +62,12 @@ from ..qwen3_5._hybrid_text_model import HybridTextModelMixin
 
 _regroup_split_conv_cache_inputs = _split_conv_cache_utils._regroup_flat_split_conv_cache
 _flatten_split_conv_cache_outputs = _split_conv_cache_utils._flatten_split_conv_cache_outputs
-
 ensure_hybrid_fused_rms_norm_registered()
 
 
 # ============================================================================
 # RMSNorm wrappers
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeRMSNorm: "Qwen3_5MoeRMSNorm"})
 class _Qwen3_5MoeRMSNorm(HybridRMSNormMixin, DynamicModule):  # noqa: N801
     """Registered adapter for the shared hybrid RMSNorm implementation."""
@@ -93,12 +88,9 @@ class _Qwen3_5MoeRMSNormGated(HybridRMSNormGatedMixin, DynamicModule):  # noqa: 
 # ============================================================================
 # Rotary Embedding
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeTextRotaryEmbedding: "Qwen3_5MoeTextRotaryEmbedding"})
 class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
     """Pre-compute cos/sin cache for M-RoPE.
-
     Unlike the HF model which applies interleaved mrope at forward time,
     here we pre-compute per-position cos/sin (without interleaving).
     The interleaving is handled by T/H/W masks in ``_Qwen3_5MoeTextModel``.
@@ -119,41 +111,34 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
         else:
             max_pe_length = 4096
         self._setup_cos_sin_cache(seq_len=max_pe_length)
-
         # ---- M-RoPE interleaved masks ----
         partial_rotary_factor = getattr(self.config, "partial_rotary_factor", 0.25)
         head_dim = self.config.head_dim
         rotary_dim = int(head_dim * partial_rotary_factor)
         half_dim = rotary_dim // 2
-
         rope_parameters = self.config.rope_parameters
         if isinstance(rope_parameters, dict):
             mrope_section = rope_parameters.get("mrope_section", [11, 11, 10])
         else:
             mrope_section = getattr(rope_parameters, "mrope_section", [11, 11, 10])
-
         h_ids = torch.arange(1, mrope_section[1] * 3, 3)
         w_ids = torch.arange(2, mrope_section[2] * 3, 3)
-
         time_mask = torch.ones(half_dim)
         time_mask[h_ids] = 0
         time_mask[w_ids] = 0
         time_mask = torch.cat([time_mask, time_mask], 0)
         time_mask.unsqueeze_(0).unsqueeze_(0)
         self.register_buffer("time_mask", time_mask.half(), persistent=False)
-
         hight_mask = torch.zeros(half_dim)
         hight_mask[h_ids] = 1
         hight_mask = torch.cat([hight_mask, hight_mask], 0)
         hight_mask.unsqueeze_(0).unsqueeze_(0)
         self.register_buffer("hight_mask", hight_mask.half(), persistent=False)
-
         width_mask = torch.zeros(half_dim)
         width_mask[w_ids] = 1
         width_mask = torch.cat([width_mask, width_mask], 0)
         width_mask.unsqueeze_(0).unsqueeze_(0)
         self.register_buffer("width_mask", width_mask.half(), persistent=False)
-
         if hasattr(self, "setup_after_callback"):
             self.setup_after_callback()
 
@@ -164,14 +149,12 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
 
     def _compute_cos_sin(self, max_seq_len=2048):
         """Compute cos/sin embeddings per position without interleaving.
-
         Returns:
             cos: (1, max_seq_len, 1, rotary_dim)
             sin: (1, max_seq_len, 1, rotary_dim)
         """
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(1, max_seq_len, -1, 1)
         positions = torch.arange(max_seq_len, device=self.inv_freq.device).float()[None, :, None, None]
-
         device_type = (
             self.inv_freq.device.type
             if isinstance(self.inv_freq.device.type, str) and self.inv_freq.device.type != "mps"
@@ -183,23 +166,19 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
-
         return cos.to(dtype=self.inv_freq.dtype), sin.to(dtype=self.inv_freq.dtype)
 
     def forward(self, time_position_ids: Tensor, hight_position_ids: Tensor, width_position_ids: Tensor):
         cos = self.cos_cached
         sin = self.sin_cached
-
         time_cos = cos[time_position_ids] * self.time_mask
         time_sin = sin[time_position_ids] * self.time_mask
         hight_cos = cos[hight_position_ids] * self.hight_mask
         hight_sin = sin[hight_position_ids] * self.hight_mask
         width_cos = cos[width_position_ids] * self.width_mask
         width_sin = sin[width_position_ids] * self.width_mask
-
         combined_cos = time_cos + hight_cos + width_cos
         combined_sin = time_sin + hight_sin + width_sin
-
         rotary_dim = combined_cos.shape[-1]
         combined_cos = combined_cos.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
         combined_sin = combined_sin.reshape(-1, rotary_dim).unsqueeze(0).unsqueeze(0)
@@ -209,20 +188,34 @@ class _Qwen3_5MoeTextRotaryEmbedding(DynamicModule):  # noqa: N801
 # ============================================================================
 # Full Attention (with gating + partial rotary)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeAttention: "Qwen3_5MoeAttention"})
 class _Qwen3_5MoeAttention(HybridGatedAttentionMixin, DynamicModule):  # noqa: N801
     """Registered adapter for the shared hybrid gated-attention path."""
 
-    pass
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_seq_length: Optional[Tensor] = None,
+        current_input_length: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        past_k_cache: Optional[Tensor] = None,
+        past_v_cache: Optional[Tensor] = None,
+    ) -> torch.Tensor:
+        return super().forward(
+            hidden_states=hidden_states,
+            past_seq_length=past_seq_length,
+            current_input_length=current_input_length,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            past_k_cache=past_k_cache,
+            past_v_cache=past_v_cache,
+        )
 
 
 # ============================================================================
 # GatedDeltaNet (linear attention)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeGatedDeltaNet: "Qwen3_5MoeGatedDeltaNet"})
 class _Qwen3_5MoeGatedDeltaNet(HybridGatedDeltaNetMixin, DynamicModule):  # noqa: N801
     """Registered Qwen3.5-MoE adapter for the shared hybrid GDN path."""
@@ -233,8 +226,6 @@ class _Qwen3_5MoeGatedDeltaNet(HybridGatedDeltaNetMixin, DynamicModule):  # noqa
 # ============================================================================
 # SparseMoeBlock (packed Experts + shared expert)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeSparseMoeBlock: "Qwen3_5MoeSparseMoeBlock"})
 class _Qwen3_5MoeSparseMoeBlock(HybridSparseMoeMixin, DynamicModule):  # noqa: N801
     """Registered adapter for the shared sparse-MoE implementation."""
@@ -245,8 +236,6 @@ class _Qwen3_5MoeSparseMoeBlock(HybridSparseMoeMixin, DynamicModule):  # noqa: N
 # ============================================================================
 # Decoder Layer
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeDecoderLayer: "Qwen3_5MoeDecoderLayer"})
 class _Qwen3_5MoeDecoderLayer(HybridDecoderLayerMixin, DynamicModule):  # noqa: N801
     """Registered adapter for the shared hybrid decoder implementation."""
@@ -257,8 +246,6 @@ class _Qwen3_5MoeDecoderLayer(HybridDecoderLayerMixin, DynamicModule):  # noqa: 
 # ============================================================================
 # TextModel (with M-RoPE masks)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeTextModel: "Qwen3_5MoeTextModel"})
 class _Qwen3_5MoeTextModel(HybridTextModelMixin, DynamicModule):  # noqa: N801
     """Qwen3.5-MoE M-RoPE adapter for the shared text/cache loop."""
@@ -269,12 +256,9 @@ class _Qwen3_5MoeTextModel(HybridTextModelMixin, DynamicModule):  # noqa: N801
 # ============================================================================
 # ForCausalLM (top-level wrapper)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeForCausalLM: "Qwen3_5MoeForCausalLM"})
 class _Qwen3_5MoeForCausalLM(DynamicModule):  # noqa: N801
     """Top-level wrapper for Qwen3.5-MoE CausalLM.
-
     Qwen3_5MoeForCausalLM.model is Qwen3_5MoeTextModel directly.
     """
 
@@ -335,8 +319,6 @@ class _Qwen3_5MoeForCausalLM(DynamicModule):  # noqa: N801
 # ============================================================================
 # ForConditionalGeneration (VL wrapper)
 # ============================================================================
-
-
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeForConditionalGeneration: "Qwen3_5MoeForConditionalGeneration"})
 class _Qwen3_5MoeForConditionalGeneration(DynamicModule):  # noqa: N801
     """Top-level wrapper for Qwen3.5-MoE VL (ConditionalGeneration)."""

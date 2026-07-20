@@ -163,6 +163,18 @@ HF/GPTQModel 目录，不要在 workflow 里新增 `existing_hf` algorithm；使
 模型结构和量化参数放在 YAML；FlashAttention/GDR 默认值也放在 YAML，
 必要时可用 workflow CLI 做本次运行的显式开关覆盖。
 
+#### Layer Tag
+
+如果需要在每个 layer 结束处插入 Tag，便于 PP 并行分配 GPU 或按 layer 切分 HMONNX，
+可以在运行 workflow 前设置：
+
+```bash
+export LAYER_TAG_ENABLE=1
+```
+
+环境变量支持的真值为 `1`、`true`、`yes`、`on`；开启后会在 wrap 配置中注入
+`enable_layer_tag=True`，无需修改模型配置。
+
 真实量化后导出：
 
 ```bash
@@ -267,7 +279,12 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --quick-test \
   --overwrite
 
-CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+# 122B 导出必须启用 HUGE_MODEL_EXPORT_ENABLED，走 placeholder 分层导出以降峰值内存。
+export HUGE_MODEL_EXPORT_ENABLED=1
+# 可选：并行导出 placeholder 子图（默认 1）。多卡时可按可见 GPU 数设置。
+export XH2MODELZOO_EXPORT_WORKERS=4
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --model-dir weights/Qwen3.5-122B-A10B \
   --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full.yaml \
   --quant-output-dir work_dirs/qwen3_5_122B_quant \
@@ -275,7 +292,7 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --quick-test \
   --overwrite
 
-CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --model-dir weights/Qwen3.5-122B-A10B \
   --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full_gptq.yaml \
   --quant-output-dir work_dirs/qwen3_5_122B_gptq_quant \

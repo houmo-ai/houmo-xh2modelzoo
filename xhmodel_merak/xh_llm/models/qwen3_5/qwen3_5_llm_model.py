@@ -20,11 +20,11 @@
 # File: qwen3_5_llm_model.py
 # Description:
 #   Qwen3.5 LLM model adapted for the xh2 model zoo (xh2modelzoo).
-
 import copy
 import gc
 import json
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional, Union, cast
 
@@ -35,6 +35,7 @@ from transformers import AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5CausalLMOutputWithPast
 
+from xhmodel_merak.utils import calculate_file_md5
 from xhmodel_merak.xh_llm.base_model import get_model_param_buffer_size_gb
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_processor import XHQwen3_5Processor
@@ -55,7 +56,7 @@ from ...types import (
     ModelSwitcher,
     VLLMModelMeta,
 )
-from ...utils import get_cpu_memory_mb
+from ...utils import get_cpu_memory_mb, is_huge_model_export_enabled
 from ...vision_llm_model import VisionLLMModel
 from ._gdr_ops import GDRChunkScan
 from .data_preprocess import Qwen3_5_DataPreprocess
@@ -81,6 +82,8 @@ try:
     from transformers.modeling_utils import no_init_weights
 except ImportError:
     no_init_weights = init_empty_weights
+
+from ._llm_model_impl import register_wrap_modules
 
 
 class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
@@ -221,47 +224,124 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_embeds = image_embeds.squeeze(0)
 
-        # seq_length = inputs_embeds.shape[1]
+        seq_length = inputs_embeds.shape[1]
         data_processor = self._llm_model.get_data_preprocessor()
-        # net_input_seq_len = self._llm_model.get_input_sequence_length()
-        # steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
+        net_input_seq_len = self._llm_model.get_input_sequence_length()
 
-        data_batch = {
-            "input_ids": input_ids,
-            "image_embeds": image_embeds,
-            "past_seq_length": self._past_seq_length,
-            "image_grid_thw": image_grid_thw,
-            "video_grid_thw": video_grid_thw,
-        }
-        data_input = data_processor(data_batch)
-        (
-            inputs_embeds,
-            time_position_ids,
-            height_position_ids,
-            width_position_ids,
-            past_seq_length,
-            current_seq_length,
-            linear_mask,
-            past_key_values,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
-        ) = data_input
+        if seq_length <= net_input_seq_len:
+            data_batch = {
+                "input_ids": input_ids,
+                "inputs_embeds": inputs_embeds if input_ids is None else None,
+                "image_embeds": image_embeds,
+                "past_seq_length": self._past_seq_length,
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+            }
+            data_input = data_processor(data_batch)
+            (
+                inputs_embeds,
+                time_position_ids,
+                height_position_ids,
+                width_position_ids,
+                past_seq_length,
+                current_seq_length,
+                linear_mask,
+                past_key_values,
+                past_value_caches,
+                past_conv_caches,
+                past_recurrent_states,
+            ) = data_input
 
-        result = self._llm_model.forward(
-            inputs_embeds,
-            time_position_ids,
-            height_position_ids,
-            width_position_ids,
-            past_seq_length,
-            current_seq_length,
-            linear_mask,
-            past_key_values,
-            past_value_caches,
-            past_conv_caches,
-            past_recurrent_states,
-        )
-        logits = result[0]
+            result = self._llm_model.forward(
+                inputs_embeds,
+                time_position_ids,
+                height_position_ids,
+                width_position_ids,
+                past_seq_length,
+                current_seq_length,
+                linear_mask,
+                past_key_values,
+                past_value_caches,
+                past_conv_caches,
+                past_recurrent_states,
+            )
+            logits = result[0]
+        else:
+            device = inputs_embeds.device
+
+            if image_embeds is not None and input_ids is not None:
+                image_token_id = data_processor.image_token_id
+                n_image_tokens = int((input_ids == image_token_id).sum().item())
+                if n_image_tokens > 0:
+                    n_image_features = int(image_embeds.shape[0])
+                    if n_image_features != n_image_tokens:
+                        raise ValueError(
+                            "Image features and image tokens do not match: "
+                            f"tokens={n_image_tokens}, features={n_image_features}"
+                        )
+                    image_mask = (input_ids == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                    image_embeds_merged = image_embeds.to(device=device, dtype=inputs_embeds.dtype)
+                    inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds_merged)
+
+            position_ids, rope_deltas = data_processor.get_rope_index(
+                input_ids, inputs_embeds, image_grid_thw, video_grid_thw, attention_mask
+            )
+            data_processor.rope_deltas = rope_deltas
+
+            steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
+            pad_len = steps * net_input_seq_len - seq_length
+            if pad_len > 0:
+                padding_embeds = self.get_input_embeddings()(torch.zeros((1, pad_len), dtype=torch.long, device=device))
+                inputs_embeds = torch.cat([inputs_embeds, padding_embeds], dim=1)
+                last_pos = position_ids[:, :, -1:].expand(-1, -1, pad_len)
+                position_ids = torch.cat([position_ids, last_pos], dim=2)
+
+            past_key_caches = data_processor.past_key_caches
+            past_value_caches = data_processor.past_value_caches
+            past_conv_caches = data_processor.past_conv_caches
+            past_recurrent_states = data_processor.past_recurrent_states
+            running_past_seq = self._past_seq_length
+            outputs_logits = []
+
+            for step_index in range(steps):
+                start = step_index * net_input_seq_len
+                end = (step_index + 1) * net_input_seq_len
+                sub_current_len = min(end, seq_length) - start
+                sub_embeds = inputs_embeds[:, start:end, :]
+                sub_time_pos = position_ids[0, 0, start:end].to(torch.int64)
+                sub_height_pos = position_ids[1, 0, start:end].to(torch.int64)
+                sub_width_pos = position_ids[2, 0, start:end].to(torch.int64)
+                linear_mask = (
+                    torch.cat(
+                        [
+                            torch.ones(sub_current_len, device=device),
+                            torch.zeros(net_input_seq_len - sub_current_len, device=device),
+                        ]
+                    )
+                    .unsqueeze(0)
+                    .to(dtype=torch.float16)
+                )
+
+                chunk_result = self._llm_model.forward(
+                    sub_embeds,
+                    sub_time_pos,
+                    sub_height_pos,
+                    sub_width_pos,
+                    torch.tensor([running_past_seq], dtype=torch.int32, device=device),
+                    torch.tensor([sub_current_len], dtype=torch.int32, device=device),
+                    linear_mask,
+                    past_key_caches,
+                    past_value_caches,
+                    past_conv_caches,
+                    past_recurrent_states,
+                )
+                outputs_logits.append(chunk_result[0])
+                running_past_seq += sub_current_len
+
+            if self._llm_model.get_num_logits_to_keep() == 0:
+                logits = torch.cat(outputs_logits, dim=1)[:, :seq_length, :]
+            else:
+                logits = outputs_logits[-1]
 
         return Qwen3_5CausalLMOutputWithPast(
             logits=logits,
@@ -473,7 +553,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
     @classmethod
     def get_empty_hf_model(cls, hf_model_dir, **kwargs) -> Any:
-        native_hf_model = super().get_empty_hf_model(hf_model_dir)
+        native_hf_model = super().get_empty_hf_model(hf_model_dir, **kwargs)
         native_hf_model = qwen3_5_patch(native_hf_model)
         return native_hf_model
 
@@ -527,7 +607,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         if cumsum_quant_cfg is None:
             cumsum_quant_cfg = dict(
                 act_schema=dict(fp_mode="sefp", man_bit=16),
-                act_schema_2=dict(fp_mode="fp16", man_bit=8),
+                act_schema_2=dict(fp_mode="sefp", man_bit=8),
             )
         quant_cfg.setdefault("nodes_cfg", ConfigDict())
         wrap_model = self._wrap_model or self.get_inference_model()
@@ -738,8 +818,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         hf_model = None
 
     def init_wrap_model(self, hf_model: XHQwen3_5ForConditionalGeneration) -> Any:
-        from ._llm_model_impl import register_wrap_modules
-
         register_wrap_modules()
         wrap_model = super().init_wrap_model(hf_model)
         return wrap_model
@@ -897,12 +975,12 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         if model_name is None or len(model_name) == 0:
             raise ValueError("Model name is not specified in config, please set model_name in config before exporting.")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        assert hasattr(self, "visual") and self.visual is not None, (
-            "Visual model is not initialized, cannot get visual config for export."
-        )
-        image_size_h = self.visual.config.max_size_h
-        image_size_w = self.visual.config.max_size_w
-        model_name = f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"
+        if getattr(self, "visual", None) is not None:
+            image_size_h = self.visual.config.max_size_h
+            image_size_w = self.visual.config.max_size_w
+            model_name = f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"
+        else:
+            model_name = f"hmquant_{model_name}_{str_datetime}"
         output_dir = Path(output_dir) / model_name
         output_dir.mkdir(parents=True, exist_ok=True)
         meta_info = self.create_export_metadata(output_dir)
@@ -988,8 +1066,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         for adapter in adapters:
             logger.info(
-                f"Start exporting Qwen3.5 LoRA adapter {adapter.name!r} "
-                f"({len(adapter.pairs)} target Linear modules)"
+                f"Start exporting Qwen3.5 LoRA adapter {adapter.name!r} ({len(adapter.pairs)} target Linear modules)"
             )
             adapter_wrap_model = _copy_model_shared_params(wrap_template)
             self._quantize_wrap_variant(adapter_wrap_model, adapter)
@@ -1013,61 +1090,232 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         return exported_adapters
 
-    @log_function_call()
-    def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
-        logger = get_xhquant_logger()
-        self.work_dir = str(output_dir)
+    def _export_visual_hmonnx_impl(self, exported_info: ExportData) -> None:
+        """导出视觉子模型并将相对路径写入统一的 VLLM 元数据。"""
+        if getattr(self, "visual", None) is None:
+            return
 
-        # Inspect every adapter before loading/tracing the base model.  This
-        # rejects unsupported PEFT features and visual/VIT tensors before any
-        # partial LoRA artifacts are created.
-        lora_adapters = inspect_lora_adapters(getattr(self.config, "lora", None))
-
-        self.to_wrap()
-
-        exported_info = self.get_export_info(output_dir)
-        meta_info = exported_info.meta
-        meta_info = cast(VLLMModelMeta, meta_info)
-        assert isinstance(meta_info, VLLMModelMeta), f"meta_info expected VLLMModelMeta, but get {type(meta_info)}"
-
+        meta_info = cast(VLLMModelMeta, exported_info.meta)
         visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
-        # 导出visual
-        assert hasattr(self, "visual") and self.visual is not None, (
-            "Visual model is not initialized, cannot export hmonnx."
-        )
+        logger = get_xhquant_logger()
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage before exporting visual hmonnx: {str(memory_info)}")
         logger.info(f"Start exporting visual hmonnx to {visual_output_dir}")
-        self.visual.config.model_name = (
-            f"{exported_info.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
-        )
+
+        self.visual.config.model_name = f"{exported_info.model_name}_visual"
         self.visual.to_quanted_aligned()
         visual_meta = self.visual.export_hmonnx(visual_output_dir)
         visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
         meta_info.visual_config = visual_meta
         json.dump(
-            meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4
+            meta_info.to_dict(),
+            open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"),
+            indent=4,
         )
-
-        del self.visual
-        gc.collect()
 
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage after exporting visual hmonnx: {str(memory_info)}")
 
+    def _get_big_language_placeholder_export_components(self):
+        from ._qwen3_5_big_export import Qwen3_5BigHFModel
+
+        return Qwen3_5BigHFModel, Qwen3_5BigHFModel.PLACEHOLDER_TYPES
+
+    def _check_big_language_placeholder_export_supported(self, empty_hf_model: Any) -> None:
+        hf_model_type = str(getattr(empty_hf_model.config, "model_type", "")).lower()
+        if "moe" in hf_model_type or "moe" in type(empty_hf_model).__name__.lower():
+            raise NotImplementedError(
+                "Qwen3.5 MoE big-model placeholder export must use the MoE-specific placeholder components."
+            )
+
+        language_model = self._get_language_model(empty_hf_model)
+        if not hasattr(language_model, "modules"):
+            raise NotImplementedError("Qwen3.5 big-model placeholder export requires an nn.Module language model.")
+
+        found_types = {type(module).__name__ for module in language_model.modules()}
+
+        _, placeholder_types = self._get_big_language_placeholder_export_components()
+        missing_types = sorted(set(placeholder_types) - found_types)
+        if missing_types:
+            raise NotImplementedError(
+                "Qwen3.5 big-model placeholder export requires placeholder modules "
+                f"{placeholder_types}, but missing {missing_types}."
+            )
+
+    def _export_big_language_hmonnx(self, exported_info: ExportData) -> VLLMModelMeta:
+        """使用 placeholder 分层导出 Qwen3.5 文本模型，降低峰值内存占用。
+
+        主图仅保留 attention、GatedDeltaNet、MLP/MoE 等大模块的输入输出契约；
+        每个 placeholder 模块随后按需从 safetensors 加载权重，并分别导出 prefill
+        和 decode 子图。最后将主图中的 placeholder 节点替换为对应子图。
+
+        Args:
+            output_dir: 导出产物的根目录。
+
+        Returns:
+            包含 prefill/decode HMONNX 路径及模型配置的导出元数据。
+
+        Note:
+            该流程会推进当前模型的 wrap、frontend、quant 和 export 状态，并移除
+            ``self.visual``；视觉模型不在此文本大模型分层导出流程中处理。
+        """
+        from ...wrap_model import traceable_module_placeholder_context
+
+        logger = get_xhquant_logger()
+        big_hf_model_cls, placeholder_types = self._get_big_language_placeholder_export_components()
+        # 主图模型保持 placeholder 子树为 meta tensor，仅加载 embedding、norm、
+        # lm_head 等非 placeholder 权重，避免一次性物化完整语言模型。
+        empty_hf_model = self.get_empty_hf_model(self.hf_model_dir)
+        empty_hf_model.model.visual = None
+        self._check_big_language_placeholder_export_supported(empty_hf_model)
+        main_placeholder_prefixes = big_hf_model_cls.resolve_placeholder_prefixes(
+            empty_hf_model,
+            placeholder_types,
+        )
+
+        # 子图模型专用于逐模块加载真实权重。必须与主图模型分离，避免子图导出时的
+        # 反量化、wrap 和释放操作污染仍在构建中的主图模型。
+        empty_hf_model_for_placeholder = copy.deepcopy(empty_hf_model)
+        # 将nn.Linear替换成量化版本的Linear
+        big_hf_model_cls._preprocess_quantized_hf_model(
+            empty_hf_model_for_placeholder,
+            self.hf_model_dir,
+        )
+        big_hf_model_cls._preprocess_quantized_hf_model(
+            empty_hf_model,
+            self.hf_model_dir,
+            skip_module_prefixes=main_placeholder_prefixes,
+        )
+
+        big_hf_model = big_hf_model_cls(self.hf_model_dir, empty_hf_model, placeholder_types)
+        big_hf_model.replace_runtime_placeholder_modules(empty_hf_model)
+
+        # 首次注册原生 HF 模块类型，使 TorchFX 在 wrap 阶段将其视为叶子节点，
+        # 防止 tracing 提前展开大模块内部计算。
+        big_hf_model.register_layer_as_placeholder(empty_hf_model)
+        placeholder_callback = partial(big_hf_model_cls.register_placeholder, hf_model=empty_hf_model)
+        with traceable_module_placeholder_context(placeholder_types, callback=placeholder_callback):
+            self.to_wrap(empty_hf_model)
+
+        # wrap 会把原生模块转换为 DynamicModule/XH 模块，因此需要再次解析并注册
+        # 转换后的实际类型，确保 frontend tracing 仍保留相同的模块边界。
+        big_hf_model.strip_unwrapped_placeholder_members(empty_hf_model)
+        big_hf_model.register_layer_as_placeholder(empty_hf_model)
+        self.to_fronted()
+
+        # 先创建统一导出目录和元数据；placeholder 子图分别存放在 prefill/decode
+        # 主图目录下，文件名由完整 module target 唯一确定。
+
+        exported_dir = exported_info.exported_dir
+        # 视觉模型与文本 PlaceHolder 主/子图相互独立，优先导出并释放视觉权重，
+        # 后续大模型文本分层导出即可保持较低的峰值内存。
+
+        target_device = self.config.chip_arch
+        quant_cfg = self.get_quant_cfg()
+        prefill_placeholder_exported_dir = str(Path(exported_dir) / "prefill" / "placeholders")
+
+        # prefill 与 decode 的输入 shape、线性注意力模式和缓存契约不同，需在各自
+        # 模式下保存 wrap 配置，并将两张前端图中的目标模块替换为 PlaceHolderModule。
+        self.set_prefill()
+        prefill_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
+        big_hf_model.register_layer_as_place_holder(self._frontend_model.prefill)
+        self.set_decode()
+        decode_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
+        big_hf_model.register_layer_as_place_holder(self._frontend_model.decode)
+        decode_placeholder_exported_dir = str(Path(exported_dir) / "decode" / "placeholders")
+
+        # 同一 module target 的真实权重只加载一次，再分别按 prefill/decode 配置导出；
+        # 每个模块完成后立即释放，控制 CPU/GPU 峰值内存。外层 MemoryTracker 会递归
+        # 采样这里创建的所有 placeholder 导出子进程。
+        big_hf_model.export_prefill_decode_placeholder_layers(
+            self._frontend_model.prefill,
+            self._frontend_model.decode,
+            empty_hf_model_for_placeholder,
+            target_device,
+            prefill_wrap_cfg,
+            decode_wrap_cfg,
+            quant_cfg,
+            prefill_placeholder_exported_dir,
+            decode_placeholder_exported_dir,
+            empty_hf_model_factory=type(self).get_empty_hf_model,
+        )
+
+        # 导出包含 PlaceHolder 节点的整体 prefill/decode 主图。主图量化阶段不会再次
+        # 展开已经独立导出的模块，因此无需同时持有所有层的真实权重。
+        self.set_prefill()
+        self._export_language_hmonnx_impl(exported_info)
+        export_meta = cast(VLLMModelMeta, exported_info.meta)
+        exported_dir = exported_info.exported_dir
+
+        # 根据 PlaceHolder 节点的 content（完整 module target）定位对应子图，并回填
+        # prefill/decode 主图，形成不再依赖 placeholder 自定义算子的最终 HMONNX。
+        prefill_hmonnx_file = str(Path(exported_dir) / export_meta.prefill_hmonnx)
+        decode_hmonnx_file = str(Path(exported_dir) / export_meta.decode_hmonnx)
+        big_hf_model.replace_hmonnx_placeholders_with_subgraphs(prefill_hmonnx_file)
+        big_hf_model.replace_hmonnx_placeholders_with_subgraphs(decode_hmonnx_file)
+        export_meta.prefill_hmonnx_md5 = calculate_file_md5(prefill_hmonnx_file)
+        export_meta.decode_hmonnx_md5 = calculate_file_md5(decode_hmonnx_file)
+        json.dump(
+            export_meta.to_dict(),
+            open(str(Path(exported_dir) / "golden_meta_info.json"), "w"),
+            indent=4,
+        )
+        logger.info(f"Exporting completed! Exported model is saved at: {exported_info.exported_dir}")
+        return export_meta
+
+    @log_function_call()
+    def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
+        self.work_dir = str(output_dir)
+
+        # Inspect every adapter before loading/tracing the base model. This
+        # rejects unsupported PEFT features and visual/VIT tensors before any
+        # partial LoRA artifacts are created.
+        lora_adapters = inspect_lora_adapters(getattr(self.config, "lora", None))
+
+        exported_info = self.get_export_info(output_dir)
+        self._export_visual_hmonnx_impl(exported_info)
+        if getattr(self, "visual", None) is not None:
+            del self.visual
+            self._trim_cpu_allocator()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            memory_info = get_cpu_memory_mb()
+            get_xhquant_logger().info(f"CPU memory usage after releasing visual model: {str(memory_info)}")
+
+        if is_huge_model_export_enabled():
+            if lora_adapters:
+                raise NotImplementedError("Qwen3.5 LoRA export is not supported with big-model placeholder export.")
+            meta_info = self._export_big_language_hmonnx(exported_info)
+        else:
+            self.to_wrap()
+            meta_info = self._export_language_hmonnx_impl(exported_info, lora_adapters=lora_adapters)
+        return meta_info
+
+    def _export_language_hmonnx_impl(
+        self,
+        exported_info: ExportData,
+        lora_adapters: Optional[list[LoRAAdapterSpec]] = None,
+    ) -> VLLMModelMeta:
+        logger = get_xhquant_logger()
+        lora_adapters = lora_adapters or []
+        meta_info = exported_info.meta
+        meta_info = cast(VLLMModelMeta, meta_info)
+        assert isinstance(meta_info, VLLMModelMeta), f"meta_info expected VLLMModelMeta, but get {type(meta_info)}"
+
         wrap_template = None
         if lora_adapters:
-            # Keep one structural template with shared base tensors.  Base and
+            if self._wrap_model is None:
+                raise RuntimeError("Qwen3.5 LoRA export requires a wrapped base model template.")
+            # Keep one structural template with shared base tensors. Base and
             # adapter frontends are traced from independent structural clones,
             # so applying one adapter cannot mutate another graph.
             wrap_template = self._wrap_model
             base_wrap_model = _copy_model_shared_params(wrap_template)
             self._quantize_wrap_variant(base_wrap_model)
-        else:
-            if self._state != LLMModelState.QUANTED_ALIGNED:
-                self.to_quanted_aligned()
-            self._quanted_model.prefill.fixed()
-            self._quanted_model.decode.fixed()
+        elif self._state != LLMModelState.QUANTED_ALIGNED:
+            self.to_quanted_aligned()
+        self._quanted_model.prefill.fixed()
+        self._quanted_model.decode.fixed()
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage after quantization: {str(memory_info)}")
 
@@ -1219,5 +1467,5 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         json.dump(
             meta_info.to_dict(), open(str(Path(exported_info.exported_dir) / "golden_meta_info.json"), "w"), indent=4
         )
-        logger.info(f"Exporting completed! Exported model is saved at: {output_dir}")
+        logger.info(f"Exporting completed! Exported model is saved at: {exported_info.exported_dir}")
         return meta_info

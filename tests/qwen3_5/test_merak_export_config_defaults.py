@@ -264,6 +264,37 @@ def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
     assert _flatten_split_conv_cache_outputs is flatten_canonical
 
 
+def test_qwen3_5_decoder_layer_exposes_split_conv_cache_outputs_flat():
+    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
+
+    class FakeLinearAttn(nn.Module):
+        split_conv_cache = True
+        _flat_split_conv_cache_outputs = True
+        _verify_output_intermediates = False
+        input_sequence_length = 1
+
+        def forward(self, **kwargs):
+            hidden_states = kwargs["hidden_states"]
+            return hidden_states, "q_cache", "k_cache", "v_cache", "recurrent_state"
+
+    layer = _llm_model_impl._Qwen3_5DecoderLayer.__new__(_llm_model_impl._Qwen3_5DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.layer_type = "linear_attention"
+    layer.input_layernorm = nn.Identity()
+    layer.linear_attn = FakeLinearAttn()
+    layer.post_attention_layernorm = nn.Identity()
+    layer.mlp = nn.Identity()
+
+    output = layer(torch.ones(1, 1, 1), linear_attn_mask=torch.ones(1, 1))
+
+    assert len(output) == 5
+    assert output[1:] == ("q_cache", "k_cache", "v_cache", "recurrent_state")
+    assert _llm_model_impl._unpack_linear_decoder_layer_outputs(output, layer, True)[1:] == (
+        ("q_cache", "k_cache", "v_cache"),
+        "recurrent_state",
+    )
+
+
 def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv_requirement():
     from xhmodel_merak.xh_llm.models.qwen3_5.split_conv_cache_utils import (
         _flatten_merged_conv_cache_outputs,
@@ -454,6 +485,48 @@ def test_qwen3_5_moe_text_model_regroups_flat_split_conv_cache_before_layer_inde
 
     assert "_regroup_flat_split_conv_cache" in names
     assert "_flatten_split_conv_cache_outputs" in names
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    [
+        "xhmodel_merak.xh_llm.models.qwen3_5._llm_model_impl",
+        "xhmodel_merak.xh_llm.models.qwen3_5_moe._moe_model",
+    ],
+)
+def test_qwen3_5_linear_attention_mask_views_are_shared_before_decoder_layers(module_path):
+    module = importlib.import_module(module_path)
+    mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+
+    sequence_mask, channel_mask, state_mask = module._prepare_linear_attn_mask_views(mask, torch.float16)
+
+    assert sequence_mask.shape == (1, 3, 1)
+    assert channel_mask.shape == (1, 1, 3)
+    assert state_mask.shape == (1, 3, 1, 1)
+    assert sequence_mask.dtype == channel_mask.dtype == state_mask.dtype == torch.float16
+    resolved = module._resolve_linear_attn_mask_views(
+        (sequence_mask, channel_mask, state_mask),
+        torch.float16,
+    )
+    assert all(
+        actual is expected
+        for actual, expected in zip(resolved, (sequence_mask, channel_mask, state_mask), strict=True)
+    )
+
+    text_model_source = inspect.getsource(
+        module._Qwen3_5MoeTextModel.forward
+        if hasattr(module, "_Qwen3_5MoeTextModel")
+        else module._Qwen3_5TextModel.forward
+    )
+    gated_delta_net_source = inspect.getsource(
+        module._Qwen3_5MoeGatedDeltaNet.forward
+        if hasattr(module, "_Qwen3_5MoeGatedDeltaNet")
+        else module._Qwen3_5GatedDeltaNet.forward
+    )
+    assert text_model_source.index("linear_attn_mask_views =") < text_model_source.index("for idx")
+    assert "linear_attn_mask=linear_attn_mask_views" in text_model_source
+    assert "_resolve_linear_attn_mask_views" in gated_delta_net_source
+    assert "linear_attn_mask.unsqueeze" not in gated_delta_net_source
 
 
 def test_qwen3_5_text_models_use_merged_flatten_path_when_split_conv_cache_is_disabled():

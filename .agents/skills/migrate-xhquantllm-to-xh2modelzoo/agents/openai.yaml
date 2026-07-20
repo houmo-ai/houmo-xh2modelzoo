@@ -1,4 +1,0 @@
-interface:
-  display_name: "Migrate xhquant_llm Models"
-  short_description: "Port xhquant_llm families into xh2modelzoo converters"
-  default_prompt: "Migrate this xhquant_llm model family to xh2modelzoo and complete converter registration plus export/hmonnx validation."

@@ -5,12 +5,32 @@
 ## 安装
 
 ```bash
-pip install -e . 
+pip install -e .
 或者 poetry install --only-root
 或者 uv pip install -e . --link-mode=copy
+或者 python -m pip install -e . \
+  --use-pep517 \
+  --no-build-isolation \
+  --config-settings editable_mode=compat
 ```
 
 ## ModelZoo
+
+### 超大模型分层导出
+
+Qwen3.5 等超大模型的 placeholder 分层导出不再通过配置项 `is_big_model` 开启，
+请设置环境变量：
+
+```bash
+export HUGE_MODEL_EXPORT_ENABLED=1
+# 可选真值：1 / true / yes / on
+
+# 并行导出 placeholder 子图的 worker 数（默认 1）。多卡时可按可见 GPU 数提高。
+export XH2MODELZOO_EXPORT_WORKERS=1
+```
+
+**Qwen3.5-122B-A10B 导出必须启用 `HUGE_MODEL_EXPORT_ENABLED`**；未设置或取值为假时，走普通导出路径。  
+`XH2MODELZOO_EXPORT_WORKERS` 仅在超大模型 placeholder 导出路径生效；OOM 时可减小该值或减少可见 GPU。
 
 ### 1. [设计文档](https://houmo.feishu.cn/wiki/J5Vrw7DCHiJzhekbEJvcwquQnzf)
 

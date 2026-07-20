@@ -150,7 +150,7 @@ class HybridSparseMoeMixin:
         moe_out = self.moeblock(hidden_states, routing_weights)
         shared_out = self.shared_expert(hidden_states)
         shared_out = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_out
-        return moe_out + shared_out, router_logits
+        return moe_out + shared_out
 
     def _setup(self, cfg: Optional[Dict] = None):
         self.input_seq_len = cfg.input_sequence_length

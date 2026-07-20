@@ -39,10 +39,8 @@ class HybridTextModelMixin:
         if self.output_hidden_state_indices is not None:
             self._output_hidden_set = set(self.output_hidden_state_indices)
         self.output_post_norm_hidden = cfg.get("output_post_norm_hidden", False)
-
         input_seq_len = cfg.input_sequence_length
         self.slice = xhnn.Slice([0], [input_seq_len], [1], [1])
-
         self.llm_gather = xhnn.BatchGather(1)
         self.llm_gather.update_offset_indices(self.batch_size, input_seq_len)
 
@@ -60,12 +58,10 @@ class HybridTextModelMixin:
         self.slice._update_cfg = types.MethodType(_slice_update_cfg, self.slice)
         self.use_cache = cfg.use_cache
         self.split_conv_cache = cfg.get("split_conv_cache", True)
-
         # Layer type tracking
         self.layer_types = self.config.layer_types
         self.num_full_attention_layers = sum(1 for t in self.layer_types if t == "full_attention")
         self.num_linear_attention_layers = sum(1 for t in self.layer_types if t == "linear_attention")
-
         # MoE conversion can enter TextModel tracing before child linear-attn
         # modules have independently consumed the full wrap cfg. Make the split
         # cache contract explicit at the TextModel boundary so a flat external
@@ -80,7 +76,6 @@ class HybridTextModelMixin:
                 linear_attn.split_conv_cache = True
                 if hasattr(linear_attn, "_setup") and not hasattr(linear_attn, "conv1d_q"):
                     linear_attn._setup(cfg)
-
         # Mark specific linear_attention layers for alpha scaling
         alpha_scaling_layers = cfg.get("alpha_scaling_layers", [8, 20])
         chunk_inverse_alpha = cfg.get("chunk_inverse_alpha", 0.5)
@@ -88,7 +83,6 @@ class HybridTextModelMixin:
             if self.layer_types[idx_layer] == "linear_attention" and idx_layer in alpha_scaling_layers:
                 gdn = decoder_layer.linear_attn
                 gdn._alpha_scaling_config = {"alpha": chunk_inverse_alpha}
-
         self._setup_position_embeddings(cfg)
         self.enable_layer_tag = cfg.get("enable_layer_tag", False)
         if self.enable_layer_tag:
@@ -141,7 +135,6 @@ class HybridTextModelMixin:
             width_position_ids,
         )
         hidden_states = inputs_embeds
-
         conv_cache_out_list = []
         recurrent_state_out_list = []
         collected_hidden_states = []
@@ -154,10 +147,8 @@ class HybridTextModelMixin:
             split_conv_cache = True
         if split_conv_cache and _is_nested_split_conv_cache(past_conv_cache):
             past_conv_cache = _regroup_flat_split_conv_cache(past_conv_cache)
-
         for idx_layer, decoder_layer in enumerate(self.layers):
             layer_type = self.layer_types[idx_layer]
-
             if self.use_cache:
                 if layer_type == "full_attention":
                     _past_k_cache = past_key_cache[full_attn_cache_idx] if past_key_cache is not None else None
@@ -195,7 +186,6 @@ class HybridTextModelMixin:
                 else:
                     _past_conv_cache = None
                     _past_recurrent_state = None
-
             if layer_type == "linear_attention":
                 hidden_states, conv_cache_out, recurrent_state_out = decoder_layer(
                     hidden_states,
@@ -228,19 +218,16 @@ class HybridTextModelMixin:
                     past_conv_cache=_past_conv_cache,
                     past_recurrent_state=_past_recurrent_state,
                 )
-
             if self.output_hidden_state_indices is not None and idx_layer in self._output_hidden_set:
                 collected_hidden_states.append(hidden_states)
             if self.enable_layer_tag:
                 hidden_states = self.tags[idx_layer](hidden_states)
             if self.max_layers > 0 and idx_layer + 1 >= self.max_layers:
                 break
-
             # if True:
             #     break
             # if idx_layer == 3:
             #     break
-
         if self.num_logits_to_keep == 0:
             pass
         else:
@@ -251,7 +238,6 @@ class HybridTextModelMixin:
                 target_hidden = self.llm_gather(target_hidden, current_input_length - 1)
         hidden_states = self.norm(hidden_states)
         post_norm_out = hidden_states
-
         if split_conv_cache:
             conv_cache_out_list = _flatten_split_conv_cache_outputs(conv_cache_out_list)
         else:

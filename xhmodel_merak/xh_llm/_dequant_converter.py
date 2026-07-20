@@ -152,6 +152,21 @@ def general_qlinear_converter(self: nn.Module):
     self.in_features = self.infeatures
 
 
+def ensure_gptqmodel_unpack_buffers(module: nn.Module) -> None:
+    """Initialize unpack buffers that GPTQModel 5.8 creates lazily."""
+    unpack_buffer_names = ("wf_unsqueeze_zero", "wf_unsqueeze_neg_one")
+    if all(getattr(module, name, None) is not None for name in unpack_buffer_names):
+        return
+
+    init_unpack_buffers = getattr(module, "_init_wf_unsqueeze_buffers", None)
+    if callable(init_unpack_buffers):
+        init_unpack_buffers()
+
+    missing = [name for name in unpack_buffer_names if getattr(module, name, None) is None]
+    if missing:
+        raise RuntimeError(f"{type(module).__name__} failed to initialize GPTQ unpack buffers: " + ", ".join(missing))
+
+
 def gptqmodel_torch_qlinear_converter(self: nn.Module):
     import torch as t  # conflict with torch.py
 
@@ -334,15 +349,53 @@ def autoround_torch_qlinear_converter(self: nn.Module):
     self.to(old_device)
 
 
-def restore_autoround_qwen3_5_moe_sparse_block(module: nn.Module, model_config) -> nn.Module:
-    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
+def restore_autoround_qwen3_5_moe_sparse_block(module: nn.Module) -> nn.Module:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeExperts,
+        Qwen3_5MoeSparseMoeBlock,
+    )
 
-    text_config = model_config.get_text_config() if hasattr(model_config, "get_text_config") else model_config
-    with torch.device("meta"):
-        restored = Qwen3_5MoeSparseMoeBlock(text_config)
+    restored = object.__new__(Qwen3_5MoeSparseMoeBlock)
+    nn.Module.__init__(restored)
 
     restored.gate = module.gate
-    restored.experts = module.experts
+    if isinstance(module.experts, nn.ModuleList):
+        if not module.experts:
+            raise ValueError("LinearQwen3_5MoeSparseMoeBlock must contain at least one expert.")
+        first_expert = module.experts[0]
+        gate_rows = first_expert.gate_proj.weight.shape[0]
+        up_rows = first_expert.up_proj.weight.shape[0]
+        gate_up_proj = first_expert.gate_proj.weight.new_empty(
+            (len(module.experts), gate_rows + up_rows, *first_expert.gate_proj.weight.shape[1:])
+        )
+        down_proj = first_expert.down_proj.weight.new_empty((len(module.experts), *first_expert.down_proj.weight.shape))
+        with torch.no_grad():
+            for expert_idx, expert in enumerate(module.experts):
+                gate_up_proj[expert_idx, :gate_rows].copy_(expert.gate_proj.weight)
+                gate_up_proj[expert_idx, gate_rows:].copy_(expert.up_proj.weight)
+                down_proj[expert_idx].copy_(expert.down_proj.weight)
+        restored_experts = object.__new__(Qwen3_5MoeExperts)
+        nn.Module.__init__(restored_experts)
+        restored_experts.num_experts = len(module.experts)
+        restored_experts.hidden_dim = first_expert.gate_proj.weight.shape[1]
+        restored_experts.intermediate_dim = gate_rows
+        restored_experts.config = first_expert.config
+        restored_experts.act_fn = first_expert.act_fn
+        restored_experts.gate_up_proj = nn.Parameter(
+            gate_up_proj,
+            requires_grad=any(
+                expert.gate_proj.weight.requires_grad or expert.up_proj.weight.requires_grad
+                for expert in module.experts
+            ),
+        )
+        restored_experts.down_proj = nn.Parameter(
+            down_proj,
+            requires_grad=any(expert.down_proj.weight.requires_grad for expert in module.experts),
+        )
+        restored.experts = restored_experts
+    else:
+        restored.experts = module.experts
     restored.shared_expert = module.shared_expert
     restored.shared_expert_gate = module.shared_expert_gate
+    restored.train(module.training)
     return restored

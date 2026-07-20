@@ -14,8 +14,21 @@ source env.sh
 
 - 基础配置：`configs_merak/xh2a/llm_models/qwen3_5_moe/_qwen3_5_moe_xh2a_2k.py`
 - 35B-A3B 配置：`configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py`
+- 122B-A10B 配置：`configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_moe_122b_a10b_instruct_xh2a_2k.py`
 - 视觉分支配置：`configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_visual_xh2a_2k.py`
 - 默认模型目录：`/data01/nfs_shared/Qwen3.5-35B-A3B`
+
+### Layer Tag
+
+如果需要在每个 layer 结束处插入 Tag，便于 PP 并行分配 GPU 或按 layer 切分 HMONNX，
+可以在导出前设置：
+
+```bash
+export LAYER_TAG_ENABLE=1
+```
+
+环境变量支持的真值为 `1`、`true`、`yes`、`on`；开启后会在 wrap 配置中注入
+`enable_layer_tag=True`，无需修改模型配置。
 
 ## 导出 HMONNX
 
@@ -25,8 +38,48 @@ source env.sh
 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py --config configs_merak/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_5_moe_35b_a3b_instruct_xh2a_2k.py
 ```
 
-或者直接指定模型目录：
+导出 **122B-A10B** 时必须启用超大模型分层导出（placeholder 路径），否则峰值内存会过高：
 
+```bash
+export HUGE_MODEL_EXPORT_ENABLED=1
+# 可选真值：1 / true / yes / on
+
+# 可选：并行导出 placeholder 子图（默认 1）。多卡时可按可见 GPU 数设置。
+export XH2MODELZOO_EXPORT_WORKERS=4
+
+python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py \
+  --config configs_merak/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_moe_122b_a10b_instruct_xh2a_2k.py
+```
+
+workflow 方式同样需要该环境变量：
+
+```bash
+export HUGE_MODEL_EXPORT_ENABLED=1
+export XH2MODELZOO_EXPORT_WORKERS=4
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-122B-A10B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full.yaml \
+  --quant-output-dir work_dirs/qwen3_5_122B_quant \
+  --export-output-dir work_dirs/qwen3_5_122B_export \
+  --overwrite
+```
+
+### Placeholder 输出契约
+
+Qwen3.5-MoE 的超大模型分层导出会将以下 Hugging Face 模块作为独立 placeholder 子图展开：
+
+- `Qwen3_5MoeAttention`
+- `Qwen3_5MoeGatedDeltaNet`
+- `Qwen3_5MoeSparseMoeBlock`
+
+这些模块的 `forward` 返回值中不允许包含 `None`，包括 tuple、list 或 mapping 中的嵌套成员。
+主图中的 `PlaceHolderModule` 与独立 HMONNX 子图通过固定数量、固定顺序的 tensor 端口连接，
+而 `None` 无法表示为 HMONNX tensor 输出。适配或升级 Transformers 实现时，必须保证上述模块
+在 prefill 和 decode 路径下均只返回 tensor，或者返回仅由 tensor 组成的扁平容器。
+
+或者直接指定模型目录：
+ 
 ```bash
 python examples_merak/llm/qwen3_5/qwen3_5_xh_export_hmonnx.py --model /data01/nfs_shared/Qwen3.5-35B-A3B --context-length 2048 --prefill-chunk-length 256
 ```

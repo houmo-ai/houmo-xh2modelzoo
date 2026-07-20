@@ -43,6 +43,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
 from xhquant.nn import BfpFlashAttention, LLMCache, MaskedSoftmax, RMSNorm
+from xhquant.ops.xh import torch_ops_xh_pipe_tag
 from xhquant.utils import get_root_logger
 from xhquant.utils.registry import DynamicModule
 
@@ -497,7 +498,7 @@ class _Qwen3Model(_Qwen3ModelBase):
 
             hidden_states = layer_outputs[0]
             if self.enable_layer_tag:
-                hidden_states = self.tags[idx](hidden_states)
+                hidden_states = torch_ops_xh_pipe_tag(hidden_states, f"layer_{idx}", "LLM", f"layer_{idx}")
             if self.max_layers > 0 and idx + 1 >= self.max_layers:
                 break
 
@@ -579,10 +580,7 @@ class _Qwen3Model(_Qwen3ModelBase):
         else:
             self._setup_cos_sin_embeding()
         self.enable_layer_tag = cfg.get("enable_layer_tag", False)
-        if self.enable_layer_tag:
-            self.tags = nn.ModuleList(
-                [xhnn.XHTag(f"layer_{layer_idx}", "LLM", f"layer_{layer_idx}") for layer_idx in range(len(self.layers))]
-            )
+
         return self
 
 

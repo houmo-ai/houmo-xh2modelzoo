@@ -1,5 +1,6 @@
 import ctypes
 import gc
+import os
 import weakref
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
@@ -14,7 +15,6 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoConfig, GenerationConfig
-from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
@@ -95,6 +95,8 @@ class XHBaseModel(DeviceMixin):
             wrap_config.only_first_block = self.config.only_first_block
         if hasattr(self.config, "max_layers"):
             wrap_config.max_layers = self.config.max_layers
+        if os.environ.get("LAYER_TAG_ENABLE", "").strip().lower() in {"1", "true", "yes", "on"}:
+            wrap_config.enable_layer_tag = True
         return wrap_config
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -191,11 +193,8 @@ class XHBaseModel(DeviceMixin):
         raise NotImplementedError("Subclasses must implement _to_wrap method to support wraping the model.")
 
     def to_wrap(self, hf_model: Optional[Any] = None):
-        if self._state == LLMModelState.WRAP:
-            return
-
         if self._state != LLMModelState.NONE:
-            raise RuntimeError(f"Invalid state transition: {self._state} -> {LLMModelState.WRAP}")
+            return
         hf_model = self.get_native_model() if hf_model is None else hf_model
         logger = get_xhquant_logger()
         for _, sub_model in self._models.items():
@@ -704,7 +703,7 @@ class XHBaseModel(DeviceMixin):
             if original_device.type != "cpu":
                 module.to(original_device)
 
-        logger.info(f"Dequantizing GPTQModel Finished")
+        logger.info("Dequantizing GPTQModel Finished")
         return native_hf_model
 
     @classmethod
@@ -774,6 +773,51 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
+    def _get_gptq_quant_linear_converters(cls):
+        """Return installed GPTQ QuantLinear implementations and converters."""
+        from ._dequant_converter import (
+            general_qlinear_converter,
+            gptqmodel_torch_qlinear_converter,
+            qlinear_cuda_old_converter,
+        )
+
+        converter_by_type = {}
+        unsupported_base_types = []
+
+        try:
+            from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
+            from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
+            from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
+            from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as Exllamav2QuantLinear
+            from auto_gptq.nn_modules.qlinear.qlinear_marlin import QuantLinear as AutoGPTQMarlinQuantLinear
+
+            converter_by_type[GeneralQuantLinear] = general_qlinear_converter
+            converter_by_type[CudaOldQuantLinear] = qlinear_cuda_old_converter
+            unsupported_base_types.extend([ExllamaQuantLinear, Exllamav2QuantLinear, AutoGPTQMarlinQuantLinear])
+        except ImportError:
+            pass
+
+        try:
+            from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+            from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+
+            converter_by_type[TorchQuantLinear] = gptqmodel_torch_qlinear_converter
+            for module_path, class_name in (
+                ("gptqmodel.nn_modules.qlinear.torch_fused", "TorchFusedQuantLinear"),
+                ("gptqmodel.nn_modules.qlinear.gemm_hf_kernel", "HFKernelLinear"),
+            ):
+                try:
+                    module = __import__(module_path, fromlist=[class_name])
+                    converter_by_type[getattr(module, class_name)] = gptqmodel_torch_qlinear_converter
+                except (ImportError, AttributeError):
+                    pass
+            unsupported_base_types.append(BaseQuantLinear)
+        except ImportError:
+            pass
+
+        return converter_by_type, tuple(unsupported_base_types)
+
+    @classmethod
     def _dequantize_gptq_hf_model(cls, native_hf_model: nn.Module):
         """
         Abandon this method in future. Should unify 'gptqmodel' quant model
@@ -782,76 +826,29 @@ class XHBaseModel(DeviceMixin):
         and dequantize it via this method.
         """
         hf_model = native_hf_model
-        assert hf_model.config.quantization_config.quant_method == QuantizationMethod.GPTQ
-        hf_quantizer: GptqHfQuantizer = hf_model.hf_quantizer
-
-        from transformers.utils import is_gptqmodel_available
-
-        try:
-            from transformers.utils import is_auto_gptq_available
-        except ImportError:
-
-            def is_auto_gptq_available():
-                return False
-
-        from ._dequant_converter import (
-            general_qlinear_converter,
-            gptqmodel_torch_qlinear_converter,
-            qlinear_cuda_old_converter,
-        )
-
-        converter: Optional[Callable] = None
-
-        QuantLinear = hf_quantizer.optimum_quantizer.quant_linear  # type: ignore
-        if is_auto_gptq_available():
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda import QuantLinear as GeneralQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_cuda_old import QuantLinear as CudaOldQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllama import QuantLinear as ExllamaQuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_exllamav2 import QuantLinear as Exllamav2QuantLinear
-            from auto_gptq.nn_modules.qlinear.qlinear_marlin import QuantLinear as MarlinQuantLinear
-
-            if QuantLinear is GeneralQuantLinear:
-                converter = general_qlinear_converter
-            elif QuantLinear is CudaOldQuantLinear:
-                converter = qlinear_cuda_old_converter
-            elif QuantLinear is ExllamaQuantLinear:
-                converter = None
-            elif QuantLinear is Exllamav2QuantLinear:
-                converter = None
-            elif QuantLinear is MarlinQuantLinear:
-                converter = None
-
-        if is_gptqmodel_available():
-            from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-            from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-
-            torch_linear_cls = [TorchQuantLinear]
-            try:
-                from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
-
-                torch_linear_cls.append(TorchFusedQuantLinear)
-            except Exception:
-                pass
-            try:
-                from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
-
-                torch_linear_cls.append(HFKernelLinear)
-            except Exception:
-                pass
-
-            if QuantLinear in torch_linear_cls:
-                converter = gptqmodel_torch_qlinear_converter
-            elif QuantLinear is MarlinQuantLinear:
-                converter = None
-
-        assert converter is not None, f"Not implemented for {QuantLinear} yet"
-
+        converter_by_type, unsupported_base_types = cls._get_gptq_quant_linear_converters()
         dequant_linears = []
-        for name, module in hf_model.named_modules():  # type: ignore
-            if isinstance(module, QuantLinear):
-                dequant_linears.append((name, module))
+        unsupported_linears = []
+        for name, module in hf_model.named_modules():
+            converter = next(
+                (
+                    candidate_converter
+                    for quant_linear_type, candidate_converter in converter_by_type.items()
+                    if isinstance(module, quant_linear_type)
+                ),
+                None,
+            )
+            if converter is not None:
+                dequant_linears.append((name, module, converter))
+            elif unsupported_base_types and isinstance(module, unsupported_base_types):
+                unsupported_linears.append((name, type(module)))
+
+        if unsupported_linears:
+            details = ", ".join(f"{name}: {module_type.__name__}" for name, module_type in unsupported_linears[:20])
+            raise NotImplementedError(f"GPTQ dequantization is not implemented for: {details}")
+
         pbar = tqdm(dequant_linears, desc="Dequantizing GPTQ model")
-        for name, module in pbar:
+        for name, module, converter in pbar:
             pbar.set_description(f"Dequantizing GPTQ: {name}")
             converter(module)
 
@@ -1134,36 +1131,33 @@ class XHBaseModel(DeviceMixin):
 
         for _, module in enumerate(tqdm(dequant_linears, desc="Dequantizing AutoRound QuantLinear modules")):
             autoround_torch_qlinear_converter(module)
+        dequant_linears.clear()
+
+        autoround_moe_block_names = [
+            module_name
+            for module_name, module in hf_model.named_modules()
+            if type(module).__name__ == "LinearQwen3_5MoeSparseMoeBlock"
+        ]
+        logger.info(
+            "Found %d AutoRound LinearQwen3_5MoeSparseMoeBlock modules to restore.",
+            len(autoround_moe_block_names),
+        )
+        for module_name in autoround_moe_block_names:
+            module = hf_model.get_submodule(module_name) if module_name else hf_model
+            restored_module = restore_autoround_qwen3_5_moe_sparse_block(module)
+            if module_name:
+                parent_name, child_name = module_name.rsplit(".", 1) if "." in module_name else ("", module_name)
+                parent = hf_model.get_submodule(parent_name) if parent_name else hf_model
+                setattr(parent, child_name, restored_module)
+            else:
+                hf_model = restored_module
+
+        autoround_moe_block_names.clear()
         gc.collect()
 
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage After autoround dequantization: {str(memory_info)}")
-        visual_count, visual_bytes = get_model_param_buffer_size_gb(hf_model.model.visual)
-        language_count, language_bytes = get_model_param_buffer_size_gb(hf_model.model.language_model)
-        logger.info(
-            f"visual_count={visual_count} B, visual_bytes={visual_bytes:.2f} GB, "
-            f"language_count={language_count} B, language_bytes={language_bytes:.2f} GB"
-        )
 
-        restored_moe_blocks = 0
-        try:
-            from auto_round.modeling.fused_moe.qwen3_5_moe import LinearQwen3_5MoeSparseMoeBlock
-
-            for name, module in list(hf_model.named_modules()):
-                if isinstance(module, LinearQwen3_5MoeSparseMoeBlock):
-                    hf_model.set_submodule(
-                        name,
-                        restore_autoround_qwen3_5_moe_sparse_block(module, hf_model.config),
-                    )
-                    restored_moe_blocks += 1
-        except ImportError:
-            pass
-
-        logger.info(f"Converted {len(dequant_linears)} AutoRound torch QuantLinear modules to nn.Linear.")
-        if restored_moe_blocks > 0:
-            logger.info(f"Restored {restored_moe_blocks} AutoRound Qwen3.5-MoE sparse blocks back to HF modules.")
-            memory_info = get_cpu_memory_mb()
-            logger.info(f"CPU memory usage after restoring MoE blocks: {str(memory_info)}")
         hf_model.quantization_method = None  # type: ignore
         hf_model._is_hf_initialized = False  # type: ignore
         return hf_model
@@ -1184,6 +1178,21 @@ class XHBaseModel(DeviceMixin):
     @classmethod
     def _postprocess_gptqmodel_structure(cls, native_hf_model: nn.Module, **kwargs) -> nn.Module:
         return native_hf_model
+
+    @classmethod
+    def dequantize_hf_model(cls, hf_model, quantization_config):
+        quant_method = cls._get_quantization_method(quantization_config)
+        if quant_method == "awq":
+            hf_model = cls._dequantize_awq_hf_model(hf_model)
+        elif quant_method == "gptq":
+            hf_model = cls._dequantize_gptq_hf_model(hf_model)
+        elif quant_method == "compressed-tensors":
+            hf_model = cls._dequantize_compressed_tensors_hf_model(hf_model)
+        elif quant_method in {"auto-round", "auto_round", "autoround"}:
+            hf_model = cls._dequantize_autoround_hf_model(hf_model)
+        else:
+            raise NotImplementedError(f"Dequantize not implemented for quantization method: {quant_method}")
+        return hf_model
 
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:

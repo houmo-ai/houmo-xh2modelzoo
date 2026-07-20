@@ -279,9 +279,48 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
             self._kvcache_mixin._linear_key_dim = linear_attn.key_dim
             self._kvcache_mixin._linear_value_dim = linear_attn.value_dim
 
+    def _get_big_language_placeholder_export_components(self):
+        # Import the real MoE wrappers before entering
+        # ``traceable_module_placeholder_context``.  The context temporarily
+        # replaces these registrations with lightweight placeholder wrappers;
+        # importing ``_moe_model`` for the first time from inside that context
+        # would make its decorators register the same HF classes twice.
+        from ._moe_model import register_wrap_modules
+        from ._qwen3_5_moe_big_export import Qwen3_5_MOE_BigHFModel
+
+        register_wrap_modules()
+        return Qwen3_5_MOE_BigHFModel, Qwen3_5_MOE_BigHFModel.PLACEHOLDER_TYPES
+
+    def _check_big_language_placeholder_export_supported(self, empty_hf_model: Any) -> None:
+        hf_model_type = str(getattr(empty_hf_model.config, "model_type", "")).lower()
+        model_type_name = type(empty_hf_model).__name__.lower()
+        if "moe" not in hf_model_type and "moe" not in model_type_name:
+            raise NotImplementedError(
+                "Qwen3.5 dense big-model placeholder export must use the dense placeholder components."
+            )
+
+        language_model = self._get_language_model(empty_hf_model)
+        if not hasattr(language_model, "modules"):
+            raise NotImplementedError("Qwen3.5 MoE big-model placeholder export requires an nn.Module language model.")
+
+        found_types = {type(module).__name__ for module in language_model.modules()}
+
+        _, placeholder_types = self._get_big_language_placeholder_export_components()
+        required_hf_types = {
+            "Qwen3_5MoeAttention",
+            "Qwen3_5MoeGatedDeltaNet",
+            "Qwen3_5MoeSparseMoeBlock",
+        }
+        missing_types = sorted(required_hf_types - found_types)
+        if missing_types:
+            raise NotImplementedError(
+                "Qwen3.5 MoE big-model placeholder export requires placeholder modules "
+                f"{placeholder_types}, but missing {missing_types}."
+            )
+
     def init_wrap_model(self, hf_model: Qwen3_5MoeForConditionalGeneration) -> Any:
         from ._moe_model import register_wrap_modules
-
+        
         register_wrap_modules()
         wrap_model = super(VisionLLMModel, self).init_wrap_model(hf_model)
         return wrap_model

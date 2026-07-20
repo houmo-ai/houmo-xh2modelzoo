@@ -314,6 +314,8 @@ class _Qwen3_5VisionModel(DynamicModule):  # noqa: N801
         self.only_first_block = False
         self.patch_size = cfg.patch_size
         device = next(self.parameters()).device
+        if device.type == "meta":
+            device = torch.device("cpu")
         self.max_size_w = cfg.max_size_w
         self.max_size_h = cfg.max_size_h
         self.max_size_t = cfg.max_size_t

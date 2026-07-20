@@ -21,6 +21,7 @@
 
 import gc
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -30,32 +31,32 @@ import accelerate.hooks
 import torch
 import torch.fx as fx
 import torch.nn as nn
-import xhquant.utils.suppress_printing
 from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
-from xhquant.api import (
-    Config, 
-    ConfigDict, 
-    FrontendType, 
-    Hook, 
-    PrecisionMode, 
-    QTensor, 
-    ptq_quantize, 
-    set_random_seed, 
-    get_root_logger, 
-    convert_fx_model_to_quanted_model, 
-    QuantScheme, 
-    DeviceType,
-    create_quant_config,
-)
 
-from xh_model_zoo.xh_llm.models.builder import MODELS
-from xh_model_zoo.xh_llm.models.base_llm_model import LLMBaseModel
-from xh_model_zoo.xh_llm.models.cosyvoice3 import XHQwen2LegacyModel
-from xh_model_zoo_develop.utils.cpu_gpu_utils import print_gpu_info
+import xhquant.utils.suppress_printing
 from xh_model_zoo.utils.time_profiler import time_profiler
+from xh_model_zoo.xh_llm.models.base_llm_model import LLMBaseModel
+from xh_model_zoo.xh_llm.models.builder import MODELS
+from xh_model_zoo.xh_llm.models.cosyvoice3 import XHQwen2LegacyModel
 from xh_model_zoo.xh_llm.models.eval_model_type import EvalModelType
 from xh_model_zoo.xh_llm.utils import decode_next_token
+from xh_model_zoo_develop.utils.cpu_gpu_utils import print_gpu_info
+from xhquant.api import (
+    Config,
+    ConfigDict,
+    DeviceType,
+    FrontendType,
+    Hook,
+    PrecisionMode,
+    QTensor,
+    QuantScheme,
+    convert_fx_model_to_quanted_model,
+    create_quant_config,
+    get_root_logger,
+    ptq_quantize,
+    set_random_seed,
+)
 
 
 def to_device(inputs, device):
@@ -134,12 +135,7 @@ def parse_arguments():
     parser.add_argument("--valid", action="store_true", help="validate the model")
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     # 新增量化类型命令行参数
-    parser.add_argument(
-        "--quant-type",
-        type=str,
-        default="w8a16_sefp",
-        help="Quantization type (e.g., w8a16_sefp)"
-    )
+    parser.add_argument("--quant-type", type=str, default="w8a16_sefp", help="Quantization type (e.g., w8a16_sefp)")
     return parser
 
 
@@ -158,10 +154,10 @@ def main(args):
     work_dir.mkdir(exist_ok=True, parents=True)
     log_file = work_dir / f"{cfg_name}_debug.log"
 
-    # 设备配置简化
-    is_big_model = cfg.get("is_big_model", False)
+    # 设备配置简化。超大模型导出由环境变量 HUGE_MODEL_EXPORT_ENABLED 控制。
+    is_huge_model = os.environ.get("HUGE_MODEL_EXPORT_ENABLED", "").lower() in {"1", "true", "yes", "on"}
     only_export = not args.valid
-    cfg.device = "cpu" if is_big_model else ("cuda:0" if torch.cuda.is_available() else "cpu")
+    cfg.device = "cpu" if is_huge_model else ("cuda:0" if torch.cuda.is_available() else "cpu")
     cfg.exec_device = "cuda:0" if torch.cuda.is_available() else "cpu"
     cfg.dtype = "float16"
     cfg.debug = args.debug
@@ -197,12 +193,14 @@ def main(args):
     decode_onnx_dir.mkdir(exist_ok=True, parents=True)
 
     # 元信息初始化
-    meta_info = ConfigDict({
-        "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-        "config": str(Path(args.config).name),
-        "model_name": cfg_name,
-        "wrap_cfg": cfg.model.wrap_cfg.to_dict()
-    })
+    meta_info = ConfigDict(
+        {
+            "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "config": str(Path(args.config).name),
+            "model_name": cfg_name,
+            "wrap_cfg": cfg.model.wrap_cfg.to_dict(),
+        }
+    )
 
     # 模型和分词器加载
     hf_model_dir = cfg.hf_model_dir
@@ -214,16 +212,22 @@ def main(args):
     # 复制HF配置文件
     hf_config_dir = work_dir / "hf_config"
     hf_config_dir.mkdir(exist_ok=True, parents=True)
-    for cfg_file in ["config.json", "generation_config.json", "tokenizer_config.json", 
-                    "vocab.json", "tokenizer.json", "chat_template.jinja", "added_tokens.json"]:
+    for cfg_file in [
+        "config.json",
+        "generation_config.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "tokenizer.json",
+        "chat_template.jinja",
+        "added_tokens.json",
+    ]:
         src = Path(hf_model_dir) / cfg_file
         if src.exists():
             shutil.copyfile(src, hf_config_dir / cfg_file)
     meta_info.hf_config = str(hf_config_dir.relative_to(work_dir))
 
     # 输入数据准备
-    messages = [{"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": args.prompt}]
+    messages = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": args.prompt}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     input_ids = tokenizer([text], return_tensors="pt").input_ids.to(device)
 
@@ -243,11 +247,13 @@ def main(args):
 
     # KV缓存元信息
     if xh_model.past_key_caches and len(xh_model.past_key_caches) > 0:
-        meta_info.update({
-            "use_cache": True,
-            "kv_cache_shape": xh_model.past_key_caches[0].shape,
-            "num_hidden_layers": len(xh_model.past_key_caches)
-        })
+        meta_info.update(
+            {
+                "use_cache": True,
+                "kv_cache_shape": xh_model.past_key_caches[0].shape,
+                "num_hidden_layers": len(xh_model.past_key_caches),
+            }
+        )
 
     # 设备钩子设置（保持原逻辑）
     xh_model.change_eval_type(EvalModelType.WRAPED)

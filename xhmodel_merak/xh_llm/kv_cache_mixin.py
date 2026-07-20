@@ -65,6 +65,24 @@ class KVCacheMixin:
     def clear_other_cache(self):
         pass
 
+    def _prepare_other_cache_on_device(self, device: torch.device | str) -> None:
+        """Create auxiliary caches on the scope device.
+
+        ``prepare_other_cache`` implementations use ``self._device`` explicitly,
+        so a ``torch.device`` context alone cannot override a stale model device.
+        Meta tracing keeps the large KV caches on meta, while auxiliary linear
+        attention caches must be real CPU tensors for fake-tensor propagation.
+        """
+        requested_device = torch.device(device)
+        other_cache_device = torch.device("cpu") if requested_device.type == "meta" else requested_device
+        original_device = self._device
+        self._device = other_cache_device
+        try:
+            with torch.device(other_cache_device):
+                self.prepare_other_cache()
+        finally:
+            self._device = original_device
+
     @contextmanager
     def kv_cache_scope(self, device: torch.device | str | None = None) -> Generator[None, None, None]:
         """上下文管理器，确保 prepare_kv_cache 和 clear_kv_cache 成对调用。
@@ -86,10 +104,7 @@ class KVCacheMixin:
             if device is not None:
                 with torch.device(device):
                     self.prepare_kv_cache()
-                if torch.device(device).type == "meta":
-                    device = "cpu"
-                with torch.device(device):
-                    self.prepare_other_cache()
+                self._prepare_other_cache_on_device(device)
             else:
                 self.prepare_kv_cache()
                 self.prepare_other_cache()
@@ -194,17 +209,14 @@ class KVCacheContextManager:
         self._model = llm_model
 
     def __enter__(self):
+        kvcache_mixin = self._model.get_kvcache_mixin()
         if self.device is not None:
             with torch.device(self.device):
-                self._model.get_kvcache_mixin().prepare_kv_cache()
-            device = self.device
-            if torch.device(device).type == "meta":
-                device = "cpu"
-            with torch.device(device):
-                self._model.get_kvcache_mixin().prepare_other_cache()
+                kvcache_mixin.prepare_kv_cache()
+            kvcache_mixin._prepare_other_cache_on_device(self.device)
         else:
-            self._model.get_kvcache_mixin().prepare_kv_cache()
-            self._model.get_kvcache_mixin().prepare_other_cache()
+            kvcache_mixin.prepare_kv_cache()
+            kvcache_mixin.prepare_other_cache()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._model.get_kvcache_mixin().clear_kv_cache()

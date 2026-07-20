@@ -381,8 +381,8 @@ class BaseLLMModel(XHBaseModel):
         except ImportError:
             # Fallback for older transformers versions
             no_init_weights = init_empty_weights
-
-        with no_init_weights(), init_empty_weights():
+        include_buffers = kwargs.pop("include_buffers", False)
+        with no_init_weights(), init_empty_weights(include_buffers=include_buffers):
             auto_model_cls = cls.HF_AUTO_MODEL_CLS
             model_dtype = cls.HF_MODEL_DTYPE
             if "dtype" not in kwargs:
@@ -421,7 +421,6 @@ class BaseLLMModel(XHBaseModel):
             assert isinstance(inputs, (list, tuple)), (
                 f"Processed dummy inputs should be a list or tuple of tensors, but get {type(inputs)}."
             )
-
             extra_args = {}
             frontend_model = to_frontend_graph(wrap_model, self.frontend_type, inputs, **extra_args)
             return frontend_model
@@ -617,14 +616,20 @@ class BaseLLMModel(XHBaseModel):
                 logger.warning(f"{src_file} not exists, skip copy")
         meta_info.hf_config = str(hf_config_dir.relative_to(output_dir))
 
-        token_embedding = self.embed_tokens
+        meta_info.kv_cache = self.kvcache_config
+        self._extra_export_metadata(output_dir, meta_info)
+        return meta_info
 
+    def _save_export_token_embedding(self, output_dir: str | Path, meta_info: LLMModelMeta) -> LLMModelMeta:
+        token_embedding = self.embed_tokens
+        if token_embedding is None:
+            raise RuntimeError("Token embedding is not initialized, cannot save quant_embedding.pt.")
+
+        output_dir = Path(output_dir)
         token_embedding_file_path = Path(output_dir) / "quant_embedding.pt"
         torch.save(token_embedding.state_dict(), str(token_embedding_file_path))
         meta_info.quant_embedding = str(token_embedding_file_path.relative_to(output_dir))
         meta_info.quant_embedding_md5 = calculate_file_md5(str(token_embedding_file_path))
-        meta_info.kv_cache = self.kvcache_config
-        self._extra_export_metadata(output_dir, meta_info)
         return meta_info
 
     def get_export_info(self, output_dir) -> ExportData:
@@ -678,6 +683,7 @@ class BaseLLMModel(XHBaseModel):
         model_name = exported_info.model_name
         export_model_name = exported_info.model_name
         output_dir_path = Path(exported_info.exported_dir)
+        self._save_export_token_embedding(output_dir_path, meta_info)
         meta_info.kv_cache = self.kvcache_config
         with self.get_kvcache_mixin().kv_cache_scope(device="meta"):
             self.set_input_sequence_length(self.wrap_cfg.prefill_chunk_length)
