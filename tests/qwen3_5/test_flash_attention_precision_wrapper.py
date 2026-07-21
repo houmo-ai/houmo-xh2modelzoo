@@ -1,3 +1,4 @@
+import copy
 from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,30 @@ QWEN_CONFIG_ROOT = Path(__file__).resolve().parents[2] / "configs_merak/workflow
 
 class _Cfg(dict):
     __getattr__ = dict.__getitem__
+
+
+class _ReferenceFlashAttention(torch.nn.Module):
+    """Return the canonical FlashAttention layout [B, H, S, D]."""
+
+    def __init__(self, *, scale, num_heads, num_kv_heads, **kwargs):
+        super().__init__()
+        del num_heads, kwargs
+        self.scale = scale
+        self.num_kv_heads = num_kv_heads
+
+    def forward(self, query, key, value, **kwargs):
+        del kwargs
+        groups = query.shape[1] // self.num_kv_heads
+        key = torch.repeat_interleave(key, groups, dim=1)
+        value = torch.repeat_interleave(value, groups, dim=1)
+        probabilities = torch.softmax(torch.matmul(query * self.scale, key.transpose(2, 3)), dim=-1)
+        return torch.matmul(probabilities, value)
+
+
+class _SoftmaxIgnoringPast(torch.nn.Module):
+    def forward(self, scores, past_seq_length=None):
+        del past_seq_length
+        return torch.softmax(scores, dim=-1)
 
 
 def _build_attention(monkeypatch, bits, *, enable=True):
@@ -73,6 +98,33 @@ def _build_moe_attention(monkeypatch, bits, *, enable=True):
     return attention, captured
 
 
+def _build_layout_attention(monkeypatch):
+    monkeypatch.setattr(shared_impl, "FlashAttention", _ReferenceFlashAttention)
+    attention = impl._Qwen3_5TextAttention.__new__(impl._Qwen3_5TextAttention)
+    torch.nn.Module.__init__(attention)
+    attention.config = SimpleNamespace(
+        num_key_value_heads=1,
+        num_attention_heads=2,
+        partial_rotary_factor=0.5,
+    )
+    attention.head_dim = 2
+    attention.q_proj = torch.nn.Linear(4, 8, bias=False)
+    attention.k_proj = torch.nn.Linear(4, 2, bias=False)
+    attention.v_proj = torch.nn.Linear(4, 2, bias=False)
+    attention.o_proj = torch.nn.Linear(4, 4, bias=False)
+    attention.q_norm = torch.nn.Identity()
+    attention.k_norm = torch.nn.Identity()
+    attention._setup(
+        _Cfg(
+            enable_rope=False,
+            use_cache=False,
+            flash_attention={"enable": False},
+        )
+    )
+    attention.masked_softmax = _SoftmaxIgnoringPast()
+    return attention
+
+
 @pytest.mark.parametrize("value", [8, 16])
 def test_flash_attention_passes_all_five_precision_bits(monkeypatch, value):
     attention, captured = _build_attention(
@@ -99,6 +151,25 @@ def test_flash_attention_uses_keyword_only_public_api(monkeypatch):
     assert captured["num_heads"] == 4
     assert captured["num_kv_heads"] == 2
     assert captured["is_causal"] is True
+
+
+def test_flash_and_legacy_attention_preserve_same_bshd_wrapper_layout(monkeypatch):
+    torch.manual_seed(0)
+    legacy = _build_layout_attention(monkeypatch)
+    flash = copy.deepcopy(legacy)
+    flash.use_flash_attention = True
+    flash.flash_attn = _ReferenceFlashAttention(
+        num_heads=flash.num_heads,
+        num_kv_heads=flash.num_key_value_heads,
+        scale=1 / flash.head_dim**0.5,
+    )
+    hidden_states = torch.randn(1, 3, 4)
+
+    legacy_output = legacy(hidden_states)[0]
+    flash_output = flash(hidden_states)[0]
+
+    assert legacy_output.shape == flash_output.shape == (1, 3, 4)
+    torch.testing.assert_close(flash_output, legacy_output)
 
 
 @pytest.mark.parametrize("field", ["q_bits", "k_bits", "v_bits", "s_bits", "p_bits"])

@@ -118,6 +118,7 @@ class HybridGatedAttentionMixin:
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
             )
+            attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, self.attn_hidden_dim)
         else:
             query_states = query_states * self.kv_scale

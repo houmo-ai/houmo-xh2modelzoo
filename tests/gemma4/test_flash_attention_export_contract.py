@@ -1449,12 +1449,30 @@ class _CapturedFlash(torch.nn.Module):
 
     def forward(self, query, key, value, **kwargs):
         self.calls.append({"query": query, "key": key, "value": value, **kwargs})
-        return query.transpose(1, 2).contiguous()
+        return query
 
 
 class _IdentityRope(torch.nn.Module):
     def forward(self, x, *position_embeddings):
         return x
+
+
+class _ReferenceGemmaFlash(torch.nn.Module):
+    """Reference causal attention with canonical [B, H, S, D] output."""
+
+    def forward(self, query, key, value, **kwargs):
+        del kwargs
+        groups = query.shape[1] // key.shape[1]
+        key = torch.repeat_interleave(key, groups, dim=1)
+        value = torch.repeat_interleave(value, groups, dim=1)
+        scores = torch.matmul(query, key.transpose(2, 3))
+        query_length, key_length = scores.shape[-2:]
+        causal_mask = torch.triu(
+            torch.ones(query_length, key_length, dtype=torch.bool, device=scores.device),
+            diagonal=1,
+        )
+        scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
+        return torch.matmul(torch.softmax(scores, dim=-1), value)
 
 
 def _setup_tiny_attention(
@@ -1539,6 +1557,42 @@ def test_v2_flash_attention_preserves_gemma4_unscaled_qk_contract(monkeypatch, h
     # self.scaling=1.0 to attention.  FlashAttention must not apply the usual
     # 1/sqrt(head_dim) scale a second time.
     assert attention.flash_attn.scale == 1.0
+
+
+def test_flash_and_legacy_attention_preserve_same_bshd_wrapper_layout(monkeypatch):
+    torch.manual_seed(0)
+    legacy = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="full_attention",
+        window=None,
+        version=1,
+        head_dim=4,
+    )
+    flash = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="full_attention",
+        window=None,
+        version=2,
+        head_dim=4,
+    )
+    for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        getattr(flash, name).load_state_dict(getattr(legacy, name).state_dict())
+    flash.flash_attn = _ReferenceGemmaFlash()
+    hidden_states = torch.randn(1, 3, 8)
+    position_embeddings = (
+        torch.ones(1, 1, 3, 4),
+        torch.zeros(1, 1, 3, 4),
+    )
+    call_kwargs = {
+        "past_seq_length": torch.tensor([0], dtype=torch.int32),
+        "current_input_length": torch.tensor([3], dtype=torch.int32),
+    }
+
+    legacy_output = legacy(hidden_states, position_embeddings, attention_mask=None, **call_kwargs)[0]
+    flash_output = flash(hidden_states, position_embeddings, attention_mask=None, **call_kwargs)[0]
+
+    assert legacy_output.shape == flash_output.shape == (1, 3, 8)
+    torch.testing.assert_close(flash_output, legacy_output)
 
 
 @pytest.mark.parametrize("value", [8, 16])

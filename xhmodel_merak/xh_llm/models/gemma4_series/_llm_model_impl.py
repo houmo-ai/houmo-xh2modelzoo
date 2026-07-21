@@ -449,6 +449,7 @@ class _Gemma4TextAttention(DynamicModule):
                 kv_window_start_abs=kv_window_start_abs if self.is_sliding_attention else None,
                 kv_valid_length=kv_valid_length if self.is_sliding_attention else None,
             )
+            attn_output = attn_output.transpose(1, 2).contiguous()
             attn_weights = None
         else:
             key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
