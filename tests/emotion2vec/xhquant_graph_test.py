@@ -44,10 +44,10 @@ def test_xhquant_graph_module_uses_xhquant_wrappers_for_core_layers():
     assert isinstance(attention.softmax, Softmax)
 
 
-def test_xhquant_graph_exports_backbone_without_classification_head():
+def test_xhquant_graph_exports_classification_head():
     from xhmodel_merak.xh_llm.models.emotion2vec.xhquant_graph import XHEmotion2vecGraphModel
 
-    assert "classification_head" not in XHEmotion2vecGraphModel.forward.__code__.co_names
+    assert "classification_head" in XHEmotion2vecGraphModel.forward.__code__.co_names
 
 
 def test_xhquant_graph_expects_externally_normalized_waveform():
@@ -89,7 +89,7 @@ def test_xhquant_graph_matches_official_plus_large_short_audio():
         expected, expected_mask, expected_utterance = Emotion2vecReferenceModel(native)(
             torch.from_numpy(padded).unsqueeze(0), valid_samples
         )
-        actual, actual_mask, actual_utterance = graph(normalized.unsqueeze(0), valid_frames)
+        actual, actual_mask, actual_utterance, actual_probabilities = graph(normalized.unsqueeze(0), valid_frames)
 
     expected = expected[0, ~expected_mask[0]].float()
     actual = actual[0, ~actual_mask[0]].float()
@@ -99,3 +99,4 @@ def test_xhquant_graph_matches_official_plus_large_short_audio():
     assert graph.alibi_bias.shape == (1, 16, 809, 809)
     assert cosine.item() >= 0.99
     torch.testing.assert_close(actual_utterance, expected_utterance, rtol=2e-2, atol=2e-2)
+    assert actual_probabilities.shape == (1, 9)

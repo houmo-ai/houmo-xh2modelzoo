@@ -64,7 +64,7 @@ class Emotion2vecHMONNXModel:
         if self._classification_head is not None:
             return self._classification_head
         if not self.meta_info.quant_embedding:
-            raise FileNotFoundError("emotion2vec metadata does not contain hmquant/quant_embedding.pt")
+            raise FileNotFoundError("emotion2vec metadata does not contain quant_embedding.pt")
         head_path = Path(self.meta_info.quant_embedding)
         if not head_path.is_file():
             raise FileNotFoundError(f"emotion2vec classification head not found: {head_path}")
@@ -93,6 +93,7 @@ class Emotion2vecHMONNXModel:
         )
 
         valid_features: list[torch.Tensor] = []
+        single_chunk_probabilities: torch.Tensor | None = None
         for chunk in chunks:
             normalized = normalize_padded_waveform(chunk.waveform, chunk.valid_samples)
             chunk_waveform_tensor = torch.from_numpy(normalized).unsqueeze(0).to(torch.float16)
@@ -101,8 +102,11 @@ class Emotion2vecHMONNXModel:
             if isinstance(result, dict):
                 frame_features = result["frame_features"]
                 frame_mask = result["frame_padding_mask"]
+                chunk_probabilities = result["probabilities"]
             else:
-                frame_features, frame_mask, _ = result
+                frame_features, frame_mask, _, chunk_probabilities = result
+            if len(chunks) == 1:
+                single_chunk_probabilities = chunk_probabilities[0].float().cpu()
             frame_features_numpy = frame_features.cpu().numpy()
             frame_mask_numpy = frame_mask.to(torch.bool).cpu().numpy()
             if chunk.valid_samples < self.meta_info.window_samples and not frame_mask_numpy.any():
@@ -115,9 +119,16 @@ class Emotion2vecHMONNXModel:
         frame_features = torch.cat(valid_features, dim=0)
         frame_padding_mask = torch.zeros(frame_features.shape[0], dtype=torch.bool)
         utterance_feature = frame_features.float().mean(dim=0)
-        head_weight, head_bias = self._load_classification_head()
-        logits = F.linear(utterance_feature, head_weight, head_bias)
-        probabilities = torch.softmax(logits, dim=-1)
+        logits = None
+        if single_chunk_probabilities is not None:
+            probabilities = single_chunk_probabilities
+            if self.meta_info.quant_embedding and Path(self.meta_info.quant_embedding).is_file():
+                head_weight, head_bias = self._load_classification_head()
+                logits = F.linear(utterance_feature, head_weight, head_bias)
+        else:
+            head_weight, head_bias = self._load_classification_head()
+            logits = F.linear(utterance_feature, head_weight, head_bias)
+            probabilities = torch.softmax(logits, dim=-1)
         active_indices = [
             index
             for index, label in enumerate(self.meta_info.labels)

@@ -112,6 +112,7 @@ class XHEmotion2vecModel(BaseVisionModel):
                     "frame_features",
                     "frame_padding_mask",
                     "utterance_feature",
+                    "probabilities",
                 ],
                 verbose=False,
             )
@@ -127,6 +128,7 @@ class XHEmotion2vecModel(BaseVisionModel):
                 "frame_features",
                 "frame_padding_mask",
                 "utterance_feature",
+                "probabilities",
             ],
         }
 
@@ -142,9 +144,8 @@ class XHEmotion2vecModel(BaseVisionModel):
         native_model = self.get_native_model()
         if native_model.proj is None:
             raise ValueError("emotion2vec emotion-recognition export requires the official classification head")
-        hmquant_dir = Path(output_dir) / "hmquant"
-        hmquant_dir.mkdir(parents=True, exist_ok=True)
-        classification_head_file = hmquant_dir / "quant_embedding.pt"
+        classification_head_file = Path(output_dir) / "quant_embedding.pt"
+        classification_head_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save(native_model.proj.state_dict(), classification_head_file)
         meta_info.quant_embedding = str(classification_head_file.relative_to(output_dir))
         meta_info.quant_embedding_md5 = calculate_file_md5(classification_head_file)

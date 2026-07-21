@@ -6,8 +6,9 @@
 
 - 输入：单声道 16 kHz 波形；
 - 固定 HMONNX 窗口：16 秒，即 `[1, 256000]`；
-- HMONNX 输出：帧级特征、padding mask 和句级特征；
-- 分类头：官方 `proj` 独立保存为 `hmquant/quant_embedding.pt`；
+- HMONNX 输出：帧级特征、padding mask、句级特征和 9 维 probabilities；
+- HMONNX 分类头：xhquant `XHLinear(1024, 9) → Softmax`；
+- 外置分类头：官方 `proj` 同时保存为 `quant_embedding.pt`，供长音频全局特征分类；
 - 默认量化类型：`w8a8h1_sefp`；
 - 波形归一化：图外 FP32；
 - HMONNX 神经网络输入：FP16 波形和图外预计算的 INT32 `valid_frames`；
@@ -78,7 +79,7 @@ $$
 `Emotion2vecModelMeta` 描述导出产物，包括：
 
 - HMONNX 相对路径；
-- `hmquant/quant_embedding.pt` 相对路径和 MD5；
+- `quant_embedding.pt` 相对路径和 MD5；
 - 采样率和窗口长度；
 - 输出特征维度；
 - 校准音频路径；
@@ -122,6 +123,7 @@ $$
 - `XHEmotion2vecPositionEncoder`：卷积相对位置编码器；
 - `XHEmotion2vecSelfAttention`：基于 `XHLinear`、`MatMul` 和 `Softmax` 的多头注意力；
 - `XHEmotion2vecMLP`：基于 `XHLinear` 和 `Gelu` 的前馈网络；
+- `XHEmotion2vecClassificationHead`：基于 `XHLinear(1024, 9)` 和 `Softmax` 的图内短音频分类头；
 - `XHEmotion2vecTransformerBlock`：attention、MLP、残差和 LayerNorm；
 - `build_alibi_bias()`：构建适配 16 个 attention heads 的 ALiBi bias；
 - `XHEmotion2vecGraphModel`：组合卷积前端、extra tokens、4 层 Audio context encoder 和 8 层主干 Transformer。
@@ -144,7 +146,7 @@ Merak 模型封装和 HMONNX 导出入口。
 - 使用图外 processor 对 calibration waveform 做 FP32 归一化；
 - 通过临时 ONNX 将 PyTorch/xhquant wrapper 转成 xhquant frontend graph；
 - 执行 Merak 状态链：wrap、frontend、W8A8 aligned PTQ、export graph、HMONNX；
-- 将官方顶层 `proj` state dict 保存到 `hmquant/quant_embedding.pt`；
+- 将官方顶层 `proj` state dict 保存到 `quant_embedding.pt`；
 - 创建 `Emotion2vecModelMeta`。
 
 这里的临时 ONNX 只是 xhquant frontend 中转格式。最终交付产物仍是经过 xhquant PTQ 和 export graph 转换的 HMONNX。
@@ -185,7 +187,8 @@ HMONNX 运行时封装。
 - 删除 padding frames；
 - 拼接多个窗口的有效帧；
 - 对全部有效帧求均值，得到 utterance embedding；
-- 加载 `hmquant/quant_embedding.pt`，对全局 utterance embedding 执行分类并计算 probabilities；
+- 单个窗口直接使用 HMONNX 第四输出 probabilities；
+- 多个窗口加载 `quant_embedding.pt`，对拼接后的全局 utterance embedding 执行分类并计算 probabilities；
 - 按官方 FunASR 逻辑过滤 `unuse_*`，返回 labels、scores 和预测标签；`<unk>` 保留。
 
 它是实际部署或离线提取特征时使用的主入口。
@@ -216,7 +219,7 @@ flowchart LR
     F --> G[W8A8 aligned PTQ]
     G --> H[export graph]
     H --> I[HMONNX]
-    A --> J[hmquant/quant_embedding.pt]
+    A --> J[quant_embedding.pt]
     I --> K[emotion2vec_meta.json]
     J --> K
 ```
@@ -246,7 +249,7 @@ flowchart LR
     H --> I
     I --> J[mean pooling]
     J --> K[1024 维 utterance embedding]
-    L[hmquant/quant_embedding.pt] --> M[linear + softmax]
+    L[quant_embedding.pt] --> M[linear + softmax]
     K --> M
     M --> N[9 维 logits/probabilities]
 ```
@@ -262,7 +265,7 @@ flowchart LR
 | Conv、Linear、MatMul 主体 | 默认 W8A8 | `w8a8h1_sefp` |
 | frame padding mask | BOOL | 屏蔽补零产生的无效帧 |
 | utterance pooling | FP32 | 图外对有效帧求均值 |
-| 官方 `proj` 分类头 | FP32 state dict | 图外加载 `hmquant/quant_embedding.pt` |
+| 官方 `proj` 分类头 | FP32 state dict | 图外加载 `quant_embedding.pt` |
 
 ## 与 examples 目录的关系
 

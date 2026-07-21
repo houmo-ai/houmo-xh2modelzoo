@@ -172,6 +172,16 @@ class XHEmotion2vecMLP(nn.Module):
         return self.fc2(self.gelu(self.fc1(x)))
 
 
+class XHEmotion2vecClassificationHead(nn.Module):
+    def __init__(self, source: nn.Linear):
+        super().__init__()
+        self.proj = _copy_linear(source)
+        self.softmax = Softmax(dim=-1)
+
+    def forward(self, utterance_feature: torch.Tensor) -> torch.Tensor:
+        return self.softmax(self.proj(utterance_feature))
+
+
 class XHEmotion2vecTransformerBlock(nn.Module):
     def __init__(self, source: nn.Module):
         super().__init__()
@@ -244,6 +254,9 @@ class XHEmotion2vecGraphModel(nn.Module):
         self.prenet_norm = _copy_layer_norm(audio.context_encoder.norm)
         source_blocks = list(audio.context_encoder.blocks) + list(native_model.blocks)
         self.blocks = nn.ModuleList([XHEmotion2vecTransformerBlock(block) for block in source_blocks])
+        if native_model.proj is None:
+            raise ValueError("emotion2vec emotion-recognition export requires the official classification head")
+        self.classification_head = XHEmotion2vecClassificationHead(native_model.proj)
         self.num_extra_tokens = int(audio.modality_cfg.num_extra_tokens)
         num_heads = int(source_blocks[0].attn.num_heads)
         alibi = build_alibi_bias(
@@ -276,4 +289,5 @@ class XHEmotion2vecGraphModel(nn.Module):
         x = x[:, self.num_extra_tokens :]
         valid_frame_weights = (~frame_padding_mask).unsqueeze(-1).to(x.dtype)
         utterance_feature = (x * valid_frame_weights).sum(dim=1) / valid_frame_weights.sum(dim=1).clamp_min(1.0)
-        return x, frame_padding_mask, utterance_feature
+        probabilities = self.classification_head(utterance_feature)
+        return x, frame_padding_mask, utterance_feature, probabilities

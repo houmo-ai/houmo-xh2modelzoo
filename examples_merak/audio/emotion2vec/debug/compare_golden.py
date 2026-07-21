@@ -20,7 +20,7 @@ def compare_golden(golden_dir: str, meta_path: str, audio: str) -> dict[str, flo
     probabilities_golden = np.load(reference_dir / "probabilities.npy")
     frame = result["frame_features"].cpu().numpy().astype(np.float64)
     utterance = result["utterance_feature"].cpu().numpy().astype(np.float64)
-    logits = result["logits"].cpu().numpy().astype(np.float64)
+    logits = None if result["logits"] is None else result["logits"].cpu().numpy().astype(np.float64)
     probabilities = result["probabilities"].cpu().numpy().astype(np.float64)
     frame_golden = frame_golden.astype(np.float64)
     utterance_golden = utterance_golden.astype(np.float64)
@@ -34,10 +34,13 @@ def compare_golden(golden_dir: str, meta_path: str, audio: str) -> dict[str, flo
     )
     mae = float(np.mean(np.abs(frame - frame_golden)))
     max_abs = float(np.max(np.abs(frame - frame_golden)))
-    logits_cos = float(
-        np.dot(logits, logits_golden) / (np.linalg.norm(logits) * np.linalg.norm(logits_golden) + 1e-8)
-    )
-    logits_mae = float(np.mean(np.abs(logits - logits_golden)))
+    logits_cos = 1.0
+    logits_mae = 0.0
+    if logits is not None:
+        logits_cos = float(
+            np.dot(logits, logits_golden) / (np.linalg.norm(logits) * np.linalg.norm(logits_golden) + 1e-8)
+        )
+        logits_mae = float(np.mean(np.abs(logits - logits_golden)))
     probabilities_mae = float(np.mean(np.abs(probabilities - probabilities_golden)))
     return {
         "frame_cos": frame_cos,

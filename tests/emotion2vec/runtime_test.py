@@ -14,15 +14,15 @@ class _FakeSession:
         frame_features = torch.arange(24, dtype=torch.float32).reshape(1, 3, 8)
         frame_mask = torch.tensor([[False, False, True]])
         utterance = frame_features[:, :2].mean(dim=1)
-        return frame_features, frame_mask, utterance
+        probabilities = torch.softmax(torch.arange(9, dtype=torch.float32), dim=0).unsqueeze(0)
+        return frame_features, frame_mask, utterance, probabilities
 
 
 def test_runtime_extract_waveform_chunks_and_pools_frames(tmp_path):
     from xhmodel_merak.xh_llm.models.emotion2vec.configuration_emotion2vec import Emotion2vecModelMeta
     from xhmodel_merak.xh_llm.models.emotion2vec.emotion2vec_hmonnx_inference import Emotion2vecHMONNXModel
 
-    head_path = tmp_path / "hmquant" / "quant_embedding.pt"
-    head_path.parent.mkdir()
+    head_path = tmp_path / "quant_embedding.pt"
     head_weight = torch.arange(72, dtype=torch.float32).reshape(9, 8)
     head_bias = torch.arange(9, dtype=torch.float32)
     torch.save({"weight": head_weight, "bias": head_bias}, head_path)
@@ -72,7 +72,7 @@ def test_runtime_rejects_mismatched_meta_path(tmp_path):
     assert model.meta_info.hmonnx == str(tmp_path / "model.hmonnx")
 
 
-def test_runtime_requires_external_classification_head(tmp_path):
+def test_runtime_single_window_uses_hmonnx_probabilities_without_external_head(tmp_path):
     from xhmodel_merak.xh_llm.models.emotion2vec.configuration_emotion2vec import Emotion2vecModelMeta
     from xhmodel_merak.xh_llm.models.emotion2vec.emotion2vec_hmonnx_inference import Emotion2vecHMONNXModel
 
@@ -80,5 +80,7 @@ def test_runtime_requires_external_classification_head(tmp_path):
     model = Emotion2vecHMONNXModel(meta)
     model.session = _FakeSession()
 
-    with pytest.raises(FileNotFoundError, match="quant_embedding.pt"):
-        model.extract_waveform(np.ones(16000, dtype=np.float32), sampling_rate=16000)
+    result = model.extract_waveform(np.ones(16000, dtype=np.float32), sampling_rate=16000)
+
+    assert result["logits"] is None
+    assert result["probabilities"].shape == (9,)

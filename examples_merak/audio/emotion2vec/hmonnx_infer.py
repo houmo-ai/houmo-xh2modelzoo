@@ -17,7 +17,8 @@ def main() -> None:
     Path(args.output).mkdir(parents=True, exist_ok=True)
     np.save(Path(args.output) / "frame_features.npy", result["frame_features"].cpu().numpy())
     np.save(Path(args.output) / "utterance_feature.npy", result["utterance_feature"].cpu().numpy())
-    np.save(Path(args.output) / "logits.npy", result["logits"].cpu().numpy())
+    if result["logits"] is not None:
+        np.save(Path(args.output) / "logits.npy", result["logits"].cpu().numpy())
     np.save(Path(args.output) / "probabilities.npy", result["probabilities"].cpu().numpy())
     print(
         {

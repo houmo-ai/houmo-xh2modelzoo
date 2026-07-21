@@ -80,8 +80,11 @@ class Emotion2vecWorkflow(BaseLLMWorkflow):
         if golden_dir.exists():
             shutil.rmtree(golden_dir)
         golden_dir.mkdir(parents=True)
+        hmonnx_file = Path(meta.hmonnx)
+        if not hmonnx_file.is_absolute():
+            hmonnx_file = Path(export_result.work_dir) / hmonnx_file
         self._dump_hmonnx_operator_golden(
-            hmonnx_file=Path(meta.hmonnx),
+            hmonnx_file=hmonnx_file,
             golden_dir=golden_dir,
             device=device,
             inputs=[hmonnx_waveform, valid_frames],

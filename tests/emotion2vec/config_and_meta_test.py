@@ -20,7 +20,7 @@ def test_emotion2vec_config_defaults_target_plus_large_and_w8a8():
     meta = Emotion2vecModelMeta(
         hmonnx="artifacts/emotion2vec.hmonnx",
         onnx="artifacts/emotion2vec.onnx",
-        quant_embedding="hmquant/quant_embedding.pt",
+        quant_embedding="quant_embedding.pt",
         quant_embedding_md5="abc123",
         sampling_rate=cfg.sampling_rate,
         window_samples=cfg.window_samples,
@@ -29,7 +29,7 @@ def test_emotion2vec_config_defaults_target_plus_large_and_w8a8():
     payload = meta.to_dict()
     assert payload["hmonnx"] == "artifacts/emotion2vec.hmonnx"
     assert payload["onnx"] == "artifacts/emotion2vec.onnx"
-    assert payload["quant_embedding"] == "hmquant/quant_embedding.pt"
+    assert payload["quant_embedding"] == "quant_embedding.pt"
     assert payload["quant_embedding_md5"] == "abc123"
     assert payload["model_config"]["model_type"] == "Emotion2vecForEmotionRecognition"
     assert payload["feature_dim"] == 1024
@@ -47,7 +47,7 @@ def test_emotion2vec_meta_resolves_relative_paths_from_meta_file(tmp_path):
             "hmonnx": "export/model.hmonnx",
             "onnx": "export/model.onnx",
             "golden_dir": "golden",
-            "quant_embedding": "hmquant/quant_embedding.pt",
+            "quant_embedding": "quant_embedding.pt",
             "model_config": {"model_type": "Emotion2vecForSequenceEmbedding"},
         }
     )
@@ -55,5 +55,5 @@ def test_emotion2vec_meta_resolves_relative_paths_from_meta_file(tmp_path):
     assert meta.hmonnx == str(tmp_path / "export/model.hmonnx")
     assert meta.onnx == str(tmp_path / "export/model.onnx")
     assert meta.golden_dir == str(tmp_path / "golden")
-    assert meta.quant_embedding == str(tmp_path / "hmquant/quant_embedding.pt")
+    assert meta.quant_embedding == str(tmp_path / "quant_embedding.pt")
     assert meta.model_config.model_type == "Emotion2vecForSequenceEmbedding"
