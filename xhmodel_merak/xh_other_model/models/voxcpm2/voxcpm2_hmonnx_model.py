@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import warnings
+from copy import deepcopy
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple, Union
 
@@ -204,11 +205,20 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         self._torch_audio_vae = None
         self._torch_audio_vae_load_error: Optional[Exception] = None
 
-        lm_meta_path = work_dir / "lm_export_meta_info.json"
-        if not lm_meta_path.exists():
-            raise FileNotFoundError(f"lm_export_meta_info.json 不在 {work_dir}")
-        with open(lm_meta_path, "r", encoding="utf-8") as f:
-            lm_meta = json.load(f)
+        self.release_manifest = self._load_release_manifest(work_dir)
+        self.release_components = (
+            self.release_manifest.get("components", {})
+            if self.release_manifest is not None
+            else {}
+        )
+        if self.release_manifest is not None:
+            lm_meta = self._build_release_lm_meta(self.release_manifest)
+        else:
+            lm_meta_path = work_dir / "lm_export_meta_info.json"
+            if not lm_meta_path.exists():
+                raise FileNotFoundError(f"lm_export_meta_info.json 不在 {work_dir}")
+            with open(lm_meta_path, "r", encoding="utf-8") as f:
+                lm_meta = json.load(f)
         self.lm_meta = lm_meta
         model_dir = torch_audio_model_dir or lm_meta.get("hf_model")
         self.torch_audio_model_dir = (
@@ -302,16 +312,20 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         self.residual_decode.past_k_caches = self.residual_prefill.past_k_caches
         self.residual_decode.past_v_caches = self.residual_prefill.past_v_caches
 
-        locenc_dir = work_dir / "LocEnc"
-        locenc_meta = load_meta(locenc_dir / "locenc_meta_info.json")
+        locenc_meta = self._release_component_meta("locenc")
+        if locenc_meta is None:
+            locenc_dir = work_dir / "LocEnc"
+            locenc_meta = load_meta(locenc_dir / "locenc_meta_info.json")
         self.locenc = LocEncStepSession(
             str(work_dir / locenc_meta["hmonnx_file"]),
             device=self.device,
             dtype=self.input_dtype,
         )
 
-        locdit_dir = work_dir / "LocDiT"
-        locdit_meta = load_meta(locdit_dir / "locdit_meta_info.json")
+        locdit_meta = self._release_component_meta("locdit")
+        if locdit_meta is None:
+            locdit_dir = work_dir / "LocDiT"
+            locdit_meta = load_meta(locdit_dir / "locdit_meta_info.json")
         self.locdit = LocDiTStepSession(
             str(work_dir / locdit_meta["hmonnx_file"]),
             device=self.device,
@@ -380,6 +394,61 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
     # Decoder 目录搜索
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _load_release_manifest(work_dir: Path) -> Optional[dict]:
+        export_meta = work_dir / "export_meta_info.json"
+        if export_meta.is_file():
+            values = load_meta(export_meta)
+            if values.get("components"):
+                return values
+        manifests = sorted(work_dir.glob("*_manifest.json"))
+        if not manifests:
+            return None
+        if len(manifests) != 1:
+            raise ValueError(f"Expected one release manifest in {work_dir}, got {len(manifests)}")
+        return load_meta(manifests[0])
+
+    @staticmethod
+    def _build_release_lm_meta(manifest: dict) -> dict:
+        components = manifest["components"]
+
+        def build_lm(name: str) -> dict:
+            prefill = components[f"{name}_prefill"]
+            decode = components[f"{name}_decode"]
+            meta = deepcopy(prefill.get("runtime") or prefill.get("source_meta", {}))
+            meta["prefill_onnx"] = prefill.get("hmonnx_file") or prefill["with_act_onnx"]
+            meta["decode_onnx"] = decode.get("hmonnx_file") or decode["with_act_onnx"]
+            return meta
+
+        return {
+            "hf_model": manifest.get("hf_model"),
+            "hf_config": manifest["hf_config"],
+            "input_dtype": manifest.get("dtype", "float16"),
+            "prefill_length": int(manifest["prefill_length"]),
+            "cache_length": int(manifest["context_length"]),
+            "host_modules": manifest["host_modules"],
+            "base_lm": build_lm("baselm"),
+            "residual_lm": build_lm("residuallm"),
+        }
+
+    def _release_component_meta(self, name: str) -> Optional[dict]:
+        values = self.release_components.get(name)
+        if not values:
+            return None
+        meta = deepcopy(values.get("runtime") or values.get("source_meta", {}))
+        meta["hmonnx_file"] = values.get("hmonnx_file") or values["with_act_onnx"]
+        return meta
+
+    def _release_component_candidates(self, prefix: str) -> list[dict]:
+        candidates = []
+        for name, values in self.release_components.items():
+            if not name.startswith(prefix):
+                continue
+            meta = deepcopy(values.get("runtime") or values.get("source_meta", {}))
+            meta["hmonnx_file"] = values.get("hmonnx_file") or values["with_act_onnx"]
+            candidates.append(meta)
+        return candidates
+
     def _find_decoder(self, work_dir: Path, prefer: str) -> Tuple[Optional[dict], Optional[str]]:
         """在 work_dir 下查找所有 AudioVAE_Decoder_np* 目录,按 prefer 返回。
 
@@ -387,6 +456,16 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
             prefer: "stream" → 选 num_patches 最小的那一份
                     "full"   → 选 num_patches 最大的那一份
         """
+        release_metas = [
+            meta
+            for meta in self._release_component_candidates("audiovae_decoder_")
+            if "stateful" not in str(meta.get("module", "")).lower()
+        ]
+        if release_metas:
+            selector = min if prefer == "stream" else max
+            chosen = selector(release_metas, key=lambda m: int(m["num_patches"]))
+            return chosen, chosen["hmonnx_file"]
+
         dirs = sorted(work_dir.glob("AudioVAE_Decoder_np*"))
         if not dirs:
             return None, None
@@ -407,6 +486,11 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
 
     def _find_stateful_stream_decoder(self, work_dir: Path) -> Tuple[Optional[dict], Optional[str]]:
         """查找真流式 AudioVAE decoder 元信息。"""
+        release_metas = self._release_component_candidates("audiovae_decoder_stateful_")
+        if release_metas:
+            chosen = min(release_metas, key=lambda m: int(m.get("num_patches", 1)))
+            return chosen, chosen["hmonnx_file"]
+
         dirs = sorted(work_dir.glob("AudioVAE_Decoder_StreamState_np*"))
         metas = []
         for d in dirs:
@@ -431,6 +515,11 @@ class VoxCPM2HMONNXTTSPipeline(nn.Module):
         返回:
             (meta, hmonnx_file)；找不到则返回 (None, None)
         """
+        release_metas = self._release_component_candidates("audiovae_encoder_")
+        if release_metas:
+            chosen = max(release_metas, key=lambda m: int(m["num_patches"]))
+            return chosen, chosen["hmonnx_file"]
+
         legacy_meta = work_dir / "AudioVAE_Encoder" / "audiovae_encoder_meta_info.json"
         if legacy_meta.exists():
             meta = load_meta(legacy_meta)

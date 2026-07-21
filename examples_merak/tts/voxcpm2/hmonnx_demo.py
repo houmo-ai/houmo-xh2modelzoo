@@ -1,23 +1,4 @@
-"""VoxCPM2 HMONNX demo。
-
-用法:
-    python hmonnx_demo.py \
-        --work_dir /data01/home/binghu.ji/0401_modelzoo/xh2modelzoo/examples/audio/voxcpm2/work_dirs/VoxCPM2_XH2a \
-        --text "后摩智能的小伙伴们你们好，我是哆啦 A 梦！" \
-        --output zero_shot_output.wav
-
-    # reference mode:
-    python hmonnx_demo.py \
-        --work_dir /data01/home/binghu.ji/0401_modelzoo/xh2modelzoo/examples/audio/voxcpm2/work_dirs/VoxCPM2_XH2a \
-        --text "后摩智能的小伙伴们你们好，我是哆啦 A 梦！" \
-        --reference_wav /data01/home/binghu.ji/0401_modelzoo/xh2modelzoo/examples/audio/qwen3_asr/dsj_20251212.wav \
-        --output 0423_reference_output.wav \
-        --align_torch \
-        --model_dir /data01/home/binghu.ji/models/VoxCPM2
-
-输出:
-    写到 --output 指定的 WAV 文件(默认 output.wav)。
-"""
+"""Run VoxCPM2 inference from an exported HMONNX work directory."""
 
 from __future__ import annotations
 
@@ -30,52 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-try:
-    import soundfile as sf
-except ImportError:
-    sf = None
-
-
-def save_wav(audio: np.ndarray, sample_rate: int, path: str):
-    """保存 1D 波形到 WAV。优先用 soundfile,失败则回退到 scipy.io.wavfile。"""
-    Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-    audio = audio.astype(np.float32)
-    audio = np.clip(audio, -1.0, 1.0)
-
-    if sf is not None:
-        sf.write(path, audio, sample_rate)
-        return
-
-    from scipy.io import wavfile
-    int16 = (audio * 32767).astype(np.int16)
-    wavfile.write(path, sample_rate, int16)
-
-
-def _calc_audio_metrics(hmonnx_audio: np.ndarray, torch_audio: np.ndarray):
-    a = np.asarray(hmonnx_audio, dtype=np.float32).reshape(-1)
-    b = np.asarray(torch_audio, dtype=np.float32).reshape(-1)
-    min_len = min(a.size, b.size)
-    if min_len == 0:
-        return {
-            "hmonnx_len": int(a.size),
-            "torch_len": int(b.size),
-            "len_ratio": float("inf") if b.size == 0 else float(a.size / max(1, b.size)),
-            "max_abs": float("inf"),
-            "mean_abs": float("inf"),
-            "cosine": 0.0,
-        }
-    ax = a[:min_len]
-    bx = b[:min_len]
-    abs_diff = np.abs(ax - bx)
-    cosine = float(np.dot(ax, bx) / ((np.linalg.norm(ax) * np.linalg.norm(bx)) + 1e-12))
-    return {
-        "hmonnx_len": int(a.size),
-        "torch_len": int(b.size),
-        "len_ratio": float(a.size / max(1, b.size)),
-        "max_abs": float(abs_diff.max()),
-        "mean_abs": float(abs_diff.mean()),
-        "cosine": cosine,
-    }
+from audio_utils import calc_audio_metrics, save_wav
 
 
 def main(args):
@@ -180,7 +116,7 @@ def main(args):
         t3 = time.time()
         print(f"[align] pytorch done. elapsed={t3 - t2:.2f}s", file=sys.stderr)
 
-        metrics = _calc_audio_metrics(audio, torch_audio)
+        metrics = calc_audio_metrics(audio, torch_audio)
         print(
             "[align] hmonnx_vs_torch "
             f"len=({metrics['hmonnx_len']},{metrics['torch_len']}) "
@@ -220,7 +156,7 @@ def main(args):
 def build_argparser():
     p = argparse.ArgumentParser()
     p.add_argument("--work_dir", type=str, required=True,
-                   help="量化导出的工作目录(含 lm_export_meta_info.json 等)")
+                   help="导出产物根目录(含 export_meta_info.json)")
     p.add_argument("--text", type=str, required=True, help="目标合成文本")
     p.add_argument("--prompt_wav", type=str, default=None)
     p.add_argument("--prompt_text", type=str, default=None)
@@ -241,7 +177,7 @@ def build_argparser():
     p.add_argument("--output", type=str, default="output.wav")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--align_torch", action="store_true", help="追加 PyTorch 端到端对齐")
-    p.add_argument("--model_dir", type=str, default="/data01/home/binghu.ji/models/VoxCPM2")
+    p.add_argument("--model_dir", type=str, default=None)
     p.add_argument(
         "--audio_encoder_backend",
         type=str,
@@ -253,7 +189,7 @@ def build_argparser():
         "--torch_audio_model_dir",
         type=str,
         default=None,
-        help="torch 音频编码器模型目录(默认取 lm_export_meta_info.json 的 hf_model)",
+        help="torch 音频编码器模型目录(默认取 export_meta_info.json 的 hf_model)",
     )
     p.add_argument("--e2e_len_ratio_tol", type=float, default=0.20)
     p.add_argument("--e2e_mean_abs_tol", type=float, default=0.25)

@@ -1,7 +1,7 @@
 """VoxCPM2 AudioVAE Encoder HMONNX 导出脚本。
 
 用法:
-    python export_audiovae_encoder.py --model /data01/home/binghu.ji/models/VoxCPM2
+    python export_audiovae_encoder.py --model <model_dir>
 """
 
 import argparse
@@ -35,6 +35,7 @@ from .utils import (
     compute_audiovae_encoder_input_length,
     load_and_pad_audio,
     remove_weight_norm_recursively,
+    resolve_export_dtype,
     write_json_file,
 )
 
@@ -221,7 +222,7 @@ def main(args):
     logger = get_root_logger()
 
     device = activate_export_device(getattr(args, "device", None))
-    dtype = torch.float32
+    dtype = resolve_export_dtype(args.dtype)
     logger.info("Using export device: %s", device)
 
     logger.info("从 %s 中加载 VoxCPM2 模型", model_path)
@@ -410,7 +411,7 @@ def main(args):
         hmonnx_file=str(hmonnx_file.relative_to(work_dir.parent)),
         golden_dir=str(golden_dir.relative_to(work_dir.parent)) if args.gen_golden else None,
         quant_type=args.quant_type,
-        input_dtype="float32",  # wrapper / calibration 侧 dtype
+        input_dtype=str(dtype).removeprefix("torch."),
         graph_input_dtype=graph_input_dtype,  # HMONNX 图真实接受的 dtype
         input_names=["audio"],
         output_names=["mu"],
@@ -454,6 +455,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--quant_type", type=str, default="w16a16_sefp")
     parser.add_argument("--device", default=None, help="Export device: cpu, cuda, or cuda:N")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument("--gen_golden", action="store_true")
     parser.add_argument("--skip_verify", action="store_true")
     parser.add_argument("--verify_max_abs_tol", type=float, default=0.5)

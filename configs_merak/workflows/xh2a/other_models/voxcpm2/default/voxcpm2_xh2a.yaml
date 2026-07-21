@@ -22,16 +22,14 @@ export:
     audiovae_decoder_stateful: w8a8_sefp
   model:
     type: XHVoxCPM2Model
-    hf_model: null
+  lm:
     wrap_cfg:
       max_sequence_length: 1024
       input_sequence_length: 256
       use_cache: true
-      num_logits_to_keep: 0
       kv_cache:
         cache_axis: 2
-      enable_rope: true
-    quant_config: {}
+      batch_size: 1
     frontend_type: TorchFX
     export_cfg:
       input_names:
@@ -40,7 +38,6 @@ export:
         - current_input_length
       output_names:
         - hidden
-  lm:
     skip_verify: true
   locenc:
     cal_wav: null

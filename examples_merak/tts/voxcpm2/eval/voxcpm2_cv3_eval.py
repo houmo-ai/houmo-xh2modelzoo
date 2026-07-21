@@ -6,16 +6,8 @@ This follows the style of examples/audio/qwen3_tts/eval/qwen3_tts_eval.py:
   * shard CV3-Eval samples across the requested GPUs
   * generate wav files only; no metric computation is done here
 
-Examples:
-    # HMONNX, generate all 500 zh + 500 en samples on all visible GPUs
-    PYTHONPATH=/data01/home/she.gao/xh2modelzoo CUDA_VISIBLE_DEVICES=0,1,2,3 \
-    /data01/home/she.gao/miniconda3/envs/xhquant/bin/python voxcpm2_cv3_eval.py \
-      --mode hmonnx --languages zh,en --gpus auto
-
-    # Float/PyTorch, first 2 samples per language
-    PYTHONPATH=/data01/home/she.gao/xh2modelzoo CUDA_VISIBLE_DEVICES=0 \
-    /data01/home/she.gao/miniconda3/envs/xhquant/bin/python voxcpm2_cv3_eval.py \
-      --mode float --languages zh,en --gpus 0 --max-samples 2
+Run this script from the repository root. Model, export, and CV3-Eval
+directories are supplied explicitly on the command line.
 """
 
 from __future__ import annotations
@@ -33,11 +25,11 @@ import torch
 from torch.multiprocessing import set_start_method, spawn
 from tqdm import tqdm
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+EXAMPLE_DIR = Path(__file__).resolve().parent.parent
+if str(EXAMPLE_DIR) not in sys.path:
+    sys.path.insert(0, str(EXAMPLE_DIR))
 
-from hmonnx_demo import save_wav  # noqa: E402
+from audio_utils import save_wav  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -305,8 +297,12 @@ def merge_manifests(output_dir: Path, mode: str, languages: List[str], num_ranks
 
 
 def validate_paths(args: argparse.Namespace) -> None:
+    if args.data_path is None:
+        args.data_path = str(Path(args.cv3_root) / "data" / "zero_shot")
     paths = [args.cv3_root, args.data_path, args.model_dir]
     if args.mode == "hmonnx":
+        if not args.work_dir:
+            raise ValueError("--work-dir is required when --mode hmonnx")
         paths.append(args.work_dir)
     missing = [path for path in paths if not Path(path).exists()]
     if missing:
@@ -362,18 +358,18 @@ def build_argparser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--mode", required=True, choices=["float", "hmonnx"], help="inference mode")
-    parser.add_argument("--model-dir", default="/data01/nfs_shared/ASR_TTS/VoxCPM2")
+    parser.add_argument("--model-dir", required=True)
     parser.add_argument(
         "--work-dir",
-        default=str(SCRIPT_DIR / "work_dirs" / "VoxCPM2_XH2a"),
+        default=None,
         help="VoxCPM2 HMONNX export directory; only used by --mode hmonnx",
     )
-    parser.add_argument("--cv3-root", default="/data01/home/she.gao/CV3-Eval")
-    parser.add_argument("--data-path", default="/data01/home/she.gao/CV3-Eval/data/zero_shot")
+    parser.add_argument("--cv3-root", required=True)
+    parser.add_argument("--data-path", default=None)
     parser.add_argument("--languages", default="zh,en")
     parser.add_argument("--gpus", default="auto", help="comma-separated visible GPU ids, or auto for all visible GPUs")
     parser.add_argument("--max-samples", type=int, default=None, help="None means all samples, usually 500/language")
-    parser.add_argument("--exp-dir", default=str(SCRIPT_DIR / "cv3_eval_results" / "voxcpm2_cv3"))
+    parser.add_argument("--exp-dir", default="work_dirs/voxcpm2_cv3_eval")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--cv3-mode", choices=["prompt", "reference", "reference_prompt"], default="prompt")
     parser.add_argument("--audio-encoder-backend", choices=["auto", "hmonnx", "torch"], default="hmonnx")

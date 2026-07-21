@@ -45,7 +45,12 @@ try:
 except ImportError:
     from voxcpm.model.voxcpm2 import VoxCPM2Model
 
-from .utils import activate_export_device, remove_weight_norm_recursively, write_json_file
+from .utils import (
+    activate_export_device,
+    remove_weight_norm_recursively,
+    resolve_export_dtype,
+    write_json_file,
+)
 
 
 GB = int(2**30)
@@ -349,7 +354,7 @@ def _verify_wrapper_vs_native_streaming(
             wrapper_out = wrapper(z_step, sr_idx, *wrapper_states)
             wrapper_chunks.append(wrapper_out[0])
             wrapper_states = list(wrapper_out[1:])
-            native_chunks.append(native_dec.decode_chunk(z_step.to(torch.float32)))
+            native_chunks.append(native_dec.decode_chunk(z_step))
 
     wrapper_audio = torch.cat(wrapper_chunks, dim=-1)
     native_audio = torch.cat(native_chunks, dim=-1)
@@ -437,7 +442,7 @@ def main(args):
             raise ValueError("--cpu cannot be combined with a non-CPU --device value.")
         requested_device = "cpu"
     device = activate_export_device(requested_device)
-    dtype = torch.float32
+    dtype = resolve_export_dtype(args.dtype)
     logger.info("Using export device: %s", device)
 
     logger.info("Loading VoxCPM2 model from %s", model_path)
@@ -599,7 +604,7 @@ def main(args):
         onnx_file=str(onnx_file.relative_to(work_dir.parent)),
         hmonnx_file=str(hmonnx_file.relative_to(work_dir.parent)) if hmonnx_file.exists() else None,
         quant_type=args.quant_type,
-        input_dtype="float32",
+        input_dtype=str(dtype).removeprefix("torch."),
         graph_input_dtype=graph_dtypes,
         input_names=input_names,
         output_names=output_names,
@@ -640,6 +645,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--verify_steps", type=int, default=4)
     parser.add_argument("--device", default=None, help="Export device: cpu, cuda, or cuda:N")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument("--cpu", action="store_true", help="Deprecated alias for --device cpu")
     parser.add_argument("--skip_hmonnx", action="store_true")
     parser.add_argument("--skip_verify", action="store_true")

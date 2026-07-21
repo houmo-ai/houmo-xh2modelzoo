@@ -41,12 +41,8 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         output_dir: str,
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
-        *,
-        release_date: str | None = None,
-        release_prefix: str | None = None,
-        overwrite: bool = False,
     ) -> ExportResult:
-        """Export every component once and atomically build the HM release directory."""
+        """Export components, then materialize the legacy-named release layout."""
         from .release_layout import build_release_directory
 
         resolved_device = str(activate_export_device(device))
@@ -63,14 +59,21 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         if unsupported:
             raise ValueError(f"Unsupported VoxCPM2 component(s): {unsupported}")
 
-        output_root_path = Path(output_dir).expanduser().resolve()
-        output_root_path.mkdir(parents=True, exist_ok=True)
+        output_dir_path = Path(output_dir).expanduser().resolve()
+        if output_dir_path.exists():
+            raise FileExistsError(
+                f"Export directory already exists: {output_dir_path}. "
+                "Remove it first or use the example's --overwrite option."
+            )
+        output_dir_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix=".voxcpm2_release_staging_",
-            dir=output_root_path,
+            prefix=".voxcpm2_export_staging_",
+            dir=output_dir_path.parent,
         ) as staging_value:
             work_dir = Path(staging_value)
-            config_file = workflow_config.dump(str(work_dir / f"{workflow_config.name}.yaml"))
+            config_file = workflow_config.dump(
+                str(work_dir / f"{workflow_config.name}.yaml")
+            )
             self._run_components(
                 export_model_dir=export_model_dir,
                 work_dir=work_dir,
@@ -87,16 +90,11 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                 components_cfg,
                 device=resolved_device,
             )
-            release_dir = build_release_directory(
-                work_dir,
-                output_root_path,
-                release_date=release_date,
-                release_prefix=release_prefix,
-                overwrite=overwrite,
-            )
-        release_config = release_dir / f"{release_dir.name}_export_config{Path(config_file).suffix}"
-        manifest_file = release_dir / f"{release_dir.name}_manifest.json"
+            release_dir = build_release_directory(work_dir, output_dir_path)
+
+        manifest_file = release_dir / "export_meta_info.json"
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        release_config = release_dir / manifest["config"]
         return ExportResult(
             work_dir=str(release_dir),
             config_file=str(release_config),
@@ -109,16 +107,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         device: str,
         input_messages: Any = None,
     ) -> str:
-        """Generate golden data from the released HMONNX files in-place.
-
-        This is deliberately separate from :meth:`export`: quantization and
-        HMONNX export happen once, while golden can be generated or refreshed
-        later without loading the original Hugging Face model again.
-
-        ``input_messages`` may optionally be a mapping from release component
-        name to an explicit ordered HMONNX input sequence. Missing components
-        use deterministic inputs inferred from the fixed ONNX input contract.
-        """
+        """Generate golden data by running the already exported HMONNX graphs."""
         from .release_layout import _copy_golden_step, _read_json, _write_json
 
         if export_result is None:
@@ -133,7 +122,11 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         components = manifest.get("components")
         if not isinstance(components, Mapping) or not components:
             raise ValueError(f"No release components found in {manifest_path}")
-        explicit_inputs = input_messages if isinstance(input_messages, Mapping) else {}
+        if input_messages is not None:
+            raise ValueError(
+                "VoxCPM2 dump_golden does not accept synthetic input_messages; "
+                "it builds deterministic inputs from each released graph contract."
+            )
 
         generated_steps: dict[str, Path] = {}
         with tempfile.TemporaryDirectory(
@@ -144,30 +137,25 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
             for component_name, values in components.items():
                 if not isinstance(values, Mapping):
                     raise TypeError(f"Invalid manifest entry for {component_name!r}")
-                hmonnx_file = release_dir / str(values["with_act_onnx"])
+                hmonnx_file = release_dir / str(
+                    values.get("hmonnx_file") or values["with_act_onnx"]
+                )
                 if not hmonnx_file.is_file():
                     raise FileNotFoundError(
                         f"Missing released HMONNX for {component_name}: {hmonnx_file}"
                     )
-                component_inputs = explicit_inputs.get(component_name)
-                if component_inputs is None:
-                    component_inputs = _build_release_golden_inputs(
-                        hmonnx_file,
-                        component_name,
-                        resolved_device,
-                    )
-                elif not isinstance(component_inputs, (list, tuple)):
-                    raise TypeError(
-                        "Explicit golden inputs must be a list or tuple; "
-                        f"got {type(component_inputs).__name__} for {component_name!r}"
-                    )
-
+                component_inputs = _build_release_golden_inputs(
+                    hmonnx_file,
+                    component_name,
+                    resolved_device,
+                    manifest,
+                )
                 golden_dir = staging_dir / component_name / "golden"
                 _run_release_hmonnx_golden(
                     hmonnx_file,
                     golden_dir,
                     resolved_device,
-                    list(component_inputs),
+                    component_inputs,
                 )
                 source_step = golden_dir / "step_0"
                 if not source_step.is_dir():
@@ -176,11 +164,15 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     )
                 generated_steps[component_name] = source_step
 
-            component_step_paths: dict[str, str] = {}
             for component_name, values in components.items():
-                component_dir = release_dir / str(values["directory"])
-                hmonnx_file = release_dir / str(values["with_act_onnx"])
-                external_file = release_dir / str(values["external_data"])
+                component_dir = release_dir / str(
+                    values.get("component_dir") or values["directory"]
+                )
+                hmonnx_file = release_dir / str(
+                    values.get("hmonnx_file") or values["with_act_onnx"]
+                )
+                external_value = values.get("external_data")
+                external_file = release_dir / str(external_value) if external_value else None
                 step_dir = component_dir / "step_0"
                 if step_dir.exists() or step_dir.is_symlink():
                     if step_dir.is_dir() and not step_dir.is_symlink():
@@ -191,26 +183,25 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                 graph_stem = hmonnx_file.stem.removesuffix("_with_act")
                 _copy_golden_step(generated_steps[component_name], step_dir, graph_stem)
                 (step_dir / hmonnx_file.name).symlink_to(Path("..") / hmonnx_file.name)
-                (step_dir / external_file.name).symlink_to(Path("..") / external_file.name)
+                if external_file is not None:
+                    (step_dir / external_file.name).symlink_to(Path("..") / external_file.name)
 
                 relative_step = str(step_dir.relative_to(release_dir))
-                values["step_dir"] = relative_step
-                component_step_paths[component_name] = relative_step
+                if "golden_dir" in values:
+                    values["golden_dir"] = relative_step
+                else:
+                    values["step_dir"] = relative_step
 
         manifest["export_device"] = resolved_device
         manifest["components"] = components
-        _write_json(manifest_path, manifest)
-        golden_meta = {
-            "release_prefix": manifest.get("release_prefix", release_dir.name),
+        manifest["golden"] = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "device": resolved_device,
             "input_messages": repr(input_messages),
-            "components": component_step_paths,
         }
-        golden_meta_path = release_dir / "golden_meta_info.json"
-        _write_json(golden_meta_path, golden_meta)
+        _write_json(manifest_path, manifest)
         export_result.meta = manifest
-        return str(golden_meta_path)
+        return str(manifest_path)
 
     def _run_components(
         self,
@@ -223,12 +214,14 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         device: str,
     ) -> None:
         quant_types = _mapping(export_cfg.get("quant_types"))
+        dtype = str(export_cfg.get("dtype", "float16"))
         lm_prefill_length, lm_cache_length = _lm_lengths(export_cfg)
 
         if _component_enabled(components_cfg, "lm"):
             from . import export_lm
 
             cfg = _mapping(export_cfg.get("lm"))
+            lm_contract = _lm_export_contract(cfg)
             export_lm.main(
                 Namespace(
                     model=export_model_dir,
@@ -236,6 +229,13 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     prefill_length=lm_prefill_length,
                     cache_length=lm_cache_length,
                     device=device,
+                    dtype=dtype,
+                    frontend_type=lm_contract["frontend_type"],
+                    use_cache=lm_contract["use_cache"],
+                    cache_axis=lm_contract["cache_axis"],
+                    batch_size=lm_contract["batch_size"],
+                    input_names=lm_contract["input_names"],
+                    output_names=lm_contract["output_names"],
                     quant_type=str(_quant_type(cfg, quant_types, "lm", "w8a8_sefp")),
                     gen_golden=gen_golden,
                     skip_verify=bool(cfg.get("skip_verify", True)),
@@ -257,6 +257,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     cal_wav=cfg.get("cal_wav"),
                     num_cal_samples=int(cfg.get("num_cal_samples", 8)),
                     device=device,
+                    dtype=dtype,
                     quant_type=str(_quant_type(cfg, quant_types, "locenc", "w8a8_sefp")),
                     gen_golden=gen_golden,
                     skip_verify=bool(cfg.get("skip_verify", True)),
@@ -276,6 +277,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     model=export_model_dir,
                     output_dir=str(work_dir),
                     device=device,
+                    dtype=dtype,
                     quant_type=str(_quant_type(cfg, quant_types, "locdit", "w8a8_sefp")),
                     gen_golden=gen_golden,
                     skip_verify=bool(cfg.get("skip_verify", True)),
@@ -297,6 +299,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     num_patches=int(cfg.get("num_patches", 128)),
                     audio=cfg.get("audio"),
                     device=device,
+                    dtype=dtype,
                     quant_type=str(_quant_type(cfg, quant_types, "audiovae_encoder", "w16a16_sefp")),
                     gen_golden=gen_golden,
                     skip_verify=bool(cfg.get("skip_verify", True)),
@@ -319,6 +322,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                 3,
                 gen_golden,
                 device,
+                dtype,
             )
         if _component_enabled(components_cfg, "audiovae_decoder_full"):
             self._run_audiovae_decoder(
@@ -331,6 +335,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                 128,
                 gen_golden,
                 device,
+                dtype,
             )
 
         if _component_enabled(components_cfg, "audiovae_decoder_stateful"):
@@ -346,6 +351,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                     seed=int(cfg.get("seed", 0)),
                     verify_steps=int(cfg.get("verify_steps", 4)),
                     device=device,
+                    dtype=dtype,
                     cpu=False,
                     skip_hmonnx=bool(cfg.get("skip_hmonnx", False)),
                     skip_verify=bool(cfg.get("skip_verify", True)),
@@ -364,6 +370,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
         default_patches: int,
         gen_golden: bool,
         device: str,
+        dtype: str,
     ) -> None:
         from . import export_audiovae_decoder
 
@@ -373,6 +380,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
                 output_dir=str(work_dir),
                 num_patches=int(cfg.get(patches_key, default_patches)),
                 device=device,
+                dtype=dtype,
                 quant_type=str(_quant_type(cfg, quant_types, component_name, "w8a8_sefp")),
                 gen_golden=gen_golden,
                 skip_verify=bool(cfg.get("skip_verify", True)),
@@ -404,6 +412,7 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
             "hf_model": model_dir,
             "model_name": export_cfg.get("model_name", Path(model_dir).name),
             "target_device": export_cfg.get("target_device", "XH2a"),
+            "dtype": str(export_cfg.get("dtype", "float16")),
             "export_device": device,
             "prefill_length": prefill_length,
             "context_length": context_length,
@@ -448,15 +457,15 @@ class VoxCPM2Workflow(BaseOtherModelWorkflow):
 
 
 def _lm_lengths(export_cfg: Mapping[str, Any]) -> tuple[int, int]:
-    model_cfg = _mapping(export_cfg.get("model"))
-    wrap_cfg = _mapping(model_cfg.get("wrap_cfg"))
+    lm_cfg = _mapping(export_cfg.get("lm"))
+    wrap_cfg = _mapping(lm_cfg.get("wrap_cfg"))
     try:
         prefill_length = int(wrap_cfg["input_sequence_length"])
         cache_length = int(wrap_cfg["max_sequence_length"])
     except KeyError as exc:
         raise ValueError(
-            "VoxCPM2 requires export.model.wrap_cfg.input_sequence_length and "
-            "export.model.wrap_cfg.max_sequence_length."
+            "VoxCPM2 requires export.lm.wrap_cfg.input_sequence_length and "
+            "export.lm.wrap_cfg.max_sequence_length."
         ) from exc
 
     if cache_length <= 0 or prefill_length > cache_length:
@@ -466,6 +475,36 @@ def _lm_lengths(export_cfg: Mapping[str, Any]) -> tuple[int, int]:
             f"Got prefill_length={prefill_length}, cache_length={cache_length}."
         )
     return prefill_length, cache_length
+
+
+def _lm_export_contract(lm_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    wrap_cfg = _mapping(lm_cfg.get("wrap_cfg"))
+    kv_cache = _mapping(wrap_cfg.get("kv_cache"))
+    export_cfg = _mapping(lm_cfg.get("export_cfg"))
+    contract = {
+        "use_cache": bool(wrap_cfg.get("use_cache", True)),
+        "cache_axis": int(kv_cache.get("cache_axis", 2)),
+        "batch_size": int(wrap_cfg.get("batch_size", 1)),
+        "frontend_type": str(lm_cfg.get("frontend_type", "TorchFX")),
+        "input_names": list(
+            export_cfg.get(
+                "input_names",
+                ["inputs_embeds", "past_seq_length", "current_input_length"],
+            )
+        ),
+        "output_names": list(export_cfg.get("output_names", ["hidden"])),
+    }
+    if not contract["use_cache"]:
+        raise ValueError("VoxCPM2 LM export requires wrap_cfg.use_cache=true")
+    if contract["cache_axis"] != 2:
+        raise ValueError("VoxCPM2 LM export currently requires kv_cache.cache_axis=2")
+    if contract["batch_size"] != 1:
+        raise ValueError("VoxCPM2 LM export currently supports batch_size=1 only")
+    if len(contract["input_names"]) != 3:
+        raise ValueError("VoxCPM2 LM export_cfg.input_names must contain exactly 3 names")
+    if len(contract["output_names"]) != 1:
+        raise ValueError("VoxCPM2 LM export_cfg.output_names must contain exactly 1 name")
+    return contract
 
 def _quant_type(
     component_cfg: Mapping[str, Any],
@@ -509,6 +548,9 @@ def _component_enabled(components_cfg: Mapping[str, Any], name: str) -> bool:
 
 
 def _find_release_manifest(release_dir: Path) -> Path:
+    export_meta = release_dir / "export_meta_info.json"
+    if export_meta.is_file():
+        return export_meta
     expected = release_dir / f"{release_dir.name}_manifest.json"
     if expected.is_file():
         return expected
@@ -524,8 +566,9 @@ def _build_release_golden_inputs(
     hmonnx_file: Path,
     component_name: str,
     device: str,
+    manifest: Mapping[str, Any] | None = None,
 ) -> list[Any]:
-    """Infer deterministic inputs from a fixed-shape released ONNX graph."""
+    """Build deterministic inputs from a released graph's static contract."""
     import onnx
     import torch
     from onnx import TensorProto
@@ -535,9 +578,10 @@ def _build_release_golden_inputs(
     initializer_names = {value.name for value in model.graph.initializer}
     initializer_names.update(value.values.name for value in model.graph.sparse_initializer)
     graph_inputs = [value for value in model.graph.input if value.name not in initializer_names]
+
     sequence_length = 1
     for value in graph_inputs:
-        if value.name == "input_1":
+        if value.name in {"input_1", "inputs_embeds"}:
             shape = _fixed_onnx_shape(value, hmonnx_file)
             if len(shape) > 1:
                 sequence_length = shape[1]
@@ -555,6 +599,7 @@ def _build_release_golden_inputs(
         TensorProto.INT64: torch.int64,
         TensorProto.BOOL: torch.bool,
     }
+    prefill_length = int((manifest or {}).get("prefill_length", 1))
     result: list[Any] = []
     for value in graph_inputs:
         tensor_type = value.type.tensor_type
@@ -569,9 +614,9 @@ def _build_release_golden_inputs(
         if dtype == torch.bool:
             tensor = torch.zeros(shape, dtype=dtype, device=torch_device)
         elif dtype in (torch.int32, torch.int64):
-            if name == "valid_length":
-                fill_value = 11 if component_name.endswith("_decode") else 0
-            elif name == "current_length":
+            if name in {"valid_length", "past_seq_length"}:
+                fill_value = prefill_length if component_name.endswith("_decode") else 0
+            elif name in {"current_length", "current_input_length"}:
                 fill_value = sequence_length
             elif name == "sr_idx":
                 fill_value = 3
@@ -601,7 +646,7 @@ def _fixed_onnx_shape(value: Any, hmonnx_file: Path) -> tuple[int, ...]:
     for dim in value.type.tensor_type.shape.dim:
         if not dim.HasField("dim_value") or dim.dim_value <= 0:
             raise ValueError(
-                f"Golden generation requires fixed positive input shapes; "
+                "Golden generation requires fixed positive input shapes; "
                 f"{hmonnx_file.name}:{value.name} has a dynamic dimension"
             )
         shape.append(int(dim.dim_value))

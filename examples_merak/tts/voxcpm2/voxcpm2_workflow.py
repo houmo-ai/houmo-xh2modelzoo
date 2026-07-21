@@ -1,8 +1,10 @@
 import argparse
+import shutil
+from pathlib import Path
 
 
 DEFAULT_CONFIG = "configs_merak/workflows/xh2a/other_models/voxcpm2/default/voxcpm2_xh2a.yaml"
-DEFAULT_OUTPUT = "work_dirs"
+DEFAULT_OUTPUT = "work_dirs/hmquant_xh2_voxcpm2_wmix_amix_256_1k"
 
 
 def parse_args() -> argparse.Namespace:
@@ -12,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--export-output-dir",
         default=DEFAULT_OUTPUT,
-        help="Parent directory for the automatically named HM-standard release directory.",
+        help="Final VoxCPM2 artifact directory.",
     )
     parser.add_argument("--quant-output-dir", default="work_dirs/voxcpm2_quant")
     parser.add_argument(
@@ -23,13 +25,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--components", default=None, help="Comma-separated component list override.")
     parser.add_argument("--quant-type", default=None, help="Override component quant types where applicable.")
     parser.add_argument(
+        "--cal-wav",
+        default=None,
+        help="Real calibration audio for LocEnc and AudioVAE Encoder.",
+    )
+    parser.add_argument(
         "--dump-golden",
         action="store_true",
         help="Generate step_0 golden from the released HMONNX after export.",
     )
-    parser.add_argument("--release-date", default=None, help="HM release date in YYYYMMDD; defaults to today.")
-    parser.add_argument("--release-prefix", default=None, help="Explicit lowercase HM release prefix override.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite the selected export/release output.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove the export output directory before running.",
+    )
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -52,28 +61,29 @@ def _build_config_overrides(args: argparse.Namespace) -> dict[str, object]:
             "audiovae_decoder_stateful",
         ):
             overrides[f"export.quant_types.{name}"] = args.quant_type
+    if args.cal_wav:
+        overrides["export.locenc.cal_wav"] = args.cal_wav
+        overrides["export.audiovae_encoder.audio"] = args.cal_wav
     return overrides
+
+
+def _remove_output_dir_if_needed(output_dir: str, overwrite: bool) -> None:
+    path = Path(output_dir).expanduser()
+    if overwrite and path.exists():
+        shutil.rmtree(path)
 
 
 def main() -> None:
     args = parse_args()
-    try:
-        from xhmodel_merak.workflows import AutoWorkflow
+    from xhmodel_merak.workflows import AutoWorkflow
 
-        workflow = AutoWorkflow.from_config(
-            model_dir=args.model_dir,
-            config_path=args.config_path,
-            debug=args.debug,
-        )
-    except ModuleNotFoundError:
-        from xhmodel_merak.xh_other_model.workflows import AutoOtherModelWorkflow
-
-        workflow = AutoOtherModelWorkflow.from_config(
-            model_dir=args.model_dir,
-            config_path=args.config_path,
-            debug=args.debug,
-        )
+    workflow = AutoWorkflow.from_config(
+        model_dir=args.model_dir,
+        config_path=args.config_path,
+        debug=args.debug,
+    )
     overrides = _build_config_overrides(args)
+    _remove_output_dir_if_needed(args.export_output_dir, args.overwrite)
     quant_result = workflow.quant(
         output_dir=args.quant_output_dir,
         device=args.device,
@@ -84,9 +94,6 @@ def main() -> None:
         output_dir=args.export_output_dir,
         device=args.device,
         config_overrides=overrides,
-        release_date=args.release_date,
-        release_prefix=args.release_prefix,
-        overwrite=args.overwrite,
     )
     print(f"release_dir: {export_result.work_dir}")
     if args.dump_golden:

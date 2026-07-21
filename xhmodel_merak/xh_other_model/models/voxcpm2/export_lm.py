@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import shutil
 import time
-from copy import deepcopy
 from pathlib import Path
 from typing import Any, List, Tuple, Union
 
@@ -45,6 +44,7 @@ except ImportError:
 try:
     from .utils import (
         activate_export_device,
+        resolve_export_dtype,
         copy_hf_config_files,
         validate_cache_length,
         validate_prefill_length,
@@ -53,6 +53,7 @@ try:
 except ImportError:
     from .utils import (
         activate_export_device,
+        resolve_export_dtype,
         copy_hf_config_files,
         validate_cache_length,
         validate_prefill_length,
@@ -215,6 +216,12 @@ def _export_single_lm(
     device: torch.device,
     exec_device: torch.device,
     dtype: torch.dtype,
+    frontend_type: str,
+    use_cache: bool,
+    cache_axis: int,
+    batch_size: int,
+    input_names: list[str],
+    output_names: list[str],
     prefill_data_batch: dict,
     decode_data_batch: dict,
     gen_golden: bool,
@@ -256,22 +263,20 @@ def _export_single_lm(
     decode_ref = decode_ref_full[:, -1:, :].detach()
 
     # --- 构造 cfg ---
-    from copy import deepcopy
-
     wrap_cfg = ConfigDict(dict(
-        use_cache=True,
+        use_cache=use_cache,
         input_sequence_length=prefill_length,
         max_sequence_length=cache_length,
-        kv_cache=dict(cache_axis=2),
+        kv_cache=dict(cache_axis=cache_axis),
         num_logits_to_keep=0,         # prefill 输出全部 hidden
         enable_rope=enable_rope,
         only_first_block=False,
-        batch_size=1,
+        batch_size=batch_size,
     ))
 
     export_cfg = ConfigDict(dict(
         input_names=[],
-        output_names=["hidden"],
+        output_names=output_names,
     ))
 
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
@@ -283,11 +288,12 @@ def _export_single_lm(
         hf_module=hf_module,
         wrap_cfg=wrap_cfg,
         quant_config=quant_config,
+        frontend_type=frontend_type,
         export_cfg=export_cfg,
     ))
 
     # 设置 export_cfg 的固定输入名(除 KV cache 外的前三个)
-    base_input_names = ["inputs_embeds", "past_seq_length", "current_input_length"]
+    base_input_names = list(input_names)
     xh_model.export_cfg.input_names = list(base_input_names)
     # init_wrap_model 里的 prepare_kv_cache 会把 past_key_cache_{i}/past_value_cache_{i} 追加进来
     xh_model.init_wrap_model()
@@ -335,7 +341,7 @@ def _export_single_lm(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    cfg_name_prefill = f"voxcpm2_{lm_name.lower()}_prefill_xh2a"
+    cfg_name_prefill = f"voxcpm2_{lm_name.lower()}_prefill_xh2a_{quant_type}"
     prefill_onnx = xhmodel_export_onnx(
         xh_model, prefill_data_batch, str(prefill_dir), cfg_name_prefill, logger,
     )
@@ -383,7 +389,7 @@ def _export_single_lm(
     decode_dir.mkdir(exist_ok=True, parents=True)
     decode_golden_dir = decode_dir / "hmonnx" / "golden"
 
-    cfg_name_decode = f"voxcpm2_{lm_name.lower()}_decode_xh2a"
+    cfg_name_decode = f"voxcpm2_{lm_name.lower()}_decode_xh2a_{quant_type}"
     decode_onnx = xhmodel_export_onnx(
         xh_model, decode_data_batch, str(decode_dir), cfg_name_decode, logger,
     )
@@ -472,10 +478,10 @@ def _export_single_lm(
         num_attention_heads=xh_model.num_attention_heads,
         hidden_size=xh_model.hidden_size,
         head_dim=xh_model.head_dim,
-        input_names=["inputs_embeds", "past_seq_length", "current_input_length"]
+        input_names=list(input_names)
         + [f"past_key_cache_{i}" for i in range(xh_model.num_hidden_layers)]
         + [f"past_value_cache_{i}" for i in range(xh_model.num_hidden_layers)],
-        output_names=["hidden"],
+        output_names=list(output_names),
         parity=parity if verify else None,
     )
 
@@ -536,7 +542,19 @@ def main(args):
 
     device = activate_export_device(getattr(args, "device", None))
     exec_device = device
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    dtype = resolve_export_dtype(args.dtype)
+    frontend_type = str(getattr(args, "frontend_type", "TorchFX"))
+    use_cache = bool(getattr(args, "use_cache", True))
+    cache_axis = int(getattr(args, "cache_axis", 2))
+    batch_size = int(getattr(args, "batch_size", 1))
+    input_names = list(
+        getattr(
+            args,
+            "input_names",
+            ["inputs_embeds", "past_seq_length", "current_input_length"],
+        )
+    )
+    output_names = list(getattr(args, "output_names", ["hidden"]))
     logger.info("Using export device: %s", device)
 
     logger.info("Loading VoxCPM2 from %s", model_path)
@@ -604,6 +622,12 @@ def main(args):
         device=device,
         exec_device=exec_device,
         dtype=dtype,
+        frontend_type=frontend_type,
+        use_cache=use_cache,
+        cache_axis=cache_axis,
+        batch_size=batch_size,
+        input_names=input_names,
+        output_names=output_names,
         prefill_data_batch=base_prefill_batch,
         decode_data_batch=base_decode_batch,
         gen_golden=args.gen_golden,
@@ -628,6 +652,12 @@ def main(args):
         device=device,
         exec_device=exec_device,
         dtype=dtype,
+        frontend_type=frontend_type,
+        use_cache=use_cache,
+        cache_axis=cache_axis,
+        batch_size=batch_size,
+        input_names=input_names,
+        output_names=output_names,
         prefill_data_batch=residual_prefill_batch,
         decode_data_batch=residual_decode_batch,
         gen_golden=args.gen_golden,
@@ -695,6 +725,7 @@ if __name__ == "__main__":
         help="量化类型(default: w8a8_sefp)",
     )
     parser.add_argument("--device", default=None, help="Export device: cpu, cuda, or cuda:N")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument(
         "--gen_golden", action="store_true",
         help="生成 golden 数据供端侧对拍",

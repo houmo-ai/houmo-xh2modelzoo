@@ -104,17 +104,39 @@ def patch_to_latent(patch: torch.Tensor, latent_dim: int) -> torch.Tensor:
 class StatefulAudioVAEDecoderHMONNX:
     def __init__(self, work_dir: str | Path, device: torch.device):
         self.work_dir = Path(work_dir).expanduser().resolve()
-        meta_files = sorted(self.work_dir.glob("audiovae_decoder_streaming_stateful_np*_meta_info.json"))
-        if not meta_files:
-            raise FileNotFoundError(f"stateful decoder meta not found in {self.work_dir}")
-        self.meta_path = meta_files[0]
-        with open(self.meta_path, "r", encoding="utf-8") as f:
-            self.meta = json.load(f)
+        self.meta_path = self.work_dir / "export_meta_info.json"
+        if self.meta_path.is_file():
+            with open(self.meta_path, "r", encoding="utf-8") as f:
+                export_meta = json.load(f)
+            candidates = [
+                values
+                for name, values in export_meta["components"].items()
+                if name.startswith("audiovae_decoder_stateful_")
+            ]
+            if not candidates:
+                raise KeyError(f"No stateful decoder component in {self.meta_path}")
+            component = min(
+                candidates,
+                key=lambda values: int((values.get("runtime") or {}).get("num_patches", 1)),
+            )
+            self.meta = dict(component.get("runtime") or {})
+            self.meta["hmonnx_file"] = component["hmonnx_file"]
+            hmonnx_root = self.work_dir
+        else:
+            meta_files = sorted(
+                self.work_dir.glob("audiovae_decoder_streaming_stateful_np*_meta_info.json")
+            )
+            if not meta_files:
+                raise FileNotFoundError(f"stateful decoder metadata not found in {self.work_dir}")
+            self.meta_path = meta_files[0]
+            with open(self.meta_path, "r", encoding="utf-8") as f:
+                self.meta = json.load(f)
+            hmonnx_root = self.work_dir.parent
 
         hmonnx_rel = self.meta.get("hmonnx_file")
         if not hmonnx_rel:
             raise FileNotFoundError(f"hmonnx_file is missing in {self.meta_path}")
-        self.hmonnx_path = self.work_dir.parent / hmonnx_rel
+        self.hmonnx_path = hmonnx_root / hmonnx_rel
         self.session = HMONNXGoldenInference(str(self.hmonnx_path))
         self.session.to(device)
         self.device = device
@@ -278,14 +300,14 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--work_dir",
         type=str,
-        default="/data01/home/she.gao/xh2modelzoo/examples/audio/voxcpm2/work_dirs/VoxCPM2_XH2a",
+        required=True,
     )
     p.add_argument(
         "--stateful_decoder_dir",
         type=str,
-        default="/data01/home/she.gao/xh2modelzoo/examples/audio/voxcpm2/work_dirs/VoxCPM2_XH2a/AudioVAE_Decoder_StreamState_np1",
+        required=True,
     )
-    p.add_argument("--torch_audio_model_dir", type=str, default="/data01/nfs_shared/ASR_TTS/VoxCPM2")
+    p.add_argument("--torch_audio_model_dir", type=str, required=True)
     p.add_argument("--text", type=str, default="这是一个真实流式解码对齐测试。")
     p.add_argument("--prompt_wav", type=str, default=None)
     p.add_argument("--prompt_text", type=str, default=None)
@@ -301,7 +323,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--output_dir",
         type=str,
-        default="/data01/home/she.gao/xh2modelzoo/examples/audio/voxcpm2/streaming_align_results/stateful_streaming_align",
+        default="work_dirs/voxcpm2_stateful_streaming_align",
     )
     p.add_argument("--save_chunks", action="store_true")
     return p

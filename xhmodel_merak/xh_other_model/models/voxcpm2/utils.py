@@ -104,6 +104,26 @@ def activate_export_device(device: str | torch.device | None = None) -> torch.de
     return resolved
 
 
+def resolve_export_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
+    """Resolve the YAML/export dtype without silently changing precision."""
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    name = str(dtype or "float16").strip().lower().removeprefix("torch.")
+    aliases = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
+    name = aliases.get(name, name)
+    supported = {
+        "float16": torch.float16,
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }
+    if name not in supported:
+        raise ValueError(
+            f"Unsupported VoxCPM2 export dtype {dtype!r}; "
+            f"expected one of {sorted(supported)}."
+        )
+    return supported[name]
+
+
 def validate_prefill_length(length: int) -> None:
     """校验 prefill 序列长度参数。"""
     if length <= 0:

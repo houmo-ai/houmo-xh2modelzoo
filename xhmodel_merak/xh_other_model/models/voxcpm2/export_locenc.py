@@ -81,9 +81,9 @@ except ImportError:
     from voxcpm.model.voxcpm2 import VoxCPM2Model
 
 try:
-    from .utils import activate_export_device, write_json_file
+    from .utils import activate_export_device, resolve_export_dtype, write_json_file
 except ImportError:
-    from .utils import activate_export_device, write_json_file
+    from .utils import activate_export_device, resolve_export_dtype, write_json_file
 
 
 GB = int(2**30)
@@ -476,7 +476,7 @@ def main(args):
     logger = get_root_logger()
 
     device = activate_export_device(getattr(args, "device", None))
-    dtype = torch.float32
+    dtype = resolve_export_dtype(args.dtype)
     logger.info("Using export device: %s", device)
 
     logger.info("Loading VoxCPM2 from %s", model_path)
@@ -486,7 +486,7 @@ def main(args):
         training=False,
         device=str(device),
     )
-    voxcpm2.to(device=device)
+    voxcpm2.to(device=device, dtype=dtype)
     voxcpm2.eval()
     # wrapper 和 audio_vae 都统一到 fp32
     voxcpm2.audio_vae.to(dtype=dtype)
@@ -729,6 +729,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--quant_type", type=str, default="w8a8_sefp")
     parser.add_argument("--device", default=None, help="Export device: cpu, cuda, or cuda:N")
+    parser.add_argument("--dtype", default="float16")
     parser.add_argument("--gen_golden", action="store_true")
     parser.add_argument("--skip_verify", action="store_true")
     parser.add_argument("--verify_max_abs_tol", type=float, default=1.0)

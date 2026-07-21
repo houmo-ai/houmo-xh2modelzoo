@@ -7,34 +7,41 @@
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/voxcpm2_workflow.py \
-  --model-dir /data01/nfs_shared/ASR_TTS/VoxCPM2 \
+  --model-dir <model_dir> \
   --config-path configs_merak/workflows/xh2a/other_models/voxcpm2/default/voxcpm2_xh2a.yaml \
+  --cal-wav <audio_file> \
   --device cuda \
   --overwrite
 ```
 
-导出入口始终一次生成符合《HM模型版本发布命名规则》的完整目录。`--export-output-dir`
-表示规范发布目录的父目录，默认是 `work_dirs`，因此上面的命令会直接生成：
+`--export-output-dir` 表示最终产物目录，不会再追加一层自动生成的目录。例如传入：
 
 ```text
-work_dirs/hmquant_xh2_voxcpm2_wmix_amix_256_1k_<date>/
+--export-output-dir work_dirs/hmquant_xh2_voxcpm2_wmix_amix_256_1k_<date>
 ```
 
-其中四个 LM 图分别使用根目录下的 `baselm_prefill`、`baselm_decode`、
-`residuallm_prefill` 和 `residuallm_decode` 目录；其他组件同样各自使用独立目录。
-所有 host 侧 `.pt` 文件都直接位于发布根目录，embedding 文件名为 `quant_embedding.pt`，
-不再生成 `host_modules` 中间目录。
-`hf_config` 不复制模型仓库的 README；各组件目录只保留 HMONNX、external_data 和可选
-`step_0`，不再生成组件级 `*_meta_info.json`，组件信息统一记录在根目录 manifest 中。
+workflow 会先在同级临时目录完成各 exporter 的原始导出，再执行一次 release 整理，
+以延续历史发布产物的目录和文件命名。最终根目录使用 `baselm_prefill`、
+`baselm_decode`、`residuallm_prefill`、`residuallm_decode`、`locenc`、`locdit` 以及
+各 AudioVAE 组件目录；图文件继续使用 `hmquant_*_<component>_with_act.onnx` 命名。
+embedding 保存为 `quant_embedding.pt`，其余 host 权重按 release prefix 放在根目录。
+临时原始导出目录会在 release 完成后删除。
 
-如需修改父目录可传 `--export-output-dir <dir>`；不再需要单独的 release 模式参数。
-`--dump-golden` 是可选项。添加后 workflow 会先完成一次规范 HMONNX 导出，再调用标准
-`dump_golden(export_result, device)` 接口直接加载发布目录中的 HMONNX，为各组件生成 `step_0`；
-不会重新量化或重新导出模型。也可以在已有 `ExportResult` 上单独调用该接口刷新 golden。
+发布根目录的固定入口仍为 `export_meta_info.json`，其中使用相对路径完整索引实际
+YAML、HF config、embedding、host 权重、10 张 HMONNX 图、external data 和可选
+golden。demo/eval 只根据该文件装配组件，不猜测目录名。发布目录不生成带前缀的
+`*_manifest.json` 或 `golden_meta_info.json`；golden 状态直接记录在
+`export_meta_info.json` 中。
+
+目录名由调用方一次性确定，不再需要单独的 release 模式参数。
+`--dump-golden` 是可选项。添加后 workflow 会先完成 HMONNX 导出，再调用标准
+`dump_golden(export_result, device)` 接口，根据最终图的静态输入契约构造确定性输入并为各组件
+生成 `step_0`。该阶段只运行已有 HMONNX，不重新加载原始模型，也不重新量化或导出。
 
 `--device` 是统一的导出执行设备，会传给所有组件，并用于模型初始化、KV cache、导出张量
 和 golden 生成。可使用 `cpu`、`cuda` 或 `cuda:N`；`cuda:N` 还会被设为当前 CUDA device，
 因此依赖内部未带编号的 `cuda` 分配也会落到同一张卡。`N` 是当前进程可见的逻辑 GPU 编号。
+完整精度导出应传入 `--cal-wav`，该音频会同时用于 LocEnc 和 AudioVAE Encoder 校准。
 
 默认配置会导出以下组件：
 
@@ -52,18 +59,19 @@ work_dirs/hmquant_xh2_voxcpm2_wmix_amix_256_1k_<date>/
 
 `export.components` 必须显式配置，写哪些组件就导出哪些；列出全部组件时生成完整发布目录，
 未配置或配置为空会直接报错。命令行可用 `--components lm,locenc` 临时覆盖为部分导出，
-也可用 `--quant-type w8a8_sefp` 覆盖支持量化的组件类型。入口会优先走标准 `AutoWorkflow`，
-如果本地环境缺少可选 `xh_llm` 依赖，会自动回退到 `AutoOtherModelWorkflow`。
+也可用 `--quant-type w8a8_sefp` 覆盖支持量化的组件类型。入口统一使用顶层
+`AutoWorkflow`。
 
-指定日期并同时生成 golden 的完整示例：
+同时生成 golden 的完整示例：
 
 ```bash
 PYTHONPATH=$PWD python examples_merak/tts/voxcpm2/voxcpm2_workflow.py \
-  --model-dir /data01/nfs_shared/ASR_TTS/VoxCPM2 \
+  --model-dir <model_dir> \
   --config-path configs_merak/workflows/xh2a/other_models/voxcpm2/default/voxcpm2_xh2a.yaml \
-  --device cuda:6 \
+  --cal-wav <audio_file> \
+  --device cuda:0 \
   --dump-golden \
-  --release-date 20260715
+  --overwrite
 ```
 
 当前默认配置中，AudioVAE Encoder 使用 `w16a16`，其余组件使用 `w8a8`。因此发布
@@ -76,9 +84,9 @@ PYTHONPATH=$PWD python examples_merak/tts/voxcpm2/voxcpm2_workflow.py \
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/hmonnx_demo.py \
-  --work_dir work_dirs/VoxCPM2_XH2a \
+  --work_dir <output_dir> \
   --text "你好，这是 VoxCPM2 HMONNX 非流式 demo 验证。" \
-  --output work_dirs/VoxCPM2_XH2a/demo_outputs/non_streaming.wav \
+  --output <demo_output_dir>/non_streaming.wav \
   --audio_encoder_backend hmonnx \
   --inference_timesteps 4 \
   --min_len 2 \
@@ -90,10 +98,10 @@ python examples_merak/tts/voxcpm2/hmonnx_demo.py \
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/hmonnx_demo.py \
-  --work_dir work_dirs/VoxCPM2_XH2a \
+  --work_dir <output_dir> \
   --text "这是一段使用参考音色合成的语音。" \
-  --reference_wav /data01/nfs_shared/ASR_TTS/CAM++/examples/speaker1_b_cn_16k.wav \
-  --output work_dirs/VoxCPM2_XH2a/demo_outputs/reference.wav \
+  --reference_wav <audio_file> \
+  --output <demo_output_dir>/reference.wav \
   --audio_encoder_backend hmonnx \
   --inference_timesteps 4 \
   --min_len 2 \
@@ -104,7 +112,7 @@ python examples_merak/tts/voxcpm2/hmonnx_demo.py \
 
 `hmonnx_demo.py` 支持两种流式后端：
 
-- `--streaming_backend stateful`: 推荐路径。使用 `AudioVAE_Decoder_StreamState_np1`，每次只输入最新 1 个 latent patch，并在 HMONNX 图输入/输出间传递 decoder states，对齐原生 `audio_vae.streaming_decode()` 的接口。
+- `--streaming_backend stateful`: 推荐路径。通过顶层 metadata 定位 stateful decoder，每次只输入最新 latent patch，并在 HMONNX 图输入/输出间传递 decoder states，对齐原生 `audio_vae.streaming_decode()` 的接口。
 - `--streaming_backend overlap`: 兼容路径。使用 `AudioVAE_Decoder_np3`，每步输入带重叠窗口的 latent，再做 overlap/crop 拼接；实现简单，但不是真正的 state cache 流式。
 
 真流式 demo：
@@ -112,13 +120,13 @@ python examples_merak/tts/voxcpm2/hmonnx_demo.py \
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/hmonnx_demo.py \
-  --work_dir work_dirs/VoxCPM2_XH2a \
+  --work_dir <output_dir> \
   --text "你好，这是 VoxCPM2 HMONNX 真流式 stateful demo 验证。" \
-  --output work_dirs/VoxCPM2_XH2a/demo_outputs/streaming_stateful.wav \
+  --output <demo_output_dir>/streaming_stateful.wav \
   --streaming \
   --streaming_backend stateful \
   --audio_encoder_backend hmonnx \
-  --torch_audio_model_dir /data01/nfs_shared/ASR_TTS/VoxCPM2 \
+  --torch_audio_model_dir <model_dir> \
   --inference_timesteps 4 \
   --min_len 2 \
   --max_len 24
@@ -129,9 +137,9 @@ python examples_merak/tts/voxcpm2/hmonnx_demo.py \
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/hmonnx_demo.py \
-  --work_dir work_dirs/VoxCPM2_XH2a \
+  --work_dir <output_dir> \
   --text "你好，这是 VoxCPM2 HMONNX overlap 流式 demo 验证。" \
-  --output work_dirs/VoxCPM2_XH2a/demo_outputs/streaming_overlap.wav \
+  --output <demo_output_dir>/streaming_overlap.wav \
   --streaming \
   --streaming_backend overlap \
   --audio_encoder_backend hmonnx \
@@ -145,11 +153,11 @@ stateful decoder 对齐脚本会比较 HMONNX stateful decoder 和 PyTorch `audi
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/tts/voxcpm2/voxcpm2_stateful_streaming_align.py \
-  --work_dir work_dirs/VoxCPM2_XH2a \
-  --stateful_decoder_dir work_dirs/VoxCPM2_XH2a/AudioVAE_Decoder_StreamState_np1 \
-  --torch_audio_model_dir /data01/nfs_shared/ASR_TTS/VoxCPM2 \
+  --work_dir <output_dir> \
+  --stateful_decoder_dir <output_dir> \
+  --torch_audio_model_dir <model_dir> \
   --audio_encoder_backend hmonnx \
-  --output_dir work_dirs/VoxCPM2_XH2a/demo_outputs/stateful_align \
+  --output_dir <demo_output_dir>/stateful_align \
   --inference_timesteps 4 \
   --min_len 2 \
   --max_len 24 \
@@ -166,10 +174,10 @@ python examples_merak/tts/voxcpm2/voxcpm2_stateful_streaming_align.py \
 CUDA_VISIBLE_DEVICES=<gpu_id> \
 PYTHONPATH=$PWD/examples_merak/tts/voxcpm2:$PWD \
 python examples_merak/tts/voxcpm2/run_demo_suite.py \
-  --work-dir work_dirs/VoxCPM2_XH2a \
-  --model-dir /data01/nfs_shared/ASR_TTS/VoxCPM2 \
-  --reference-wav /data01/nfs_shared/ASR_TTS/CAM++/examples/speaker1_b_cn_16k.wav \
-  --output-dir work_dirs/VoxCPM2_XH2a/demo_outputs/full_demo_suite \
+  --work-dir <output_dir> \
+  --model-dir <model_dir> \
+  --reference-wav <audio_file> \
+  --output-dir <demo_output_dir>/full_demo_suite \
   --audio-encoder-backend hmonnx \
   --inference-timesteps 4 \
   --min-len 2 \
@@ -182,4 +190,4 @@ python examples_merak/tts/voxcpm2/run_demo_suite.py \
 
 - YAML 中 `lm.skip_verify: true` 只跳过导出阶段的 LM PyTorch/HMONNX 对齐验证，不影响 demo 推理。
 - `locenc.cal_wav` 为空时会使用随机校准数据，适合快速打通导出链路；正式精度评估建议指定真实音频校准集。
-- `model.wrap_cfg` 是 BaseLM 和 ResidualLM 共用的唯一长度配置源：`input_sequence_length` 控制 prefill 图长度，`max_sequence_length` 直接控制 KV cache 总容量。当前两者分别为 256 和 1024，prefill 和 decode 共用这 1024 个位置。
+- `lm.wrap_cfg` 是 BaseLM 和 ResidualLM 共用的唯一长度配置源：`input_sequence_length` 控制 prefill 图长度，`max_sequence_length` 直接控制 KV cache 总容量。当前两者分别为 256 和 1024，prefill 和 decode 共用这 1024 个位置。

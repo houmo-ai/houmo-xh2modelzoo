@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from hmonnx_demo import _calc_audio_metrics, save_wav
+from audio_utils import calc_audio_metrics, save_wav
 
 
 def as_audio(x) -> np.ndarray:
@@ -85,7 +85,7 @@ def run_align_case(name: str, pipeline, output_dir: Path, gen_kwargs: dict, args
     torch_elapsed = time.time() - t1
     save_wav(torch_audio, int(pipeline.sample_rate), str(torch_path))
 
-    metrics = _calc_audio_metrics(hmonnx_audio, torch_audio)
+    metrics = calc_audio_metrics(hmonnx_audio, torch_audio)
     report = {
         "name": name,
         "hmonnx_wav": str(hmonnx_path),
@@ -107,7 +107,7 @@ def run_stateful_align_case(output_dir: Path, args: argparse.Namespace) -> dict:
         "--work_dir",
         str(Path(args.work_dir).expanduser().resolve()),
         "--stateful_decoder_dir",
-        str(Path(args.work_dir).expanduser().resolve() / "AudioVAE_Decoder_StreamState_np1"),
+        str(Path(args.work_dir).expanduser().resolve()),
         "--torch_audio_model_dir",
         str(Path(args.model_dir).expanduser().resolve()),
         "--audio_encoder_backend",
@@ -251,10 +251,10 @@ def main(args: argparse.Namespace) -> None:
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--work-dir", default="/data01/home/she.gao/xh2modelzoo/examples/audio/voxcpm2/work_dirs/VoxCPM2_XH2a")
-    parser.add_argument("--model-dir", default="/data01/nfs_shared/ASR_TTS/VoxCPM2")
-    parser.add_argument("--reference-wav", default="/data01/nfs_shared/ASR_TTS/CAM++/examples/speaker1_b_cn_16k.wav")
-    parser.add_argument("--output-dir", default="/data01/home/she.gao/xh2modelzoo/examples/audio/voxcpm2/demo_results/full_demo_suite")
+    parser.add_argument("--work-dir", required=True)
+    parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--reference-wav", required=True)
+    parser.add_argument("--output-dir", default="work_dirs/voxcpm2_demo_suite")
     parser.add_argument("--audio-encoder-backend", choices=["auto", "hmonnx", "torch"], default="hmonnx")
     parser.add_argument("--cfg-value", type=float, default=2.0)
     parser.add_argument("--inference-timesteps", type=int, default=10)

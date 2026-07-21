@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,7 +81,7 @@ def build_release_prefix(
 
 def build_release_directory(
     source_work_dir: str | Path,
-    output_root: str | Path,
+    output_dir: str | Path,
     *,
     release_date: str | None = None,
     release_prefix: str | None = None,
@@ -88,7 +89,7 @@ def build_release_directory(
 ) -> Path:
     """Convert a completed workflow export into the HM release layout."""
     source = Path(source_work_dir).expanduser().resolve()
-    output_root = Path(output_root).expanduser().resolve()
+    destination = Path(output_dir).expanduser().resolve()
     export_meta = _read_json(source / "export_meta_info.json")
     source_golden_meta = (
         _read_json(source / "golden_meta_info.json")
@@ -113,22 +114,22 @@ def build_release_directory(
     if prefix != prefix.lower():
         raise ValueError(f"release_prefix must be lowercase, got {prefix!r}")
 
-    destination = output_root / prefix
     if destination.exists():
         if not overwrite:
             raise FileExistsError(f"Release directory already exists: {destination}")
         shutil.rmtree(destination)
-    output_root.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    temp_dir = Path(tempfile.mkdtemp(prefix=f".{prefix}.", dir=output_root))
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{prefix}.", dir=destination.parent))
     try:
         component_manifest: dict[str, dict[str, Any]] = {}
         for component in components:
             component_manifest[component.name] = _materialize_component(temp_dir, prefix, component)
 
         hf_config_dir = _copy_hf_config(source, export_meta, lm_meta, temp_dir)
-        host_modules = _copy_host_modules(source, lm_meta, temp_dir, prefix)
-        _copy_export_config(source, export_meta, temp_dir, prefix)
+        host_meta = lm_meta if lm_meta.get("host_modules") else export_meta
+        host_modules = _copy_host_modules(source, host_meta, temp_dir, prefix)
+        config_file = _copy_export_config(source, export_meta, temp_dir, prefix)
 
         manifest = {
             "release_prefix": prefix,
@@ -136,6 +137,7 @@ def build_release_directory(
             "source_work_dir": str(source),
             "hf_model": export_meta.get("hf_model"),
             "target_device": export_meta.get("target_device", "XH2a"),
+            "dtype": export_meta.get("dtype", "float16"),
             "export_device": export_meta.get("export_device") or source_golden_meta.get("device"),
             "prefill_length": int(lm_meta.get("prefill_length", export_meta["prefill_length"])),
             "context_length": int(lm_meta.get("cache_length", export_meta["context_length"])),
@@ -148,22 +150,32 @@ def build_release_directory(
             "host_modules": host_modules,
             "components": component_manifest,
         }
-        _write_json(temp_dir / f"{prefix}_manifest.json", manifest)
-        golden_components = {
-            name: values["step_dir"]
-            for name, values in component_manifest.items()
-            if values["step_dir"] is not None
+        export_meta_info = {
+            "format_version": 1,
+            "model_name": "VoxCPM2",
+            "release_prefix": prefix,
+            "create_time": manifest["create_time"],
+            "hf_model": manifest["hf_model"],
+            "target_device": manifest["target_device"],
+            "dtype": manifest["dtype"],
+            "export_device": manifest["export_device"],
+            "prefill_length": manifest["prefill_length"],
+            "context_length": manifest["context_length"],
+            "config": config_file,
+            "hf_config": manifest["hf_config"],
+            "quant_embedding": manifest["quant_embedding"],
+            "host_modules": manifest["host_modules"],
+            "components": {
+                name: _canonical_component(values)
+                for name, values in component_manifest.items()
+            },
         }
-        if golden_components:
-            _write_json(
-                temp_dir / "golden_meta_info.json",
-                {
-                    "release_prefix": prefix,
-                    "create_time": manifest["create_time"],
-                    "device": manifest["export_device"],
-                    "components": golden_components,
-                },
-            )
+        if any(values["step_dir"] is not None for values in component_manifest.values()):
+            export_meta_info["golden"] = {
+                "create_time": manifest["create_time"],
+                "device": manifest["export_device"],
+            }
+        _write_json(temp_dir / "export_meta_info.json", export_meta_info)
         _validate_release_directory(temp_dir, prefix, components)
         temp_dir.rename(destination)
     except Exception:
@@ -172,46 +184,207 @@ def build_release_directory(
     return destination
 
 
+def finalize_export_metadata(work_dir: str | Path) -> Path:
+    """Index direct exporter outputs without copying or renaming graph files."""
+    root = Path(work_dir).expanduser().resolve()
+    export_meta = _read_json(root / "export_meta_info.json")
+    lm_meta_path = root / "lm_export_meta_info.json"
+    lm_meta = _read_json(lm_meta_path) if lm_meta_path.is_file() else {}
+    components = _collect_components(root, export_meta, lm_meta)
+    if not components:
+        raise ValueError(f"No release components found under {root}")
+
+    prefix = build_release_prefix(
+        target_device=str(export_meta.get("target_device", "XH2a")),
+        model_name=str(lm_meta.get("model_name", export_meta.get("model_name", root.name))),
+        quant_types=[component.quant_type for component in components],
+        prefill_length=int(lm_meta.get("prefill_length", export_meta["prefill_length"])),
+        context_length=int(lm_meta.get("cache_length", export_meta["context_length"])),
+    )
+    component_manifest = {
+        component.name: _direct_component(root, component)
+        for component in components
+    }
+    hf_config_value = lm_meta.get("hf_config")
+    if hf_config_value and (root / str(hf_config_value) / "config.json").is_file():
+        hf_config_dir = root / str(hf_config_value)
+    else:
+        hf_config_dir = _copy_hf_config(root, export_meta, lm_meta, root)
+    host_modules = {
+        name: str(path)
+        for name, path in lm_meta.get("host_modules", {}).items()
+    }
+
+    config_value = export_meta.get("config")
+    if not config_value or not (root / str(config_value)).is_file():
+        raise FileNotFoundError(f"Workflow config is missing from {root}: {config_value}")
+
+    create_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    final_meta = {
+        "format_version": 1,
+        "model_name": str(export_meta.get("model_name", "VoxCPM2")),
+        "release_prefix": prefix,
+        "create_time": create_time,
+        "hf_model": export_meta.get("hf_model"),
+        "target_device": export_meta.get("target_device", "XH2a"),
+        "dtype": export_meta.get("dtype", "float16"),
+        "export_device": export_meta.get("export_device"),
+        "prefill_length": int(lm_meta.get("prefill_length", export_meta["prefill_length"])),
+        "context_length": int(lm_meta.get("cache_length", export_meta["context_length"])),
+        "config": str(config_value),
+        "hf_config": str(hf_config_dir.relative_to(root)),
+        "quant_embedding": host_modules.get("token_embedding"),
+        "host_modules": host_modules,
+        "components": {
+            name: values
+            for name, values in component_manifest.items()
+        },
+    }
+    _write_json(root / "export_meta_info.json", final_meta)
+    _validate_direct_export_metadata(root, final_meta)
+    return root
+
+
+def _direct_component(root: Path, component: ReleaseComponent) -> dict[str, Any]:
+    hmonnx_file = component.source_onnx.resolve()
+    if not hmonnx_file.is_file():
+        raise FileNotFoundError(f"Missing HMONNX for {component.name}: {hmonnx_file}")
+    runtime = deepcopy(component.source_meta)
+    source_onnx_value = runtime.pop("onnx_file", None)
+    for key in (
+        "hmonnx_file",
+        "golden_dir",
+        "prefill_onnx",
+        "decode_onnx",
+        "prefill_golden",
+        "decode_golden",
+        "hf_config",
+        "host_modules",
+    ):
+        runtime.pop(key, None)
+    calibration = runtime.get("calibration")
+    if isinstance(calibration, dict):
+        calibration.pop("wav_path", None)
+
+    relative_hmonnx = hmonnx_file.relative_to(root)
+    external_data = _direct_external_data(root, hmonnx_file)
+    onnx_file = str(source_onnx_value) if source_onnx_value else None
+    if onnx_file and not (root / onnx_file).is_file():
+        onnx_file = None
+    return {
+        "component_dir": relative_hmonnx.parent.as_posix(),
+        "onnx_file": onnx_file,
+        "hmonnx_file": relative_hmonnx.as_posix(),
+        "external_data": external_data,
+        "golden_dir": None,
+        "quant_type": component.quant_type,
+        "runtime": runtime,
+    }
+
+
+def _direct_external_data(root: Path, hmonnx_file: Path) -> str | None:
+    model = onnx.load_model(str(hmonnx_file), load_external_data=False)
+    locations = _external_locations(model)
+    if len(locations) > 1:
+        raise ValueError(
+            f"Expected at most one external data file in {hmonnx_file}, got {sorted(locations)}"
+        )
+    if not locations:
+        return None
+    external_file = hmonnx_file.parent / next(iter(locations))
+    if not external_file.is_file():
+        raise FileNotFoundError(f"Missing external data for {hmonnx_file}: {external_file}")
+    return external_file.relative_to(root).as_posix()
+
+
+def _validate_direct_export_metadata(root: Path, meta: dict[str, Any]) -> None:
+    for key in ("config", "hf_config"):
+        value = meta.get(key)
+        if not value or not (root / str(value)).exists():
+            raise FileNotFoundError(f"Export metadata path is missing: {key}={value}")
+    for name, values in meta["components"].items():
+        hmonnx_file = root / values["hmonnx_file"]
+        if not hmonnx_file.is_file():
+            raise FileNotFoundError(f"Missing HMONNX for {name}: {hmonnx_file}")
+        external_data = values.get("external_data")
+        if external_data and not (root / external_data).is_file():
+            raise FileNotFoundError(f"Missing external data for {name}: {external_data}")
+    for name, value in meta.get("host_modules", {}).items():
+        if not (root / value).is_file():
+            raise FileNotFoundError(f"Missing host module {name}: {value}")
+
+
 def _collect_components(
     source: Path,
     export_meta: dict[str, Any],
     lm_meta: dict[str, Any],
 ) -> list[ReleaseComponent]:
     components: list[ReleaseComponent] = []
+    exported = export_meta.get("components", {})
     if lm_meta:
         for lm_key, release_name in (("base_lm", "baselm"), ("residual_lm", "residuallm")):
             values = lm_meta[lm_key]
             for phase in ("prefill", "decode"):
-                golden_value = values.get(f"{phase}_golden")
-                golden_dir = source / golden_value if golden_value else None
-                source_onnx = (
-                    _find_with_act_onnx(golden_dir)
-                    if golden_dir is not None
-                    else source / values[f"{phase}_onnx"]
-                )
+                component_name = f"{release_name}_{phase}"
+                canonical = exported.get(component_name, {})
+                golden_value = canonical.get("golden_dir") or values.get(f"{phase}_golden")
+                golden_dir = _resolve_golden_parent(source, golden_value)
+                if canonical.get("hmonnx_file"):
+                    source_onnx = source / canonical["hmonnx_file"]
+                else:
+                    source_onnx = (
+                        _find_with_act_onnx(golden_dir)
+                        if golden_dir is not None
+                        else source / values[f"{phase}_onnx"]
+                    )
+                source_meta = deepcopy(canonical.get("runtime") or values)
                 components.append(
                     ReleaseComponent(
-                        name=f"{release_name}_{phase}",
+                        name=component_name,
                         source_onnx=source_onnx,
                         golden_dir=golden_dir,
-                        source_meta=values,
-                        quant_type=str(lm_meta["quant_type"]),
+                        source_meta=source_meta,
+                        quant_type=str(canonical.get("quant_type", lm_meta["quant_type"])),
                     )
                 )
 
-    exported = export_meta.get("components", {})
     for key, release_name in _COMPONENT_NAMES.items():
         values = exported.get(key)
+        if not values:
+            values = exported.get(release_name)
+        if not values and "_np" in release_name:
+            prefix = release_name.rsplit("_np", 1)[0] + "_np"
+            matches = [
+                (name, candidate)
+                for name, candidate in exported.items()
+                if name.startswith(prefix)
+            ]
+            if len(matches) == 1:
+                release_name, values = matches[0]
         if not values or not values.get("exists", True):
             continue
-        meta_path = source / values["meta_file"]
-        meta = _read_json(meta_path)
+        if values.get("hmonnx_file"):
+            meta = deepcopy(values.get("runtime") or {})
+            meta.update(
+                {
+                    "hmonnx_file": values["hmonnx_file"],
+                    "golden_dir": values.get("golden_dir"),
+                    "quant_type": values.get("quant_type", meta.get("quant_type", "")),
+                }
+            )
+        else:
+            meta_path = source / values["meta_file"]
+            meta = _read_json(meta_path)
         hmonnx_value = meta.get("hmonnx_file")
         if not hmonnx_value:
             continue
         hmonnx_file = source / hmonnx_value
         golden_value = meta.get("golden_dir")
-        golden_dir = source / golden_value if golden_value else hmonnx_file.parent / "golden"
+        golden_dir = (
+            _resolve_golden_parent(source, golden_value)
+            if golden_value
+            else hmonnx_file.parent / "golden"
+        )
         if not golden_dir.is_dir():
             golden_dir = None
         if key.startswith("audiovae_") and "num_patches" in meta:
@@ -228,6 +401,13 @@ def _collect_components(
             )
         )
     return components
+
+
+def _resolve_golden_parent(source: Path, value: str | None) -> Path | None:
+    if not value:
+        return None
+    golden_dir = source / value
+    return golden_dir.parent if golden_dir.name == "step_0" else golden_dir
 
 
 def _materialize_component(root: Path, prefix: str, component: ReleaseComponent) -> dict[str, Any]:
@@ -325,9 +505,20 @@ def _copy_golden_step(source: Path, destination: Path, graph_stem: str) -> None:
 
 
 def _golden_graph_stem(step_dir: Path) -> str:
-    links = sorted(step_dir.glob("*_with_act.onnx"))
+    graph_dirs = sorted(
+        path for path in step_dir.glob("*_with_act") if path.is_dir()
+    )
+    if len(graph_dirs) == 1:
+        return graph_dirs[0].name
+
+    links = sorted(
+        path for path in step_dir.glob("*.onnx") if path.is_symlink()
+    )
     if len(links) != 1:
-        raise ValueError(f"Expected one with_act ONNX link under {step_dir}, got {len(links)}")
+        raise ValueError(
+            f"Expected one golden graph directory or ONNX link under {step_dir}, "
+            f"got {len(graph_dirs)} directories and {len(links)} links"
+        )
     return links[0].stem
 
 
@@ -375,18 +566,52 @@ def _copy_host_modules(source: Path, lm_meta: dict[str, Any], root: Path, prefix
     return result
 
 
-def _copy_export_config(source: Path, export_meta: dict[str, Any], root: Path, prefix: str) -> None:
+def _copy_export_config(
+    source: Path,
+    export_meta: dict[str, Any],
+    root: Path,
+    prefix: str,
+) -> str | None:
     relative = export_meta.get("config")
     if not relative:
-        return
+        return None
     source_file = source / relative
     if source_file.is_file():
-        _link_or_copy(source_file, root / f"{prefix}_export_config{source_file.suffix}")
+        destination = root / f"{prefix}_export_config{source_file.suffix}"
+        _link_or_copy(source_file, destination)
+        return destination.relative_to(root).as_posix()
+    return None
+
+
+def _canonical_component(values: dict[str, Any]) -> dict[str, Any]:
+    """Build a release-root-relative component index without staging paths."""
+    runtime = deepcopy(values.get("source_meta", {}))
+    for key in (
+        "onnx_file",
+        "hmonnx_file",
+        "golden_dir",
+        "prefill_onnx",
+        "decode_onnx",
+        "prefill_golden",
+        "decode_golden",
+        "hf_config",
+        "host_modules",
+    ):
+        runtime.pop(key, None)
+    calibration = runtime.get("calibration")
+    if isinstance(calibration, dict):
+        calibration.pop("wav_path", None)
+    return {
+        "component_dir": values["directory"],
+        "hmonnx_file": values["with_act_onnx"],
+        "external_data": values["external_data"],
+        "golden_dir": values["step_dir"],
+        "quant_type": values["quant_type"],
+        "runtime": runtime,
+    }
 
 
 def _validate_release_directory(root: Path, prefix: str, components: list[ReleaseComponent]) -> None:
-    if root.name != prefix and not root.name.startswith(f".{prefix}."):
-        raise ValueError(f"Unexpected release root name: {root.name}")
     for component in components:
         component_dir = root / _component_relative_dir(component.name)
         graph_stem = f"{_component_release_prefix(prefix, component.quant_type)}_{component.name}"
@@ -407,6 +632,13 @@ def _validate_release_directory(root: Path, prefix: str, components: list[Releas
                     raise ValueError(f"Incorrect step_0 symlink: {link}")
     if not (root / "hf_config" / "config.json").is_file():
         raise FileNotFoundError("Release is missing hf_config/config.json")
+    export_meta_file = root / "export_meta_info.json"
+    if not export_meta_file.is_file():
+        raise FileNotFoundError("Release is missing export_meta_info.json")
+    export_meta = _read_json(export_meta_file)
+    config_file = export_meta.get("config")
+    if config_file and not (root / config_file).is_file():
+        raise FileNotFoundError(f"Release config is missing: {config_file}")
 
 
 def _component_relative_dir(component_name: str) -> Path:
