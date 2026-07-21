@@ -14,6 +14,7 @@ from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b"
+QWEN_CONFIG_ROOT = Path(__file__).resolve().parents[2] / "configs_merak/workflows/xh2a/llm_models"
 
 
 class _Cfg(dict):
@@ -26,6 +27,7 @@ def _build_attention(monkeypatch, bits, *, enable=True):
     class _CapturedFlashAttention(torch.nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
+            captured["args"] = args
             captured.update(kwargs)
 
     monkeypatch.setattr(shared_impl, "FlashAttention", _CapturedFlashAttention)
@@ -53,6 +55,7 @@ def _build_moe_attention(monkeypatch, bits, *, enable=True):
     class _CapturedFlashAttention(torch.nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
+            captured["args"] = args
             captured.update(kwargs)
 
     monkeypatch.setattr(shared_impl, "FlashAttention", _CapturedFlashAttention)
@@ -87,6 +90,15 @@ def test_flash_attention_passes_all_five_precision_bits(monkeypatch, value):
     assert captured["v_bits"] == value
     assert captured["s_bits"] == value
     assert captured["p_bits"] == value
+
+
+def test_flash_attention_uses_keyword_only_public_api(monkeypatch):
+    _, captured = _build_attention(monkeypatch, {})
+
+    assert captured["args"] == ()
+    assert captured["num_heads"] == 4
+    assert captured["num_kv_heads"] == 2
+    assert captured["is_causal"] is True
 
 
 @pytest.mark.parametrize("field", ["q_bits", "k_bits", "v_bits", "s_bits", "p_bits"])
@@ -155,3 +167,16 @@ def test_all16_config_resolves_to_five_bits(monkeypatch):
     fields = ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
     assert tuple(getattr(attention, f"flash_{field}") for field in fields) == (16,) * 5
     assert tuple(captured[field] for field in fields) == (16,) * 5
+
+
+def test_all_qwen35_workflows_declare_five_precision_fields():
+    fields = {"q_bits", "k_bits", "v_bits", "s_bits", "p_bits"}
+    paths = sorted(QWEN_CONFIG_ROOT.glob("qwen3_5*/**/*.yaml"))
+    flash_paths = []
+    for path in paths:
+        flash_cfg = WorkflowConfig.from_file(str(path)).build_export_dict()["model"].get("flash_attention")
+        if flash_cfg is None:
+            continue
+        flash_paths.append(path)
+        assert fields <= flash_cfg.keys(), path
+    assert flash_paths

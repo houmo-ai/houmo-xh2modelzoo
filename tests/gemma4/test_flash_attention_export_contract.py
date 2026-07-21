@@ -560,10 +560,24 @@ def test_contract_gate_is_typed_and_requires_explicit_sliding_layer(monkeypatch)
     v2 = config_cls(
         model_name="e2b",
         attention_contract_version=2,
+        flash_attention={
+            "q_bits": 16,
+            "k_bits": 8,
+            "v_bits": 16,
+            "s_bits": 8,
+            "p_bits": 16,
+        },
         max_mm_ranges_per_chunk=3,
     )
     assert v2.attention_contract_version == 2
     assert v2.max_mm_ranges_per_chunk == 3
+    assert v2.flash_attention == {
+        "q_bits": 16,
+        "k_bits": 8,
+        "v_bits": 16,
+        "s_bits": 8,
+        "p_bits": 16,
+    }
     assert v2.uses_sliding_flash_attention_v2 is True
 
     config_cls = _patch_hf_config(monkeypatch, layer_types=["full_attention"])
@@ -573,6 +587,32 @@ def test_contract_gate_is_typed_and_requires_explicit_sliding_layer(monkeypatch)
     legacy = config_cls(model_name="legacy")
     assert legacy.attention_contract_version == 1
     assert legacy.uses_sliding_flash_attention_v2 is False
+
+
+def test_attention_visibility_spec_is_identical_across_lowering_versions(monkeypatch):
+    config_cls = _patch_hf_config(
+        monkeypatch,
+        layer_types=["sliding_attention", "full_attention"],
+        sliding_window=512,
+    )
+
+    legacy = config_cls(model_name="legacy", attention_contract_version=1, max_mm_ranges_per_chunk=3)
+    flash = config_cls(model_name="flash", attention_contract_version=2, max_mm_ranges_per_chunk=3)
+
+    assert legacy.attention_lowering == "legacy_attention"
+    assert flash.attention_lowering == "flash_attention"
+    assert legacy.attention_visibility_spec == flash.attention_visibility_spec
+    assert flash.attention_visibility_spec == {
+        "layer_types": ["sliding_attention", "full_attention"],
+        "is_causal": True,
+        "bidirectional_vision_attention": legacy.bidirectional_vision_attention,
+        "sliding_window": 512,
+        "max_mm_ranges_per_chunk": 3,
+        "has_full_attention": True,
+        "has_sliding_attention": True,
+        "requires_kv_window_metadata": True,
+        "requires_mm_prefix_ranges": legacy.bidirectional_vision_attention,
+    }
 
 
 @pytest.mark.parametrize(
@@ -644,6 +684,13 @@ def test_flash_attention_yamls_are_additive_and_preserve_existing_configs():
         flash_model = flash_payload["export"]["model"]
         assert flash_model.pop("attention_contract_version") == 2, flash_path
         assert flash_model.pop("max_mm_ranges_per_chunk") >= 1, flash_path
+        assert flash_model.pop("flash_attention") == {
+            "q_bits": 8,
+            "k_bits": 8,
+            "v_bits": 8,
+            "s_bits": 8,
+            "p_bits": 8,
+        }, flash_path
         assert flash_payload == base_payload, flash_path
 
 
@@ -654,6 +701,7 @@ def _make_series_processor(
     bidirectional: bool,
     max_ranges: int = 1,
     contract_version: int = 2,
+    attention_visibility_spec=None,
 ):
     import torch
 
@@ -672,6 +720,7 @@ def _make_series_processor(
         bidirectional_vision_attention=bidirectional,
         attention_contract_version=contract_version,
         max_mm_ranges_per_chunk=max_ranges,
+        attention_visibility_spec=attention_visibility_spec,
     )
     return processor.to(device="cpu", dtype=torch.float32)
 
@@ -706,6 +755,75 @@ def test_compact_metadata_formula(window, query, past, current, expected):
     assert ranges.shape == (1, 1, 2)
     assert ranges.dtype == torch.int32
     assert ranges.tolist() == [[[0, 0]]]
+
+
+def test_visibility_metadata_resolution_is_identical_across_lowering_versions():
+    import torch
+
+    processors = [
+        _make_series_processor(
+            window=16,
+            query=8,
+            bidirectional=True,
+            max_ranges=2,
+            contract_version=version,
+        )
+        for version in (1, 2)
+    ]
+    mm_token_type_ids = torch.tensor([0, 1, 1, 0, 1, 0, 0, 0], dtype=torch.long)
+
+    assert processors[0].attention_lowering == "legacy_attention"
+    assert processors[1].attention_lowering == "flash_attention"
+    assert processors[0].attention_visibility_spec == processors[1].attention_visibility_spec
+    resolved = [
+        processor._build_compact_attention_metadata(
+            current_input_length=6,
+            past_seq_length=40,
+            mm_token_type_ids=mm_token_type_ids,
+            device=torch.device("cpu"),
+        )
+        for processor in processors
+    ]
+    for legacy_value, flash_value in zip(resolved[0], resolved[1], strict=True):
+        torch.testing.assert_close(legacy_value, flash_value)
+    assert resolved[0][0].tolist() == [25]
+    assert resolved[0][1].tolist() == [21]
+    assert resolved[0][2].tolist() == [[[41, 42], [44, 44]]]
+
+
+def test_full_only_visibility_uses_absolute_kv_metadata_without_contract_gate():
+    import torch
+
+    from xhmodel_merak.xh_llm.models.gemma4_series.attention_visibility import (
+        Gemma4AttentionVisibilitySpec,
+    )
+
+    spec = Gemma4AttentionVisibilitySpec.from_checkpoint_semantics(
+        layer_types=["full_attention"],
+        sliding_window=512,
+        bidirectional_vision_attention=False,
+        max_mm_ranges_per_chunk=1,
+    )
+    processors = [
+        _make_series_processor(
+            window=512,
+            query=8,
+            bidirectional=False,
+            contract_version=version,
+            attention_visibility_spec=spec,
+        )
+        for version in (1, 2)
+    ]
+    for processor in processors:
+        start, valid, ranges = processor._build_compact_attention_metadata(
+            current_input_length=3,
+            past_seq_length=40,
+            mm_token_type_ids=torch.zeros(8, dtype=torch.long),
+            device=torch.device("cpu"),
+        )
+        assert start.tolist() == [0]
+        assert valid.tolist() == [43]
+        assert ranges.tolist() == [[[0, 0]]]
 
 
 def test_visual_ranges_are_absolute_inclusive_and_overflow_fails():
@@ -1148,6 +1266,26 @@ def test_v2_metadata_is_complete(tmp_path):
     assert meta.layer_kv_shapes == [[1, 2, 832, 128]]
 
 
+def test_export_metadata_keeps_visibility_semantics_independent_of_lowering(tmp_path):
+    metas = []
+    for version in (1, 2):
+        model = _series_model_stub(
+            version=version,
+            bidirectional=True,
+            ple=False,
+            window=512,
+        )
+        meta = SimpleNamespace()
+        model._extra_export_metadata(str(tmp_path / str(version)), meta)
+        metas.append(meta)
+
+    assert metas[0].attention_lowering == "legacy_attention"
+    assert metas[1].attention_lowering == "flash_attention"
+    assert metas[0].attention_visibility_spec == metas[1].attention_visibility_spec
+    assert metas[0].attention_visibility_spec["requires_kv_window_metadata"] is True
+    assert metas[0].attention_visibility_spec["requires_mm_prefix_ranges"] is True
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -1303,6 +1441,8 @@ def test_v2_bridge_factory_has_static_nonvisual_and_ple_variants():
 class _CapturedFlash(torch.nn.Module):
     def __init__(self, *args, sliding_window=None, **kwargs):
         super().__init__()
+        self.constructor_args = args
+        self.constructor_kwargs = kwargs
         self.sliding_window_size = sliding_window
         self.scale = kwargs.get("scale")
         self.calls = []
@@ -1325,6 +1465,7 @@ def _setup_tiny_attention(
     version: int,
     use_cache: bool = False,
     head_dim: int = 4,
+    flash_attention: dict | None = None,
 ):
     from xhmodel_merak.xh_llm.models.gemma4_series import _llm_model_impl as impl
 
@@ -1347,6 +1488,7 @@ def _setup_tiny_attention(
     attention._setup(
         SimpleNamespace(
             attention_contract_version=version,
+            flash_attention=flash_attention,
             use_cache=use_cache,
             kv_cache=SimpleNamespace(cache_axis=2),
         )
@@ -1397,6 +1539,51 @@ def test_v2_flash_attention_preserves_gemma4_unscaled_qk_contract(monkeypatch, h
     # self.scaling=1.0 to attention.  FlashAttention must not apply the usual
     # 1/sqrt(head_dim) scale a second time.
     assert attention.flash_attn.scale == 1.0
+
+
+@pytest.mark.parametrize("value", [8, 16])
+def test_v2_flash_attention_uses_keyword_api_and_passes_all_precision_bits(monkeypatch, value):
+    attention = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="full_attention",
+        window=None,
+        version=2,
+        flash_attention={name: value for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")},
+    )
+
+    assert attention.flash_attn.constructor_args == ()
+    assert attention.flash_attn.constructor_kwargs["num_heads"] == 2
+    assert attention.flash_attn.constructor_kwargs["num_kv_heads"] == 1
+    assert tuple(
+        attention.flash_attn.constructor_kwargs[name]
+        for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+    ) == (value,) * 5
+
+
+def test_v2_flash_attention_defaults_all_precision_bits_to_eight(monkeypatch):
+    attention = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="full_attention",
+        window=None,
+        version=2,
+    )
+
+    assert tuple(
+        attention.flash_attn.constructor_kwargs[name]
+        for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+    ) == (8,) * 5
+
+
+@pytest.mark.parametrize("field", ["q_bits", "k_bits", "v_bits", "s_bits", "p_bits"])
+def test_v2_flash_attention_rejects_invalid_precision_bit(monkeypatch, field):
+    with pytest.raises(ValueError, match=rf"{field}=12"):
+        _setup_tiny_attention(
+            monkeypatch,
+            layer_type="full_attention",
+            window=None,
+            version=2,
+            flash_attention={field: 12},
+        )
 
 
 def test_all_flash_layers_receive_visual_ranges_but_only_sliding_receives_compact_window_metadata(monkeypatch):
@@ -1522,6 +1709,7 @@ def test_v2_attention_rejects_unknown_layer_type(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize(
     ("layer_type", "window", "message"),
     [
@@ -1529,13 +1717,15 @@ def test_v2_attention_rejects_unknown_layer_type(monkeypatch):
         ("full_attention", 512, "full_attention.*sliding_window.*None"),
     ],
 )
-def test_v2_attention_rejects_layer_type_window_mismatch(monkeypatch, layer_type, window, message):
+def test_attention_rejects_layer_type_window_mismatch_independent_of_lowering(
+    monkeypatch, version, layer_type, window, message
+):
     with pytest.raises(ValueError, match=message):
         _setup_tiny_attention(
             monkeypatch,
             layer_type=layer_type,
             window=window,
-            version=2,
+            version=version,
         )
 
 

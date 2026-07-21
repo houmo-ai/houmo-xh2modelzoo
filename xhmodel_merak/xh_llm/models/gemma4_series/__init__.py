@@ -21,6 +21,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4VisionModel,
 )
 
+from .attention_visibility import Gemma4AttentionVisibilitySpec
 from .export_plan import Gemma4SeriesExportPlan, build_gemma4_series_export_plan
 from .gemma4_series_audio_model import XHGemma4AudioModel, XHGemma4SeriesAudioModel
 from .gemma4_series_hmonnx_inference import XHGemma4HMONNXModel, XHGemma4SeriesHMONNXModel
@@ -97,6 +98,7 @@ for fn in [
 __all__ = [
     "Gemma4AudioConfig",
     "Gemma4AudioModelMeta",
+    "Gemma4AttentionVisibilitySpec",
     "Gemma4Config",
     "Gemma4ForCausalLM",
     "Gemma4ForConditionalGeneration",

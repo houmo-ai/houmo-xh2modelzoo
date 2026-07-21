@@ -185,11 +185,10 @@ class HybridGatedAttentionMixin:
                     )
         if self.use_flash_attention:
             self.flash_attn = FlashAttention(
-                self.attn_hidden_dim,
-                self.num_heads,
-                True,
+                num_heads=self.num_heads,
                 scale=1 / math.sqrt(self.head_dim),
                 num_kv_heads=self.num_key_value_heads,
+                is_causal=True,
                 q_bits=self.flash_q_bits,
                 k_bits=self.flash_k_bits,
                 v_bits=self.flash_v_bits,

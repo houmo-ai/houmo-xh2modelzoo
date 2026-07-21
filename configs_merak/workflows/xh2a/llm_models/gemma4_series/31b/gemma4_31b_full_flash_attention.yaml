@@ -38,6 +38,12 @@ export:
     prefill_chunk_length: 320
     attention_contract_version: 2
     max_mm_ranges_per_chunk: 1
+    flash_attention:
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
     use_cache: true
     num_logits_to_keep: 1
     sliding_kv_cache_input_mode: slice_window

@@ -27,7 +27,10 @@ export:
     flash_attention:
       enable: false
       q_bits: 8
+      k_bits: 8
+      v_bits: 8
       s_bits: 8
+      p_bits: 8
     visual_config:
       max_size_w: 448
       max_size_h: 448

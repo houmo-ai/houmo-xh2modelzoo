@@ -43,7 +43,10 @@ export:
     flash_attention:
       enable: false
       q_bits: 8
+      k_bits: 8
+      v_bits: 8
       s_bits: 8
+      p_bits: 8
     split_conv_cache: true
     normalize_force_fp32: false
     use_manual_depthwise_conv1d: false

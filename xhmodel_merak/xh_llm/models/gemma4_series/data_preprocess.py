@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import torch
 import torch.nn as nn
 
 from ...llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
+from .attention_visibility import (
+    Gemma4AttentionVisibilitySpec,
+    resolve_gemma4_attention_visibility_spec,
+)
 
 
 class Gemma4PerLayerInputEmbedding(nn.Module):
@@ -107,7 +112,10 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         sliding_window: int = 1024,
         bidirectional_vision_attention: bool = False,
         attention_contract_version: int = 1,
+        attention_lowering: str | None = None,
         max_mm_ranges_per_chunk: int = 1,
+        attention_visibility_spec: Gemma4AttentionVisibilitySpec | Mapping | None = None,
+        layer_types: Sequence[str] | None = None,
         emit_full_attention_mask: bool | None = None,
         emit_accepted_count_input: bool = False,
     ):
@@ -126,14 +134,26 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         self.audio_token_id = audio_token_id
         self.video_token_id = video_token_id
         self.per_layer_input_embedding = per_layer_input_embedding
-        self.sliding_window = sliding_window
-        self.bidirectional_vision_attention = bool(bidirectional_vision_attention)
         self.attention_contract_version = int(attention_contract_version)
-        self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
         if self.attention_contract_version not in (1, 2):
             raise ValueError("Gemma4 attention_contract_version must be 1 or 2")
-        if self.max_mm_ranges_per_chunk <= 0:
-            raise ValueError("Gemma4 max_mm_ranges_per_chunk must be positive")
+        self.attention_lowering = attention_lowering or (
+            "flash_attention" if self.attention_contract_version >= 2 else "legacy_attention"
+        )
+        if self.attention_lowering not in {"legacy_attention", "flash_attention"}:
+            raise ValueError(f"Unsupported Gemma4 attention_lowering: {self.attention_lowering!r}")
+        self.attention_visibility_spec = resolve_gemma4_attention_visibility_spec(
+            attention_visibility_spec,
+            layer_types=layer_types or ("sliding_attention", "full_attention"),
+            sliding_window=sliding_window,
+            bidirectional_vision_attention=bidirectional_vision_attention,
+            max_mm_ranges_per_chunk=max_mm_ranges_per_chunk,
+        )
+        # Compatibility fields remain available to old runtime code, but all
+        # three are now projections of the version-independent semantic spec.
+        self.sliding_window = self.attention_visibility_spec.sliding_window
+        self.bidirectional_vision_attention = self.attention_visibility_spec.bidirectional_vision_attention
+        self.max_mm_ranges_per_chunk = self.attention_visibility_spec.max_mm_ranges_per_chunk
         if emit_full_attention_mask:
             raise ValueError(
                 "Gemma4 Series no longer emits full_attention_mask; full-attention layers use "
@@ -216,7 +236,10 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         q_len = self.input_sequence_length
         neg = torch.tensor(torch.finfo(torch.float16).min, dtype=torch.float16, device=device)
         full_ctx = self.context_length
-        sw = self.sliding_window
+        # A full-only legacy graph keeps the historical sliding-mask ABI even
+        # though no layer consumes it.  Use full context only to construct that
+        # inert compatibility input; it is not part of the visibility spec.
+        sw = self.sliding_window or full_ctx
 
         # ── Full attention mask (width = context_length) ──
         full_mask = torch.full((1, 1, q_len, full_ctx), neg, dtype=torch.float16, device=device)
@@ -287,19 +310,30 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         p = max(0, int(past_seq_length))
         c = max(0, int(current_input_length))
         q = int(self.input_sequence_length)
-        w = int(self.sliding_window)
         if not 0 <= c <= q:
             raise ValueError(f"current_input_length must be in [0, {q}], got {c}")
-        if w <= 0:
-            raise ValueError(f"sliding_window must be positive, got {w}")
-
-        retained = min(p, w - 1)
-        start = p - retained
-        width = self._aligned(w + q - 1, 16)
-        valid = min(width, retained + c)
+        if self.attention_visibility_spec.has_sliding_attention:
+            if type(self.sliding_window) is not int or self.sliding_window <= 0:
+                raise ValueError(f"sliding_window must be positive, got {self.sliding_window}")
+            if self.sliding_window != self.attention_visibility_spec.sliding_window:
+                raise ValueError(
+                    "sliding_window compatibility field must match attention_visibility_spec: "
+                    f"{self.sliding_window} != {self.attention_visibility_spec.sliding_window}"
+                )
+            w = self.sliding_window
+            retained = min(p, w - 1)
+            start = p - retained
+            width = self._aligned(w + q - 1, 16)
+            valid = min(width, retained + c)
+        else:
+            # Full-only attention retains absolute key coordinates.  Flash's
+            # fixed metadata slots remain populated for ABI compatibility even
+            # though no sliding layer consumes a compact KV base.
+            start = 0
+            valid = min(int(self.context_length), p + c)
 
         ranges: list[tuple[int, int]] = []
-        if self.bidirectional_vision_attention:
+        if self.attention_visibility_spec.requires_mm_prefix_ranges:
             mm = mm_token_type_ids[:c] > 0
             range_start = None
             for idx in range(c):
@@ -378,25 +412,17 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         current_len_tensor = torch.tensor([current_input_length], dtype=torch.int32, device=device)
         output = [inputs_embeds, past_seq_tensor, current_len_tensor]
 
-        if self.enable_page_attention:
-            if self.attention_contract_version < 2:
-                raise RuntimeError("Gemma4 PageAttention requires attention_contract_version=2")
-            # convert_to_page_attention removes compact FlashAttention metadata
-            # and KV-cache graph inputs.  PageAttention receives those values
-            # through its runtime context, so only graph-resident text payloads
-            # remain in the positional HMONNX input tuple.
-            if per_layer_inputs is not None:
-                output.append(per_layer_inputs)
-            return tuple(output)
+        if self.enable_page_attention and self.attention_lowering != "flash_attention":
+            raise RuntimeError("Gemma4 PageAttention requires FlashAttention lowering")
 
-        if self.attention_contract_version >= 2:
+        if self.attention_lowering == "flash_attention":
             kv_window_start_abs, kv_valid_length, mm_prefix_ranges = self._build_compact_attention_metadata(
                 current_input_length=current_input_length,
                 past_seq_length=past_seq_length,
                 mm_token_type_ids=mm_token_type_ids,
                 device=device,
             )
-            if self.bidirectional_vision_attention:
+            if self.attention_visibility_spec.requires_mm_prefix_ranges:
                 output.append(mm_prefix_ranges)
             output.extend([kv_window_start_abs, kv_valid_length])
         else:
@@ -411,13 +437,18 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             output.append(sliding_attention_mask)
         if per_layer_inputs is not None:
             output.append(per_layer_inputs)
-        if self.attention_contract_version == 1 and self.emit_accepted_count_input:
+        if self.attention_lowering == "legacy_attention" and self.emit_accepted_count_input:
             accepted_count = data.get("accepted_count", 0)
             if torch.is_tensor(accepted_count):
                 accepted_count = accepted_count.to(device=device, dtype=torch.int32).reshape(1)
             else:
                 accepted_count = torch.tensor([int(accepted_count)], dtype=torch.int32, device=device)
             output.append(accepted_count)
+        if self.enable_page_attention:
+            # Flash-to-Page removes only the continuous KV-cache graph inputs.
+            # Visibility metadata remains in the converted graph as fixed slots
+            # and is authoritative over the legacy context fallback.
+            return tuple(output)
         output.extend([self.past_key_caches, self.past_value_caches])
         return tuple(output)
 

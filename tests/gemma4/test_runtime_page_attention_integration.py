@@ -179,7 +179,7 @@ def test_real_gemma_runtime_contract_v2_rejects_incomplete_or_legacy_metadata():
         runtime.set_page_attention_context(contexts_by_cache_index={0: _context("full", base=None)})
 
     runtime.meta_info.attention_contract_version = 1
-    with pytest.raises(RuntimeError, match="contract-v2"):
+    with pytest.raises(RuntimeError, match="FlashAttention lowering"):
         runtime.set_page_attention_context(
             contexts_by_cache_index={
                 0: _context("local", base=0),
@@ -196,12 +196,12 @@ def _write_contract_v2_graph(path) -> None:
         value("inputs_embeds"),
         value("past_seq_length", TensorProto.INT32),
         value("current_input_length", TensorProto.INT32),
-        value("per_layer_inputs"),
-        value("compact_key"),
-        value("compact_value"),
         value("mm_prefix_ranges", TensorProto.INT32),
         value("kv_window_start_abs", TensorProto.INT64),
         value("kv_valid_length", TensorProto.INT64),
+        value("per_layer_inputs"),
+        value("compact_key"),
+        value("compact_value"),
     ]
     nodes = [
         helper.make_node("Identity", ["inputs_embeds"], ["projected_key"]),
@@ -326,18 +326,31 @@ def test_gemma_page_attention_preprocess_matches_converted_graph_inputs_with_ple
         }
     )
 
-    assert len(outputs) == 4
-    inputs_embeds, past_seq_length, current_input_length, per_layer_inputs = outputs
+    assert len(outputs) == 7
+    (
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        mm_prefix_ranges,
+        kv_window_start_abs,
+        kv_valid_length,
+        per_layer_inputs,
+    ) = outputs
     assert inputs_embeds.shape == (1, 4, 8)
     assert past_seq_length.tolist() == [7]
     assert current_input_length.tolist() == [2]
+    assert mm_prefix_ranges.tolist() == [[[0, 0], [0, 0]]]
+    assert kv_window_start_abs.tolist() == [0]
+    assert kv_valid_length.tolist() == [9]
     assert per_layer_inputs.shape == (1, 4, 3, 4)
     assert all(value is not key_caches and value is not value_caches for value in outputs)
-    assert all(value.shape != (1, 2, 2) for value in outputs)
     assert converted_input_names == [
         "inputs_embeds",
         "past_seq_length",
         "current_input_length",
+        "mm_prefix_ranges",
+        "kv_window_start_abs",
+        "kv_valid_length",
         "per_layer_inputs",
     ]
     assert len(outputs) == len(converted_input_names)

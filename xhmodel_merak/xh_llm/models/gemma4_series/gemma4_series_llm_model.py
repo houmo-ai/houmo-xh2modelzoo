@@ -23,6 +23,7 @@ from xhmodel_merak.xh_llm.types import ExportData, KVCacheConfig, LLMModelState,
 from xhmodel_merak.xh_llm.vision_llm_model import VisionLLMModel
 from xhquant.utils import get_xhquant_logger, log_function_call
 
+from .attention_visibility import resolve_gemma4_attention_visibility_spec
 from .data_preprocess import (
     Gemma4DataPreprocess,
     Gemma4MoeDataPreprocess,
@@ -1173,6 +1174,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
             video_token_id=self.config.video_token_id or -1,
             bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
             attention_contract_version=getattr(self.config, "attention_contract_version", 1),
+            attention_lowering=getattr(self.config, "attention_lowering", None),
+            attention_visibility_spec=getattr(self.config, "attention_visibility_spec", None),
+            layer_types=self.layer_types,
             max_mm_ranges_per_chunk=getattr(self.config, "max_mm_ranges_per_chunk", 1),
             # Full-attention layers receive None and use xhquant.nn.MaskedSoftmax's
             # causal path.  Only sliding attention consumes the explicit mask.
@@ -1326,8 +1330,15 @@ class XHGemma4SeriesModel(VisionLLMModel):
         return quanted_model
 
     def _uses_compact_attention_contract(self) -> bool:
+        attention_lowering = getattr(self.config, "attention_lowering", None)
+        if attention_lowering is None:
+            attention_lowering = (
+                "flash_attention"
+                if int(getattr(self.config, "attention_contract_version", 1)) >= 2
+                else "legacy_attention"
+            )
         return (
-            int(getattr(self.config, "attention_contract_version", 1)) >= 2
+            attention_lowering == "flash_attention"
             and not self._is_mtp_export()
             and not bool(getattr(self.config, "enable_mtp_outputs", False))
         )
@@ -1492,6 +1503,21 @@ class XHGemma4SeriesModel(VisionLLMModel):
         meta_info.variant = getattr(self.config, "variant", None)
         meta_info.capabilities = dict(getattr(self.config, "capabilities", {}) or {})
         meta_info.attention_contract_version = int(getattr(self.config, "attention_contract_version", 1))
+        meta_info.attention_lowering = getattr(
+            self.config,
+            "attention_lowering",
+            "flash_attention" if meta_info.attention_contract_version >= 2 else "legacy_attention",
+        )
+        visibility_spec = resolve_gemma4_attention_visibility_spec(
+            getattr(self.config, "attention_visibility_spec", None),
+            layer_types=layer_types,
+            sliding_window=self.sliding_window,
+            bidirectional_vision_attention=bool(
+                getattr(self.config, "bidirectional_vision_attention", False)
+            ),
+            max_mm_ranges_per_chunk=int(getattr(self.config, "max_mm_ranges_per_chunk", 1)),
+        )
+        meta_info.attention_visibility_spec = visibility_spec.to_dict()
         meta_info.uses_sliding_flash_attention_v2 = meta_info.attention_contract_version >= 2 and any(
             layer_type == "sliding_attention" for layer_type in layer_types
         )

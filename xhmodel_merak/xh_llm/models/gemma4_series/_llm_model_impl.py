@@ -277,31 +277,38 @@ class _Gemma4TextAttention(DynamicModule):
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
         raw_sliding_window = getattr(self, "sliding_window", None)
-        if self.use_flash_attention_v2:
-            if self.layer_type == "sliding_attention":
-                if type(raw_sliding_window) is not int or raw_sliding_window <= 0:
-                    raise ValueError(
-                        "Gemma4 contract-v2 sliding_attention requires sliding_window "
-                        f"to be a positive integer, got {raw_sliding_window!r}"
-                    )
-                attention_max_length = raw_sliding_window
-                self.is_sliding_attention = True
-            else:
-                if raw_sliding_window is not None:
-                    raise ValueError(
-                        f"Gemma4 contract-v2 full_attention requires sliding_window=None, got {raw_sliding_window!r}"
-                    )
-                attention_max_length = -1
-                self.is_sliding_attention = False
+        # Attention type belongs to the checkpoint semantics.  The contract
+        # version below only selects legacy MatMul/Softmax versus Flash lowering.
+        if self.layer_type == "sliding_attention":
+            if type(raw_sliding_window) is not int or raw_sliding_window <= 0:
+                raise ValueError(
+                    "Gemma4 sliding_attention requires sliding_window "
+                    f"to be a positive integer, got {raw_sliding_window!r}"
+                )
+            attention_max_length = raw_sliding_window
+            self.is_sliding_attention = True
         else:
-            attention_max_length = int(raw_sliding_window) if raw_sliding_window is not None else -1
-            self.is_sliding_attention = attention_max_length > 0
+            if raw_sliding_window is not None:
+                raise ValueError(
+                    f"Gemma4 full_attention requires sliding_window=None, got {raw_sliding_window!r}"
+                )
+            attention_max_length = -1
+            self.is_sliding_attention = False
         self.enable_accepted_count_input = False
         if self.use_flash_attention_v2:
+            flash_attention_cfg = _cfg_get(cfg, "flash_attention", {})
+            flash_bits = {
+                name: int(_cfg_get(flash_attention_cfg, name, 8))
+                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+            }
+            invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
+            if invalid_bits:
+                invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
+                raise ValueError(
+                    f"Gemma4 flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                )
             self.flash_attn = xhnn.FlashAttention(
-                embed_dim=self.num_attention_heads * self.head_dim,
                 num_heads=self.num_attention_heads,
-                batch_first=True,
                 # Gemma4's Q/K RMSNorm contract already uses the model's
                 # explicit attention scaling (1.0).  Applying the generic
                 # 1/sqrt(head_dim) factor here changes every v2 layer.
@@ -309,6 +316,7 @@ class _Gemma4TextAttention(DynamicModule):
                 num_kv_heads=self.num_key_value_heads,
                 is_causal=True,
                 sliding_window=attention_max_length if self.is_sliding_attention else None,
+                **flash_bits,
             )
         else:
             self.k_repeat_interleave = xhnn.RepeatInterleave()

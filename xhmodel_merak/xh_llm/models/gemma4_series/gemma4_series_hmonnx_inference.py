@@ -280,6 +280,15 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             )
         )
 
+    def _attention_lowering(self) -> str:
+        return str(
+            getattr(
+                self.meta_info,
+                "attention_lowering",
+                "flash_attention" if self._attention_contract_version() >= 2 else "legacy_attention",
+            )
+        )
+
     def _active_page_attention_model(self) -> HMONNXModel:
         if self.is_prefill():
             return self._active_prefill_model
@@ -308,8 +317,8 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
                 slot_mapping=slot_mapping,
                 block_size=block_size,
             )
-        if self._attention_contract_version() < 2:
-            raise RuntimeError("Gemma4 contexts_by_cache_index requires attention contract-v2")
+        if self._attention_lowering() != "flash_attention":
+            raise RuntimeError("Gemma4 contexts_by_cache_index requires FlashAttention lowering")
 
         page_attention_modules = self._get_page_attention_modules(self._active_page_attention_model())
         cache_indices = self._page_attention_cache_index_by_layer(
@@ -582,6 +591,12 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             sliding_window=self.sliding_window,
             bidirectional_vision_attention=bidirectional_vision_attention,
             attention_contract_version=self._attention_contract_version(),
+            attention_lowering=self._attention_lowering(),
+            attention_visibility_spec=getattr(self.meta_info, "attention_visibility_spec", None),
+            layer_types=(
+                getattr(self, "layer_types", getattr(self.meta_info, "layer_types", ()))
+                or ("sliding_attention", "full_attention")
+            ),
             max_mm_ranges_per_chunk=int(getattr(self.meta_info, "max_mm_ranges_per_chunk", 1)),
             emit_full_attention_mask=False,
             emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
@@ -635,6 +650,14 @@ class XHGemma4MoeHMONNXModel(XHGemma4SeriesHMONNXModel):
             video_token_id=getattr(model_config, "video_token_id", -1) or -1,
             sliding_window_cfg=sliding_window_cfg,
             bidirectional_vision_attention=getattr(model_config, "bidirectional_vision_attention", False),
+            attention_contract_version=self._attention_contract_version(),
+            attention_lowering=self._attention_lowering(),
+            attention_visibility_spec=getattr(self.meta_info, "attention_visibility_spec", None),
+            layer_types=(
+                getattr(self, "layer_types", getattr(self.meta_info, "layer_types", ()))
+                or ("sliding_attention", "full_attention")
+            ),
+            max_mm_ranges_per_chunk=int(getattr(self.meta_info, "max_mm_ranges_per_chunk", 1)),
             emit_full_attention_mask=False,
             emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
         )
