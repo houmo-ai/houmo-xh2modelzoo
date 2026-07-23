@@ -9,7 +9,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,7 @@
 #
 # File: qwen2_hf_compatible.py
 # Description:
-#   Qwen2 HuggingFace compatibility layer for CosyVoice3
+#   Qwen2 HuggingFace compatibility layer for CosyVoice3 HMONNX inference.
 
 from typing import Any, Optional, Union
 
@@ -30,11 +30,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, DynamicCache, Qwen2Fo
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import no_init_weights
-
-# from transformers.models.qwen2.modeling_qwen2 import KwargsForCausalLM
 from typing_extensions import Self
 
-from ..base_llm_model import BaseModel
+from ...base_llm_model import BaseModel
 
 
 def get_empty_hf_model(hf_model_dir, device_map="cpu", **kwargs) -> Any:
@@ -50,12 +48,9 @@ def get_empty_hf_model(hf_model_dir, device_map="cpu", **kwargs) -> Any:
         )
     return hf_model
 
+
 def create_llm_wraped_cls(cls):
     class _Qwen2ForCausalLM(cls):
-        # def __init__(self, llm: Qwen2ForCausalLM):
-        #     super().__init__()
-        #     self._llm = llm
-
         def _setup(self, *args, **kwargs):
             pass
 
@@ -70,14 +65,16 @@ def create_llm_wraped_cls(cls):
                 self._llm_model.set_phase_prefill(prefill)
 
         def generate(self, min_len, max_len, *args, **kwargs):
-            stop_token = [6561, 6562, 6563, 6564, 6565, 6566, 6567, 6568, 6569, 6570, 6571, 6572, 6573, 6574, 6575, 6576, 6577, 6578, 6579, 6580, 6581, 6582, 6583, 6584, 6585, 6586, 6587, 6588, 6589, 6590, 6591, 6592, 6593, 6594, 6595, 6596, 6597, 6598, 6599, 6600, 6601, 6602, 6603, 6604, 6605, 6606, 6607, 6608, 6609, 6610, 6611, 6612, 6613, 6614, 6615, 6616, 6617, 6618, 6619, 6620, 6621, 6622, 6623, 6624, 6625, 6626, 6627, 6628, 6629, 6630, 6631, 6632, 6633, 6634, 6635, 6636, 6637, 6638, 6639, 6640, 6641, 6642, 6643, 6644, 6645, 6646, 6647, 6648, 6649, 6650, 6651, 6652, 6653, 6654, 6655, 6656, 6657, 6658, 6659, 6660, 6661, 6662, 6663, 6664, 6665, 6666, 6667, 6668, 6669, 6670, 6671, 6672, 6673, 6674, 6675, 6676, 6677, 6678, 6679, 6680, 6681, 6682, 6683, 6684, 6685, 6686, 6687, 6688, 6689, 6690, 6691, 6692, 6693, 6694, 6695, 6696, 6697, 6698, 6699, 6700, 6701, 6702, 6703, 6704, 6705, 6706, 6707, 6708, 6709, 6710, 6711, 6712, 6713, 6714, 6715, 6716, 6717, 6718, 6719, 6720, 6721, 6722, 6723, 6724, 6725, 6726, 6727, 6728, 6729, 6730, 6731, 6732, 6733, 6734, 6735, 6736, 6737, 6738, 6739, 6740, 6741, 6742, 6743, 6744, 6745, 6746, 6747, 6748, 6749, 6750, 6751, 6752, 6753, 6754, 6755, 6756, 6757, 6758, 6759, 6760]
+            stop_token = list(range(6561, 6761))
             out_tokens = []
             self.prefill = True
             self._past_seq_length = 0
             self.prefill_input_sequence_length = self._llm_model.get_input_sequence_length()
             out = self.forward(*args, **kwargs)
             logp = self._llm_model.llm_decoder_session(out.logits.squeeze(0))
-            top_ids = self._llm_model.sampling_ids(logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if 0 < min_len else False).item()
+            top_ids = self._llm_model.sampling_ids(
+                logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if 0 < min_len else False
+            ).item()
             if top_ids in stop_token:
                 return out_tokens
             out_tokens.append(top_ids)
@@ -85,7 +82,9 @@ def create_llm_wraped_cls(cls):
             for i in range(1, max_len):
                 out = self.forward(inputs_embeds=lm_input)
                 logp = self._llm_model.llm_decoder_session(out.logits.squeeze(0))
-                top_ids = self._llm_model.sampling_ids(logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if i < min_len else False).item()
+                top_ids = self._llm_model.sampling_ids(
+                    logp.squeeze(dim=0), out_tokens, 25, ignore_eos=True if i < min_len else False
+                ).item()
                 if top_ids in stop_token:
                     break
                 out_tokens.append(top_ids)
@@ -155,9 +154,9 @@ def create_llm_wraped_cls(cls):
             self._llm_model.set_input_sequence_length(input_sequence_length)
 
             pad_seq_lenght = inputs_embeds.shape[1]
-            assert (
-                pad_seq_lenght % input_sequence_length == 0
-            ), "pad_seq_lenght must be divisible by input_sequence_length"
+            assert pad_seq_lenght % input_sequence_length == 0, (
+                "pad_seq_lenght must be divisible by input_sequence_length"
+            )
             steps = pad_seq_lenght // input_sequence_length
             for i in range(steps):
                 start = i * input_sequence_length
@@ -188,16 +187,13 @@ def create_llm_wraped_cls(cls):
                 self._llm_model.set_input_sequence_length(1)
 
             return CausalLMOutputWithPast(
-                # loss=loss,
                 logits=logits,
-                # past_key_values=outputs.past_key_values,
-                # hidden_states=outputs.hidden_states,
-                # attentions=outputs.attentions,
             )
 
     return _Qwen2ForCausalLM
 
-class Qwen2_HFCompatible(Qwen2ForCausalLM):
+
+class Qwen2_HFCompatible(Qwen2ForCausalLM):  # noqa: N801
     def __init__(self, *args, **kwargs):
         """Initializing a dynamic module is not allowed!"""
         raise RuntimeError("DynamicModule cannot be initialized directly; use convert instead!")
@@ -206,10 +202,6 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
         self._llm_model.set_input_sequence_length(input_seq_length)
 
     def __setup__(self, llm_model: BaseModel) -> Self:
-        """"""
-        """
-        初始化模型
-        """
         self._prefill = True
         self._llm_model = llm_model
         self.embed_tokens = llm_model.token_embedding
@@ -251,23 +243,11 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        # if self.gradient_checkpointing and self.training and use_cache:
-        #     # logger.warning_once(
-        #     #     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-        #     # )
-        #     use_cache = False
-
-        # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
         if not isinstance(past_key_values, (type(None), Cache)):
             raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
 
@@ -287,31 +267,8 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # causal_mask = self._update_causal_mask(
-        #     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        # )
-
-        # # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        # outputs: BaseModelOutputWithPast = self.model(
-        #     input_ids=input_ids,
-        #     attention_mask=attention_mask,
-        #     position_ids=position_ids,
-        #     past_key_values=past_key_values,
-        #     inputs_embeds=inputs_embeds,
-        #     use_cache=use_cache,
-        #     output_attentions=output_attentions,
-        #     output_hidden_states=output_hidden_states,
-        #     cache_position=cache_position,
-        #     **kwargs,
-        # )
-
-        # hidden_states = outputs.last_hidden_state
-        # # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        # logits = self.lm_head(hidden_states[:, slice_indices, :])
         past_seq_length = torch.tensor([self._past_seq_length], dtype=torch.int32).to(inputs_embeds.device)
 
-        # TODO: 需要根据attention mask计算seq_length
         seq_length = input_ids.shape[-1]
         current_input_length = torch.tensor([seq_length], dtype=torch.int32).to(inputs_embeds.device)
 
@@ -326,19 +283,12 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
             inputs_embeds, past_seq_length, current_input_length, past_key_caches, past_value_caches
         )
 
-        # self._past_seq_length += seq_length
         logits = outputs.logits
-        # loss = None
-        # if labels is not None:
-        #     loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return CausalLMOutputWithPast(
-            # loss=loss,
             logits=logits,
             past_key_values=past_key_values,
-            # hidden_states=outputs.hidden_states,
-            # attentions=outputs.attentions,
         )
 
     @classmethod
@@ -356,7 +306,6 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
             hf_model = hf_model_or_path
 
         if llm_model is not None:
-            #assert isinstance(llm_model, BaseModel)
             if not isinstance(llm_model, BaseModel):
                 _llm_cls = create_llm_wraped_cls(type(hf_model))
                 hf_model.__class__ = _llm_cls
@@ -365,7 +314,6 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
             else:
                 hf_model.__class__ = cls
                 hf_model.__setup__(llm_model)
-            # hf_model.embed_tokens = hf_model.model.embed_tokens
             del hf_model.model
             del hf_model.lm_head
             if torch.cuda.is_available():
@@ -388,7 +336,6 @@ class Qwen2_HFCompatible(Qwen2ForCausalLM):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        # TODO: 需要根据attention mask计算seq_length
         if input_ids is not None:
             seq_length = input_ids.shape[-1]
         elif inputs_embeds is not None:

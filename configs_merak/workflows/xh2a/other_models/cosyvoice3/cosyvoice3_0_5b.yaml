@@ -1,0 +1,74 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model_name: CosyVoice3-0.5B
+  # onnx_dir, llm_checkpoint, model.hf_model are null by default.
+  # They MUST be provided via CLI (--onnx-dir, --llm-checkpoint, --model-dir)
+  # or config_overrides. The workflow resolves fallbacks from model_dir.
+  onnx_dir: null
+  llm_checkpoint: null
+  components:
+    - llm
+    - llm_decoder
+    - speech_tokenizer_v3
+    - campplus
+    - flow_decoder
+    - hift
+    - spk_embed_affine_layer
+    - pre_lookahead_layer
+  quant_types:
+    llm: w8a16_sefp
+    llm_decoder: w8a16h1_sefp
+    speech_tokenizer_v3: w8a16_sefp
+    campplus: w8a16_sefp
+    flow_decoder: w8a16_sefp
+    hift: w8a16_sefp
+    spk_embed_affine_layer: w8a16h1_sefp
+    pre_lookahead_layer: w8a16h1_sefp
+  source_onnx:
+    llm_decoder: llm_decoder.onnx
+    speech_tokenizer_v3: speech_tokenizer_v3.onnx
+    campplus: campplus.onnx
+    flow_decoder: flow_decoder_estimator_fp32.onnx
+    hift: hift.onnx
+    spk_embed_affine_layer: spk_embed_affine_layer.onnx
+    pre_lookahead_layer: pre_lookahead_layer.onnx
+  shapes:
+    campplus:
+      batch_size: 1
+      sequence_length: 1000
+    flow_decoder:
+      seq_len: 2048
+  model:
+    type: XHCosyVoice3LLM
+    hf_model: null
+    wrap_cfg:
+      max_sequence_length: 2048
+      input_sequence_length: 256
+      use_cache: true
+      num_logits_to_keep: 1
+      kv_cache:
+        cache_axis: 2
+    quant_config:
+      inputs:
+        inputs_embeds:
+          quantizer:
+            qspec:
+              fake_dtype: float16
+        past_seq_length:
+          quantizer:
+            qspec:
+              fake_dtype: int32
+        current_input_length:
+          quantizer:
+            qspec:
+              fake_dtype: int32
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+      output_names:
+        - logits
