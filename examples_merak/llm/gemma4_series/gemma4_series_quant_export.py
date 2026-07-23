@@ -82,15 +82,43 @@ def _build_quant_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.base:
         return {"quant": None}
     if args.existing_hf_model_dir:
+        existing_quant_config = _load_existing_quant_config(args.existing_hf_model_dir)
+        provider = str(existing_quant_config.get("provider", "")).lower()
+        quant_config = {
+            "algorithm": "existing_hf",
+            "method": "autoround" if "auto-round" in provider else "gptq",
+            "artifact_format": args.artifact_format,
+            "existing_hf_model_dir": args.existing_hf_model_dir,
+        }
+        for key in ("bits", "group_size", "sym"):
+            if key in existing_quant_config:
+                quant_config[key] = existing_quant_config[key]
         return {
-            "quant": {
-                "algorithm": "existing_hf",
-                "method": "autoround",
-                "artifact_format": args.artifact_format,
-                "existing_hf_model_dir": args.existing_hf_model_dir,
-            }
+            "quant": quant_config,
         }
     return None
+
+
+def _load_existing_quant_config(model_dir: str) -> dict[str, Any]:
+    """Read weight-only metadata needed to preserve export naming/contracts."""
+
+    root = Path(model_dir)
+    if not root.is_dir():
+        return {}
+    for name in ("config.json", "quantize_config.json", "quantization_config.json"):
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        quant_config = payload.get("quantization_config", payload)
+        if isinstance(quant_config, dict) and quant_config.get("bits") is not None:
+            return quant_config
+    return {}
 
 
 def _target_model_dir_for_mtp(args: argparse.Namespace) -> str:

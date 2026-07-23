@@ -639,6 +639,7 @@ def test_gemma4_series_workflow_model_names_follow_hf_name_contract():
     assert config_paths
 
     expected_names = {
+        "12b_unified": "gemma_4_12b_unified",
         "26b_a4b": "gemma_4_26b_a4b",
         "31b": "gemma_4_31b",
         "e2b": "gemma_4_e2b",
@@ -1427,6 +1428,7 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
         json.dumps({"text_config": {"max_position_embeddings": 262144}}),
         encoding="utf-8",
     )
+    (assistant_dir / "config.json").write_text("{}", encoding="utf-8")
     meta_path.write_text(
         json.dumps(
             {
@@ -1438,11 +1440,17 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
                     "context_max_length": 2048,
                     "max_pe_length": 32768,
                     "num_draft_tokens": 4,
-                    "mtp_config": {
-                        "assistant_hf_model": "assistant",
-                        "target_hf_model": "base",
-                        "input_sequence_length": 1,
-                    },
+                        "mtp_config": {
+                            "assistant_hf_model": "assistant",
+                            "target_hf_model": "base",
+                            "input_sequence_length": 1,
+                            "shared_kv_inputs": [
+                                "shared_key_cache_sliding",
+                                "shared_value_cache_sliding",
+                                "shared_key_cache_full",
+                                "shared_value_cache_full",
+                            ],
+                        },
                 },
             }
         ),
@@ -1529,6 +1537,9 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
 
     fake_mtp_model.XHGemma4SeriesAssistantDraftModel = FakeDraftModel
     fake_mtp_model.resolve_target_max_pe_length = fake_resolve_target_max_pe_length
+    fake_mtp_model.validate_assistant_target_contract = (
+        lambda _assistant_dir, _target_dir, _mtp_cfg=None: {}
+    )
     monkeypatch.setitem(
         sys.modules,
         "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model",
@@ -1559,6 +1570,30 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     assert updated["model_config"]["max_pe_length"] == 262144
     assert updated["model_config"]["max_pe_length_source"] == ("target_config.text_config.max_position_embeddings")
     assert updated["draft_decode_onnx_file"].startswith("mtp_draft_decode/")
+
+
+def test_gemma4_assistant_weight_loading_rejects_checkpoint_key_drift(
+    monkeypatch,
+    tmp_path,
+):
+    from xhmodel_merak.xh_llm.models.gemma4_series import (
+        gemma4_series_mtp_model,
+    )
+
+    monkeypatch.setattr(gemma4_series_mtp_model, "load_file", lambda *_args, **_kwargs: {})
+
+    class StubDraft:
+        def load_state_dict(self, _state_dict, strict):
+            assert strict is False
+            return ["model.layers.0.self_attn.k_proj.weight"], [
+                "renamed.unexpected.weight"
+            ]
+
+    with pytest.raises(RuntimeError, match="unexpected=.*renamed.unexpected"):
+        gemma4_series_mtp_model.Gemma4AssistantDraftModule._load_weights(
+            StubDraft(),
+            tmp_path / "assistant.safetensors",
+        )
 
 
 def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_path):
@@ -1766,6 +1801,31 @@ def test_gemma4_series_gptq_defaults_use_dense_and_moe_calibration_jsonl():
         "quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
     )
     assert moe_kwargs["moe"]["routing"] == "bypass"
+
+
+def test_gemma4_dense_calibration_alias_resolves_shared_resource(
+    monkeypatch,
+    tmp_path,
+):
+    from xhmodel_merak.xh_llm.models.gemma4_series import quant_adapter
+
+    package_root = tmp_path / "gptqmodel"
+    resource = (
+        package_root
+        / "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
+    )
+    resource.parent.mkdir(parents=True)
+    resource.write_text('{"text": "calibration"}\n', encoding="utf-8")
+    spec = SimpleNamespace(submodule_search_locations=[str(package_root)])
+    monkeypatch.setattr(
+        quant_adapter.importlib.util,
+        "find_spec",
+        lambda _name: spec,
+    )
+
+    assert quant_adapter._resolve_calibration_value(
+        quant_adapter.DEFAULT_DENSE_CALIBRATION_JSONL
+    ) == str(resource.resolve())
 
 
 def test_gemma4_series_detects_e2b_as_dense_e_series():

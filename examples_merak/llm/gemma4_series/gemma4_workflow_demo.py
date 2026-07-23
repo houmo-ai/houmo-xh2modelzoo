@@ -2,7 +2,7 @@
 """Gemma4 unified workflow API demo.
 
 This example intentionally keeps all Gemma4 variants behind the same public
-workflow/API shape. E2B/E4B, 31B Dense, and 26B-A4B are selected only as presets
+workflow/API shape. 12B Unified, E2B/E4B, 31B Dense, and 26B-A4B are selected only as presets
 (model path + topology label + output naming); the script does not expose the
 legacy gemma4_moe/_with_mask public entry points.
 
@@ -52,6 +52,19 @@ class Gemma4Preset:
 # same config family; 26B-A4B is only a topology/model-path preset here, not a
 # separate gemma4_moe public API.
 PRESETS: dict[str, Gemma4Preset] = {
+    "12b-unified": Gemma4Preset(
+        name="12b-unified",
+        hf_model_dir="weights/gemma-4-12B-it",
+        output_slug="gemma4_12b_unified",
+        topology="dense-12b-encoder-free",
+        config_path="./configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml",
+        mtp_config_path=(
+            "./configs_merak/workflows/xh2a/llm_models/gemma4_series/"
+            "12b_unified/gemma4_12b_unified_full_mtp.yaml"
+        ),
+        assistant_model_dir="weights/gemma-4-12B-it-assistant",
+        public_model_entry="Gemma4UnifiedForConditionalGeneration",
+    ),
     "e2b": Gemma4Preset(
         name="e2b",
         hf_model_dir="weights/gemma-4-E2B-it",
@@ -98,6 +111,8 @@ def _remove_output_dir_if_needed(output_dir: Path, force: bool) -> None:
 
 def _preset_with_cli_overrides(args: argparse.Namespace) -> Gemma4Preset:
     preset = PRESETS[args.preset]
+    if args.mtp_config and not preset.mtp_config_path:
+        raise ValueError(f"preset {preset.name} does not support MTP")
     config_path = args.config_path or (preset.mtp_config_path if args.mtp_config else preset.config_path)
     return Gemma4Preset(
         name=preset.name,
@@ -164,6 +179,10 @@ def _export_overrides(args: argparse.Namespace, preset: Gemma4Preset, action: Ac
     overrides: dict[str, Any] = {}
     if args.context_max_length is not None:
         overrides["export.model.context_max_length"] = args.context_max_length
+        if args.mtp_config:
+            overrides["export.model.mtp_config.context_max_length"] = (
+                args.context_max_length
+            )
     if args.prefill_chunk_length is not None:
         overrides["export.model.prefill_chunk_length"] = args.prefill_chunk_length
     if action == "existing-hf" and _existing_artifact_format(args) == "gguf_qat":
@@ -204,8 +223,6 @@ def _input_messages(args: argparse.Namespace, *, dry_run: bool = False) -> dict[
 
 
 def _audio_support_status(preset: Gemma4Preset) -> str:
-    if preset.name not in {"e2b", "e4b"}:
-        return "unsupported_by_model"
     config_path = Path(preset.hf_model_dir) / "config.json"
     if not config_path.exists():
         return "unknown_missing_hf_config"
@@ -266,7 +283,7 @@ def run(args: argparse.Namespace) -> None:
 
     if args.golden and args.modality == "audio" and _audio_support_status(preset) != "supported":
         raise ValueError(
-            f"audio is unsupported by preset {preset.name}; use e2b/e4b with a HF config containing audio_config"
+            f"audio is unsupported by preset {preset.name}; its HF config must contain audio_config"
         )
     if args.golden and args.modality == "audio" and not args.audio_path:
         raise ValueError("audio golden dumping requires --audio-path; synthetic audio is dry-run only")
@@ -315,7 +332,11 @@ def parse_args() -> argparse.Namespace:
         help="Artifact format for --existing-hf-model-dir; auto detects .gguf paths as gguf_qat.",
     )
     parser.add_argument("--config-path", help="Override the shared unified Gemma4 workflow YAML path.")
-    parser.add_argument("--mtp-config", action="store_true", help="Use the preset full_mtp YAML and enable base MTP outputs.")
+    parser.add_argument(
+        "--mtp-config",
+        action="store_true",
+        help="Use the preset full_mtp YAML and enable base MTP outputs.",
+    )
     parser.add_argument("--work-dir", default="./work_dirs/gemma4_unified_workflow_demo")
     parser.add_argument("--device", default=DEFAULT_DEVICE)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
@@ -347,7 +368,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--audio-path",
         default=None,
-        help="Optional local audio path for audio dry-run/golden metadata; supported only by E4B.",
+        help="Optional local audio path for audio dry-run/golden metadata; support is read from the HF config.",
     )
     parser.add_argument("--golden", action="store_true", help="Call dump_golden after export.")
     parser.add_argument("--debug", action="store_true")

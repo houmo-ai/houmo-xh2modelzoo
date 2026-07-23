@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoProcessor
 from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
+
 from xhmodel_merak.configuration_utils import BaseConfig
 
 
@@ -68,6 +69,21 @@ class XHGemma4SeriesProcessor(Gemma4Processor):
             trust_remote_code=trust_remote_code,
             **kwargs,
         )
+        if type(processor).__name__ == "Gemma4UnifiedProcessor":
+            if any(
+                value is not None
+                for value in (video_max_patches, video_image_seq_length, video_pooling_kernel_size)
+            ):
+                raise ValueError(
+                    "Gemma4 Unified vision limits are checkpoint-owned; legacy video patch/pooling overrides "
+                    "are not supported."
+                )
+            from .gemma4_unified_processor import XHGemma4UnifiedProcessor
+
+            return XHGemma4UnifiedProcessor.from_hf_processor(
+                processor,
+                model_dir=pretrained_model_name_or_path,
+            )
         if isinstance(processor, cls):
             processor.video_max_patches = video_max_patches
             processor.video_image_seq_length = video_image_seq_length
@@ -586,7 +602,11 @@ class XHGemma4SeriesProcessor(Gemma4Processor):
                         audios.append(item.get("audio"))
                         sampling_rate = int(item.get("sampling_rate", sampling_rate))
         if getattr(self, "chat_template", None):
-            rendered = super().apply_chat_template(messages, add_generation_prompt=add_generation_prompt, tokenize=False)
+            rendered = super().apply_chat_template(
+                messages,
+                add_generation_prompt=add_generation_prompt,
+                tokenize=False,
+            )
         else:
             rendered = self._render_messages_fallback(messages, add_generation_prompt)
         return rendered, images, videos, audios, sampling_rate

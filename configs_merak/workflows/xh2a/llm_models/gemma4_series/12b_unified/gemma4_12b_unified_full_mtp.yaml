@@ -1,0 +1,95 @@
+# Gemma4 12B Unified GPTQModel + MTP export configuration.
+# Frontend token capacities and feature widths are checkpoint-owned.
+quant:
+  algorithm: gptqmodel
+  method: gptq
+  preset: full_multimodal
+  rotation: null
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  iters: 200
+  seed: 42
+  quant_nontext_module: false
+  calibration:
+    # Model-neutral alias for the shared language-only dense IVSG corpus.
+    jsonl: gptqmodel://quantization/calibration/dense_ivsg/shared-dense-text.jsonl
+    text_key: text
+    nsamples: 256
+    seqlen: 512
+  runtime:
+    batch_size: 1
+    device_map: auto
+    trust_remote_code: true
+    offload_to_disk: false
+  validation:
+    check_quant_text_demo: true
+    check_quant_image_demo: true
+    check_quant_video_demo: false
+    check_quant_audio_demo: false
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4UnifiedForConditionalGeneration
+    hf_model: null
+    model_name: gemma_4_12b_unified
+    # Keep the deploy/export default resource-safe. The checkpoint-owned
+    # 262144 RoPE limit is resolved separately; opt into a larger KV cache via
+    # workflow/CLI context_max_length only after checking device capacity.
+    context_max_length: 2048
+    prefill_chunk_length: 320
+    use_cache: true
+    num_logits_to_keep: 1
+    sliding_kv_cache_input_mode: slice_window
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      input_modality: image
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    video_visual_config:
+      input_modality: video
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    audio_config:
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false
+    spec_decode_mode: mtp
+    num_draft_tokens: 4
+    output_post_norm_hidden: true
+    mtp_config:
+      # Required workflow inputs. The public demo/CLI injects preset defaults
+      # or explicit --assistant/target model directories and validates them.
+      assistant_hf_model: null
+      target_hf_model: null
+      body_quant_type: w8a8h1_sefp
+      lm_head_quant_type: w4a8h0_ssfp
+      batch_size: 1
+      input_sequence_length: 1
+      context_max_length: 2048
+      use_cache: true
+      num_draft_tokens: 4
+      assistant_num_hidden_layers: 4
+      assistant_layer_pattern:
+      - sliding_attention
+      - sliding_attention
+      - sliding_attention
+      - full_attention
+      assistant_hidden_size: 1024
+      assistant_num_attention_heads: 16
+      assistant_num_key_value_heads: 8
+      assistant_num_global_key_value_heads: 1
+      head_dim: 256
+      use_ordered_embeddings: false
+      shared_kv_inputs:
+      - shared_key_cache_sliding
+      - shared_value_cache_sliding
+      - shared_key_cache_full
+      - shared_value_cache_full

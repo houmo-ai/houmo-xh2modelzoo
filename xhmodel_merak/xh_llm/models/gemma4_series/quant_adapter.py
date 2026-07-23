@@ -34,7 +34,7 @@ _SUPPORTED_GPTQMODEL_PRESETS = {
 _SUPPORTED_ROTATIONS = {None}
 _DEFAULT_RECIPE_ENTRYPOINT = "gptqmodel.recipes.gemma4:quantize_gemma4"
 DEFAULT_DENSE_CALIBRATION_JSONL = (
-    "gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
+    "gptqmodel://quantization/calibration/dense_ivsg/shared-dense-text.jsonl"
 )
 DEFAULT_MOE_CALIBRATION_JSONL = (
     "gptqmodel://quantization/calibration/moe_ebss/gen_data/Qwen3-Next-80B-A3B-Instruct.jsonl"
@@ -43,6 +43,11 @@ DEFAULT_AUTOROUND_DATASET_PATH = "data/calib_data/NeelNanda-pile-10k.jsonl"
 DEFAULT_AUTOROUND_DATASET = f"xh2modelzoo://{DEFAULT_AUTOROUND_DATASET_PATH}"
 _LEGACY_AUTOROUND_DATASETS = {"NeelNanda/pile-10k", "pile-10k"}
 _REPO_RESOURCE_PREFIXES = ("xh2modelzoo://", "repo://")
+_GPTQMODEL_RESOURCE_ALIASES = {
+    "quantization/calibration/dense_ivsg/shared-dense-text.jsonl": (
+        "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
+    ),
+}
 
 
 def quantize_with_autoround_mode1(
@@ -463,13 +468,15 @@ def _resolve_autoround_dataset_value(value: Any) -> str:
 
 def _resolve_gptqmodel_resource(uri: str) -> str:
     relative_path = uri.removeprefix("gptqmodel://").lstrip("/")
+    relative_path = _GPTQMODEL_RESOURCE_ALIASES.get(relative_path, relative_path)
+    resolved_uri = f"gptqmodel://{relative_path}"
     spec = importlib.util.find_spec("gptqmodel")
     package_locations = list(spec.submodule_search_locations or []) if spec and spec.submodule_search_locations else []
     for package_root in package_locations:
         candidate = Path(package_root) / relative_path
         if candidate.is_file():
             return str(candidate.resolve())
-    return uri
+    return resolved_uri
 
 
 def _is_repo_resource(value: str) -> bool:

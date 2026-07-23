@@ -10,6 +10,12 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 MTP_DRAFT_DECODE_DIR = "mtp_draft_decode"
+REQUIRED_SHARED_KV_INPUTS = (
+    "shared_key_cache_sliding",
+    "shared_value_cache_sliding",
+    "shared_key_cache_full",
+    "shared_value_cache_full",
+)
 
 
 def quant_type_weight_bits(quant_type: str | None, default: int = 4) -> int:
@@ -48,6 +54,68 @@ def resolve_model_path(path: str) -> Path:
     if candidate.is_absolute():
         return candidate.resolve()
     return (Path.cwd() / candidate).resolve()
+
+
+def require_model_dir(path: str, *, role: str) -> Path:
+    model_dir = resolve_model_path(path)
+    if not model_dir.is_dir():
+        raise FileNotFoundError(
+            f"Gemma4 MTP {role} model directory does not exist: {model_dir}"
+        )
+    config_path = model_dir / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Gemma4 MTP {role} model directory is missing config.json: "
+            f"{model_dir}"
+        )
+    return model_dir
+
+
+def validate_mtp_model_inputs(model_cfg: dict[str, Any]) -> dict[str, Path]:
+    mtp_cfg = model_cfg.get("mtp_config") or {}
+    if not isinstance(mtp_cfg, dict):
+        raise TypeError("Gemma4 MTP export.model.mtp_config must be a mapping")
+
+    assistant_dir = mtp_cfg.get("assistant_hf_model")
+    target_dir = mtp_cfg.get("target_hf_model")
+    missing = [
+        f"export.model.mtp_config.{name}"
+        for name, value in (
+            ("assistant_hf_model", assistant_dir),
+            ("target_hf_model", target_dir),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "Gemma4 MTP export requires model paths before graph export: "
+            f"missing {', '.join(missing)}. "
+            "Inject them with workflow config_overrides, the "
+            "--mtp-assistant-model-dir/--mtp-target-model-dir CLI options, "
+            "or a public Gemma4 preset."
+        )
+
+    shared_kv_inputs = mtp_cfg.get("shared_kv_inputs")
+    if list(shared_kv_inputs or []) != list(REQUIRED_SHARED_KV_INPUTS):
+        raise ValueError(
+            "Gemma4 MTP export.model.mtp_config.shared_kv_inputs must be "
+            f"{list(REQUIRED_SHARED_KV_INPUTS)!r}; got "
+            f"{shared_kv_inputs!r}. Duplicate and legacy KV names are not "
+            "accepted."
+        )
+
+    model_paths = {
+        "assistant": require_model_dir(str(assistant_dir), role="assistant"),
+        "target": require_model_dir(str(target_dir), role="target"),
+    }
+    from .gemma4_series_mtp_model import validate_assistant_target_contract
+
+    validate_assistant_target_contract(
+        model_paths["assistant"],
+        model_paths["target"],
+        mtp_cfg,
+    )
+    return model_paths
 
 
 def resolve_exported_dir(export_result: Any) -> Path:
@@ -288,12 +356,12 @@ def export_mtp_draft(
 
     model_cfg = model_config_dict(meta)
     mtp_cfg = mtp_config_dict(meta)
-    assistant_dir = mtp_cfg.get("assistant_hf_model")
     target_dir = mtp_cfg.get("target_hf_model") or hf_model_dir
-    if not assistant_dir:
-        raise ValueError("MTP draft export requires export.model.mtp_config.assistant_hf_model")
-    if not target_dir:
-        raise ValueError("MTP draft export requires export.model.mtp_config.target_hf_model or hf_model_dir")
+    if target_dir and not mtp_cfg.get("target_hf_model"):
+        mtp_cfg["target_hf_model"] = target_dir
+    model_paths = validate_mtp_model_inputs(
+        {**model_cfg, "mtp_config": mtp_cfg}
+    )
 
     body_quant_type = str(mtp_cfg.get("body_quant_type") or "w8a8h1_sefp")
     lm_head_quant_type = str(mtp_cfg.get("lm_head_quant_type") or "w4a8h0_ssfp")
@@ -309,10 +377,13 @@ def export_mtp_draft(
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
         XHGemma4SeriesAssistantDraftModel,
         resolve_target_max_pe_length,
+        validate_assistant_target_contract,
     )
     from xhquant.api import ConfigDict, PrecisionMode, get_xhquant_logger, ptq_quantize
 
-    target_path = resolve_model_path(str(target_dir))
+    target_path = model_paths["target"]
+    assistant_path = model_paths["assistant"]
+    validate_assistant_target_contract(assistant_path, target_path, mtp_cfg)
     target_max_pe_length_info = resolve_target_max_pe_length(
         target_path,
         model_cfg,
@@ -325,7 +396,7 @@ def export_mtp_draft(
     logger = get_xhquant_logger()
     logger.info("Exporting Gemma4 Series MTP assistant draft ONNX to %s", output_dir)
     model = XHGemma4SeriesAssistantDraftModel(
-        assistant_model_dir=str(resolve_model_path(str(assistant_dir))),
+        assistant_model_dir=str(assistant_path),
         target_model_dir=str(target_path),
         wrap_cfg=ConfigDict(
             input_sequence_length=int(mtp_cfg.get("input_sequence_length") or 1),

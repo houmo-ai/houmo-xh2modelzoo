@@ -17,11 +17,32 @@ from safetensors.torch import load_file
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm, Gemma4TextModel
 
+
+try:
+    from transformers.models.gemma4_unified.configuration_gemma4_unified import (
+        Gemma4UnifiedTextConfig,
+    )
+    from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+        Gemma4UnifiedRMSNorm,
+        Gemma4UnifiedTextModel,
+    )
+except ModuleNotFoundError as exc:
+    if not (exc.name or "").startswith("transformers.models.gemma4_unified"):
+        raise
+    Gemma4UnifiedTextConfig = None
+    Gemma4UnifiedRMSNorm = None
+    Gemma4UnifiedTextModel = None
+
 import xhquant.nn as xhnn
 from xh_model_zoo.xh_llm.models.base_model import BaseModel
 from xhquant.api import ConfigDict, get_xhquant_logger
 from xhquant.nn import LLMCacheV2, MaskedAdd, MaskedSoftmax, SoftmaxPlus
 from xhquant.nn import RMSNorm as XHRMSNorm
+
+
+_GEMMA4_RMS_NORM_TYPES = tuple(
+    module_type for module_type in (Gemma4RMSNorm, Gemma4UnifiedRMSNorm) if module_type is not None
+)
 
 
 DTYPE_MAP = {
@@ -200,19 +221,18 @@ def _compute_rotary_cache(
     emb = torch.cat((freqs, freqs), dim=-1)
     cos = emb.cos() * attention_scaling
     sin = emb.sin() * attention_scaling
-    if partial_rotary_factor < 1.0:
-        head_dim = int(cos.shape[-1])
-        rotary_dim = int(head_dim * partial_rotary_factor)
-        cos[:, head_dim // 2 : head_dim // 2 + rotary_dim] = 1.0
-        sin[:, head_dim // 2 : head_dim // 2 + rotary_dim] = 0.0
+    # Proportional/partial Gemma4 RoPE already pads inv_freq with zeros for
+    # non-rotary dimensions. Applying partial_rotary_factor a second time
+    # would incorrectly disable the mirrored half used by rotate_half.
+    _ = partial_rotary_factor
     return cos.to(dtype=inv_freq.dtype), sin.to(dtype=inv_freq.dtype)
 
 
 def _convert_gemma4_rmsnorm(hf_norm: nn.Module) -> XHRMSNorm:
     if isinstance(hf_norm, XHRMSNorm):
         return hf_norm
-    if not isinstance(hf_norm, Gemma4RMSNorm):
-        raise TypeError(f"Expected Gemma4RMSNorm, got {type(hf_norm).__name__}")
+    if not isinstance(hf_norm, _GEMMA4_RMS_NORM_TYPES):
+        raise TypeError(f"Expected a Gemma4 RMSNorm, got {type(hf_norm).__name__}")
     hidden_size = int(hf_norm.weight.shape[0])
     eps = float(getattr(hf_norm, "eps", 1e-6))
     new_norm = XHRMSNorm(hidden_size, eps)
@@ -220,6 +240,146 @@ def _convert_gemma4_rmsnorm(hf_norm: nn.Module) -> XHRMSNorm:
         new_norm.weight.data.copy_(hf_norm.weight.data.detach().to(new_norm.weight.dtype))
     new_norm.weight.requires_grad_(False)
     return new_norm
+
+
+def _resolve_assistant_text_types(
+    assistant_config: dict[str, Any],
+) -> tuple[type, type, type[nn.Module]]:
+    """Select the HF text implementation matching the assistant checkpoint."""
+
+    if assistant_config.get("model_type") == "gemma4_unified_assistant":
+        if (
+            Gemma4UnifiedTextConfig is None
+            or Gemma4UnifiedTextModel is None
+            or Gemma4UnifiedRMSNorm is None
+        ):
+            raise RuntimeError(
+                "Gemma4 12B Unified MTP requires transformers>=5.13.0; "
+                "the original Gemma4 MTP path remains compatible with transformers>=5.5.0."
+            )
+        return Gemma4UnifiedTextConfig, Gemma4UnifiedTextModel, Gemma4UnifiedRMSNorm
+    return Gemma4TextConfig, Gemma4TextModel, Gemma4RMSNorm
+
+
+def validate_assistant_target_contract(
+    assistant_model_dir: str | Path,
+    target_model_dir: str | Path,
+    mtp_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the assistant/target contract used by shared-KV MTP.
+
+    Gemma4 Unified is not accepted merely because its checkpoint names look
+    like legacy Gemma4. The model family, backbone width, layer ownership and
+    per-attention-type KV geometry must all agree.
+    """
+
+    assistant = load_json_file(Path(assistant_model_dir) / "config.json")
+    target = load_json_file(Path(target_model_dir) / "config.json")
+    assistant_text = _nested_dict(assistant.get("text_config"))
+    target_text = _nested_dict(target.get("text_config"))
+    assistant_type = str(assistant.get("model_type") or "")
+    target_type = str(target.get("model_type") or "")
+    expected_target_types = {
+        "gemma4_assistant": {"gemma4"},
+        "gemma4_unified_assistant": {"gemma4_unified"},
+    }
+    if target_type not in expected_target_types.get(assistant_type, set()):
+        raise ValueError(
+            "Gemma4 MTP assistant/target model types are incompatible: "
+            f"assistant={assistant_type!r}, target={target_type!r}"
+        )
+
+    backbone_hidden_size = int(assistant.get("backbone_hidden_size") or 0)
+    target_hidden_size = int(target_text.get("hidden_size") or 0)
+    if backbone_hidden_size != target_hidden_size:
+        raise ValueError(
+            "Gemma4 MTP assistant backbone_hidden_size must match target hidden_size: "
+            f"{backbone_hidden_size} != {target_hidden_size}"
+        )
+
+    layer_types = list(assistant_text.get("layer_types") or [])
+    num_layers = int(assistant_text.get("num_hidden_layers") or 0)
+    num_kv_shared_layers = int(assistant_text.get("num_kv_shared_layers") or 0)
+    if len(layer_types) != num_layers or num_kv_shared_layers != num_layers:
+        raise ValueError(
+            "Gemma4 MTP assistant must declare one layer type per layer and all "
+            f"layers as KV-shared: layers={num_layers}, layer_types={len(layer_types)}, "
+            f"num_kv_shared_layers={num_kv_shared_layers}"
+        )
+
+    target_layer_types = list(target_text.get("layer_types") or [])
+    shared_cache_geometry = {
+        "sliding_attention": {
+            "num_key_value_heads": int(assistant_text.get("num_key_value_heads") or 0),
+            "head_dim": int(assistant_text.get("head_dim") or 0),
+        },
+        "full_attention": {
+            "num_key_value_heads": int(
+                assistant_text.get("num_global_key_value_heads")
+                or assistant_text.get("num_key_value_heads")
+                or 0
+            ),
+            "head_dim": int(
+                assistant_text.get("global_head_dim")
+                or assistant_text.get("head_dim")
+                or 0
+            ),
+        },
+    }
+    target_geometry = {
+        "sliding_attention": {
+            "num_key_value_heads": int(target_text.get("num_key_value_heads") or 0),
+            "head_dim": int(target_text.get("head_dim") or 0),
+        },
+        "full_attention": {
+            "num_key_value_heads": int(
+                target_text.get("num_global_key_value_heads")
+                or target_text.get("num_key_value_heads")
+                or 0
+            ),
+            "head_dim": int(target_text.get("global_head_dim") or target_text.get("head_dim") or 0),
+        },
+    }
+    for layer_type in set(layer_types):
+        if layer_type not in shared_cache_geometry or layer_type not in target_layer_types:
+            raise ValueError(
+                f"Gemma4 MTP cannot map assistant layer type {layer_type!r} to the target"
+            )
+        if shared_cache_geometry[layer_type] != target_geometry[layer_type]:
+            raise ValueError(
+                f"Gemma4 MTP shared KV geometry mismatch for {layer_type}: "
+                f"assistant={shared_cache_geometry[layer_type]}, "
+                f"target={target_geometry[layer_type]}"
+            )
+
+    if mtp_config:
+        yaml_fields = {
+            "assistant_num_hidden_layers": num_layers,
+            "assistant_layer_pattern": layer_types,
+            "assistant_hidden_size": int(assistant_text.get("hidden_size") or 0),
+            "assistant_num_attention_heads": int(assistant_text.get("num_attention_heads") or 0),
+            "assistant_num_key_value_heads": int(assistant_text.get("num_key_value_heads") or 0),
+            "assistant_num_global_key_value_heads": int(
+                assistant_text.get("num_global_key_value_heads") or 0
+            ),
+            "head_dim": int(assistant_text.get("head_dim") or 0),
+            "use_ordered_embeddings": bool(assistant.get("use_ordered_embeddings", False)),
+        }
+        mismatches = {
+            key: (mtp_config.get(key), expected)
+            for key, expected in yaml_fields.items()
+            if key in mtp_config and mtp_config.get(key) != expected
+        }
+        if mismatches:
+            raise ValueError(f"Gemma4 MTP YAML does not match assistant config: {mismatches}")
+
+    return {
+        "assistant_model_type": assistant_type,
+        "target_model_type": target_type,
+        "backbone_hidden_size": backbone_hidden_size,
+        "assistant_hidden_size": int(assistant_text.get("hidden_size") or 0),
+        "shared_cache_geometry": shared_cache_geometry,
+    }
 
 
 class Gemma4AssistantMaskedEmbedder(nn.Module):
@@ -398,7 +558,7 @@ class Gemma4AssistantDecoderLayer(nn.Module):
 class Gemma4AssistantBackbone(nn.Module):
     def __init__(
         self,
-        text_model: Gemma4TextModel,
+        text_model: nn.Module,
         max_position_embeddings: int,
         input_sequence_length: int,
         cache_axis: int = 2,
@@ -509,18 +669,20 @@ class Gemma4AssistantDraftModule(nn.Module):
         self.target_model_dir = target_model_dir
         self.assistant_config_dict = load_json_file(Path(assistant_model_dir) / "config.json")
         self.target_config_dict = load_json_file(Path(target_model_dir) / "config.json")
+        validate_assistant_target_contract(assistant_model_dir, target_model_dir)
 
-        text_config = Gemma4TextConfig(**self.assistant_config_dict["text_config"])
+        config_cls, model_cls, _ = _resolve_assistant_text_types(self.assistant_config_dict)
+        text_config = config_cls(**self.assistant_config_dict["text_config"])
         self.text_config = text_config
         self.backbone_hidden_size = int(self.assistant_config_dict["backbone_hidden_size"])
         self.use_ordered_embeddings = bool(self.assistant_config_dict.get("use_ordered_embeddings", False))
 
-        text_model_config = Gemma4TextConfig(**self.assistant_config_dict["text_config"])
+        text_model_config = config_cls(**self.assistant_config_dict["text_config"])
         # Build local K/V parameters so the local Transformers version can
         # instantiate the model; the draft attention ignores those K/V weights
         # and consumes target shared KV by layer_type instead.
         text_model_config.num_kv_shared_layers = 0
-        text_model = Gemma4TextModel(text_model_config)
+        text_model = model_cls(text_model_config)
         self.model = Gemma4AssistantBackbone(
             text_model,
             max_position_embeddings=max_position_embeddings,
@@ -543,7 +705,7 @@ class Gemma4AssistantDraftModule(nn.Module):
     def _convert_norms_for_export(self) -> None:
         for layer in self.model.layers:
             attn = layer.self_attn
-            if isinstance(attn.q_norm, Gemma4RMSNorm):
+            if isinstance(attn.q_norm, _GEMMA4_RMS_NORM_TYPES):
                 attn.q_norm = _convert_gemma4_rmsnorm(attn.q_norm)
             for attr in (
                 "input_layernorm",
@@ -552,9 +714,9 @@ class Gemma4AssistantDraftModule(nn.Module):
                 "post_feedforward_layernorm",
             ):
                 module = getattr(layer, attr, None)
-                if isinstance(module, Gemma4RMSNorm):
+                if isinstance(module, _GEMMA4_RMS_NORM_TYPES):
                     setattr(layer, attr, _convert_gemma4_rmsnorm(module))
-        if isinstance(self.model.norm, Gemma4RMSNorm):
+        if isinstance(self.model.norm, _GEMMA4_RMS_NORM_TYPES):
             self.model.norm = _convert_gemma4_rmsnorm(self.model.norm)
         self.to(dtype=self.lm_head.weight.dtype)
 

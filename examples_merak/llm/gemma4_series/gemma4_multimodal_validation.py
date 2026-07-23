@@ -31,7 +31,7 @@ Modality = Literal["image", "video", "audio"]
 UNSUPPORTED_BY_MODEL = "unsupported_by_model"
 SUPPORTED = "supported"
 MIN_SYNTHETIC_VIDEO_FRAMES = 16
-PRESET_ORDER = ("e2b", "e4b", "31b", "26b-a4b")
+PRESET_ORDER = ("12b-unified", "e2b", "e4b", "31b", "26b-a4b")
 
 
 @dataclass(frozen=True)
@@ -62,16 +62,19 @@ def _preset_with_override(preset_name: str, hf_model_dir: str | None) -> Gemma4P
         output_slug=preset.output_slug,
         topology=preset.topology,
         config_path=preset.config_path,
+        mtp_config_path=preset.mtp_config_path,
+        assistant_model_dir=preset.assistant_model_dir,
         public_model_entry=preset.public_model_entry,
     )
 
 
 def _audio_support(preset: Gemma4Preset, hf_config: dict[str, Any]) -> tuple[str, str]:
-    # E-series checkpoints expose the audio tower in HF config.  31B and
+    # E-series checkpoints expose the audio tower; 12B Unified exposes the
+    # encoder-free audio projection in the same config field.  31B and
     # 26B-A4B may still contain audio token ids, but they are documented as
     # unsupported by the model preset here.
-    if preset.name not in {"e2b", "e4b"}:
-        return UNSUPPORTED_BY_MODEL, "audio is only enabled for E-series presets"
+    if preset.name not in {"12b-unified", "e2b", "e4b"}:
+        return UNSUPPORTED_BY_MODEL, "audio is only enabled for 12B Unified and E-series presets"
     if isinstance(hf_config.get("audio_config"), dict):
         return SUPPORTED, "HF config has audio_config"
     return UNSUPPORTED_BY_MODEL, "HF config has no audio_config"

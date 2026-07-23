@@ -1,0 +1,59 @@
+# Gemma4 12B Unified AutoRound W4G64 + HMONNX export configuration.
+# AutoRound quantizes only HF model.language_model.layers; it does not rewrite
+# the checkpoint image/video/audio weights. The frontend quant_scheme entries
+# below independently control the later HMONNX side-graph export.
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  preset: mode1
+  rotation: null
+  # AutoRound writes auto_gptq-packed weights. GPTQModel then reloads that
+  # compatible format and owns the normalized gptqmodel_hf artifact consumed
+  # by the common HMONNX export path.
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  iters: 200
+  seed: 42
+  format: auto_gptq
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    # Throughput preset used by the validated W4G64 run. Override batch_size
+    # to 1 on memory-constrained devices; the workflow supplies the requested
+    # CUDA device and this text-only AutoRound path does not use disk offload.
+    batch_size: 8
+    trust_remote_code: true
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4UnifiedForConditionalGeneration
+    hf_model: null
+    model_name: gemma_4_12b_unified
+    context_max_length: 2048
+    prefill_chunk_length: 320
+    use_cache: true
+    num_logits_to_keep: 1
+    sliding_kv_cache_input_mode: slice_window
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      input_modality: image
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    video_visual_config:
+      input_modality: video
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    audio_config:
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false

@@ -138,12 +138,14 @@ class Gemma4AudioHMONNXModel(HMONNXModel):
         attention_chunk_size: int = 12,
         attention_context_left: int = 13,
         attention_context_right: int = 0,
+        frontend_kind: str = "tower",
     ):
         super().__init__(hmonnx)
         self.input_feature_length = int(input_feature_length or 0)
         self.attention_chunk_size = int(attention_chunk_size)
         self.attention_context_left = int(attention_context_left)
         self.attention_context_right = int(attention_context_right)
+        self.frontend_kind = str(frontend_kind)
 
     @staticmethod
     def normalize_audio_inputs(
@@ -171,8 +173,9 @@ class Gemma4AudioHMONNXModel(HMONNXModel):
                 args[1],
                 self.input_feature_length,
             )
-            args[0], args[1] = input_features, input_features_mask.to(torch.float16)
-        if len(args) == 2:
+            mask_dtype = torch.float16
+            args[0], args[1] = input_features, input_features_mask.to(mask_dtype)
+        if len(args) == 2 and self.frontend_kind != "encoder_free":
             args.append(
                 XHGemma4Processor.build_audio_attention_mask(
                     args[1],
@@ -244,6 +247,7 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
                 attention_chunk_size=getattr(self.audio_meta, "attention_chunk_size", 12) or 12,
                 attention_context_left=getattr(self.audio_meta, "attention_context_left", 13) or 13,
                 attention_context_right=getattr(self.audio_meta, "attention_context_right", 0) or 0,
+                frontend_kind=getattr(self.audio_meta, "frontend_kind", "tower"),
             )
             if self.audio_meta is not None and getattr(self.audio_meta, "hmonnx", None)
             else None
@@ -551,12 +555,14 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         return logits
 
     def get_tf_processor(self):
-        processor = XHGemma4Processor.from_pretrained(
-            self.hf_model_dir,
-            video_max_patches=getattr(self.video_visual_meta, "max_patches", None),
-            video_image_seq_length=getattr(self.video_visual_meta, "num_image_tokens", None),
-            video_pooling_kernel_size=getattr(self.video_visual_meta, "pooling_kernel_size", None),
-        )
+        processor_kwargs = {}
+        if getattr(self.meta_info, "frontend_kind", "tower") != "encoder_free":
+            processor_kwargs = {
+                "video_max_patches": getattr(self.video_visual_meta, "max_patches", None),
+                "video_image_seq_length": getattr(self.video_visual_meta, "num_image_tokens", None),
+                "video_pooling_kernel_size": getattr(self.video_visual_meta, "pooling_kernel_size", None),
+            }
+        processor = XHGemma4Processor.from_pretrained(self.hf_model_dir, **processor_kwargs)
         if self.audio_meta is not None:
             processor.config.audio_feature_length = getattr(self.audio_meta, "input_feature_length", None)
             processor.config.audio_attention_chunk_size = getattr(self.audio_meta, "attention_chunk_size", 12) or 12

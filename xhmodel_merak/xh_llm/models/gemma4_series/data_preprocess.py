@@ -13,6 +13,18 @@ from .attention_visibility import (
 )
 
 
+IMAGE_MM_TOKEN_TYPE_ID = 1
+VIDEO_MM_TOKEN_TYPE_ID = 2
+
+
+def _is_vision_token_type(mm_token_type_ids: torch.Tensor) -> torch.Tensor:
+    """Return only image/video tokens; audio remains strictly causal."""
+
+    return (mm_token_type_ids == IMAGE_MM_TOKEN_TYPE_ID) | (
+        mm_token_type_ids == VIDEO_MM_TOKEN_TYPE_ID
+    )
+
+
 class Gemma4PerLayerInputEmbedding(nn.Module):
     """Host-side raw PLE embedding lookup for Gemma4 E4B.
 
@@ -279,7 +291,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         # xhquant.nn.MaskedSoftmax's causal path instead of this helper mask.
         if self.bidirectional_vision_attention and mm_token_type_ids.numel() > 0:
             mm = mm_token_type_ids[:current_input_length]
-            is_vision = mm > 0
+            is_vision = _is_vision_token_type(mm)
             # Offset to convert absolute positions to sliding-cache coordinates.
             # The first retained absolute token maps to local coordinate 0.
             cache_offset = max(0, past_seq_length - concat_pos)
@@ -334,7 +346,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
 
         ranges: list[tuple[int, int]] = []
         if self.attention_visibility_spec.requires_mm_prefix_ranges:
-            mm = mm_token_type_ids[:c] > 0
+            mm = _is_vision_token_type(mm_token_type_ids[:c])
             range_start = None
             for idx in range(c):
                 if bool(mm[idx]) and range_start is None:

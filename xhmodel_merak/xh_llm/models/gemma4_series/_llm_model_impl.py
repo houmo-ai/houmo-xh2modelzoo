@@ -16,6 +16,26 @@ from transformers.models.gemma4.modeling_gemma4 import (
     Gemma4TextRotaryEmbedding,
 )
 
+
+try:
+    from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+        Gemma4UnifiedForConditionalGeneration,
+        Gemma4UnifiedRMSNorm,
+        Gemma4UnifiedTextAttention,
+        Gemma4UnifiedTextDecoderLayer,
+        Gemma4UnifiedTextModel,
+        Gemma4UnifiedTextRotaryEmbedding,
+    )
+except ModuleNotFoundError as exc:
+    if not (exc.name or "").startswith("transformers.models.gemma4_unified"):
+        raise
+    Gemma4UnifiedForConditionalGeneration = None
+    Gemma4UnifiedRMSNorm = None
+    Gemma4UnifiedTextAttention = None
+    Gemma4UnifiedTextDecoderLayer = None
+    Gemma4UnifiedTextModel = None
+    Gemma4UnifiedTextRotaryEmbedding = None
+
 from xhquant import nn as xhnn
 from xhquant.nn import LLMCacheV2, MaskedAdd, MaskedSoftmax, RMSNorm, SoftmaxPlus
 from xhquant.nn.modules.moeblock import MoeBlock
@@ -42,6 +62,10 @@ def _register_or_replace_traceable(cls_to_key):
         return dm_class
 
     return decorator
+
+
+def _available_traceable_types(*entries):
+    return {module_type: key for module_type, key in entries if module_type is not None}
 
 
 def _move_parameter_to_meta(module: nn.Module, parameter_name: str) -> None:
@@ -163,7 +187,12 @@ def _compute_gemma4_rotary_cache(
     return cos.to(dtype=inv_freq.dtype), sin.to(dtype=inv_freq.dtype)
 
 
-@_register_or_replace_traceable({Gemma4RMSNorm: "Gemma4RMSNorm"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4RMSNorm, "Gemma4RMSNorm"),
+        (Gemma4UnifiedRMSNorm, "Gemma4UnifiedRMSNorm"),
+    )
+)
 class _Gemma4RMSNorm(DynamicModule):
     def forward(self, hidden_states):
         return self.norm(hidden_states)
@@ -180,7 +209,7 @@ class _Gemma4RMSNorm(DynamicModule):
             device = None
         elif hasattr(self, "_head_dim_hint"):
             hidden_size = self._head_dim_hint
-            device = None
+            device = getattr(self, "_device_hint", None)
         else:
             # Fallback for wrapped modules that can't determine hidden_size
             hidden_size = 8192  # Default for Gemma4
@@ -204,7 +233,12 @@ class _Gemma4RMSNorm(DynamicModule):
         return self
 
 
-@_register_or_replace_traceable({Gemma4TextRotaryEmbedding: "Gemma4TextRotaryEmbedding"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4TextRotaryEmbedding, "Gemma4TextRotaryEmbedding"),
+        (Gemma4UnifiedTextRotaryEmbedding, "Gemma4UnifiedTextRotaryEmbedding"),
+    )
+)
 class _Gemma4TextRotaryEmbedding(DynamicModule):
     def _setup(self, cfg=None):
         max_seq_len = int(
@@ -241,7 +275,12 @@ class _Gemma4TextRotaryEmbedding(DynamicModule):
         return cos_cache[position_ids], sin_cache[position_ids]
 
 
-@_register_or_replace_traceable({Gemma4TextAttention: "Gemma4TextAttention"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4TextAttention, "Gemma4TextAttention"),
+        (Gemma4UnifiedTextAttention, "Gemma4UnifiedTextAttention"),
+    )
+)
 class _Gemma4TextAttention(DynamicModule):
     def _setup(self, cfg=None):
         self.use_cache = bool(_cfg_get(cfg, "use_cache", True))
@@ -271,8 +310,10 @@ class _Gemma4TextAttention(DynamicModule):
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
         for norm_name in ("q_norm", "k_norm", "v_norm"):
             norm = getattr(self, norm_name, None)
-            if norm is not None and not getattr(norm, "with_scale", True):
-                norm._head_dim_hint = self.head_dim
+            if norm is not None:
+                norm._device_hint = self.q_proj.weight.device
+                if not getattr(norm, "with_scale", True):
+                    norm._head_dim_hint = self.head_dim
         self.rope = xhnn.Rope()
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
@@ -469,7 +510,12 @@ class _Gemma4TextAttention(DynamicModule):
         return attn_output, attn_weights
 
 
-@_register_or_replace_traceable({Gemma4TextDecoderLayer: "Gemma4TextDecoderLayer"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4TextDecoderLayer, "Gemma4TextDecoderLayer"),
+        (Gemma4UnifiedTextDecoderLayer, "Gemma4UnifiedTextDecoderLayer"),
+    )
+)
 class _Gemma4TextDecoderLayer(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         layer_scalar = getattr(self, "layer_scalar", None)
@@ -619,7 +665,12 @@ class _Gemma4TextDecoderLayer(DynamicModule):
         return hidden_states
 
 
-@_register_or_replace_traceable({Gemma4TextModel: "Gemma4TextModel"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4TextModel, "Gemma4TextModel"),
+        (Gemma4UnifiedTextModel, "Gemma4UnifiedTextModel"),
+    )
+)
 class _Gemma4TextModel(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         self.only_first_block = bool(_cfg_get(cfg, "only_first_block", False))
@@ -631,7 +682,8 @@ class _Gemma4TextModel(DynamicModule):
         self.image_token_id = int(_cfg_get(cfg, "image_token_id", -1))
         self.audio_token_id = int(_cfg_get(cfg, "audio_token_id", -1))
         self.video_token_id = int(_cfg_get(cfg, "video_token_id", -1))
-        self.per_layer_embed_scale = float(getattr(self, "hidden_size_per_layer_input", 0) or 0) ** 0.5
+        self.hidden_size_per_layer_input = int(getattr(self, "hidden_size_per_layer_input", 0) or 0)
+        self.per_layer_embed_scale = float(self.hidden_size_per_layer_input) ** 0.5
 
         self.llm_gather = xhnn.BatchGather(1)
         self.llm_gather.update_offset_indices(1, self.input_sequence_length)
@@ -835,7 +887,12 @@ class _Gemma4TextModel(DynamicModule):
         return hidden_states
 
 
-@_register_or_replace_traceable({Gemma4ForConditionalGeneration: "Gemma4ForConditionalGeneration"})
+@_register_or_replace_traceable(
+    _available_traceable_types(
+        (Gemma4ForConditionalGeneration, "Gemma4ForConditionalGeneration"),
+        (Gemma4UnifiedForConditionalGeneration, "Gemma4UnifiedForConditionalGeneration"),
+    )
+)
 class _Gemma4ForConditionalGeneration(DynamicModule):
     def _setup(self, cfg: Optional[Dict] = None):
         if cfg is None:
@@ -899,7 +956,11 @@ def register_wrap_modules():
     from xhquant.quantization.xh2a.builder import register_none_quanted_module
 
     FX_LEAF_MODULES._module_dict["Gemma4TextRotaryEmbedding"] = True
+    if Gemma4UnifiedTextRotaryEmbedding is not None:
+        FX_LEAF_MODULES._module_dict["Gemma4UnifiedTextRotaryEmbedding"] = True
 
     register_none_quanted_module(Gemma4TextRotaryEmbedding)
+    if Gemma4UnifiedTextRotaryEmbedding is not None:
+        register_none_quanted_module(Gemma4UnifiedTextRotaryEmbedding)
     register_none_quanted_module(FloorDiv)
     return None

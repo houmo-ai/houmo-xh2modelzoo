@@ -44,18 +44,24 @@ _GEMMA4_MODEL_CONFIG_CLS_NAMES = {
 }
 _GEMMA4_TOP_LEVEL_MODEL_TYPES = {
     "Gemma4ForConditionalGeneration",
+    "Gemma4UnifiedForConditionalGeneration",
     # Compatibility-only legacy top-level alias. New YAML/demo configs should
     # use Gemma4ForConditionalGeneration. Do not expose a separate MoE workflow.
     "Gemma4ForConditionalGeneration_with_mask",
 }
 _GEMMA4_GOLDEN_MIN_TEXT_TOKENS = 1025
 _GEMMA4_RECOMMENDED_CONFIGS = {
+    "12b-unified": "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml",
     "e2b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full.yaml",
     "e4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml",
     "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml",
     "26b-a4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full.yaml",
 }
 _GEMMA4_RECOMMENDED_MTP_CONFIGS = {
+    "12b-unified": (
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/"
+        "12b_unified/gemma4_12b_unified_full_mtp.yaml"
+    ),
     "e2b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b_full_mtp.yaml",
     "e4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full_mtp.yaml",
     "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full_mtp.yaml",
@@ -205,7 +211,8 @@ def get_quant_config_help() -> str:
         f"Dense defaults use IVSG calibration JSONL ({DEFAULT_DENSE_CALIBRATION_JSONL}); "
         f"26B-A4B MoE defaults use EBSS calibration JSONL ({DEFAULT_MOE_CALIBRATION_JSONL}) "
         "and routing bypass so every expert receives calibration activations. "
-        "Dense E2B/E4B/31B checkpoints can alternatively use algorithm='gptqmodel', method='autoround', preset='mode1', "
+        "Dense 12B Unified/E2B/E4B/31B checkpoints can alternatively use algorithm='gptqmodel', "
+        "method='autoround', preset='mode1', "
         "which wraps third_party/auto-round/scripts_gemma4 LLM-only W4G64 no-rotation quantization "
         f"with calibration.jsonl={DEFAULT_DENSE_CALIBRATION_JSONL!r}. "
         "26B-A4B with the same preset wraps scripts_gemma4_moe/quantize_moe.py. "
@@ -405,6 +412,7 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
     ) -> ExportResult:
         from . import mtp_workflow
 
+        config_overrides = self._normalize_export_overrides(config_overrides)
         self._validate_export_model(config_overrides)
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         workflow_model_cfg = workflow_config.export["model"]
@@ -484,8 +492,16 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
 
         def _run_case(case_name: str, messages: list[dict[str, Any]]) -> None:
             logger.info(f"{'-' * 20} Golden case: {case_name} {'-' * 20}")
+            # Every modality case performs a complete generate(), so the
+            # shared text graphs would otherwise try to reuse step_0 symlinks
+            # and decode/KV state created by the preceding case.
+            self._remove_module_golden(golden_root, "prefill")
+            self._remove_module_golden(golden_root, "decode")
             hmonnx_model.to(device)
             hmonnx_model.enable_golden = True
+            set_prefill = getattr(hmonnx_model, "set_prefill", None)
+            if callable(set_prefill):
+                set_prefill()
             if self._messages_have_multimodal(messages):
                 processor = hmonnx_model.get_tf_processor()
                 tokenizer = processor.tokenizer
@@ -616,7 +632,9 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
         requested_messages = self.build_input_message(input_messages)
         cases: list[tuple[str, list[dict[str, Any]]]] = []
 
-        if self._has_exported_subgraph(meta_info, "visual_config") and not self._module_has_golden(golden_root, "visual"):
+        if self._has_exported_subgraph(meta_info, "visual_config") and not self._module_has_golden(
+            golden_root, "visual"
+        ):
             cases.append(("visual", self._messages_for_golden_modality(requested_messages, "image")))
         if self._has_exported_subgraph(meta_info, "video_visual_config") and not self._module_has_golden(
             golden_root, "video_visual"
@@ -716,11 +734,22 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
         media_value = existing if existing is not None else cls._default_golden_media(modality)
         text = cls._first_text(requested_messages) or cls._default_golden_prompt(modality)
         key = "image" if modality == "image" else modality
+        media_item = {"type": modality, key: media_value}
+        if modality == "video" and existing is None:
+            num_frames = len(media_value)
+            fps = 2.0
+            media_item["video_metadata"] = {
+                "fps": fps,
+                "duration": num_frames / fps,
+                "total_num_frames": num_frames,
+                "frames_indices": list(range(num_frames)),
+                "video_backend": "synthetic",
+            }
         return [
             {
                 "role": "user",
                 "content": [
-                    {"type": modality, key: media_value},
+                    media_item,
                     {"type": "text", "text": cls._default_golden_prompt(modality) if existing is None else text},
                 ],
             }
@@ -793,7 +822,9 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
         from PIL import Image, ImageDraw
 
         frames = []
-        for idx in range(32):
+        # Sixteen frames keep the synthetic prompt below the default 2K export
+        # context while still crossing the 1024-token sliding-window boundary.
+        for idx in range(16):
             frame = Image.new("RGB", (224, 224), color=(245, 245, 245))
             draw = ImageDraw.Draw(frame)
             x0 = 16 + idx * 8
@@ -815,13 +846,18 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
 
     def _validate_export_model(self, config_overrides: Mapping[str, Any] | None) -> None:
         from ...builder import get_model_class
+        from .mtp_workflow import require_model_dir, validate_mtp_model_inputs
 
+        config_overrides = self._normalize_export_overrides(config_overrides)
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         export_cfg = workflow_config.build_export_dict()
         # Compatibility for this validation path only. New export config
         # finalization should go through BaseLLMWorkflow._build_export_config().
         export_cfg["model"]["hf_model"] = self.model_dir
         model_cfg = export_cfg["model"]
+        require_model_dir(self.model_dir, role="base")
+        if str(model_cfg.get("spec_decode_mode") or "").lower() == "mtp":
+            validate_mtp_model_inputs(model_cfg)
         export_plan = self._build_export_plan(workflow_config)
         export_plan.validate_fixed_contract()
         model_type = model_cfg.get("model_type") if isinstance(model_cfg, Mapping) else None
@@ -837,12 +873,32 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
             or config_cls_name not in _GEMMA4_MODEL_CONFIG_CLS_NAMES
         ):
             raise TypeError(
-                "Gemma4SeriesWorkflow supports the unified Gemma4ForConditionalGeneration public model type "
+                "Gemma4SeriesWorkflow supports Gemma4ForConditionalGeneration and "
+                "Gemma4UnifiedForConditionalGeneration through the same public series workflow "
                 "for dense/E4B/26B-A4B exports, with legacy _with_mask accepted only "
                 "for compatibility; "
                 f"got model_type={model_type!r}, model={model_cls_name}, "
                 f"config={config_cls_name}, plan={export_plan.to_log_dict()}."
             )
+
+    def _normalize_export_overrides(
+        self,
+        config_overrides: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not config_overrides:
+            return None
+        normalized = copy.deepcopy(dict(config_overrides))
+        context_key = "export.model.context_max_length"
+        mtp_context_key = "export.model.mtp_config.context_max_length"
+        if context_key in normalized:
+            base_model_cfg = self.workflow_config.export.get("model") or {}
+            if (
+                isinstance(base_model_cfg, Mapping)
+                and str(base_model_cfg.get("spec_decode_mode") or "").lower()
+                == "mtp"
+            ):
+                normalized[mtp_context_key] = normalized[context_key]
+        return normalized
 
     def _build_export_plan(self, workflow_config: WorkflowConfig) -> Gemma4SeriesExportPlan:
         export_cfg = workflow_config.build_export_dict()

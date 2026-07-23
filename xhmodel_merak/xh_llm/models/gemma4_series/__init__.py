@@ -28,6 +28,8 @@ from .gemma4_series_hmonnx_inference import XHGemma4HMONNXModel, XHGemma4SeriesH
 from .gemma4_series_llm_model import XHGemma4Model, XHGemma4SeriesModel
 from .gemma4_series_processor import XHGemma4Processor, XHGemma4SeriesProcessor
 from .gemma4_series_vision_model import XHGemma4SeriesVisionModel, XHGemma4VisionModel
+from .gemma4_unified_llm_model import XHGemma4UnifiedModel
+from .modality_contract import Gemma4SeriesModalityContract
 from .quant_adapter import build_gptqmodel_recipe_kwargs, quantize_with_gptqmodel_recipe
 from .variants import Gemma4SeriesVariantSpec, resolve_gemma4_series_variant
 from .workflow import (
@@ -54,21 +56,69 @@ from .xh_gemma4_series_config import (
     XHGemma4SeriesAudioConfig,
     XHGemma4SeriesModelConfig,
     XHGemma4SeriesVisualConfig,
+    XHGemma4UnifiedAudioConfig,
+    XHGemma4UnifiedVisualConfig,
     XHGemma4VisualConfig,
 )
 
 
-_LAZY_MTP_EXPORTS = {
-    "XHGemma4AssistantDraftModel",
-    "XHGemma4SeriesAssistantDraftModel",
+_LAZY_EXPORTS = {
+    "XHGemma4AssistantDraftModel": (".gemma4_series_mtp_model", "XHGemma4AssistantDraftModel"),
+    "XHGemma4SeriesAssistantDraftModel": (
+        ".gemma4_series_mtp_model",
+        "XHGemma4SeriesAssistantDraftModel",
+    ),
+    "Gemma4UnifiedAudioConfig": (
+        "transformers.models.gemma4_unified.configuration_gemma4_unified",
+        "Gemma4UnifiedAudioConfig",
+    ),
+    "Gemma4UnifiedConfig": (
+        "transformers.models.gemma4_unified.configuration_gemma4_unified",
+        "Gemma4UnifiedConfig",
+    ),
+    "Gemma4UnifiedTextConfig": (
+        "transformers.models.gemma4_unified.configuration_gemma4_unified",
+        "Gemma4UnifiedTextConfig",
+    ),
+    "Gemma4UnifiedVisionConfig": (
+        "transformers.models.gemma4_unified.configuration_gemma4_unified",
+        "Gemma4UnifiedVisionConfig",
+    ),
+    "Gemma4UnifiedForCausalLM": (
+        "transformers.models.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedForCausalLM",
+    ),
+    "Gemma4UnifiedForConditionalGeneration": (
+        "transformers.models.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration",
+    ),
+    "Gemma4UnifiedTextModel": (
+        "transformers.models.gemma4_unified.modeling_gemma4_unified",
+        "Gemma4UnifiedTextModel",
+    ),
+    "Gemma4UnifiedAudioAdapter": (".gemma4_unified_audio_model", "Gemma4UnifiedAudioAdapter"),
+    "Gemma4UnifiedVisionAdapter": (".gemma4_unified_vision_model", "Gemma4UnifiedVisionAdapter"),
+    "XHGemma4UnifiedAudioModel": (".gemma4_unified_audio_model", "XHGemma4UnifiedAudioModel"),
+    "XHGemma4UnifiedProcessor": (".gemma4_unified_processor", "XHGemma4UnifiedProcessor"),
+    "XHGemma4UnifiedVisionModel": (".gemma4_unified_vision_model", "XHGemma4UnifiedVisionModel"),
 }
 
 
 def __getattr__(name: str):
-    if name not in _LAZY_MTP_EXPORTS:
+    export = _LAZY_EXPORTS.get(name)
+    if export is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    mtp_model = importlib.import_module(f"{__name__}.gemma4_series_mtp_model")
-    value = getattr(mtp_model, name)
+    module_name, attribute_name = export
+    try:
+        module = importlib.import_module(module_name, package=__name__)
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").startswith("transformers.models.gemma4_unified"):
+            raise ImportError(
+                f"{name} requires transformers>=5.13.0; "
+                "the original Gemma4 Series models remain compatible with transformers>=5.5.0."
+            ) from exc
+        raise
+    value = getattr(module, attribute_name)
     globals()[name] = value
     return value
 
@@ -105,12 +155,22 @@ __all__ = [
     "Gemma4ModelMeta",
     "Gemma4SeriesAudioModelMeta",
     "Gemma4SeriesExportPlan",
+    "Gemma4SeriesModalityContract",
     "Gemma4SeriesModelMeta",
     "Gemma4SeriesVariantSpec",
     "Gemma4TextConfig",
     "Gemma4TextModel",
     "Gemma4VisionConfig",
     "Gemma4VisionModel",
+    "Gemma4UnifiedAudioConfig",
+    "Gemma4UnifiedConfig",
+    "Gemma4UnifiedForCausalLM",
+    "Gemma4UnifiedForConditionalGeneration",
+    "Gemma4UnifiedTextConfig",
+    "Gemma4UnifiedTextModel",
+    "Gemma4UnifiedVisionConfig",
+    "Gemma4UnifiedAudioAdapter",
+    "Gemma4UnifiedVisionAdapter",
     "XHGemma4AudioConfig",
     "XHGemma4AudioModel",
     "XHGemma4HMONNXModel",
@@ -127,6 +187,12 @@ __all__ = [
     "XHGemma4SeriesProcessor",
     "XHGemma4SeriesVisionModel",
     "XHGemma4SeriesVisualConfig",
+    "XHGemma4UnifiedAudioConfig",
+    "XHGemma4UnifiedAudioModel",
+    "XHGemma4UnifiedModel",
+    "XHGemma4UnifiedProcessor",
+    "XHGemma4UnifiedVisualConfig",
+    "XHGemma4UnifiedVisionModel",
     "XHGemma4VisionModel",
     "XHGemma4VisualConfig",
     "build_gemma4_series_export_plan",

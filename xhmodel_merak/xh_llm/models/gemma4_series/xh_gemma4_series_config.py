@@ -13,6 +13,7 @@ from xhquant.api import QuantScheme
 from ...types import VLLMModelMeta
 from ...vision_llm_model import VisionLLMModelConfig
 from .attention_visibility import Gemma4AttentionVisibilitySpec
+from .modality_contract import Gemma4SeriesModalityContract
 from .variants import Gemma4SeriesVariantSpec, resolve_gemma4_series_variant
 
 
@@ -114,6 +115,46 @@ class XHGemma4SeriesAudioConfig(HFModelConfig):
         )
 
 
+class XHGemma4UnifiedVisualConfig(HFModelConfig):
+    """Fixed encoder-free image or per-frame video graph config."""
+
+    def __init__(
+        self,
+        *,
+        image_seq_length: int,
+        input_dim: int,
+        position_capacity: int,
+        input_modality: str = "image",
+        frontend_kind: str = "encoder_free",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.image_seq_length = int(image_seq_length)
+        self.input_dim = int(input_dim)
+        self.position_capacity = int(position_capacity)
+        self.input_modality = str(input_modality)
+        self.frontend_kind = str(frontend_kind)
+
+
+class XHGemma4UnifiedAudioConfig(HFModelConfig):
+    """Fixed raw-waveform-frame graph config for Gemma4 Unified."""
+
+    def __init__(
+        self,
+        *,
+        input_feature_length: int,
+        feature_size: int,
+        sampling_rate: int,
+        frontend_kind: str = "encoder_free",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.input_feature_length = int(input_feature_length)
+        self.feature_size = int(feature_size)
+        self.sampling_rate = int(sampling_rate)
+        self.frontend_kind = str(frontend_kind)
+
+
 class Gemma4SeriesAudioModelMeta(BaseConfig):
     """Gemma4 Series audio runtime meta."""
 
@@ -126,6 +167,7 @@ class Gemma4SeriesAudioModelMeta(BaseConfig):
         attention_chunk_size: int | None = None,
         attention_context_left: int | None = None,
         attention_context_right: int | None = None,
+        frontend_kind: str = "tower",
         hmonnx: str | None = None,
         onnx: str | None = None,
     ):
@@ -135,6 +177,7 @@ class Gemma4SeriesAudioModelMeta(BaseConfig):
         self.attention_chunk_size = attention_chunk_size
         self.attention_context_left = attention_context_left
         self.attention_context_right = attention_context_right
+        self.frontend_kind = frontend_kind
         self.hmonnx = hmonnx
         self.onnx = onnx
 
@@ -158,6 +201,9 @@ class Gemma4SeriesModelMeta(VLLMModelMeta):
         attention_visibility_spec: Mapping | None = None,
         max_mm_ranges_per_chunk: int = 1,
         uses_sliding_flash_attention_v2: bool = False,
+        frontend_kind: str = "tower",
+        hf_architecture: str = "Gemma4ForConditionalGeneration",
+        modality_contract: Mapping | None = None,
         **kwargs,
     ):
         super().__init__(visual_config=visual_config, **kwargs)
@@ -175,6 +221,9 @@ class Gemma4SeriesModelMeta(VLLMModelMeta):
         )
         self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
         self.uses_sliding_flash_attention_v2 = bool(uses_sliding_flash_attention_v2)
+        self.frontend_kind = str(frontend_kind)
+        self.hf_architecture = str(hf_architecture)
+        self.modality_contract = dict(modality_contract) if modality_contract is not None else None
         if "_meta_path_" in kwargs:
             meta_path = Path(kwargs["_meta_path_"]).parent
             if self.visual_config is not None and getattr(self.visual_config, "onnx", None):
@@ -282,6 +331,27 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self._variant_spec: Gemma4SeriesVariantSpec = resolve_gemma4_series_variant(hf_config)
         self.variant = self._variant_spec.name
         self.capabilities = self._variant_spec.capabilities
+        self.frontend_kind = self._variant_spec.frontend_kind
+        self.hf_architecture = self._variant_spec.hf_architecture
+        unified_contract = (
+            Gemma4SeriesModalityContract.from_pretrained(hf_model)
+            if self.frontend_kind == "encoder_free" and hf_model is not None
+            else None
+        )
+        self.modality_contract = (
+            {
+                "image_soft_tokens": unified_contract.image_soft_tokens,
+                "video_soft_tokens_per_frame": unified_contract.video_soft_tokens_per_frame,
+                "audio_soft_tokens": unified_contract.audio_soft_tokens,
+                "vision_patch_dim": unified_contract.vision_patch_dim,
+                "audio_feature_dim": unified_contract.audio_feature_dim,
+                "position_capacity": unified_contract.position_capacity,
+                "sampling_rate": unified_contract.sampling_rate,
+                "config_hash": unified_contract.config_hash,
+            }
+            if unified_contract is not None
+            else None
+        )
         self.use_bidirectional_attention: str | None = text_config.get("use_bidirectional_attention")
         self.bidirectional_vision_attention: bool = self._variant_spec.bidirectional_vision_attention
         if int(prefill_chunk_length) <= 0:
@@ -295,13 +365,39 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 f"got {prefill_chunk_length}."
             )
 
-        if isinstance(visual_config, dict):
+        if unified_contract is not None:
+            visual_config = self._build_unified_visual_config(
+                visual_config,
+                model_name=model_name,
+                hf_model=hf_model,
+                contract=unified_contract,
+                input_modality="image",
+                quant_scheme=quant_scheme,
+            )
+            if video_visual_config is None and visual_config is not None:
+                video_visual_config = {}
+            video_visual_config = self._build_unified_visual_config(
+                video_visual_config,
+                model_name=model_name,
+                hf_model=hf_model,
+                contract=unified_contract,
+                input_modality="video",
+                quant_scheme=quant_scheme,
+            )
+            audio_config = self._build_unified_audio_config(
+                audio_config,
+                model_name=model_name,
+                hf_model=hf_model,
+                contract=unified_contract,
+                quant_scheme=quant_scheme,
+            )
+        elif isinstance(visual_config, dict):
             if "model_name" not in visual_config:
                 visual_config["model_name"] = f"{model_name}_visual"
             if "hf_model" not in visual_config:
                 visual_config["hf_model"] = hf_model
             visual_config = XHGemma4SeriesVisualConfig(**visual_config)
-        if video_visual_config is None and visual_config is not None:
+        if unified_contract is None and video_visual_config is None and visual_config is not None:
             video_visual_config = {
                 "model_name": f"{model_name}_video_visual",
                 "hf_model": hf_model,
@@ -313,7 +409,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 "input_modality": "video",
                 "quant_scheme": copy.deepcopy(visual_config.quant_scheme),
             }
-        if isinstance(video_visual_config, dict):
+        if unified_contract is None and isinstance(video_visual_config, dict):
             if "model_name" not in video_visual_config:
                 video_visual_config["model_name"] = f"{model_name}_video_visual"
             if "hf_model" not in video_visual_config:
@@ -327,12 +423,16 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 video_visual_config.setdefault("quant_scheme", copy.deepcopy(visual_config.quant_scheme))
             video_visual_config.setdefault("input_modality", "video")
             video_visual_config = XHGemma4SeriesVisualConfig(**video_visual_config)
-        if audio_config is None and isinstance(hf_config.get("audio_config"), dict):
+        if unified_contract is None and audio_config is None and isinstance(hf_config.get("audio_config"), dict):
             audio_config = {
                 "model_name": f"{model_name}_audio",
                 "hf_model": hf_model,
             }
-        if isinstance(audio_config, Mapping) and not isinstance(audio_config, XHGemma4SeriesAudioConfig):
+        if (
+            unified_contract is None
+            and isinstance(audio_config, Mapping)
+            and not isinstance(audio_config, XHGemma4SeriesAudioConfig)
+        ):
             audio_config = dict(audio_config)
             if "model_name" not in audio_config:
                 audio_config["model_name"] = f"{model_name}_audio"
@@ -384,6 +484,102 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         )
 
     @staticmethod
+    def _build_unified_visual_config(
+        value,
+        *,
+        model_name: str,
+        hf_model: str,
+        contract: Gemma4SeriesModalityContract,
+        input_modality: str,
+        quant_scheme,
+    ):
+        if value is None:
+            return None
+        if isinstance(value, XHGemma4UnifiedVisualConfig):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError(f"Gemma4 Unified {input_modality} visual_config must be a mapping")
+        cfg = dict(value)
+        expected_tokens = (
+            contract.image_soft_tokens
+            if input_modality == "image"
+            else contract.video_soft_tokens_per_frame
+        )
+        numeric_contract = {
+            "image_seq_length": expected_tokens,
+            "max_soft_tokens": expected_tokens,
+            "max_patches": expected_tokens,
+            "input_dim": contract.vision_patch_dim,
+            "position_capacity": contract.position_capacity,
+        }
+        for key, expected_value in numeric_contract.items():
+            if key in cfg and int(cfg[key]) != expected_value:
+                raise ValueError(
+                    f"Gemma4 Unified {key} is checkpoint-owned: expected {expected_value}, got {cfg[key]}."
+                )
+            cfg.pop(key, None)
+        if "input_modality" in cfg and str(cfg["input_modality"]) != input_modality:
+            raise ValueError(
+                "Gemma4 Unified input_modality is graph-owned: "
+                f"expected {input_modality!r}, got {cfg['input_modality']!r}."
+            )
+        cfg.pop("input_modality", None)
+        if "frontend_kind" in cfg and str(cfg["frontend_kind"]) != "encoder_free":
+            raise ValueError(
+                "Gemma4 Unified frontend_kind is checkpoint-owned: "
+                f"expected 'encoder_free', got {cfg['frontend_kind']!r}."
+            )
+        cfg.pop("frontend_kind", None)
+        cfg.setdefault("model_name", f"{model_name}_{'visual' if input_modality == 'image' else 'video_visual'}")
+        cfg.setdefault("hf_model", hf_model)
+        cfg.setdefault("quant_scheme", copy.deepcopy(quant_scheme))
+        return XHGemma4UnifiedVisualConfig(
+            image_seq_length=expected_tokens,
+            input_dim=contract.vision_patch_dim,
+            position_capacity=contract.position_capacity,
+            input_modality=input_modality,
+            **cfg,
+        )
+
+    @staticmethod
+    def _build_unified_audio_config(
+        value,
+        *,
+        model_name: str,
+        hf_model: str,
+        contract: Gemma4SeriesModalityContract,
+        quant_scheme,
+    ):
+        if isinstance(value, XHGemma4UnifiedAudioConfig):
+            return value
+        if value is None:
+            value = {}
+        if not isinstance(value, Mapping):
+            raise TypeError("Gemma4 Unified audio_config must be a mapping")
+        cfg = dict(value)
+        expected = {
+            "input_feature_length": contract.audio_soft_tokens,
+            "audio_seq_length": contract.audio_soft_tokens,
+            "feature_size": contract.audio_feature_dim,
+            "sampling_rate": contract.sampling_rate,
+        }
+        for key, expected_value in expected.items():
+            if key in cfg and int(cfg[key]) != expected_value:
+                raise ValueError(
+                    f"Gemma4 Unified {key} is checkpoint-owned: expected {expected_value}, got {cfg[key]}."
+                )
+            cfg.pop(key, None)
+        cfg.setdefault("model_name", f"{model_name}_audio")
+        cfg.setdefault("hf_model", hf_model)
+        cfg.setdefault("quant_scheme", copy.deepcopy(quant_scheme))
+        return XHGemma4UnifiedAudioConfig(
+            input_feature_length=contract.audio_soft_tokens,
+            feature_size=contract.audio_feature_dim,
+            sampling_rate=contract.sampling_rate,
+            **cfg,
+        )
+
+    @staticmethod
     def _normalize_sliding_kv_cache_input_mode(mode: str | None) -> str:
         normalized = str(mode or "slice_window").lower()
         if normalized not in {"slice_window", "legacy_full"}:
@@ -423,5 +619,7 @@ __all__ = [
     "XHGemma4SeriesAudioConfig",
     "XHGemma4SeriesModelConfig",
     "XHGemma4SeriesVisualConfig",
+    "XHGemma4UnifiedAudioConfig",
+    "XHGemma4UnifiedVisualConfig",
     "XHGemma4VisualConfig",
 ]

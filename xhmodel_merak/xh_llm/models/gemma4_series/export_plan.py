@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .modality_contract import Gemma4SeriesModalityContract
 from .variants import Gemma4SeriesVariantSpec, resolve_gemma4_series_variant
 
 
@@ -43,6 +44,7 @@ class Gemma4SeriesExportPlan:
     image_visual_max_patches: int | None
     video_visual_seq_length: int | None
     video_visual_max_patches: int | None
+    modality_contract: Gemma4SeriesModalityContract | None = None
 
     @property
     def name(self) -> str:
@@ -81,6 +83,23 @@ class Gemma4SeriesExportPlan:
             raise ValueError("Gemma4 Series exports require an image visual subgraph")
         if not self.export_video_visual:
             raise ValueError("Gemma4 Series exports require a separate video visual subgraph")
+        if self.variant.frontend_kind == "encoder_free":
+            if self.modality_contract is None:
+                raise ValueError("Gemma4 Unified export requires a checkpoint-derived modality contract")
+            self.modality_contract.validate_supported()
+            expected_image_tokens = self.modality_contract.image_soft_tokens
+            expected_video_tokens = self.modality_contract.video_soft_tokens_per_frame
+            if self.image_visual_seq_length != expected_image_tokens:
+                raise ValueError(
+                    "Gemma4 Unified image graph length must come from the checkpoint: "
+                    f"expected {expected_image_tokens}, got {self.image_visual_seq_length}"
+                )
+            if self.video_visual_seq_length != expected_video_tokens:
+                raise ValueError(
+                    "Gemma4 Unified video graph length must come from the checkpoint: "
+                    f"expected {expected_video_tokens}, got {self.video_visual_seq_length}"
+                )
+            return
         if self.image_visual_seq_length != DEFAULT_IMAGE_VISUAL_SEQ_LENGTH:
             raise ValueError(
                 "Gemma4 image visual must use image_seq_length="
@@ -110,6 +129,8 @@ class Gemma4SeriesExportPlan:
             "context_max_length": self.context_max_length,
             "input_sequence_length": self.input_sequence_length,
             "quant_type": self.quant_type,
+            "frontend_kind": self.variant.frontend_kind,
+            "modality_contract": asdict(self.modality_contract) if self.modality_contract is not None else None,
             "exports": {
                 "image_visual": self.export_image_visual,
                 "video_visual": self.export_video_visual,
@@ -135,9 +156,27 @@ def build_gemma4_series_export_plan(
             "use prefill_chunk_length instead."
         )
 
+    has_visual_cfg = isinstance(export_model_cfg.get("visual_config"), Mapping)
+    has_video_visual_cfg = isinstance(export_model_cfg.get("video_visual_config"), Mapping)
     visual_cfg = _as_mapping(export_model_cfg.get("visual_config"))
     video_visual_cfg = _as_mapping(export_model_cfg.get("video_visual_config"))
     quant_scheme = _as_mapping(export_model_cfg.get("quant_scheme"))
+    modality_contract = (
+        Gemma4SeriesModalityContract.from_pretrained(hf_model_dir)
+        if variant.frontend_kind == "encoder_free"
+        else None
+    )
+    if modality_contract is not None:
+        _validate_unified_override(
+            visual_cfg,
+            expected=modality_contract.image_soft_tokens,
+            label="image",
+        )
+        _validate_unified_override(
+            video_visual_cfg,
+            expected=modality_contract.video_soft_tokens_per_frame,
+            label="video",
+        )
 
     return Gemma4SeriesExportPlan(
         variant=variant,
@@ -147,14 +186,31 @@ def build_gemma4_series_export_plan(
             REQUIRED_INPUT_SEQUENCE_LENGTH,
         ),
         quant_type=quant_scheme.get("quant_type"),
-        export_image_visual=bool(variant.has_image and visual_cfg),
-        export_video_visual=bool(variant.has_video and video_visual_cfg),
+        export_image_visual=bool(variant.has_image and has_visual_cfg),
+        export_video_visual=bool(variant.has_video and has_video_visual_cfg),
         export_audio=bool(variant.has_audio),
         export_per_layer_input=bool(variant.has_per_layer_input),
-        image_visual_seq_length=_optional_int(visual_cfg.get("image_seq_length")),
-        image_visual_max_patches=_optional_int(visual_cfg.get("max_patches")),
-        video_visual_seq_length=_optional_int(video_visual_cfg.get("image_seq_length")),
-        video_visual_max_patches=_optional_int(video_visual_cfg.get("max_patches")),
+        image_visual_seq_length=(
+            modality_contract.image_soft_tokens
+            if modality_contract is not None
+            else _optional_int(visual_cfg.get("image_seq_length"))
+        ),
+        image_visual_max_patches=(
+            modality_contract.image_soft_tokens
+            if modality_contract is not None
+            else _optional_int(visual_cfg.get("max_patches"))
+        ),
+        video_visual_seq_length=(
+            modality_contract.video_soft_tokens_per_frame
+            if modality_contract is not None
+            else _optional_int(video_visual_cfg.get("image_seq_length"))
+        ),
+        video_visual_max_patches=(
+            modality_contract.video_soft_tokens_per_frame
+            if modality_contract is not None
+            else _optional_int(video_visual_cfg.get("max_patches"))
+        ),
+        modality_contract=modality_contract,
     )
 
 
@@ -180,6 +236,15 @@ def _as_int(value: Any, default: int) -> int:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else _as_int(value, 0)
+
+
+def _validate_unified_override(config: Mapping[str, Any], *, expected: int, label: str) -> None:
+    for key in ("image_seq_length", "max_soft_tokens", "max_patches"):
+        if key in config and _as_int(config[key], -1) != expected:
+            raise ValueError(
+                f"Gemma4 Unified {label} {key} is checkpoint-owned: "
+                f"expected {expected}, got {config[key]}."
+            )
 
 
 __all__ = [

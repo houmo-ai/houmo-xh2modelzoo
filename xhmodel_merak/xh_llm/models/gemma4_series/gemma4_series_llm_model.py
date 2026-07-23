@@ -486,11 +486,29 @@ class XHGemma4SeriesModel(VisionLLMModel):
         # implementation site.
         VisionLLMModel.__init__(self, config)
         self.config = cast(XHGemma4SeriesModelConfig, self.config)
-        self.visual = XHGemma4SeriesVisionModel(config.visual_config) if config.visual_config is not None else None
-        self.video_visual = (
-            XHGemma4SeriesVisionModel(config.video_visual_config) if config.video_visual_config is not None else None
-        )
-        self.audio = XHGemma4SeriesAudioModel(config.audio_config) if config.audio_config is not None else None
+        if getattr(config, "frontend_kind", "tower") == "encoder_free":
+            from .gemma4_unified_audio_model import XHGemma4UnifiedAudioModel
+            from .gemma4_unified_vision_model import XHGemma4UnifiedVisionModel
+
+            self.visual = (
+                XHGemma4UnifiedVisionModel(config.visual_config) if config.visual_config is not None else None
+            )
+            self.video_visual = (
+                XHGemma4UnifiedVisionModel(config.video_visual_config)
+                if config.video_visual_config is not None
+                else None
+            )
+            self.audio = (
+                XHGemma4UnifiedAudioModel(config.audio_config) if config.audio_config is not None else None
+            )
+        else:
+            self.visual = XHGemma4SeriesVisionModel(config.visual_config) if config.visual_config is not None else None
+            self.video_visual = (
+                XHGemma4SeriesVisionModel(config.video_visual_config)
+                if config.video_visual_config is not None
+                else None
+            )
+            self.audio = XHGemma4SeriesAudioModel(config.audio_config) if config.audio_config is not None else None
         self.per_layer_input_embedding: Gemma4PerLayerInputEmbedding | None = None
         self._kvcache_config = KVCacheConfig()
         self._kvcache_config.use_cache = self.config.use_cache
@@ -592,7 +610,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             processor = self.video_visual.get_tf_processor()
         else:
             processor = super().get_tf_processor()
-        if self.video_visual is not None:
+        if self.video_visual is not None and getattr(self.config, "frontend_kind", "tower") == "tower":
             processor.video_max_patches = self.video_visual.config.max_patches
             processor.video_image_seq_length = self.video_visual.config.image_seq_length
             processor.video_pooling_kernel_size = self.video_visual.config.pooling_kernel_size
@@ -1502,6 +1520,9 @@ class XHGemma4SeriesModel(VisionLLMModel):
 
         meta_info.variant = getattr(self.config, "variant", None)
         meta_info.capabilities = dict(getattr(self.config, "capabilities", {}) or {})
+        meta_info.frontend_kind = getattr(self.config, "frontend_kind", "tower")
+        meta_info.hf_architecture = getattr(self.config, "hf_architecture", "Gemma4ForConditionalGeneration")
+        meta_info.modality_contract = getattr(self.config, "modality_contract", None)
         meta_info.attention_contract_version = int(getattr(self.config, "attention_contract_version", 1))
         meta_info.attention_lowering = getattr(
             self.config,

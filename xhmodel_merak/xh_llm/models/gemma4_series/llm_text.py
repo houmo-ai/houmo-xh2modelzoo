@@ -715,6 +715,50 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         if set_input_sequence_length is not None:
             set_input_sequence_length(int(graph_length))
 
+    def _is_encoder_free_frontend(self) -> bool:
+        config_kind = getattr(getattr(self._llm_model, "config", None), "frontend_kind", None)
+        meta_kind = getattr(getattr(self._llm_model, "meta_info", None), "frontend_kind", None)
+        return (config_kind or meta_kind or "tower") == "encoder_free"
+
+    @staticmethod
+    def _prepare_visual_position_ids(
+        position_ids: torch.Tensor,
+        *,
+        encoder_free: bool,
+    ) -> torch.Tensor:
+        prepared = position_ids.clone()
+        if not encoder_free:
+            prepared[(prepared == -1).all(dim=-1)] = 0
+        return prepared
+
+    def _run_encoder_free_visual(
+        self,
+        pixel_values: torch.Tensor,
+        position_ids: torch.Tensor,
+        visual_model: Any | None = None,
+    ) -> torch.Tensor:
+        """Run the Unified projection and discard padded patches."""
+
+        visual = visual_model or self._llm_model.visual
+        pixel_values = pixel_values.reshape(-1, pixel_values.shape[-2], pixel_values.shape[-1])
+        position_ids = position_ids.reshape(-1, position_ids.shape[-2], position_ids.shape[-1])
+        outputs = []
+        for idx in range(pixel_values.shape[0]):
+            positions = position_ids[idx : idx + 1]
+            valid = ~(positions == -1).all(dim=-1, keepdim=True)
+            normalized_positions = torch.where(valid, positions, torch.zeros_like(positions))
+            embeds = visual.forward(
+                pixel_values[idx : idx + 1].to(dtype=visual.dtype, device=visual.device),
+                normalized_positions.to(dtype=torch.int32, device=visual.device),
+            )
+            if isinstance(embeds, (tuple, list)):
+                embeds = embeds[0]
+            embeds = embeds.to(device=self._llm_model.device, dtype=self._llm_model.dtype)
+            if embeds.dim() == 3 and embeds.shape[0] == 1:
+                embeds = embeds[0]
+            outputs.append(embeds[valid[0, :, 0].to(device=embeds.device)])
+        return torch.cat(outputs, dim=0) if outputs else torch.empty(0, device=self._llm_model.device)
+
     def _run_padded_visual(
         self,
         pixel_values: torch.Tensor,
@@ -773,12 +817,13 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         if getattr(self._llm_model, "audio", None) is None:
             raise ValueError("Gemma4 audio inputs were provided, but this preset has no public audio submodel.")
         audio = self._llm_model.audio
-        audio_args = [
-            input_features.to(dtype=audio.dtype, device=audio.device),
-            input_features_mask.to(device=audio.device) if input_features_mask is not None else None,
-        ]
-        if audio_attention_mask is not None:
-            audio_args.append(audio_attention_mask.to(device=audio.device))
+        audio_args = [input_features.to(dtype=audio.dtype, device=audio.device)]
+        if not self._is_encoder_free_frontend():
+            audio_args.append(
+                input_features_mask.to(device=audio.device) if input_features_mask is not None else None
+            )
+            if audio_attention_mask is not None:
+                audio_args.append(audio_attention_mask.to(device=audio.device))
         outputs = audio.forward(*audio_args)
         if isinstance(outputs, (tuple, list)):
             audio_embeds = outputs[0]
@@ -790,6 +835,9 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         if audio_mask is not None:
             audio_mask = audio_mask.to(device=audio_embeds.device).bool()
             return audio_embeds[audio_mask]
+        if self._is_encoder_free_frontend() and input_features_mask is not None:
+            valid = input_features_mask.to(device=audio_embeds.device).bool()
+            return audio_embeds[valid]
         return audio_embeds.reshape(-1, audio_embeds.shape[-1])
 
     def _run_llm_from_processed(self, data_input):
@@ -887,20 +935,29 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
             if pixel_position_ids is None and image_position_ids is not None:
                 if image_position_ids.dim() == 2:
                     image_position_ids = image_position_ids.unsqueeze(0)
-                pixel_position_ids = image_position_ids.clone()
-                pixel_position_ids[(pixel_position_ids == -1).all(dim=-1)] = 0
-            if pixel_position_ids is None or pooling_matrix is None or visual_attention_mask is None:
+                pixel_position_ids = self._prepare_visual_position_ids(
+                    image_position_ids,
+                    encoder_free=self._is_encoder_free_frontend(),
+                )
+            if self._is_encoder_free_frontend():
+                if pixel_position_ids is None:
+                    raise ValueError(
+                        "Gemma4 Unified image inference requires image_position_ids with pixel_values."
+                    )
+                image_embeds = self._run_encoder_free_visual(pixel_values, pixel_position_ids)
+            elif pixel_position_ids is None or pooling_matrix is None or visual_attention_mask is None:
                 raise ValueError(
                     "Gemma4 padded visual inference requires pixel_position_ids, "
                     "pooling_matrix and visual_attention_mask with pixel_values."
                 )
-            image_embeds = self._run_padded_visual(
-                pixel_values,
-                pixel_position_ids,
-                pooling_matrix,
-                visual_attention_mask,
-                image_soft_token_count,
-            )
+            else:
+                image_embeds = self._run_padded_visual(
+                    pixel_values,
+                    pixel_position_ids,
+                    pooling_matrix,
+                    visual_attention_mask,
+                    image_soft_token_count,
+                )
             # Offload visual model to free GPU memory for text prefill
             self._llm_model.visual.to("cpu")
             torch.cuda.empty_cache()
@@ -914,22 +971,40 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
 
         if pixel_values_videos is not None:
             if video_pixel_position_ids is None and video_position_ids is not None:
-                video_pixel_position_ids = video_position_ids.clone()
-                video_pixel_position_ids[(video_pixel_position_ids == -1).all(dim=-1)] = 0
-            if video_pixel_position_ids is None or video_pooling_matrix is None or video_visual_attention_mask is None:
+                video_pixel_position_ids = self._prepare_visual_position_ids(
+                    video_position_ids,
+                    encoder_free=self._is_encoder_free_frontend(),
+                )
+            video_visual_model = getattr(self._llm_model, "video_visual", None) or self._llm_model.visual
+            if self._is_encoder_free_frontend():
+                if video_pixel_position_ids is None:
+                    raise ValueError(
+                        "Gemma4 Unified video inference requires video_position_ids with pixel_values_videos."
+                    )
+                video_embeds = self._run_encoder_free_visual(
+                    pixel_values_videos,
+                    video_pixel_position_ids,
+                    video_visual_model,
+                )
+            elif (
+                video_pixel_position_ids is None
+                or video_pooling_matrix is None
+                or video_visual_attention_mask is None
+            ):
                 raise ValueError(
                     "Gemma4 padded video inference requires video_pixel_position_ids, "
                     "video_pooling_matrix and video_visual_attention_mask with pixel_values_videos."
                 )
-            video_embeds = self._run_padded_visual(
-                pixel_values_videos,
-                video_pixel_position_ids,
-                video_pooling_matrix,
-                video_visual_attention_mask,
-                video_soft_token_count,
-                getattr(self._llm_model, "video_visual", None) or self._llm_model.visual,
-            )
-            (getattr(self._llm_model, "video_visual", None) or self._llm_model.visual).to("cpu")
+            else:
+                video_embeds = self._run_padded_visual(
+                    pixel_values_videos,
+                    video_pixel_position_ids,
+                    video_pooling_matrix,
+                    video_visual_attention_mask,
+                    video_soft_token_count,
+                    video_visual_model,
+                )
+            video_visual_model.to("cpu")
             torch.cuda.empty_cache()
             self._gemma4_pixel_values_videos = None
             self._gemma4_video_position_ids = None
@@ -1019,6 +1094,10 @@ class _Gemma4HFCompatible(TextLLMHFCompatible):
         self._gemma4_input_features = kwargs.pop("input_features", None)
         self._gemma4_input_features_mask = kwargs.pop("input_features_mask", None)
         self._gemma4_audio_attention_mask = kwargs.pop("audio_attention_mask", None)
+        # Encoder-free audio derives its valid embedding count from the binary
+        # feature mask, so this processor-only diagnostic does not belong in
+        # HF GenerationMixin's validated model kwargs.
+        kwargs.pop("audio_soft_token_count", None)
         self._gemma4_mm_token_type_ids = kwargs.pop("mm_token_type_ids", None)
         return super().generate(*args, **kwargs)
 
