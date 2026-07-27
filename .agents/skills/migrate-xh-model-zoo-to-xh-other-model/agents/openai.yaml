@@ -1,0 +1,4 @@
+interface:
+  display_name: "Migrate XH Model Zoo"
+  short_description: "Migrate legacy models into xh_other_model"
+  default_prompt: "Use $migrate-xh-model-zoo-to-xh-other-model to migrate a legacy xh_model_zoo model into xhmodel_merak/xh_other_model."

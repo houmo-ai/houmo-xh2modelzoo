@@ -2,6 +2,10 @@
 
 本文档用于指导将旧 `xh_model_zoo`、旧 `xh2modelzoo/examples` 脚本，或其他历史导出流程迁移到 `xhmodel_merak/xh_other_model`。目标是让模型通过统一 workflow 接口完成量化、导出和 golden 生成，并逐步移除对旧目录和旧示例脚本的运行期依赖。
 
+本文档中出现的具体模型名、组件名、图结构、配置字段和 workaround 仅用于说明已知案例，不代表所有模型都必须采用相同实现。
+
+通用迁移要求应以 workflow 接口职责、依赖边界、产物契约和迁移前后的行为兼容为准；迁移时应根据目标模型的旧实现和实际导出图逐项确认，不要把单一模型的子图组成、调度方式或兼容处理直接推广为一般约定。
+
 ## 迁移目标
 
 迁移完成后，一个模型应满足以下要求：
@@ -15,6 +19,8 @@
 - `export()` 只负责导出，不生成 golden。
 - `dump_golden()` 只负责 golden，不混入 quant/export。
 - 不再依赖 `./examples`、`./xh_model_zoo`、`./configs` 中的代码或配置，也不动态加载这些目录下的旧脚本。
+- 原则上，`examples_merak` 下不同示例目录之间不互相 import；需要复用的实现应下沉到对应模型包或边界明确的公共模块，避免示例之间形成运行期耦合。
+- `xhmodel_merak/xh_other_model` 包内代码不得 import `xhmodel_merak/xh_other_model` 的同级或上级目录，例如不得依赖 `xhmodel_merak/xh_llm` 下的实现。
 
 原则上，在相同配置下，迁移后的 HMONNX 应尽量与迁移前一致。若为规避导出或 runtime bug 必须改变图结构或模型代码，应保持改动最小，并在代码或文档中说明原因。
 
@@ -285,36 +291,46 @@ README 中不要出现本机 conda 环境名或本机绝对路径。使用 `<env
 
 如果模型导出多个 HMONNX 图，图之间的调度通常在 demo 或 inference adapter 中实现。HMONNX runtime 不会自动理解业务级调度关系。
 
-迁移 demo 时需要确认：
+所有迁移 demo 都需要确认：
 
-- 是否需要 encoder -> prefill -> decode 调度。
-- KV cache 是否需要包装成 runtime 要求的类型。
-- prefill/decode 是否使用不同输入形状。
-- 流式模型是否需要额外 stateful 图。
 - demo 是否还硬编码旧产物目录、旧模型名或旧 metadata 路径。
-- eval 和 analysis 是否读取新的 `export_meta_info.json`。
+- demo 是否读取新的 `export_meta_info.json`。
 
-Qwen3-ASR 的两种 HMONNX 推理方式就是脚本侧自行调度多图：一种分段离线推理，一种累计音频加文本 prefix 推理。两者通常不需要导出不同主模型，但导出配置中的音频长度和 prefix 预算要覆盖对应场景。
+对于包含多图、缓存或流式状态的模型，还应根据实际导出图选择性确认：
 
-Qwen3-TTS 的流式 demo 需要额外 stateful decoder 图。默认 YAML 可直接包含该组件，避免用户为流式场景修改其他无关配置。
+- 是否需要在 demo 或 inference adapter 中实现业务级图调度，以及实际调度顺序。
+- cache 或其他跨图状态是否需要转换为 runtime 要求的类型。
+- 不同图是否使用不同输入形状、dtype 或初始化方式。
+- 是否存在额外的 stateful 或辅助图。
+- eval 和 analysis 是否使用新的产物目录和 metadata。
 
 ## 依赖迁移规则
 
 迁移完成后，模型包运行期不应依赖 `./examples`、`./xh_model_zoo`、`./configs`。
+
+同时必须遵守以下依赖边界：
+
+- 原则上，`examples_merak` 下不同模型或示例目录之间不建议互相 import。示例需要复用的 helper 应优先放入 `xhmodel_merak/xh_other_model/models/<model_name>/`，例如 `_export_utils.py`；确有跨模型共享需求时，应先明确公共模块的职责和边界。
+- `xhmodel_merak/xh_other_model` 包内实现只能依赖本包内部代码和外部第三方包，不得 import `xhmodel_merak/xh_other_model` 的同级或上级目录。尤其不要 import `xhmodel_merak/xh_llm`、`xhmodel_merak/workflows`、`xhmodel_merak/utils` 等路径下的实现。
+- 迁移示例使用顶层公开入口 `from xhmodel_merak.workflows import AutoWorkflow` 不属于 `xh_other_model` 包内依赖；不要因此在 `xhmodel_merak/xh_other_model` 的实现代码中反向依赖该入口。
 
 必须检查：
 
 ```bash
 rg -n "xh_model_zoo|(^|[\"'/])examples([\"'/]|$)|(^|[\"'/])configs([\"'/]|$)|spec_from_file_location|importlib.util" \
   xhmodel_merak/xh_other_model/models/<model_name>
+
+rg -n --pcre2 "xhmodel_merak\.(?!xh_other_model(?:\.|$))|from\s+xhmodel_merak\s+import" \
+  xhmodel_merak/xh_other_model/models/<model_name> --glob "*.py"
 ```
 
 如有命中：
 
 - 旧 helper 代码应搬到当前模型包，例如 `_export_utils.py`。
 - 不要用 `spec_from_file_location` 或 `importlib.util` 动态加载 `./examples`、`./xh_model_zoo`、`./configs` 下的文件。
+- 不要通过绝对 import、越界相对 import 或动态 import 绕过 `xh_other_model` 包边界。
 - 不要修改仓库外部依赖源码来临时跑通迁移。
-- 如果需要第三方包，例如 `qwen_asr`、`qwen_tts`、`lerobot`，应在环境安装说明中写明，而不是依赖本机 editable 路径。
+- 如果需要仓库外的第三方包，应在环境安装说明中写明正式安装方式，而不是依赖本机 editable 路径。
 
 ## 产物和 metadata
 
@@ -340,7 +356,9 @@ rg -n "xh_model_zoo|(^|[\"'/])examples([\"'/]|$)|(^|[\"'/])configs([\"'/]|$)|spe
 
 ### YAML 精度字段没有真正生效
 
-不要只在 YAML 中添加 `quant_type`。必须确认该字段传到每个子模型的导出函数，并体现在 HMONNX 文件名中。Qwen3-ASR 的 prefill 和 decode 都要体现 `prefill_decode.quant_type`。
+不要只在 YAML 中添加 `quant_type`。必须确认该字段传到每个受影响子模型和导出图的导出函数，并体现在 HMONNX 文件名中。对于包含 prefill/decode 或其他同类多图的模型，应按配置语义确认这些图共享或分别使用正确的精度字段。
+
+> 参考案例（非通用要求）：Qwen3-ASR 的 prefill 和 decode 共享 `prefill_decode.quant_type`，因此两个导出路径和文件名都需要体现该字段。其他模型应以自身 YAML 结构和导出实现为准。
 
 ### golden 覆盖不完整
 
@@ -352,7 +370,9 @@ rg -n "xh_model_zoo|(^|[\"'/])examples([\"'/]|$)|(^|[\"'/])configs([\"'/]|$)|spe
 - stateful decoder。
 - 其他辅助图。
 
-Qwen3-TTS 需要覆盖 Talker、CodePredictor、TextProjection、SpeechTokenizer、Base frontend、StatefulDecoder。
+应以本次实际导出的 HMONNX 清单为准确定 golden 范围，不要直接套用其他模型的固定组件列表。
+
+> 参考案例（非通用要求）：Qwen3-TTS 的一次迁移包含 Talker、CodePredictor、TextProjection、SpeechTokenizer、Base frontend 和 StatefulDecoder，因此需要覆盖这些实际导出的组件；其他模型不要求具有相同组件。
 
 ### runtime 或 converter 限制
 
@@ -364,11 +384,13 @@ Qwen3-TTS 需要覆盖 Talker、CodePredictor、TextProjection、SpeechTokenizer
 
 ### traceable module 重复注册
 
-同进程导出多个相近模型时，可能出现 traceable module 重复注册或错误复用。PI05 的 Gemma2B 和 GemmaExpert 属于这类情况。可在模型适配层做局部清理或隔离，避免修改全局依赖包源码。
+同进程导出多个相近模型时，可能出现 traceable module 重复注册或错误复用。只有实际确认存在该问题时，才应在模型适配层做局部清理或隔离；不要把清理全局注册状态作为所有模型的固定步骤，也不要修改全局依赖包源码。
+
+> 参考案例（非通用要求）：PI05 的 Gemma2B 和 GemmaExpert 曾遇到这类冲突，可用于定位同类问题，但对应处理不应无条件复制到其他模型。
 
 ### 本机环境污染
 
-不要修改仓库外部依赖源码来跑通测试。例如不应改写某个本机 `customized_models/.../lerobot`。如果环境里 editable 安装了错误来源，应修正环境安装来源，而不是把外部改动作为迁移的一部分。
+不要修改仓库外部依赖源码来跑通测试。如果环境里 editable 安装了错误来源，应修正环境安装来源，而不是把外部改动作为迁移的一部分。
 
 ## 迁移流程清单
 
@@ -410,8 +432,16 @@ Qwen3-TTS 需要覆盖 Talker、CodePredictor、TextProjection、SpeechTokenizer
 - 默认输出目录使用 `work_dirs/...`。
 - 支持 `--dump-golden`。
 - README 使用通用环境安装说明，不写本机路径。
+- 不同示例目录之间原则上不互相 import。
+- 示例需要复用的 helper 已下沉到模型包或边界明确的公共模块。
 
-### 6. 验证
+### 6. 检查依赖边界
+
+- 模型包不依赖 `./examples`、`./xh_model_zoo`、`./configs`。
+- `xhmodel_merak/xh_other_model` 包内代码不 import 其同级或上级目录，尤其不依赖 `xhmodel_merak/xh_llm`。
+- 检查所有相对 import，确认解析后的目标仍位于 `xhmodel_merak.xh_other_model` 包内。
+
+### 7. 验证
 
 至少执行：
 
