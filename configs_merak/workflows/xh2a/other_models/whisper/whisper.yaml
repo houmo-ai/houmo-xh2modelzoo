@@ -1,0 +1,37 @@
+quant: null
+
+export:
+  target_device: XH2a
+
+  # Whisper does not use the LLMBaseModel/MODELS.build() framework; export.model
+  # is the auto-binding anchor. The workflow loads transformers
+  # WhisperForConditionalGeneration directly from model_dir at export time.
+  model:
+    type: XHWhisperModel
+
+  components:
+    # Encoder: model.model.encoder. Cross-attention k/v projections for every
+    # decoder layer are folded into the encoder graph. Outputs
+    # key_state_i / value_state_i (2 * num_decoder_layers tensors).
+    encoder:
+      enabled: true
+      quant_type: w8a8_sefp
+      audio_path: examples_merak/asr/whisper/audio.mp3
+
+    # Prefill stage: decoder prompt = [sot, lang=zh, transcribe, notimestamps].
+    prefill:
+      enabled: true
+      quant_type: w8a8_sefp
+      prompt_token_ids: [50258, 50259, 50359, 50363]
+      cache_position: [0, 1, 2, 3]
+      past_len: 0
+
+    # Decode stage: single next-token step following the 4-token prefill.
+    # past_len=4: 4 tokens are already cached from the prefill stage, so the
+    # decoder writes to cache position 4 onward at the first decode step.
+    decoder:
+      enabled: true
+      quant_type: w8a8_sefp
+      prompt_token_ids: [2221]
+      cache_position: [4]
+      past_len: 4
