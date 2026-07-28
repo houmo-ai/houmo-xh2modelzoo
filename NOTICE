@@ -71,6 +71,9 @@ WIDER FACE Dataset (CC BY-NC-ND 4.0) - https://shuoyang1213.me/WIDERFACE/
 Whisper - https://github.com/openai/whisper
 FunASR - https://github.com/alibaba-damo-academy/FunASR
 CosyVoice3 - https://github.com/FunAudioLLM/CosyVoice
+Silero VAD (MIT) - https://github.com/snakers4/silero-vad
+MeloTTS (MIT) - https://github.com/myshell-ai/MeloTTS
+sherpa-onnx / Streaming Zipformer (Apache-2.0) - https://github.com/k2-fsa/sherpa-onnx
 bge-m3&bge-reranker-m3-v2 - https://github.com/FlagOpen/FlagEmbedding
 DeepSeek-R1-0528-Qwen3-8B - https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 gpt-oss-20b/120b - https://modelscope.cn/models/openai-mirror/gpt-oss-20b
@@ -95,4 +98,3 @@ gr00t / Isaac-GR00T (Non-Commercial license, implementation stubbed) - https://d
 Eagle3 (license unclear, implementation stubbed) - https://github.com/NVlabs/EAGLE
 
 For detailed third-party citation notices, licenses, and precautions, please refer to THIRD_PARTY_NOTICES.
-

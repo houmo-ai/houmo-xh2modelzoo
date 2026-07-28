@@ -1,0 +1,8 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHStreamingZipformerModel
+  quant_type: w16a16_sefp
+  check_steps: 3

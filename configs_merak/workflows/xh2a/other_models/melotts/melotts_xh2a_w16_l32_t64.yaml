@@ -1,0 +1,17 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHMeloTTSModel
+  text_max_length: 32
+  acoustic_max_length: 64
+  language_id: 3
+  speaker_id: 1
+  opset: 17
+  validation_lengths: [3, 5, 9]
+  components:
+    encoder:
+      quant_type: w16a16_sefp
+    decoder:
+      quant_type: w16a16_sefp

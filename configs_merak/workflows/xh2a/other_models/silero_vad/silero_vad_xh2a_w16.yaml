@@ -1,0 +1,12 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHSileroVADModel
+  check_steps: 5
+  variants:
+    - sample_rate: 8000
+      quant_type: w16a16_sefp
+    - sample_rate: 16000
+      quant_type: w16a16_sefp

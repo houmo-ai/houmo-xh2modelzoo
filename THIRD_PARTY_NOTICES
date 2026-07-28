@@ -153,6 +153,48 @@ Users are responsible for complying with the MIT License when using,
 redistributing, or modifying Whisper.
 
 ----------------------------------------------------------------------
+Silero VAD
+----------------------------------------------------------------------
+Component Name: Silero VAD
+Source: https://github.com/snakers4/silero-vad
+Upstream Version:
+76e3dc408eb2a5c655c34e230d2d5459b4439daa
+License: MIT License
+Usage in this project:
+The following paths contain integration and graph adaptation code:
+    examples_merak/audio/silero_vad
+    xhmodel_merak/xh_other_model/models/silero_vad
+No upstream model weights or source tree are redistributed.
+
+----------------------------------------------------------------------
+MeloTTS
+----------------------------------------------------------------------
+Component Name: MeloTTS
+Source: https://github.com/myshell-ai/MeloTTS
+Upstream Version:
+209145371cff8fc3bd60d7be902ea69cbdb7965a
+License: MIT License
+Usage in this project:
+The following paths contain integration, static export, frontend
+reference, and runtime bridge code:
+    examples_merak/audio/melotts
+    xhmodel_merak/xh_other_model/models/melotts
+No upstream source tree, checkpoint, or model archive is redistributed.
+
+----------------------------------------------------------------------
+sherpa-onnx Streaming Zipformer
+----------------------------------------------------------------------
+Component Name: sherpa-onnx / Streaming Zipformer
+Source: https://github.com/k2-fsa/sherpa-onnx
+License: Apache License, Version 2.0
+Usage in this project:
+The following paths contain integration, cache-interface adaptation,
+feature extraction reference, and evaluation code:
+    examples_merak/audio/zipformer
+    xhmodel_merak/xh_other_model/models/zipformer
+No upstream model package, source tree, or test audio is redistributed.
+
+----------------------------------------------------------------------
 bge-m3 and bge-reranker-m3-v2 (FlagEmbedding)
 ----------------------------------------------------------------------
 Component Name: bge-m3 / bge-reranker
