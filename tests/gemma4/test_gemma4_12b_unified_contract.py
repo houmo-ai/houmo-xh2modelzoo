@@ -66,6 +66,40 @@ def test_gemma4_12b_modality_contract_comes_from_checkpoint_config():
     assert contract.sampling_rate == 16000
 
 
+def test_gemma4_12b_modality_contract_accepts_transformers_5_13_config(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.modality_contract import (
+        Gemma4SeriesModalityContract,
+    )
+
+    config = json.loads((MODEL_DIR / "config.json").read_text(encoding="utf-8"))
+    config["vision_config"].pop("model_patch_size")
+    config["audio_config"].pop("audio_samples_per_token")
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "processor_config.json").write_bytes((MODEL_DIR / "processor_config.json").read_bytes())
+
+    contract = Gemma4SeriesModalityContract.from_pretrained(tmp_path)
+
+    assert contract.vision_patch_dim == 48 * 48 * 3
+
+
+def test_gemma4_12b_modality_contract_keeps_legacy_serialized_fields(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.modality_contract import (
+        Gemma4SeriesModalityContract,
+    )
+
+    config = json.loads((MODEL_DIR / "config.json").read_text(encoding="utf-8"))
+    config["vision_config"].pop("patch_size")
+    config["vision_config"].pop("pooling_kernel_size")
+    config["audio_config"].pop("audio_embed_dim")
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "processor_config.json").write_bytes((MODEL_DIR / "processor_config.json").read_bytes())
+
+    contract = Gemma4SeriesModalityContract.from_pretrained(tmp_path)
+
+    assert contract.vision_patch_dim == 48 * 48 * 3
+    assert contract.audio_feature_dim == 640
+
+
 def test_gemma4_12b_processor_uses_fixed_encoder_free_contract(unified_processor):
     processor = unified_processor
     assert type(processor).__name__ == "XHGemma4UnifiedProcessor"
@@ -875,20 +909,46 @@ def test_gemma4_12b_workflow_configs_keep_common_export_contract():
         "gemma4_12b_unified_full_mtp.yaml",
         "gemma4_12b_unified_autoround.yaml",
     ):
-        model_cfg = WorkflowConfig.from_file(config_root / config_name).export[
-            "model"
-        ]
+        model_cfg = WorkflowConfig.from_file(config_root / config_name).export["model"]
         assert {key: model_cfg[key] for key in expected} == expected
         assert model_cfg["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
-        assert (
-            model_cfg["visual_config"]["quant_scheme"]["quant_type"]
-            == "w8a8h1_sefp"
-        )
-        assert (
-            model_cfg["video_visual_config"]["quant_scheme"]["quant_type"]
-            == "w8a8h1_sefp"
-        )
-        assert (
-            model_cfg["audio_config"]["quant_scheme"]["quant_type"]
-            == "w8a8h1_sefp"
-        )
+        assert model_cfg["visual_config"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+        assert model_cfg["video_visual_config"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+        assert model_cfg["audio_config"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
+    # Plain YAMLs retain the legacy attention graph. FlashAttention is an
+    # explicit graph choice, not a side effect of the model family or context.
+    for config_name in (
+        "gemma4_12b_unified_full.yaml",
+        "gemma4_12b_unified_full_mtp.yaml",
+        "gemma4_12b_unified_autoround.yaml",
+    ):
+        model_cfg = WorkflowConfig.from_file(config_root / config_name).export["model"]
+        assert "flash_attention" not in model_cfg
+        assert "attention_contract_version" not in model_cfg
+
+
+def test_gemma4_12b_workflow_accepts_unified_base_for_export():
+    from xhmodel_merak.xh_llm.models.gemma4_series.workflow import (
+        Gemma4SeriesWorkflow,
+    )
+
+    config_path = (
+        Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified") / "gemma4_12b_unified_full.yaml"
+    )
+    workflow = Gemma4SeriesWorkflow(
+        model_dir=str(MODEL_DIR),
+        config_path=str(config_path),
+    )
+
+    workflow._validate_export_model(None)
+
+
+def test_gemma4_unified_does_not_override_common_gptq_loader():
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_unified_llm_model import (
+        XHGemma4UnifiedModel,
+    )
+
+    # Checkpoint key conversion is owned by GPTQModel. Keeping this class free
+    # of a model-specific loader avoids bypassing the common quantized loader.
+    assert "_load_gptqmodel" not in XHGemma4UnifiedModel.__dict__
+    assert "_validate_unified_frontend_weights" not in XHGemma4UnifiedModel.__dict__

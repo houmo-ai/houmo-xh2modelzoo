@@ -28,11 +28,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
+from accelerate.utils import has_offloaded_params
 from compressed_tensors import (
     ModelCompressor,
     SparsityCompressionConfig,
     delete_offload_parameter,
-    has_offloaded_params,
     register_offload_parameter,
 )
 from safetensors.torch import load_file as load_safetensors_file

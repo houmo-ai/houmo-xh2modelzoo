@@ -1,0 +1,72 @@
+# Gemma4 12B Unified GPTQModel + FlashAttention HMONNX export configuration.
+# Multimodal sequence lengths and feature widths are read from the checkpoint;
+# do not add max_soft_tokens/image_seq_length/max_patches overrides here.
+# Base export can override this block with quant: null.
+quant:
+  algorithm: gptqmodel
+  method: gptq
+  preset: full_multimodal
+  rotation: null
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  iters: 200
+  seed: 42
+  quant_nontext_module: false
+  calibration:
+    # Model-neutral alias for the shared language-only dense IVSG corpus.
+    jsonl: gptqmodel://quantization/calibration/dense_ivsg/shared-dense-text.jsonl
+    text_key: text
+    nsamples: 256
+    seqlen: 512
+  runtime:
+    batch_size: 1
+    device_map: auto
+    trust_remote_code: true
+    offload_to_disk: false
+  validation:
+    check_quant_text_demo: true
+    check_quant_image_demo: true
+    check_quant_video_demo: false
+    check_quant_audio_demo: false
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Gemma4UnifiedForConditionalGeneration
+    # Placeholder: workflow input model_dir overrides this before export.
+    hf_model: null
+    model_name: gemma_4_12b_unified
+    context_max_length: 2048
+    prefill_chunk_length: 320
+    use_cache: true
+    num_logits_to_keep: 1
+    # Presence with enable=true selects attention contract v2. The model
+    # config derives the contract version; do not duplicate it in this YAML.
+    flash_attention:
+      enable: true
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
+    sliding_kv_cache_input_mode: slice_window
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      input_modality: image
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    video_visual_config:
+      input_modality: video
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    audio_config:
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false

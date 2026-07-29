@@ -252,6 +252,22 @@ class HybridDecoderLayerMixin:
 
     def _setup(self, cfg: Optional[Dict] = None):
         del cfg
+        # Transformers 5.13 renamed this decoder discriminator from
+        # ``layer_type`` to ``block_type`` in both Qwen3.5 and Qwen3-Next.
+        # Keep one canonical attribute for the shared exported forward.
+        layer_type = getattr(self, "layer_type", None)
+        if layer_type is None:
+            layer_type = getattr(self, "block_type", None)
+        if layer_type is None:
+            if hasattr(self, "linear_attn") and not hasattr(self, "self_attn"):
+                layer_type = "linear_attention"
+            elif hasattr(self, "self_attn") and not hasattr(self, "linear_attn"):
+                layer_type = "full_attention"
+            else:
+                raise AttributeError(
+                    "Cannot determine hybrid decoder layer type from 'layer_type', 'block_type', or token-mixer modules"
+                )
+        self.layer_type = layer_type
         return self
 
 

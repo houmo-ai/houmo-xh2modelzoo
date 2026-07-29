@@ -49,14 +49,30 @@ class Gemma4SeriesModalityContract:
         image_processor = processor["image_processor"]
         video_processor = processor["video_processor"]
         feature_extractor = processor["feature_extractor"]
-        patch_size = int(vision["model_patch_size"])
+        # ``model_patch_size`` was a redundant serialized field in the
+        # pre-5.13 Gemma4 Unified config.  Transformers 5.13 exposes it as the
+        # product of the encoder patch and pooling sizes, so a freshly saved
+        # (including GPTQModel-quantized) checkpoint no longer writes that
+        # legacy key.  Accept both representations, but keep validating the
+        # result against the processor-owned contract below.
+        if "model_patch_size" in vision:
+            patch_size = int(vision["model_patch_size"])
+        else:
+            patch_size = int(vision["patch_size"]) * int(vision["pooling_kernel_size"])
         processor_patch_size = int(image_processor["patch_size"]) * int(image_processor["pooling_kernel_size"])
+        # Likewise, Transformers 5.13 derives ``audio_samples_per_token`` from
+        # ``audio_embed_dim`` and omits the former when serializing a canonical
+        # config.
+        if "audio_samples_per_token" in audio:
+            audio_samples_per_token = int(audio["audio_samples_per_token"])
+        else:
+            audio_samples_per_token = int(audio["audio_embed_dim"])
         checkpoint_pairs = {
             "vision model_patch_size": (patch_size, processor_patch_size),
             "image soft tokens": (int(vision["num_soft_tokens"]), int(image_processor["max_soft_tokens"])),
             "processor image_seq_length": (int(vision["num_soft_tokens"]), int(processor["image_seq_length"])),
             "audio feature width": (
-                int(audio["audio_samples_per_token"]),
+                audio_samples_per_token,
                 int(feature_extractor["feature_size"]),
             ),
         }
@@ -72,7 +88,7 @@ class Gemma4SeriesModalityContract:
             video_soft_tokens_per_frame=int(video_processor["max_soft_tokens"]),
             audio_soft_tokens=int(processor["audio_seq_length"]),
             vision_patch_dim=patch_size * patch_size * 3,
-            audio_feature_dim=int(audio["audio_samples_per_token"]),
+            audio_feature_dim=audio_samples_per_token,
             position_capacity=int(vision["mm_posemb_size"]),
             sampling_rate=int(feature_extractor["sampling_rate"]),
             config_hash=digest,

@@ -1036,6 +1036,23 @@ def test_get_hf_model_loads_quantized_hf_repo_without_quant_weight(monkeypatch):
     assert ("dequant",) in calls
 
 
+def test_hybrid_decoder_normalizes_transformers_513_block_type():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        HybridDecoderLayerMixin,
+    )
+
+    class Native513Decoder(HybridDecoderLayerMixin, nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block_type = "linear_attention"
+
+    decoder = Native513Decoder()
+    decoder._setup({})
+
+    assert decoder.layer_type == "linear_attention"
+    assert decoder.block_type == "linear_attention"
+
+
 def test_get_hf_model_rejects_quant_weight_for_quantized_hf_repo(monkeypatch):
     from types import SimpleNamespace
 

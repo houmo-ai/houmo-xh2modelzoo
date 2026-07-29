@@ -28,6 +28,8 @@ from .quant_adapter import (
 _GEMMA4_MODEL_CLS_NAMES = {
     # Unified public Gemma4 Series entry for E4B, 31B dense, and 26B-A4B.
     "XHGemma4SeriesModel",
+    # Transformers 5.13-only Gemma4 12B Unified entry.
+    "XHGemma4UnifiedModel",
     "XHGemma4Model",
     # Compatibility-only aliases for existing MoE configs/artifacts. These are
     # accepted by the unified workflow but are not a separate public workflow API.
