@@ -1,4 +1,6 @@
+import json
 from collections.abc import Mapping
+from pathlib import Path
 
 from xhmodel_merak.configuration_utils import HFModelConfig
 from xhquant.api import QuantScheme
@@ -10,7 +12,11 @@ from .lora import XHQwen3_5LoRAConfig, coerce_lora_config
 DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
 
 
-def build_spec_draft_quant_scheme(head_weight_bits: int = 4) -> dict:
+def build_spec_draft_quant_scheme(
+    head_weight_bits: int = 4,
+    *,
+    head_node_name: str = "lm_head",
+) -> dict:
     """Build the default MTP/DFlash draft quant scheme.
 
     Draft graphs use the regular W8A8 base quantization, but the large logits
@@ -20,20 +26,18 @@ def build_spec_draft_quant_scheme(head_weight_bits: int = 4) -> dict:
     if head_weight_bits == 8:
         return dict(quant_type=DRAFT_BASE_QUANT_TYPE)
     if head_weight_bits != 4:
-        raise ValueError(
-            f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8."
-        )
+        raise ValueError(f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8.")
     return dict(
         quant_type=DRAFT_BASE_QUANT_TYPE,
-        nodes_cfg=dict(
-            lm_head=dict(
+        nodes_cfg={
+            head_node_name: dict(
                 w_schema=dict(
                     bits=4,
                     fp_mode="ssfp",
                     hidden_bit=False,
                 )
             )
-        ),
+        },
     )
 
 
@@ -71,6 +75,7 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         context_max_length: int = 2048,
         max_pe_length: int = 262144,
         use_cache: bool = True,
+        flash_attention: Mapping | None = None,
         draft_head_weight_bits: int = 4,
         **kwargs,
     ):
@@ -83,6 +88,7 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         self.context_max_length = context_max_length
         self.max_pe_length = max_pe_length
         self.use_cache = use_cache
+        self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
         if getattr(self, "quant_scheme", None) is None:
             self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
@@ -108,7 +114,9 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         input_sequence_length: int = 1,
         max_pe_length: int = 262144,
         max_sequence_length: int = 256,
+        flash_attention: Mapping | None = None,
         draft_head_weight_bits: int = 4,
+        noise_token_id: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -124,9 +132,32 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.input_sequence_length = input_sequence_length
         self.max_pe_length = max_pe_length
         self.max_sequence_length = max_sequence_length
+        self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
+        if noise_token_id is None:
+            assistant_config_path = Path(str(self.hf_model)) / "config.json"
+            if not assistant_config_path.is_file():
+                raise ValueError(
+                    "Qwen3.5 DFlash requires noise_token_id or an assistant "
+                    f"config.json containing dflash_config.mask_token_id: "
+                    f"{assistant_config_path}"
+                )
+            assistant_config = json.loads(assistant_config_path.read_text(encoding="utf-8"))
+            dflash_hf_config = assistant_config.get("dflash_config") or {}
+            noise_token_id = dflash_hf_config.get("mask_token_id")
+        if noise_token_id is None:
+            raise ValueError("Qwen3.5 DFlash assistant config has no dflash_config.mask_token_id")
+        self.noise_token_id = int(noise_token_id)
+        if self.noise_token_id < 0:
+            raise ValueError("Qwen3.5 DFlash noise_token_id must be non-negative")
         if getattr(self, "quant_scheme", None) is None:
-            self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
+            # The TorchFX adapter owns the assistant under ``core`` and names
+            # its head node ``core_lm_head``. Quant overrides match FX node
+            # names (not the dotted module target ``core.lm_head``).
+            self.quant_scheme = build_spec_draft_quant_scheme(
+                draft_head_weight_bits,
+                head_node_name="core_lm_head",
+            )
 
     @property
     def dflash_model_dir(self) -> str:
@@ -161,7 +192,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         spec_decode_mode: str | None = None,
         mtp_config: dict | XHQwen3_5_MTPConfig | None = None,
         dflash_config: dict | XHQwen3_5_DFlashConfig | None = None,
-        num_draft_tokens: int = 4,
+        num_draft_tokens: int | None = None,
         spec_draft_head_weight_bits: int = 4,
         mtp_head_k: int | None = None,
         reranked_repo_dir: str | None = None,
@@ -215,7 +246,14 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             )
 
         self.spec_decode_mode = spec_decode_mode
-        self.num_draft_tokens = num_draft_tokens
+        if num_draft_tokens is None:
+            # MTP historically drafts four tokens. DFlash checkpoints are
+            # trained/exported with nine draft tokens unless a workflow run
+            # explicitly overrides the target verify width.
+            num_draft_tokens = 9 if spec_decode_mode == "dflash" else 4
+        if int(num_draft_tokens) <= 0:
+            raise ValueError("Qwen3.5 num_draft_tokens must be positive")
+        self.num_draft_tokens = int(num_draft_tokens)
         self.spec_draft_head_weight_bits = spec_draft_head_weight_bits
         self.mtp_head_k = mtp_head_k
         self.reranked_repo_dir = reranked_repo_dir
@@ -226,11 +264,19 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             mtp_config = dict(mtp_config)
             if "model_name" not in mtp_config:
                 mtp_config["model_name"] = f"{model_name}_mtp"
-            if "hf_model" not in mtp_config:
-                mtp_config["hf_model"] = hf_model
+            # Qwen3.5 MTP tensors live in the target checkpoint. The draft
+            # graph therefore cannot independently select a checkpoint or
+            # cache capacity.
+            mtp_config["hf_model"] = hf_model
+            mtp_config["context_max_length"] = context_max_length
             if "draft_head_weight_bits" not in mtp_config:
                 mtp_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
+            mtp_config["flash_attention"] = flash_attention
             mtp_config = XHQwen3_5_MTPConfig(**mtp_config)
+        elif mtp_config is not None:
+            mtp_config.hf_model = hf_model
+            mtp_config.context_max_length = context_max_length
+            mtp_config.flash_attention = flash_attention
         self.mtp_config = mtp_config
 
         if isinstance(dflash_config, Mapping):
@@ -239,12 +285,36 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
                 dflash_config["model_name"] = f"{model_name}_dflash"
             if "hf_model" not in dflash_config:
                 dflash_config["hf_model"] = hf_model
-            if dflash_config.get("target_model_dir") is None:
-                dflash_config["target_model_dir"] = hf_model
+            # The assistant checkpoint is independent, but its shared target
+            # cache is not: one top-level context value owns both capacities.
+            dflash_config["target_model_dir"] = hf_model
+            dflash_config["max_sequence_length"] = context_max_length
             if "draft_head_weight_bits" not in dflash_config:
                 dflash_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
+            # The unified workflow flag applies to the target and the DFlash
+            # decoder. A second hidden switch can silently produce mixed graph
+            # contracts.
+            dflash_config["flash_attention"] = flash_attention
             dflash_config = XHQwen3_5_DFlashConfig(**dflash_config)
+        elif dflash_config is not None:
+            dflash_config.target_model_dir = hf_model
+            dflash_config.max_sequence_length = context_max_length
+            dflash_config.flash_attention = flash_attention
         self.dflash_config = dflash_config
+        if self.dflash_config is not None:
+            dflash_block_size = int(
+                getattr(
+                    self.dflash_config,
+                    "block_size",
+                    self.num_draft_tokens + 1,
+                )
+            )
+            if self.num_draft_tokens + 1 > dflash_block_size:
+                raise ValueError(
+                    "Qwen3.5 DFlash num_draft_tokens exceeds checkpoint "
+                    f"capacity: proposals={self.num_draft_tokens}, "
+                    f"block_size={dflash_block_size}"
+                )
         if self.dflash_config is not None and getattr(self.dflash_config, "target_model_dir", None) is None:
             self.dflash_config.target_model_dir = hf_model
 

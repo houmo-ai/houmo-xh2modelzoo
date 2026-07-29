@@ -172,7 +172,6 @@ def _validate_mtp_config_complete(args: argparse.Namespace, config_overrides: di
         "lm_head_quant_type",
         "batch_size",
         "input_sequence_length",
-        "context_max_length",
         "use_cache",
         "num_draft_tokens",
         "assistant_num_hidden_layers",

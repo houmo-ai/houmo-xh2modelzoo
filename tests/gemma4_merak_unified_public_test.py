@@ -1440,17 +1440,17 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
                     "context_max_length": 2048,
                     "max_pe_length": 32768,
                     "num_draft_tokens": 4,
-                        "mtp_config": {
-                            "assistant_hf_model": "assistant",
-                            "target_hf_model": "base",
-                            "input_sequence_length": 1,
-                            "shared_kv_inputs": [
-                                "shared_key_cache_sliding",
-                                "shared_value_cache_sliding",
-                                "shared_key_cache_full",
-                                "shared_value_cache_full",
-                            ],
-                        },
+                    "mtp_config": {
+                        "assistant_hf_model": "assistant",
+                        "target_hf_model": "base",
+                        "input_sequence_length": 1,
+                        "shared_kv_inputs": [
+                            "shared_key_cache_sliding",
+                            "shared_value_cache_sliding",
+                            "shared_key_cache_full",
+                            "shared_value_cache_full",
+                        ],
+                    },
                 },
             }
         ),
@@ -1537,9 +1537,7 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
 
     fake_mtp_model.XHGemma4SeriesAssistantDraftModel = FakeDraftModel
     fake_mtp_model.resolve_target_max_pe_length = fake_resolve_target_max_pe_length
-    fake_mtp_model.validate_assistant_target_contract = (
-        lambda _assistant_dir, _target_dir, _mtp_cfg=None: {}
-    )
+    fake_mtp_model.validate_assistant_target_contract = lambda _assistant_dir, _target_dir, _mtp_cfg=None: {}
     monkeypatch.setitem(
         sys.modules,
         "xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model",
@@ -1564,6 +1562,7 @@ def test_gemma4_series_export_mtp_draft_writes_single_decode_dir(monkeypatch, tm
     updated = json.loads(meta_path.read_text(encoding="utf-8"))
     spec_decode = updated["spec_decode"]
     assert spec_decode["draft_decode_onnx"].startswith("mtp_draft_decode/")
+    assert spec_decode["standalone_draft_decode_onnx"].startswith("mtp_draft_decode/")
     assert spec_decode["context_length"] == 2048
     assert spec_decode["draft_rope_max_pe_length"] == 262144
     assert spec_decode["target_max_pe_length_source"] == ("target_config.text_config.max_position_embeddings")
@@ -1585,9 +1584,7 @@ def test_gemma4_assistant_weight_loading_rejects_checkpoint_key_drift(
     class StubDraft:
         def load_state_dict(self, _state_dict, strict):
             assert strict is False
-            return ["model.layers.0.self_attn.k_proj.weight"], [
-                "renamed.unexpected.weight"
-            ]
+            return ["model.layers.0.self_attn.k_proj.weight"], ["renamed.unexpected.weight"]
 
     with pytest.raises(RuntimeError, match="unexpected=.*renamed.unexpected"):
         gemma4_series_mtp_model.Gemma4AssistantDraftModule._load_weights(
@@ -1613,6 +1610,7 @@ def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_pa
         (hm_dir / "golden_meta_info.json").write_text(
             json.dumps(
                 {
+                    "attention_contract_version": 2,
                     "spec_decode_mode": "mtp",
                     "spec_decode": {"mode": "mtp"},
                     "model_config": {
@@ -1654,6 +1652,18 @@ def test_gemma4_series_workflow_export_owns_mtp_draft_export(monkeypatch, tmp_pa
 
     assert result.work_dir == str(tmp_path / "out")
     assert calls == [(str(tmp_path / "out"), workflow.model_dir, None, "float16")]
+    runtime_config = json.loads((tmp_path / "out/hmquant_fake/merak_config.json").read_text(encoding="utf-8"))
+    assert runtime_config == {
+        "architectures": ["MerakForCausalLM"],
+        "config_format": "merak_llm",
+        "load_format": "merak_llm",
+        "xh_model": {
+            "model_type": "hmonnx",
+            "meta_info": "golden_meta_info.json",
+        },
+        "enable_page_attention": True,
+        "model_type": "merak_llm",
+    }
 
 
 def test_gemma4_series_workflow_dump_golden_owns_mtp_draft_golden(monkeypatch, tmp_path):
@@ -1810,10 +1820,7 @@ def test_gemma4_dense_calibration_alias_resolves_shared_resource(
     from xhmodel_merak.xh_llm.models.gemma4_series import quant_adapter
 
     package_root = tmp_path / "gptqmodel"
-    resource = (
-        package_root
-        / "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
-    )
+    resource = package_root / "quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl"
     resource.parent.mkdir(parents=True)
     resource.write_text('{"text": "calibration"}\n', encoding="utf-8")
     spec = SimpleNamespace(submodule_search_locations=[str(package_root)])
@@ -1823,9 +1830,9 @@ def test_gemma4_dense_calibration_alias_resolves_shared_resource(
         lambda _name: spec,
     )
 
-    assert quant_adapter._resolve_calibration_value(
-        quant_adapter.DEFAULT_DENSE_CALIBRATION_JSONL
-    ) == str(resource.resolve())
+    assert quant_adapter._resolve_calibration_value(quant_adapter.DEFAULT_DENSE_CALIBRATION_JSONL) == str(
+        resource.resolve()
+    )
 
 
 def test_gemma4_series_detects_e2b_as_dense_e_series():
@@ -2175,8 +2182,11 @@ def test_gemma4_series_draft_mask_uses_shared_sliding_tail():
     assert torch.all(sliding_mask[0, 0, 0, 6:] < 0)
 
 
-def test_gemma4_series_draft_inputs_use_masksoftmax_valid_length_minus_one():
-    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import _build_assistant_inputs
+def test_gemma4_series_legacy_draft_inputs_use_masksoftmax_valid_length_minus_one():
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
+        LEGACY_DRAFT_INPUTS,
+        _build_assistant_inputs,
+    )
 
     class TinyTarget:
         dtype = torch.float16
@@ -2191,9 +2201,10 @@ def test_gemma4_series_draft_inputs_use_masksoftmax_valid_length_minus_one():
             return embedding
 
     assistant_session = SimpleNamespace(
+        input_names=LEGACY_DRAFT_INPUTS,
         input_infos={
             "sliding_attention_mask": SimpleNamespace(shape=(1, 1, 1, 8)),
-        }
+        },
     )
     shared = {
         "shared_key_cache_sliding": torch.zeros((1, 1, 8, 2), dtype=torch.float16),
@@ -2215,6 +2226,52 @@ def test_gemma4_series_draft_inputs_use_masksoftmax_valid_length_minus_one():
     assert inputs["past_seq_length"].item() == 7
     assert inputs["current_length"].item() == 1
     assert "full_attention_mask" not in inputs
+    assert "sliding_attention_mask" in inputs
+    assert set(shared).issubset(inputs)
+
+
+def test_gemma4_series_readonly_page_draft_inputs_omit_dense_cache_tensors():
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
+        READONLY_PAGE_DRAFT_INPUTS,
+        _build_assistant_inputs,
+    )
+
+    class TinyTarget:
+        dtype = torch.float16
+        device = torch.device("cpu")
+
+        def get_input_embeddings(self):
+            embedding = nn.Embedding(16, 4)
+            with torch.no_grad():
+                embedding.weight.zero_()
+            return embedding
+
+    shared = {
+        "shared_key_cache_sliding": torch.zeros((1, 1, 8, 2), dtype=torch.float16),
+        "shared_value_cache_sliding": torch.zeros((1, 1, 8, 2), dtype=torch.float16),
+        "shared_key_cache_full": torch.zeros((1, 1, 16, 2), dtype=torch.float16),
+        "shared_value_cache_full": torch.zeros((1, 1, 16, 2), dtype=torch.float16),
+    }
+    inputs = _build_assistant_inputs(
+        target_model=TinyTarget(),
+        assistant_session=SimpleNamespace(
+            input_names=READONLY_PAGE_DRAFT_INPUTS,
+            input_infos={},
+        ),
+        last_token_id=1,
+        current_hidden=torch.zeros((1, 1, 4), dtype=torch.float16),
+        shared=shared,
+        position_index=8,
+        sliding_valid_length=6,
+    )
+
+    assert set(inputs) == {
+        "inputs_embeds",
+        "past_seq_length",
+        "current_length",
+    }
+    assert inputs["past_seq_length"].item() == 7
+    assert inputs["current_length"].item() == 1
 
 
 def test_gemma4_series_masked_softmax_q1_valid_length_exposes_n_keys():

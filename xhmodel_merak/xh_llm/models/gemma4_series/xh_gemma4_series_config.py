@@ -278,7 +278,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         video_visual_config: dict | XHGemma4SeriesVisualConfig | None = None,
         audio_config: dict | XHGemma4SeriesAudioConfig | None = None,
         sliding_kv_cache_input_mode: str = "slice_window",
-        attention_contract_version: int = 1,
+        attention_contract_version: int | None = None,
         flash_attention: Mapping | None = None,
         max_mm_ranges_per_chunk: int = 1,
         **kwargs,
@@ -305,16 +305,30 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             )
         self.spec_decode_mode = str(spec_decode_mode).lower() if spec_decode_mode is not None else None
         sliding_kv_cache_input_mode = self._normalize_sliding_kv_cache_input_mode(sliding_kv_cache_input_mode)
-        self.attention_contract_version = int(attention_contract_version)
-        self.attention_lowering = "flash_attention" if self.attention_contract_version >= 2 else "legacy_attention"
         self.flash_attention = dict(flash_attention) if flash_attention is not None else None
+        # A Gemma FlashAttention block is enabled by presence for compatibility
+        # with existing family YAMLs; callers may explicitly set enable=false.
+        flash_attention_enabled = (
+            self.flash_attention is not None
+            and bool(self.flash_attention.get("enable", True))
+        )
+        derived_attention_contract = 2 if flash_attention_enabled else 1
+        if (
+            attention_contract_version is not None
+            and int(attention_contract_version) != derived_attention_contract
+        ):
+            raise ValueError(
+                "Gemma4 attention_contract_version must agree with "
+                "flash_attention.enable; omit the version and let the graph "
+                "contract be derived automatically"
+            )
+        self.attention_contract_version = derived_attention_contract
+        self.attention_lowering = (
+            "flash_attention" if flash_attention_enabled else "legacy_attention"
+        )
         self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
-        if self.attention_contract_version not in (1, 2):
-            raise ValueError("Gemma4 attention_contract_version must be 1 or 2")
         if self.max_mm_ranges_per_chunk <= 0:
             raise ValueError("Gemma4 max_mm_ranges_per_chunk must be positive")
-        if self.attention_lowering == "flash_attention" and self.spec_decode_mode == "mtp":
-            raise ValueError("Gemma4 contract-v2 PageAttention does not support MTP in phase one")
         if self.attention_lowering == "flash_attention" and sliding_kv_cache_input_mode != "slice_window":
             raise ValueError("Gemma4 contract-v2 requires sliding_kv_cache_input_mode='slice_window'")
         if self.spec_decode_mode == "mtp" and sliding_kv_cache_input_mode != "slice_window":
@@ -325,7 +339,13 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         self.enable_mtp_outputs = bool(enable_mtp_outputs or self.spec_decode_mode == "mtp")
         self.num_draft_tokens = num_draft_tokens
         self.output_post_norm_hidden = bool(output_post_norm_hidden)
-        self.mtp_config = BaseConfig(**mtp_config) if isinstance(mtp_config, Mapping) else mtp_config
+        if isinstance(mtp_config, Mapping):
+            mtp_config = dict(mtp_config)
+            mtp_config["context_max_length"] = context_max_length
+            mtp_config = BaseConfig(**mtp_config)
+        elif mtp_config is not None:
+            mtp_config.context_max_length = context_max_length
+        self.mtp_config = mtp_config
         hf_config = self._load_hf_config(hf_model)
         text_config = hf_config.get("text_config", {})
         self._variant_spec: Gemma4SeriesVariantSpec = resolve_gemma4_series_variant(hf_config)

@@ -608,7 +608,7 @@ def _make_text_export_bridge_if_needed(
     bidirectional_vision_attention: bool = False,
 ):
     text_config = hf_model.config.get_text_config()
-    if int(attention_contract_version) >= 2 and not enable_mtp_outputs:
+    if int(attention_contract_version) >= 2:
         has_ple = bool(getattr(text_config, "hidden_size_per_layer_input", 0))
         if has_ple:
             bridge_cls = (
@@ -627,7 +627,7 @@ def _make_text_export_bridge_if_needed(
             num_logits_to_keep=num_logits_to_keep,
             language_model_keeps_last_logit=(int(num_logits_to_keep or 0) == 1),
             language_model_returns_tensor=True,
-            enable_mtp_outputs=False,
+            enable_mtp_outputs=enable_mtp_outputs,
         )
     if getattr(text_config, "hidden_size_per_layer_input", 0):
         return _Gemma4TextExportBridgePLE(

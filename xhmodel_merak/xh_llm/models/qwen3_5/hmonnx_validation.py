@@ -515,6 +515,64 @@ def _spec_decode_from_meta(
     return draft, spec_mode, block_size, hidden_output_name
 
 
+def _dflash_noise_token_from_meta(
+    meta_info: dict[str, Any],
+    *,
+    spec_mode: str,
+) -> int | None:
+    """Resolve the assistant checkpoint's DFlash mask/noise token.
+
+    Contract-v2 exports must carry the token explicitly because it belongs to
+    the assistant checkpoint rather than the target tokenizer.  Contract-v1
+    artifacts predate that field and retain the historical Qwen3.5 value only
+    as a narrowly-scoped compatibility fallback.
+    """
+
+    if spec_mode != "dflash":
+        return None
+
+    spec_decode = meta_info.get("spec_decode")
+    if not isinstance(spec_decode, dict):
+        raise ValueError("DFlash metadata requires a spec_decode mapping")
+    draft = spec_decode.get("draft")
+    draft = draft if isinstance(draft, dict) else {}
+    model_config = meta_info.get("model_config")
+    model_config = model_config if isinstance(model_config, dict) else {}
+    dflash_config = model_config.get("dflash_config")
+    dflash_config = dflash_config if isinstance(dflash_config, dict) else {}
+
+    candidates = (
+        draft.get("noise_token_id"),
+        spec_decode.get("dflash_noise_token_id"),
+        dflash_config.get("noise_token_id"),
+        dflash_config.get("mask_token_id"),
+    )
+    value = next((candidate for candidate in candidates if candidate is not None), None)
+    contract_version = int(spec_decode.get("runtime_contract_version") or 1)
+    if value is None:
+        if contract_version < 2:
+            return 248070
+        raise ValueError(
+            "Qwen3.5 DFlash contract v2 requires "
+            "spec_decode.draft.noise_token_id"
+        )
+    if isinstance(value, bool):
+        raise ValueError(
+            "spec_decode.draft.noise_token_id must be a non-negative integer"
+        )
+    try:
+        noise_token_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "spec_decode.draft.noise_token_id must be a non-negative integer"
+        ) from exc
+    if noise_token_id < 0:
+        raise ValueError(
+            "spec_decode.draft.noise_token_id must be a non-negative integer"
+        )
+    return noise_token_id
+
+
 def _infer_max_context_tokens(meta_info: dict[str, Any]) -> int | None:
     max_context_tokens = meta_info.get("max_context_tokens")
     if max_context_tokens is not None:
@@ -572,6 +630,10 @@ def _load_merak_spec_runtime(
         meta_info.get("token_embedding_file") or meta_info.get("quant_embedding") or meta_info["token_embedding_file"],
     )
     draft, spec_mode, block_size, hidden_output_name = _spec_decode_from_meta(meta_info, model_dir)
+    dflash_noise_token_id = _dflash_noise_token_from_meta(
+        meta_info,
+        spec_mode=spec_mode,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(str(hf_model_config_dir))
     token_embedding = _load_token_embedding(token_embedding_file).to(dtype=_parse_dtype(dtype))
@@ -586,6 +648,7 @@ def _load_merak_spec_runtime(
         spec_decode_mode=spec_mode,
         block_size=block_size,
         hidden_output_name=hidden_output_name,
+        dflash_noise_token_id=dflash_noise_token_id,
         max_context_tokens=_infer_max_context_tokens(meta_info),
         auto_offload=not disable_auto_offload,
         auto_offload_max_memory=_parse_auto_offload_max_memory(auto_offload_max_memory),

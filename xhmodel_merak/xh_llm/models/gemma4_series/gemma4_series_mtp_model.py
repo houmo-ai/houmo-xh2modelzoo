@@ -39,6 +39,11 @@ from xhquant.api import ConfigDict, get_xhquant_logger
 from xhquant.nn import LLMCacheV2, MaskedAdd, MaskedSoftmax, SoftmaxPlus
 from xhquant.nn import RMSNorm as XHRMSNorm
 
+from .mtp_contract import (
+    MTP_DRAFT_INPUT_NAMES,
+    normalize_readonly_attention_lowering,
+)
+
 
 _GEMMA4_RMS_NORM_TYPES = tuple(
     module_type for module_type in (Gemma4RMSNorm, Gemma4UnifiedRMSNorm) if module_type is not None
@@ -300,6 +305,11 @@ def validate_assistant_target_contract(
     layer_types = list(assistant_text.get("layer_types") or [])
     num_layers = int(assistant_text.get("num_hidden_layers") or 0)
     num_kv_shared_layers = int(assistant_text.get("num_kv_shared_layers") or 0)
+    if num_layers <= 0:
+        raise ValueError(
+            "Gemma4 MTP assistant num_hidden_layers must be positive, got "
+            f"{num_layers}"
+        )
     if len(layer_types) != num_layers or num_kv_shared_layers != num_layers:
         raise ValueError(
             "Gemma4 MTP assistant must declare one layer type per layer and all "
@@ -428,9 +438,29 @@ class Gemma4AssistantMaskedEmbedder(nn.Module):
 
 
 class Gemma4AssistantSelfAttention(nn.Module):
-    def __init__(self, hf_attn: nn.Module, layer_type: str, cache_axis: int = 2):
+    def __init__(
+        self,
+        hf_attn: nn.Module,
+        layer_type: str,
+        cache_axis: int = 2,
+        use_readonly_page_attention: bool = False,
+        readonly_attention_lowering: str = "exact_range",
+    ):
         super().__init__()
         self.layer_type = layer_type
+        self.use_readonly_page_attention = bool(use_readonly_page_attention)
+        # Two read-only target-cache lowerings are kept intentionally:
+        # ``exact_range`` exports non-causal Padding Full Cross-Attention plus
+        # an absolute [start, end) range for every query.  It is the general
+        # ABI and also represents a sliding window without relying on causal
+        # alignment. ``causal`` is the faster Gemma4 MTP specialization:
+        # draft M is always 1, the causal mask is aligned at N-1, and the
+        # target cache exposes exactly N keys (the query's RoPE position still
+        # remains N). It therefore has identical visibility without a range
+        # tensor and preserves the paged split-K decode kernel.
+        self.readonly_attention_lowering = normalize_readonly_attention_lowering(
+            readonly_attention_lowering
+        )
         self.config = hf_attn.config
         self.q_proj = hf_attn.q_proj
         self.q_norm = hf_attn.q_norm
@@ -449,15 +479,53 @@ class Gemma4AssistantSelfAttention(nn.Module):
         self.rope = xhnn.Rope()
         self.k_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
         self.v_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
-        self.k_repeat_interleave = xhnn.RepeatInterleave()
-        self.v_repeat_interleave = xhnn.RepeatInterleave()
-        self.qk_matmul = xhnn.MatMul()
-        self.pv_matmul = xhnn.MatMul()
-        self.masked_add = MaskedAdd()
-        self.softmax = SoftmaxPlus(dim=-1)
-        self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
+        if self.use_readonly_page_attention:
+            use_causal = self.readonly_attention_lowering == "causal"
+            sliding_window = (
+                int(getattr(self.config, "sliding_window", 0) or 0)
+                if use_causal and self.layer_type == "sliding_attention"
+                else None
+            )
+            self.flash_attn = xhnn.FlashAttention(
+                num_heads=self.num_attention_heads,
+                num_kv_heads=self.num_key_value_heads,
+                scale=1.0,
+                is_causal=use_causal,
+                sliding_window=sliding_window,
+            )
+        else:
+            self.k_repeat_interleave = xhnn.RepeatInterleave()
+            self.v_repeat_interleave = xhnn.RepeatInterleave()
+            self.qk_matmul = xhnn.MatMul()
+            self.pv_matmul = xhnn.MatMul()
+            self.masked_add = MaskedAdd()
+            self.softmax = SoftmaxPlus(dim=-1)
+            self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=-1)
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
+
+    def _query_kv_range_abs(
+        self,
+        past_seq_length: torch.Tensor,
+        current_input_length: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return exact target-KV visibility for one Q-only draft query."""
+
+        kv_valid_length = past_seq_length + current_input_length
+        if self.layer_type == "sliding_attention":
+            sliding_window = int(getattr(self.config, "sliding_window", 0) or 0)
+            if sliding_window <= 0:
+                raise ValueError(
+                    "Gemma4 MTP sliding_attention requires a positive sliding_window"
+                )
+            range_start = torch.clamp(kv_valid_length - sliding_window, min=0)
+        else:
+            range_start = torch.zeros_like(kv_valid_length)
+        query_kv_range_abs = torch.stack(
+            (range_start, kv_valid_length),
+            dim=-1,
+        ).unsqueeze(1)
+        return kv_valid_length, query_kv_range_abs
 
     def forward(
         self,
@@ -497,25 +565,67 @@ class Gemma4AssistantSelfAttention(nn.Module):
             shared_value_cache,
         )
 
-        key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
-        value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
-        attn_weights = self.qk_matmul(query_states, key_states)
-        if attention_mask is not None:
-            attn_weights = self.masked_add(attn_weights, attention_mask)
-            attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+        if self.use_readonly_page_attention:
+            if self.readonly_attention_lowering == "causal":
+                # M=1, causal-mask alignment=N-1 and visible target KV
+                # length=N. The independently rotated query remains at
+                # absolute position N. This expresses the exact Gemma4
+                # visibility without a per-query range tensor and keeps the
+                # paged full-attention split-K decode path available.
+                attn_output = self.flash_attn(
+                    query_states,
+                    key_states,
+                    value_states,
+                    past_seq_length=past_seq_length,
+                    current_input_length=current_input_length,
+                ).transpose(1, 2).contiguous()
+            else:
+                kv_valid_length, query_kv_range_abs = self._query_kv_range_abs(
+                    past_seq_length,
+                    current_input_length,
+                )
+                attn_output = self.flash_attn(
+                    query_states,
+                    key_states,
+                    value_states,
+                    past_seq_length=past_seq_length,
+                    current_input_length=current_input_length,
+                    kv_valid_length=kv_valid_length,
+                    query_kv_range_abs=query_kv_range_abs,
+                ).transpose(1, 2).contiguous()
         else:
-            attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
-        attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
+            key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
+            value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
+            attn_weights = self.qk_matmul(query_states, key_states)
+            if attention_mask is not None:
+                attn_weights = self.masked_add(attn_weights, attention_mask)
+                attn_weights = self.softmax(attn_weights).to(query_states.dtype)
+            else:
+                attn_weights = self.masked_softmax(attn_weights, past_seq_length).to(query_states.dtype)
+            attn_output = self.pv_matmul(attn_weights, value_states).transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.attn_output_cast(attn_output)
         return self.o_proj(attn_output)
 
 
 class Gemma4AssistantDecoderLayer(nn.Module):
-    def __init__(self, hf_layer: nn.Module, layer_type: str, cache_axis: int = 2):
+    def __init__(
+        self,
+        hf_layer: nn.Module,
+        layer_type: str,
+        cache_axis: int = 2,
+        use_readonly_page_attention: bool = False,
+        readonly_attention_lowering: str = "exact_range",
+    ):
         super().__init__()
         self.layer_type = layer_type
-        self.self_attn = Gemma4AssistantSelfAttention(hf_layer.self_attn, layer_type, cache_axis=cache_axis)
+        self.self_attn = Gemma4AssistantSelfAttention(
+            hf_layer.self_attn,
+            layer_type,
+            cache_axis=cache_axis,
+            use_readonly_page_attention=use_readonly_page_attention,
+            readonly_attention_lowering=readonly_attention_lowering,
+        )
         self.input_layernorm = hf_layer.input_layernorm
         self.post_attention_layernorm = hf_layer.post_attention_layernorm
         self.pre_feedforward_layernorm = hf_layer.pre_feedforward_layernorm
@@ -562,12 +672,21 @@ class Gemma4AssistantBackbone(nn.Module):
         max_position_embeddings: int,
         input_sequence_length: int,
         cache_axis: int = 2,
+        use_readonly_page_attention: bool = False,
+        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
+        self.use_readonly_page_attention = bool(use_readonly_page_attention)
         self.embed_tokens = text_model.embed_tokens
         self.layers = nn.ModuleList(
             [
-                Gemma4AssistantDecoderLayer(layer, text_model.config.layer_types[index], cache_axis=cache_axis)
+                Gemma4AssistantDecoderLayer(
+                    layer,
+                    text_model.config.layer_types[index],
+                    cache_axis=cache_axis,
+                    use_readonly_page_attention=self.use_readonly_page_attention,
+                    readonly_attention_lowering=readonly_attention_lowering,
+                )
                 for index, layer in enumerate(text_model.layers[: text_model.config.num_hidden_layers])
             ]
         )
@@ -623,6 +742,11 @@ class Gemma4AssistantBackbone(nn.Module):
         # must be one less than the visible KV count because the compiler masks
         # q=1 with valid_length + 1.  RoPE still needs the actual token position,
         # so recover it with valid_length + current_length.
+        # ``past_seq_length`` is N-1 for the q=1 read-only attention ABI so
+        # causal PageAttention exposes exactly the N target-cache entries.
+        # That mask-alignment adjustment must not shift RoPE: the MTP input
+        # token is the next token at absolute position N. All draft iterations
+        # keep that same position because the assistant never appends its KV.
         position_index = past_seq_length + current_input_length
         full_pos = self._get_position_embeddings(position_index, "full_attention")
         sliding_pos = self._get_position_embeddings(position_index, "sliding_attention")
@@ -661,6 +785,8 @@ class Gemma4AssistantDraftModule(nn.Module):
         max_position_embeddings: int,
         input_sequence_length: int = 1,
         cache_axis: int = 2,
+        use_readonly_page_attention: bool = False,
+        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
         assistant_model_dir = str(Path(assistant_model_dir).resolve())
@@ -688,6 +814,8 @@ class Gemma4AssistantDraftModule(nn.Module):
             max_position_embeddings=max_position_embeddings,
             input_sequence_length=input_sequence_length,
             cache_axis=cache_axis,
+            use_readonly_page_attention=use_readonly_page_attention,
+            readonly_attention_lowering=readonly_attention_lowering,
         )
         self.pre_projection = nn.Linear(2 * self.backbone_hidden_size, text_config.hidden_size, bias=False)
         self.post_projection = nn.Linear(text_config.hidden_size, self.backbone_hidden_size, bias=False)
@@ -786,16 +914,7 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
         self.assistant_model_dir = str(Path(assistant_model_dir).resolve())
         self.target_model_dir = str(Path(target_model_dir).resolve())
         export_cfg = export_cfg or ConfigDict(
-            input_names=[
-                "inputs_embeds",
-                "past_seq_length",
-                "current_input_length",
-                "sliding_attention_mask",
-                "shared_key_cache_sliding",
-                "shared_value_cache_sliding",
-                "shared_key_cache_full",
-                "shared_value_cache_full",
-            ],
+            input_names=list(MTP_DRAFT_INPUT_NAMES),
             output_names=["logits", "assistant_hidden_state"],
         )
         super().__init__(
@@ -829,6 +948,12 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
             max_position_embeddings=int(max_position_embeddings),
             input_sequence_length=int(self.wrap_cfg.get("input_sequence_length", 1)),
             cache_axis=int(self.wrap_cfg.get("cache_axis", 2)),
+            use_readonly_page_attention=bool(
+                self.wrap_cfg.get("use_readonly_page_attention", False)
+            ),
+            readonly_attention_lowering=normalize_readonly_attention_lowering(
+                self.wrap_cfg.get("readonly_attention_lowering")
+            ),
         )
         self._wrap_model = self._wrap_model.to(dtype=resolve_torch_dtype(self.wrap_cfg.get("dtype", "float16")))
         self._wrap_model.eval()

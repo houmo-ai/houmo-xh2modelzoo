@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -131,6 +131,7 @@ class MTPGatedAttention(nn.Module):
         rope_theta: float,
         max_pe_length: int,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -139,6 +140,31 @@ class MTPGatedAttention(nn.Module):
         self.rotary_dim = rotary_dim
         self.num_kv_groups = num_attention_heads // num_key_value_heads
         self.use_cache = use_cache
+        flash_attention = flash_attention or {}
+        self.use_flash_attention = bool(flash_attention.get("enable", False))
+        if self.use_flash_attention:
+            flash_bits = {
+                name: int(flash_attention.get(name, 8))
+                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+            }
+            invalid_bits = {
+                name: value for name, value in flash_bits.items() if value not in (8, 16)
+            }
+            if invalid_bits:
+                invalid = ", ".join(
+                    f"{name}={value}" for name, value in invalid_bits.items()
+                )
+                raise ValueError(
+                    "MTP flash_attention q_bits/k_bits/v_bits/s_bits/p_bits "
+                    f"must be 8 or 16, got {invalid}"
+                )
+            self.flash_attn = xhnn.FlashAttention(
+                num_heads=num_attention_heads,
+                num_kv_heads=num_key_value_heads,
+                scale=head_dim**-0.5,
+                is_causal=True,
+                **flash_bits,
+            )
 
         self.q_proj = nn.Linear(
             hidden_size, num_attention_heads * head_dim * 2, bias=False
@@ -233,16 +259,25 @@ class MTPGatedAttention(nn.Module):
                 value_states, past_seq_length, current_input_length, past_v_cache
             )
 
-        query_states = query_states * self.kv_scale.to(query_states.dtype)
-        key_states_t = torch.repeat_interleave(
-            present_k_cache.transpose(2, 3), self.num_kv_groups, dim=1
-        )
-        attn_weights = torch.matmul(query_states, key_states_t)
-        attn_weights = self.masked_softmax(attn_weights, past_seq_length)
-        value_states = torch.repeat_interleave(
-            present_v_cache, self.num_kv_groups, dim=1
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                present_k_cache,
+                present_v_cache,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+            )
+        else:
+            query_states = query_states * self.kv_scale.to(query_states.dtype)
+            key_states_t = torch.repeat_interleave(
+                present_k_cache.transpose(2, 3), self.num_kv_groups, dim=1
+            )
+            attn_weights = torch.matmul(query_states, key_states_t)
+            attn_weights = self.masked_softmax(attn_weights, past_seq_length)
+            value_states = torch.repeat_interleave(
+                present_v_cache, self.num_kv_groups, dim=1
+            )
+            attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, -1)
         attn_output = attn_output * torch.sigmoid(gate)
         return self.o_proj(attn_output)
@@ -310,6 +345,7 @@ class MTPDecoderLayer(nn.Module):
         rope_theta: float,
         max_pe_length: int,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.self_attn = MTPGatedAttention(
@@ -323,6 +359,7 @@ class MTPDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
         self.mlp = MTPMLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
@@ -369,6 +406,7 @@ class MTPModel(nn.Module):
         partial_rotary_factor: float = 0.25,
         max_pe_length: int = 262144,
         use_cache: bool = True,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -393,7 +431,12 @@ class MTPModel(nn.Module):
             rope_theta=rope_theta,
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
+        # PageAttention conversion and device mapping use layer boundary tags.
+        # The assistant is a single decoder layer named ``layer`` rather than
+        # ``layers.0``, so the generic name-based fallback cannot infer it.
+        self.layer_tag = xhnn.XHTag("layer_0", "LLM", "layer_0")
         self.norm = RMSNorm(hidden_size, rms_norm_eps)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
 
@@ -416,6 +459,7 @@ class MTPModel(nn.Module):
             past_k_cache=past_key_cache,
             past_v_cache=past_value_cache,
         )
+        hidden_states = self.layer_tag(hidden_states)
         hidden_states = self.norm(hidden_states)
         post_norm_out = hidden_states
         logits = self.lm_head(hidden_states)
@@ -430,6 +474,7 @@ class MTPModel(nn.Module):
         max_pe_length: int = 262144,
         use_cache: bool = True,
         mtp_layer_index: int = 0,
+        flash_attention: Mapping | None = None,
     ) -> "MTPModel":
         from safetensors import safe_open
 
@@ -476,6 +521,7 @@ class MTPModel(nn.Module):
             partial_rotary_factor=rope_params.get("partial_rotary_factor", text_cfg.get("partial_rotary_factor", 0.25)),
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
         if is_moe:
             num_experts = _cfg_value("num_experts")
@@ -522,6 +568,7 @@ class MTPModel(nn.Module):
                     ),
                     max_pe_length=max_pe_length,
                     use_cache=use_cache,
+                    flash_attention=flash_attention,
                 )
                 if is_moe:
                     model.layer.mlp = MTPSparseMoEBlock(

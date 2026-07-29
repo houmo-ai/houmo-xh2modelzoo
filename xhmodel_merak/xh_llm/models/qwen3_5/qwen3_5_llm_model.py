@@ -86,6 +86,117 @@ except ImportError:
 from ._llm_model_impl import register_wrap_modules
 
 
+def build_qwen35_spec_decode_contract(
+    config: Any,
+    meta_info: Any,
+) -> dict[str, Any]:
+    """Build the deployment ABI consumed by the Merak vLLM proposer."""
+
+    mode = str(getattr(config, "spec_decode_mode", "") or "").lower()
+    if mode not in {"mtp", "dflash"}:
+        raise ValueError(f"Qwen3.5 speculative contract requires mtp/dflash, got {mode!r}")
+    num_draft_tokens = int(getattr(config, "num_draft_tokens", 0))
+    if num_draft_tokens <= 0:
+        raise ValueError("Qwen3.5 num_draft_tokens must be positive")
+    draft_config = config.mtp_config if mode == "mtp" else config.dflash_config
+    if draft_config is None:
+        raise ValueError(f"Qwen3.5 {mode} export is missing its draft config")
+    draft_head_weight_bits = int(
+        getattr(
+            draft_config,
+            "draft_head_weight_bits",
+            getattr(config, "spec_draft_head_weight_bits", 4),
+        )
+    )
+    hidden_output_name = "target_hidden" if mode == "dflash" else "post_norm_hidden"
+    contract: dict[str, Any] = {
+        "runtime_contract_version": 2,
+        "mode": mode,
+        # Retain the legacy DFlash block-size convention for old tools.
+        "block_size": (num_draft_tokens + 1 if mode == "dflash" else num_draft_tokens),
+        "num_draft_tokens": num_draft_tokens,
+        "verify_length": num_draft_tokens + 1,
+        "draft_head_weight_bits": draft_head_weight_bits,
+        "hidden_output_name": hidden_output_name,
+        "target": {
+            "hidden_output_name": hidden_output_name,
+            "linear_state_outputs": "per_step",
+        },
+    }
+
+    def graph_path(attribute: str) -> str:
+        graph_config = getattr(meta_info, attribute, None)
+        path = getattr(graph_config, "hmonnx", None)
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"Qwen3.5 {mode} export is missing {attribute}.hmonnx")
+        return path
+
+    if mode == "mtp":
+        prefill_path = graph_path("mtp_prefill_config")
+        decode_path = graph_path("mtp_decode_config")
+        contract.update(
+            draft_prefill_onnx=prefill_path,
+            mtp_draft_prefill_onnx=prefill_path,
+            draft_decode_onnx=decode_path,
+            mtp_draft_decode_onnx=decode_path,
+        )
+        contract["draft"] = {
+            "abi": "qwen_mtp_paged_v2",
+            "prefill_hmonnx": prefill_path,
+            "decode_hmonnx": decode_path,
+            "cache_mutation": "page_attention",
+            "cache_binding": "private_draft",
+            "page_cache_block_size": 64,
+        }
+    else:
+        context_path = graph_path("dflash_context_config")
+        context_decode_path = graph_path("dflash_context_decode_config")
+        decode_path = graph_path("dflash_decode_config")
+        noise_token_id_value = getattr(draft_config, "noise_token_id", None)
+        if noise_token_id_value is None:
+            raise ValueError(
+                "Qwen3.5 DFlash deployment metadata requires the assistant "
+                "checkpoint dflash_config.mask_token_id"
+            )
+        noise_token_id = int(noise_token_id_value)
+        if noise_token_id < 0:
+            raise ValueError(
+                "Qwen3.5 DFlash noise_token_id must be non-negative"
+            )
+        flash_attention = getattr(draft_config, "flash_attention", None) or {}
+        flash_attention_enabled = bool(
+            flash_attention.get("enable", False)
+            if hasattr(flash_attention, "get")
+            else getattr(flash_attention, "enable", False)
+        )
+        contract.update(
+            draft_context_onnx=context_path,
+            dflash_draft_context_onnx=context_path,
+            draft_context_decode_onnx=context_decode_path,
+            dflash_draft_context_decode_onnx=context_decode_path,
+            draft_decode_onnx=decode_path,
+            dflash_draft_decode_onnx=decode_path,
+        )
+        contract["draft"] = {
+            "abi": (
+                "qwen_dflash_paged_shared_v3"
+                if flash_attention_enabled
+                else "qwen_dflash_v1"
+            ),
+            "context_hmonnx": context_path,
+            "context_decode_hmonnx": context_decode_path,
+            "decode_hmonnx": decode_path,
+            "cache_mutation": (
+                "page_attention" if flash_attention_enabled else "in_place"
+            ),
+            "cache_binding": "private_draft",
+            "noise_token_id": noise_token_id,
+        }
+        if flash_attention_enabled:
+            contract["draft"]["page_cache_block_size"] = 64
+    return contract
+
+
 class _Qwen3_5KVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
     """Extended mixin supporting split_conv_cache (3 separate q/k/v caches per layer)."""
 
@@ -1421,42 +1532,11 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         meta_info.token_embedding_file = meta_info.quant_embedding
         meta_info.max_context_tokens = self.config.context_max_length
         if spec_decode_mode in ("mtp", "dflash"):
-            num_draft_tokens = getattr(self.config, "num_draft_tokens", 4)
-            draft_cfg = self.config.mtp_config if spec_decode_mode == "mtp" else self.config.dflash_config
-            draft_head_weight_bits = getattr(
-                draft_cfg,
-                "draft_head_weight_bits",
-                getattr(self.config, "spec_draft_head_weight_bits", 4),
+            spec_decode_section = build_qwen35_spec_decode_contract(
+                self.config,
+                meta_info,
             )
-            hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"
-            spec_block_size = num_draft_tokens + 1 if spec_decode_mode == "dflash" else num_draft_tokens
-            spec_decode_section = {
-                "mode": spec_decode_mode,
-                "block_size": spec_block_size,
-                "num_draft_tokens": num_draft_tokens,
-                "draft_head_weight_bits": draft_head_weight_bits,
-                "hidden_output_name": hidden_output_name,
-            }
-            meta_info.spec_decode_draft_head_weight_bits = draft_head_weight_bits
-            if spec_decode_mode == "mtp":
-                if hasattr(meta_info, "mtp_prefill_config"):
-                    spec_decode_section["draft_prefill_onnx"] = meta_info.mtp_prefill_config.hmonnx
-                    spec_decode_section["mtp_draft_prefill_onnx"] = meta_info.mtp_prefill_config.hmonnx
-                if hasattr(meta_info, "mtp_decode_config"):
-                    spec_decode_section["draft_decode_onnx"] = meta_info.mtp_decode_config.hmonnx
-                    spec_decode_section["mtp_draft_decode_onnx"] = meta_info.mtp_decode_config.hmonnx
-            elif spec_decode_mode == "dflash":
-                if hasattr(meta_info, "dflash_context_config"):
-                    spec_decode_section["draft_context_onnx"] = meta_info.dflash_context_config.hmonnx
-                    spec_decode_section["dflash_draft_context_onnx"] = meta_info.dflash_context_config.hmonnx
-                if hasattr(meta_info, "dflash_context_decode_config"):
-                    spec_decode_section["draft_context_decode_onnx"] = meta_info.dflash_context_decode_config.hmonnx
-                    spec_decode_section["dflash_draft_context_decode_onnx"] = (
-                        meta_info.dflash_context_decode_config.hmonnx
-                    )
-                if hasattr(meta_info, "dflash_decode_config"):
-                    spec_decode_section["draft_decode_onnx"] = meta_info.dflash_decode_config.hmonnx
-                    spec_decode_section["dflash_draft_decode_onnx"] = meta_info.dflash_decode_config.hmonnx
+            meta_info.spec_decode_draft_head_weight_bits = spec_decode_section["draft_head_weight_bits"]
             meta_info.spec_decode = spec_decode_section
 
         if exported_lora_adapters:

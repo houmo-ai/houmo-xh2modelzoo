@@ -25,6 +25,7 @@ class XHQwen3NextMTPConfig(HFModelConfig):
         max_pe_length: int = 262144,
         use_cache: bool = True,
         mtp_layer_index: int = 0,
+        flash_attention: Mapping | None = None,
         draft_head_weight_bits: int = 4,
         model_type: str = "Qwen3NextMTP",
         **kwargs,
@@ -39,6 +40,7 @@ class XHQwen3NextMTPConfig(HFModelConfig):
         self.max_pe_length = max_pe_length
         self.use_cache = use_cache
         self.mtp_layer_index = mtp_layer_index
+        self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
         if getattr(self, "quant_scheme", None) is None:
             self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
@@ -78,9 +80,18 @@ class XHQwen3NextModelConfig(XHQwen3_5ModelConfig):
         if isinstance(mtp_config, Mapping):
             raw = dict(mtp_config)
             raw.setdefault("model_name", f"{model_name}_mtp")
-            raw.setdefault("hf_model", self.hf_model)
+            # Qwen3-Next MTP is part of the target checkpoint and shares the
+            # target cache contract. These are derived values, not a second
+            # user-facing model/context selection.
+            raw["hf_model"] = self.hf_model
+            raw["context_max_length"] = self.context_max_length
             raw.setdefault("draft_head_weight_bits", self.spec_draft_head_weight_bits)
+            raw["flash_attention"] = self.flash_attention
             mtp_config = XHQwen3NextMTPConfig(**raw)
+        elif mtp_config is not None:
+            mtp_config.hf_model = self.hf_model
+            mtp_config.context_max_length = self.context_max_length
+            mtp_config.flash_attention = self.flash_attention
         self.mtp_config = mtp_config
         self.dflash_config = None
         if spec_decode_mode not in {None, "mtp"}:

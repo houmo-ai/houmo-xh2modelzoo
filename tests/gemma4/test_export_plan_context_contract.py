@@ -11,6 +11,7 @@ def _plan(
     input_sequence_length: int = 320,
     *,
     bidirectional_vision_attention: bool = True,
+    quant_type: str = "w8a8h1_sefp",
 ) -> Gemma4SeriesExportPlan:
     return Gemma4SeriesExportPlan(
         variant=Gemma4SeriesVariantSpec(
@@ -31,7 +32,7 @@ def _plan(
         ),
         context_max_length=context_max_length,
         input_sequence_length=input_sequence_length,
-        quant_type="w8a8h1_sefp",
+        quant_type=quant_type,
         export_image_visual=True,
         export_video_visual=True,
         export_audio=True,
@@ -48,6 +49,16 @@ def test_gemma4_export_contract_allows_any_context_not_smaller_than_prefill(
     context_max_length: int,
 ):
     _plan(context_max_length).validate_fixed_contract()
+
+
+@pytest.mark.parametrize(
+    "quant_type",
+    ["w8a8h1_sefp", "w8a16h1_sefp", "w4a8h0_ssfp"],
+)
+def test_gemma4_export_contract_accepts_supported_activation_precisions(
+    quant_type: str,
+):
+    _plan(262144, quant_type=quant_type).validate_fixed_contract()
 
 
 @pytest.mark.parametrize("input_sequence_length", [256, 279])

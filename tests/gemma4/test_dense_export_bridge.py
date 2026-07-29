@@ -52,9 +52,12 @@ def test_dense_bridge_forward_signature_excludes_per_layer_inputs():
         "past_seq_length",
         "current_input_length",
         "local_attention_mask",
-        "global_attention_mask",
     ):
         assert name in params, f"dense bridge missing required arg: {name}"
+    assert "global_attention_mask" not in params, (
+        "global attention reuses the explicit local mask path; exporting both masks "
+        "reintroduces the duplicate masked-add fixed by QTL-304"
+    )
 
 
 def test_ple_bridge_forward_signature_includes_per_layer_inputs_first():

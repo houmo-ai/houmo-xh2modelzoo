@@ -240,6 +240,17 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                     f"on {device}."
                 )
 
+            block_view_length = int(block_ids_flat.numel())
+            slot_view_length = int(slot_mapping_flat.numel())
+            previous_block_view_length = device_buffers.get("block_ids_view_length")
+            previous_slot_view_length = device_buffers.get("slot_mapping_view_length")
+            if previous_block_view_length is not None and previous_block_view_length != block_view_length:
+                invalidate_active_graph = True
+            if previous_slot_view_length is not None and previous_slot_view_length != slot_view_length:
+                invalidate_active_graph = True
+            device_buffers["block_ids_view_length"] = block_view_length
+            device_buffers["slot_mapping_view_length"] = slot_view_length
+
             if device.type == "cuda":
                 with torch.cuda.device(device):
                     block_buffer.zero_()
@@ -251,7 +262,14 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 block_buffer[: block_ids_flat.numel()].copy_(block_ids_flat)
                 slot_buffer.fill_(-1)
                 slot_buffer[: slot_mapping_flat.numel()].copy_(slot_mapping_flat)
-            staged[device_key] = (block_buffer, slot_buffer)
+            # Backing buffers keep cache-capacity allocation and stable storage,
+            # while PageAttention sees only the active/bucketed metadata range.
+            # Passing the full buffer makes a short decode look like a maximum
+            # length context and can select the wrong split-KV kernel.
+            staged[device_key] = (
+                block_buffer[:block_view_length],
+                slot_buffer[:slot_view_length],
+            )
 
         if invalidate_active_graph:
             BaseLLMHMONNXModel._clear_active_page_attention_cuda_graph(self)

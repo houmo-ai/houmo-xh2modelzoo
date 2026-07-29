@@ -373,7 +373,13 @@ def test_get_export_cfg_handles_spec_decode_outputs():
 def test_visual_export_uses_release_prefix_and_resolution_suffix():
     """Visual branch names must stay release-scoped and resolution-specific."""
     src = MERAK_MODEL.read_text()
-    assert ('f"{exported_info.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"') in src
+    # The release prefix already embeds WxH; the visual subgraph must reuse it
+    # rather than append a second, duplicated resolution suffix.
+    assert (
+        'f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"'
+        in src
+    )
+    assert 'f"{exported_info.model_name}_visual"' in src
 
 
 def test_spec_decode_export_uses_release_spec_stage_suffixes():
@@ -596,4 +602,8 @@ def test_spec_decode_export_cfg_keeps_split_conv_mtp_dflash_input_names():
     assert 'for branch in ("q", "k", "v")' in src
     assert 'f"past_conv_cache_{branch}_{cache_idx}"' in src
     assert 'f"conv_cache_out_{branch}_{cache_idx}_{step_idx}"' in src
-    assert ('hidden_output_name = "target_hidden" if spec_decode_mode == "dflash" else "post_norm_hidden"') in src
+    assert "def build_qwen35_spec_decode_contract" in src
+    assert (
+        '"target_hidden" if mode == "dflash" else "post_norm_hidden"'
+        in src
+    )

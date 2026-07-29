@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import shutil
 from collections.abc import Mapping
@@ -69,6 +70,71 @@ _GEMMA4_RECOMMENDED_MTP_CONFIGS = {
     "31b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full_mtp.yaml",
     "26b-a4b": "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b_full_mtp.yaml",
 }
+
+
+def finalize_gemma4_merak_runtime_config(export_result: ExportResult) -> Path:
+    """Write the vLLM-Merak entry config beside a Gemma4 HMONNX release.
+
+    Gemma4 and Qwen exports share the same release boundary: graph-specific
+    details stay in ``golden_meta_info.json`` and the small
+    ``merak_config.json`` only selects the Merak loader.  Derive
+    PageAttention from the finalized metadata so base and MTP exports cannot
+    drift from CLI/YAML overrides.
+    """
+
+    meta_path = Path(BaseLLMWorkflow._find_golden_meta_file(export_result))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(meta, dict):
+        raise TypeError(f"Gemma4 golden metadata must be an object: {meta_path}")
+
+    model_config = meta.get("model_config")
+    if not isinstance(model_config, dict):
+        raise TypeError(
+            "Gemma4 golden metadata must contain an object field "
+            f"'model_config': {meta_path}"
+        )
+
+    explicit_page_attention = model_config.get("enable_page_attention")
+    if isinstance(explicit_page_attention, bool):
+        enable_page_attention = explicit_page_attention
+    else:
+        flash_attention = model_config.get("flash_attention")
+        explicit_flash_enable = (
+            flash_attention.get("enable")
+            if isinstance(flash_attention, dict)
+            else None
+        )
+        if isinstance(explicit_flash_enable, bool):
+            enable_page_attention = explicit_flash_enable
+        else:
+            # Gemma4 contract-v2 exports predate the Qwen-style nested
+            # ``flash_attention.enable`` flag.  The contract itself is the
+            # authoritative declaration that the runtime must bind paged KV.
+            enable_page_attention = (
+                int(meta.get("attention_contract_version", 1)) >= 2
+            )
+
+    config = {
+        "architectures": ["MerakForCausalLM"],
+        "config_format": "merak_llm",
+        "load_format": "merak_llm",
+        "xh_model": {
+            "model_type": "hmonnx",
+            "meta_info": meta_path.name,
+        },
+        "enable_page_attention": enable_page_attention,
+        "model_type": "merak_llm",
+    }
+    config_path = meta_path.parent / "merak_config.json"
+    temporary_path = config_path.with_name(f".{config_path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(config_path)
+    return config_path
+
+
 _GEMMA4_QUANT_TEMPLATE: dict[str, Any] = {
     "algorithm": "gptqmodel",
     "method": "gptq",
@@ -436,6 +502,7 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
             max_pe_length_explicit=max_pe_length_explicit,
         )
         mtp_workflow.export_mtp_draft(export_result, hf_model_dir=self.model_dir)
+        finalize_gemma4_merak_runtime_config(export_result)
         return export_result
 
     def _resolve_export_hf_model_dir(self, quant_result: QuantResult) -> str:
@@ -889,18 +956,9 @@ class Gemma4SeriesWorkflow(BaseLLMWorkflow):
     ) -> dict[str, Any] | None:
         if not config_overrides:
             return None
-        normalized = copy.deepcopy(dict(config_overrides))
-        context_key = "export.model.context_max_length"
-        mtp_context_key = "export.model.mtp_config.context_max_length"
-        if context_key in normalized:
-            base_model_cfg = self.workflow_config.export.get("model") or {}
-            if (
-                isinstance(base_model_cfg, Mapping)
-                and str(base_model_cfg.get("spec_decode_mode") or "").lower()
-                == "mtp"
-            ):
-                normalized[mtp_context_key] = normalized[context_key]
-        return normalized
+        # MTP derives its cache capacity from the target model config. Keep a
+        # single public context override rather than patching two YAML paths.
+        return copy.deepcopy(dict(config_overrides))
 
     def _build_export_plan(self, workflow_config: WorkflowConfig) -> Gemma4SeriesExportPlan:
         export_cfg = workflow_config.build_export_dict()

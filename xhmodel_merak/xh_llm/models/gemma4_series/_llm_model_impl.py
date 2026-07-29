@@ -486,7 +486,13 @@ class _Gemma4TextAttention(DynamicModule):
                 value_states,
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
-                mm_prefix_range=mm_prefix_ranges,
+                # Transformers 5.13 Gemma4 applies the bidirectional visual
+                # overlay only to local/sliding layers.  Global layers remain
+                # strictly causal.  Supplying the range to a full-attention
+                # FlashAttention node changes the checkpoint semantics.
+                mm_prefix_range=(
+                    mm_prefix_ranges if self.is_sliding_attention else None
+                ),
                 kv_window_start_abs=kv_window_start_abs if self.is_sliding_attention else None,
                 kv_valid_length=kv_valid_length if self.is_sliding_attention else None,
             )

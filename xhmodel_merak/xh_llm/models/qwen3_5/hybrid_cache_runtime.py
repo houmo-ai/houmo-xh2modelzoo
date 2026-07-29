@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -20,6 +21,15 @@ from .split_conv_cache_utils import _regroup_flat_split_conv_cache
 
 _CONV_OUTPUT_RE = re.compile(r"^conv_cache_out_(?:(q|k|v)_)?(\d+)(?:_(\d+))?$")
 _RECURRENT_OUTPUT_RE = re.compile(r"^recurrent_state_out_(\d+)(?:_(\d+))?$")
+
+
+@dataclass
+class HybridCacheTransaction:
+    """Uncommitted per-step linear-state outputs from one target verify."""
+
+    outputs: tuple[Any, ...]
+    output_names: tuple[str, ...] | None
+    verify_steps: int
 
 
 def normalize_hybrid_hmonnx_args(args: Sequence[Any]) -> list[Any]:
@@ -135,6 +145,7 @@ def _select_named_cache_outputs(
     verify_steps: int,
     allow_missing_recurrent: bool,
     model_label: str,
+    selected_step: int | None = None,
 ) -> tuple[list[Any], list[Any]] | None:
     conv: dict[tuple[int, str | None, int], Any] = {}
     recurrent: dict[tuple[int, int], Any] = {}
@@ -155,7 +166,7 @@ def _select_named_cache_outputs(
     if not found_cache_name:
         return None
 
-    final_step = verify_steps - 1
+    final_step = verify_steps - 1 if selected_step is None else selected_step
     branches: tuple[str | None, ...] = ("q", "k", "v") if split_conv_cache else (None,)
     selected_conv: list[Any] = []
     missing_conv: list[str] = []
@@ -202,6 +213,7 @@ def _select_positional_cache_outputs(
     verify_steps: int,
     allow_missing_recurrent: bool,
     model_label: str,
+    selected_step: int | None = None,
 ) -> tuple[list[Any], list[Any]]:
     conv_branches = 3 if split_conv_cache else 1
     conv_count = linear_layers * conv_branches * verify_steps
@@ -221,7 +233,7 @@ def _select_positional_cache_outputs(
     # recurrent section; trailing hidden outputs must not be mistaken for it.
     raw_recurrent = [] if allow_missing_recurrent else list(linear_outputs[conv_count : conv_count + recurrent_count])
 
-    final_step = verify_steps - 1
+    final_step = verify_steps - 1 if selected_step is None else selected_step
     selected_conv: list[Any] = []
     for layer in range(linear_layers):
         for branch in range(conv_branches):
@@ -233,23 +245,21 @@ def _select_positional_cache_outputs(
     return selected_conv, selected_recurrent
 
 
-def commit_hybrid_cache_outputs(
+def _select_runtime_cache_outputs(
     runtime: Any,
     outputs: Sequence[Any],
     *,
+    output_names: Sequence[str] | None,
+    verify_steps: int,
+    selected_step: int | None,
     model_label: str,
-) -> tuple[Any, list[Any], list[Any]]:
-    """Parse active graph outputs and commit only verify step ``T - 1``."""
-
-    logits, *linear_outputs = outputs
+) -> tuple[list[Any], list[Any]]:
+    linear_outputs = list(outputs[1:])
     past_conv_caches = runtime._kvcache_mixin.past_conv_caches
-    past_recurrent_states = runtime._kvcache_mixin.past_recurrent_states
     split_conv_cache = bool(runtime._kvcache_mixin.split_conv_cache)
-    verify_steps = 1 if runtime.is_prefill() else get_spec_decode_verify_steps(runtime.meta_info)
     allow_missing_recurrent = runtime.is_prefill() and model_config_prefill_recurrent_state_uses_cache(
         runtime.meta_info.model_config
     )
-    output_names = _graph_output_names(runtime, len(outputs))
     selected = None
     if output_names is not None:
         selected = _select_named_cache_outputs(
@@ -260,6 +270,7 @@ def commit_hybrid_cache_outputs(
             verify_steps=verify_steps,
             allow_missing_recurrent=allow_missing_recurrent,
             model_label=model_label,
+            selected_step=selected_step,
         )
     if selected is None:
         selected = _select_positional_cache_outputs(
@@ -269,12 +280,25 @@ def commit_hybrid_cache_outputs(
             verify_steps=verify_steps,
             allow_missing_recurrent=allow_missing_recurrent,
             model_label=model_label,
+            selected_step=selected_step,
         )
-    conv_outputs, recurrent_outputs = selected
+    return selected
 
-    if split_conv_cache:
+
+def _commit_selected_cache_outputs(
+    runtime: Any,
+    conv_outputs: Sequence[Any],
+    recurrent_outputs: Sequence[Any],
+) -> None:
+    past_conv_caches = runtime._kvcache_mixin.past_conv_caches
+    past_recurrent_states = runtime._kvcache_mixin.past_recurrent_states
+    if runtime._kvcache_mixin.split_conv_cache:
         grouped = _regroup_flat_split_conv_cache(conv_outputs)
-        for (past_q, past_k, past_v), (out_q, out_k, out_v) in zip(past_conv_caches, grouped, strict=True):
+        for (past_q, past_k, past_v), (out_q, out_k, out_v) in zip(
+            past_conv_caches,
+            grouped,
+            strict=True,
+        ):
             past_q[:] = out_q[:]
             past_k[:] = out_k[:]
             past_v[:] = out_v[:]
@@ -282,13 +306,184 @@ def commit_hybrid_cache_outputs(
         for past, out in zip(past_conv_caches, conv_outputs, strict=True):
             past[:] = out[:]
     if recurrent_outputs:
-        for past, out in zip(past_recurrent_states, recurrent_outputs, strict=True):
+        for past, out in zip(
+            past_recurrent_states,
+            recurrent_outputs,
+            strict=True,
+        ):
             past[:] = out[:]
+
+
+def begin_hybrid_cache_transaction(runtime: Any) -> None:
+    """Defer Qwen verify-state mutation until acceptance is known."""
+
+    if getattr(runtime, "_hybrid_cache_transaction", None) is not None:
+        raise RuntimeError("Qwen hybrid-cache transaction is already pending")
+    runtime._defer_hybrid_cache_commit = True
+
+
+def abort_hybrid_cache_transaction(runtime: Any) -> None:
+    runtime._defer_hybrid_cache_commit = False
+    runtime._hybrid_cache_transaction = None
+
+
+def begin_hybrid_cache_output_passthrough(
+    runtime: Any,
+    *,
+    selected_step: int = 0,
+) -> None:
+    """Commit one known step while preserving the graph's raw outputs.
+
+    Merak speculative decoding needs the target hidden-state output even on
+    ordinary prefill/decode calls.  The legacy wrapper returned only logits
+    and selected cache tensors, which discarded that hidden state.  Decode
+    graphs are exported at the full verify width, so a one-token non-verify
+    call must also commit step zero rather than the padded final step.
+    """
+
+    if getattr(runtime, "_hybrid_cache_transaction", None) is not None or bool(
+        getattr(runtime, "_defer_hybrid_cache_commit", False)
+    ):
+        raise RuntimeError(
+            "Qwen hybrid-cache output passthrough conflicts with a transaction"
+        )
+    if bool(getattr(runtime, "_hybrid_cache_output_passthrough", False)):
+        raise RuntimeError(
+            "Qwen hybrid-cache output passthrough is already active"
+        )
+    selected_step = int(selected_step)
+    if selected_step < 0:
+        raise ValueError("selected_step must be non-negative")
+    runtime._hybrid_cache_output_passthrough = True
+    runtime._hybrid_cache_passthrough_step = selected_step
+
+
+def end_hybrid_cache_output_passthrough(runtime: Any) -> None:
+    runtime._hybrid_cache_output_passthrough = False
+    runtime._hybrid_cache_passthrough_step = None
+
+
+def detach_hybrid_cache_transaction(runtime: Any) -> HybridCacheTransaction:
+    """Move an uncommitted verify result out of the serial runtime."""
+
+    transaction = getattr(runtime, "_hybrid_cache_transaction", None)
+    if not isinstance(transaction, HybridCacheTransaction):
+        raise RuntimeError("Qwen hybrid-cache transaction is not pending")
+    runtime._hybrid_cache_transaction = None
+    runtime._defer_hybrid_cache_commit = False
+    return transaction
+
+
+def commit_hybrid_cache_transaction(
+    runtime: Any,
+    accepted_steps: int,
+    *,
+    model_label: str,
+    transaction: HybridCacheTransaction | None = None,
+) -> tuple[list[Any], list[Any]]:
+    """Commit snapshot ``accepted_steps - 1`` without cloning all states.
+
+    ``accepted_steps`` includes the verifier's mandatory recovery token.
+    Therefore zero accepted *draft* tokens is ``accepted_steps == 1`` and
+    commits snapshot zero.  A value of zero means that the verify operation
+    itself failed; callers must abort that transaction instead of committing
+    a nonexistent state.
+    """
+
+    attached_transaction = transaction is None
+    if transaction is None:
+        transaction = getattr(runtime, "_hybrid_cache_transaction", None)
+    if not isinstance(transaction, HybridCacheTransaction):
+        raise RuntimeError("Qwen hybrid-cache transaction is not pending")
+    accepted_steps = int(accepted_steps)
+    if accepted_steps < 1 or accepted_steps > transaction.verify_steps:
+        raise ValueError(
+            "accepted_steps must be in [1, verify_steps], got "
+            f"{accepted_steps} for {transaction.verify_steps}"
+        )
+    selected = _select_runtime_cache_outputs(
+        runtime,
+        transaction.outputs,
+        output_names=transaction.output_names,
+        verify_steps=transaction.verify_steps,
+        selected_step=accepted_steps - 1,
+        model_label=model_label,
+    )
+    _commit_selected_cache_outputs(runtime, *selected)
+    if attached_transaction:
+        runtime._hybrid_cache_transaction = None
+    runtime._defer_hybrid_cache_commit = False
+    return selected
+
+
+def commit_hybrid_cache_outputs(
+    runtime: Any,
+    outputs: Sequence[Any],
+    *,
+    model_label: str,
+) -> tuple[Any, ...]:
+    """Parse active graph outputs and commit only verify step ``T - 1``."""
+
+    logits = outputs[0]
+    verify_steps = 1 if runtime.is_prefill() else get_spec_decode_verify_steps(runtime.meta_info)
+    output_names = _graph_output_names(runtime, len(outputs))
+    passthrough = bool(
+        getattr(runtime, "_hybrid_cache_output_passthrough", False)
+    )
+    passthrough_step = getattr(
+        runtime,
+        "_hybrid_cache_passthrough_step",
+        None,
+    )
+    if (
+        not runtime.is_prefill()
+        and bool(getattr(runtime, "_defer_hybrid_cache_commit", False))
+    ):
+        if passthrough:
+            raise RuntimeError(
+                "Qwen hybrid-cache passthrough and transaction overlap"
+            )
+        if getattr(runtime, "_hybrid_cache_transaction", None) is not None:
+            raise RuntimeError("Qwen hybrid-cache transaction is already pending")
+        transaction = HybridCacheTransaction(
+            outputs=tuple(outputs),
+            output_names=(
+                tuple(output_names) if output_names is not None else None
+            ),
+            verify_steps=verify_steps,
+        )
+        runtime._hybrid_cache_transaction = transaction
+        runtime._defer_hybrid_cache_commit = False
+        return tuple(outputs)
+
+    selected = _select_runtime_cache_outputs(
+        runtime,
+        outputs,
+        output_names=output_names,
+        verify_steps=verify_steps,
+        selected_step=(
+            int(passthrough_step)
+            if passthrough_step is not None and passthrough
+            else None
+        ),
+        model_label=model_label,
+    )
+    conv_outputs, recurrent_outputs = selected
+    _commit_selected_cache_outputs(runtime, conv_outputs, recurrent_outputs)
+    if passthrough:
+        return tuple(outputs)
     return logits, conv_outputs, recurrent_outputs
 
 
 __all__ = [
     "commit_hybrid_cache_outputs",
+    "begin_hybrid_cache_transaction",
+    "abort_hybrid_cache_transaction",
+    "begin_hybrid_cache_output_passthrough",
+    "end_hybrid_cache_output_passthrough",
+    "detach_hybrid_cache_transaction",
+    "commit_hybrid_cache_transaction",
+    "HybridCacheTransaction",
     "get_spec_decode_verify_steps",
     "model_config_prefill_recurrent_state_uses_cache",
 ]

@@ -61,7 +61,6 @@ def _config_path_exists(data: dict, path: str) -> bool:
 
 def _add_context_length_overrides(
     config_overrides: dict[str, object],
-    workflow_data: dict,
     context_max_length: int | None,
 ) -> None:
     if context_max_length is None:
@@ -69,17 +68,9 @@ def _add_context_length_overrides(
     if context_max_length <= 0:
         raise ValueError(f"--context-max-length must be positive, got {context_max_length}")
 
-    # Keep speculative draft cache lengths aligned with the target model when
-    # those sections are present; strict WorkflowConfig overrides reject missing
-    # paths, so probe the loaded YAML before adding optional draft overrides.
-    candidate_paths = (
-        "export.model.context_max_length",
-        "export.model.mtp_config.context_max_length",
-        "export.model.dflash_config.max_sequence_length",
-    )
-    for path in candidate_paths:
-        if _config_path_exists(workflow_data, path):
-            config_overrides[path] = context_max_length
+    # Draft cache capacities are derived from this target-model value by the
+    # model config; the CLI intentionally exposes only one context length.
+    config_overrides["export.model.context_max_length"] = context_max_length
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,6 +123,16 @@ def parse_args() -> argparse.Namespace:
         help="Dump golden data after export.",
     )
     parser.add_argument(
+        "--golden-device-map",
+        nargs="+",
+        default=None,
+        help=(
+            "Explicit HMONNX device map used only by --dump-golden. More "
+            "than one CUDA entry enables HMONNXInferenceV2 auto-offload; "
+            "ordinary golden generation remains single-device."
+        ),
+    )
+    parser.add_argument(
         "--quick-test",
         action="store_true",
         help="Run quick HMONNX test after export.",
@@ -164,9 +165,15 @@ def parse_args() -> argparse.Namespace:
         "--context-length",
         type=int,
         default=None,
+        help=("LLM max context length for export; MTP/DFlash cache capacities derive from the same value."),
+    )
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        default=None,
         help=(
-            "LLM max context length for export; overrides "
-            "export.model.context_max_length and aligned draft cache lengths when present."
+            "Override export.model.num_draft_tokens for this run. DFlash "
+            "configs default to 9; use 15 only for an explicit experiment."
         ),
     )
     _add_bool_override_args(
@@ -236,9 +243,17 @@ def main() -> None:
         config_overrides["export.model.visual_config.max_size_w"] = args.max_size_w
     _add_context_length_overrides(
         config_overrides,
-        workflow.workflow_config.data,
         args.context_max_length,
     )
+    if args.num_draft_tokens is not None:
+        if args.num_draft_tokens <= 0:
+            raise ValueError(f"--num-draft-tokens must be positive, got {args.num_draft_tokens}")
+        if not _config_path_exists(
+            workflow.workflow_config.data,
+            "export.model.num_draft_tokens",
+        ):
+            raise ValueError("--num-draft-tokens requires an MTP or DFlash workflow config")
+        config_overrides["export.model.num_draft_tokens"] = args.num_draft_tokens
     if args.flash_attention is not None:
         config_overrides["export.model.flash_attention.enable"] = args.flash_attention
     if args.fuse_gdr_ops is not None:
@@ -262,6 +277,7 @@ def main() -> None:
                 "text": "描述这张图片",
                 "image": "data/images/qwen2_vl_demo.jpeg",
             },
+            device_map=args.golden_device_map,
         )
 
     # test hmonnx generation

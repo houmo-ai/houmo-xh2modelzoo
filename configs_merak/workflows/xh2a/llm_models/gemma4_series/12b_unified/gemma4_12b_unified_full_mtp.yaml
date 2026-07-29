@@ -35,9 +35,9 @@ export:
     model_type: Gemma4UnifiedForConditionalGeneration
     hf_model: null
     model_name: gemma_4_12b_unified
-    # Keep the deploy/export default resource-safe. The checkpoint-owned
-    # 262144 RoPE limit is resolved separately; opt into a larger KV cache via
-    # workflow/CLI context_max_length only after checking device capacity.
+    # Keep the checked-in preset resource-safe. The workflow CLI overrides
+    # this single source of truth for a concrete deployment (for example,
+    # --context-max-length 262144); the MTP branch derives the same value.
     context_max_length: 2048
     prefill_chunk_length: 320
     use_cache: true
@@ -65,6 +65,8 @@ export:
     num_draft_tokens: 4
     output_post_norm_hidden: true
     mtp_config:
+      # Draft cache capacity inherits export.model.context_max_length. Override
+      # the target context once through the workflow CLI; do not size it here.
       # Required workflow inputs. The public demo/CLI injects preset defaults
       # or explicit --assistant/target model directories and validates them.
       assistant_hf_model: null
@@ -73,7 +75,6 @@ export:
       lm_head_quant_type: w4a8h0_ssfp
       batch_size: 1
       input_sequence_length: 1
-      context_max_length: 2048
       use_cache: true
       num_draft_tokens: 4
       assistant_num_hidden_layers: 4

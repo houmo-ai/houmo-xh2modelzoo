@@ -153,6 +153,63 @@ def test_merak_qwen35_hmonnx_validation_does_not_import_xh_model_zoo():
     assert "xh_model_zoo" not in src
 
 
+def test_dflash_noise_token_comes_from_contract_v2(monkeypatch):
+    runtime = _load_runtime_module(monkeypatch)
+
+    assert (
+        runtime._dflash_noise_token_from_meta(
+            {
+                "spec_decode": {
+                    "mode": "dflash",
+                    "runtime_contract_version": 2,
+                    "draft": {"noise_token_id": 0},
+                }
+            },
+            spec_mode="dflash",
+        )
+        == 0
+    )
+
+
+def test_dflash_noise_token_v2_rejects_missing_value(monkeypatch):
+    import pytest
+
+    runtime = _load_runtime_module(monkeypatch)
+
+    with pytest.raises(
+        ValueError,
+        match=r"contract v2 requires spec_decode\.draft\.noise_token_id",
+    ):
+        runtime._dflash_noise_token_from_meta(
+            {
+                "spec_decode": {
+                    "mode": "dflash",
+                    "runtime_contract_version": 2,
+                }
+            },
+            spec_mode="dflash",
+        )
+
+
+def test_dflash_noise_token_legacy_fallback_is_v1_only(monkeypatch):
+    runtime = _load_runtime_module(monkeypatch)
+
+    assert (
+        runtime._dflash_noise_token_from_meta(
+            {"spec_decode": {"mode": "dflash"}},
+            spec_mode="dflash",
+        )
+        == 248070
+    )
+    assert (
+        runtime._dflash_noise_token_from_meta(
+            {"spec_decode": {"mode": "mtp", "runtime_contract_version": 2}},
+            spec_mode="mtp",
+        )
+        is None
+    )
+
+
 def test_qwen35_spec_runtime_uses_golden_session_wrapper():
     src = (REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_onnx_model.py").read_text(encoding="utf-8")
 

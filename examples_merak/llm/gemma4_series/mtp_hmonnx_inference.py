@@ -3,28 +3,31 @@
 
 Series-local utility (do not use legacy gemma4/gemma4e/gemma4_moe paths):
 
-* ``verify`` checks the exported target/draft graph contract:
-  target emits logits + post-norm hidden only; draft consumes shared KV tensors
-  from the target runtime cache; draft KVcache nodes are read-only via
-  ``only_handle_old_cache=True``; the assistant head is W4 while the draft body is W8.
+* ``verify`` checks both supported target/draft graph contracts:
+  legacy drafts consume shared target KV tensors with read-only KVcache nodes;
+  FlashAttention drafts bind target-owned paged caches out of band through
+  PageAttentionReadOnly.  In both forms the assistant head is W4 and its body
+  is W8.
 * ``generate`` runs a small greedy MTP loop on HMONNX target + ONNX assistant.
   Each verify round feeds ``[current_token] + draft_tokens`` to the target decode
   graph, so the exported decode sequence length must be ``num_draft_tokens + 1``.
 """
+
 from __future__ import annotations
 
 import argparse
 import copy
-from contextlib import ExitStack
 import json
 import sys
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import onnx
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
@@ -32,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 EXPECTED_BASE_OUTPUTS = ["logits", "target_hidden_state"]
-EXPECTED_DRAFT_INPUTS = [
+LEGACY_DRAFT_INPUTS = [
     "input_1",
     "valid_length",
     "current_length",
@@ -41,6 +44,11 @@ EXPECTED_DRAFT_INPUTS = [
     "shared_value_cache_sliding",
     "shared_key_cache_full",
     "shared_value_cache_full",
+]
+READONLY_PAGE_DRAFT_INPUTS = [
+    "input_1",
+    "valid_length",
+    "current_length",
 ]
 EXPECTED_DRAFT_OUTPUTS = ["logits", "assistant_hidden_state"]
 
@@ -53,12 +61,21 @@ class Preset:
 
 
 PRESETS: dict[str, Preset] = {
+    "12b-unified": Preset(
+        "12b-unified",
+        "gemma4_12b_unified",
+        "dense_lm_head",
+    ),
     "e2b": Preset("e2b", "gemma4_e2b_unified", "ordered_embedding"),
     "e4b": Preset("e4b", "gemma4_e4b_unified", "ordered_embedding"),
     "26b-a4b": Preset("26b-a4b", "gemma4_26b_a4b_unified", "dense_lm_head"),
     "31b": Preset("31b", "gemma4_31b_unified", "dense_lm_head"),
 }
 DEFAULT_HF_DIRS: dict[str, tuple[str, str]] = {
+    "12b-unified": (
+        "weights/gemma-4-12B-it",
+        "weights/gemma-4-12B-it-assistant",
+    ),
     "e2b": ("weights/gemma-4-E2B-it", "weights/gemma-4-E2B-it-assistant"),
     "e4b": ("weights/gemma-4-E4B-it", "weights/gemma-4-E4B-it-assistant"),
     "26b-a4b": ("weights/gemma-4-26B-A4B-it", "weights/gemma-4-26B-A4B-it-assistant"),
@@ -139,13 +156,19 @@ def _resolve_draft_onnx(
     *,
     meta_path: Path | None = None,
     meta_dict: dict[str, Any] | None = None,
+    prefer_standalone: bool = False,
 ) -> Path:
     if draft_onnx:
         path = Path(draft_onnx).expanduser().resolve()
     elif meta_path is not None and meta_dict is not None:
         spec = _meta_spec_decode(meta_dict)
+        draft_contract = spec.get("draft")
+        if not isinstance(draft_contract, dict):
+            draft_contract = {}
+        standalone_rel = spec.get("standalone_draft_decode_onnx") or draft_contract.get("standalone_decode_hmonnx")
         rel = (
-            spec.get("draft_decode_onnx")
+            (standalone_rel if prefer_standalone else None)
+            or spec.get("draft_decode_onnx")
             or spec.get("draft_onnx")
             or meta_dict.get("draft_decode_onnx_file")
             or meta_dict.get("draft_onnx_file")
@@ -179,7 +202,13 @@ def _quant_counter(model: onnx.ModelProto) -> Counter[tuple[int, int, str]]:
     for node in model.graph.node:
         attrs = _node_attrs(node)
         if "hmfp_weight_man_bit" in attrs:
-            counter[(int(attrs["hmfp_weight_man_bit"]), int(attrs.get("hmfp_weight_hidden_bit", -1)), str(attrs.get("mode", "")))] += 1
+            counter[
+                (
+                    int(attrs["hmfp_weight_man_bit"]),
+                    int(attrs.get("hmfp_weight_hidden_bit", -1)),
+                    str(attrs.get("mode", "")),
+                )
+            ] += 1
     return counter
 
 
@@ -220,17 +249,25 @@ def _first_sliding_kv_trace_info(meta_path: Path, meta_dict: dict[str, Any]) -> 
             "op_type": op_type,
             "attention_max_length": attention_max_length,
             "node_inputs": node_inputs,
-            "accepted_count_input_index": node_inputs.index("accepted_count") if "accepted_count" in node_inputs else None,
+            "accepted_count_input_index": node_inputs.index("accepted_count")
+            if "accepted_count" in node_inputs
+            else None,
         }
     return None
 
 
-def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: str | None = None, draft_onnx: str | None = None) -> dict[str, Any]:
+def verify_preset(
+    preset: Preset, base_root: Path, draft_root: Path, *, meta: str | None = None, draft_onnx: str | None = None
+) -> dict[str, Any]:
     meta_path = _resolve_meta_path(preset, base_root, meta)
     export_dir = meta_path.parent
     meta_dict = json.loads(meta_path.read_text(encoding="utf-8"))
     model_config = meta_dict.get("model_config", {})
     spec = _meta_spec_decode(meta_dict)
+    attention_contract_version = int(
+        meta_dict.get("attention_contract_version") or model_config.get("attention_contract_version") or 1
+    )
+    uses_target_flash_attention = attention_contract_version >= 2
     if not model_config.get("enable_mtp_outputs"):
         raise AssertionError(f"{preset.name}: base export did not enable MTP outputs")
     if spec.get("mode") != "mtp" or meta_dict.get("spec_decode_mode") != "mtp":
@@ -242,7 +279,11 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
             f"{preset.name}: verify_length must be num_draft_tokens + 1, got {verify_length} vs {num_draft_tokens}"
         )
 
-    prefill_onnx = _resolve_relative_path(meta_dict.get("prefill_hmonnx", ""), export_dir) if meta_dict.get("prefill_hmonnx") else next((export_dir / "prefill").glob("*.onnx"))
+    prefill_onnx = (
+        _resolve_relative_path(meta_dict.get("prefill_hmonnx", ""), export_dir)
+        if meta_dict.get("prefill_hmonnx")
+        else next((export_dir / "prefill").glob("*.onnx"))
+    )
     decode_onnx = _target_decode_onnx_path(meta_path, meta_dict)
     prefill_model = onnx.load(str(prefill_onnx), load_external_data=False)
     decode_model = onnx.load(str(decode_onnx), load_external_data=False)
@@ -254,8 +295,20 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         raise AssertionError(f"{preset.name}: decode outputs mismatch: {decode_outputs}")
     decode_input_shape = _onnx_value_shape(decode_model, "input_1")
     decode_inputs = _load_inputs(decode_onnx)
-    if "accepted_count" not in decode_inputs:
-        raise AssertionError(f"{preset.name}: target MTP verify decode graph is missing accepted_count input")
+    if uses_target_flash_attention:
+        required_compact_inputs = {"kv_window_start_abs", "kv_valid_length"}
+        missing = required_compact_inputs.difference(decode_inputs)
+        if missing:
+            raise AssertionError(
+                f"{preset.name}: target FlashAttention decode graph is "
+                f"missing compact metadata inputs {sorted(missing)}"
+            )
+        if "sliding_attention_mask" in decode_inputs:
+            raise AssertionError(
+                f"{preset.name}: target contract-v2 decode graph retains legacy sliding_attention_mask"
+            )
+    elif "accepted_count" not in decode_inputs:
+        raise AssertionError(f"{preset.name}: legacy target MTP verify decode graph is missing accepted_count input")
     decode_kv_nodes = _kv_nodes(decode_model)
     if not decode_kv_nodes:
         raise AssertionError(f"{preset.name}: target MTP verify decode graph has no KVcache nodes")
@@ -265,7 +318,7 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         attention_max_length = int(attrs.get("attention_max_length", attrs.get("attention-max-length", -1)))
         if attention_max_length > 0:
             sliding_kv_nodes.append(node_name)
-            if "accepted_count" not in node_inputs:
+            if not uses_target_flash_attention and "accepted_count" not in node_inputs:
                 raise AssertionError(
                     f"{preset.name}: target sliding decode KVcache {node_name} does not consume accepted_count"
                 )
@@ -286,26 +339,34 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
     decode_logits_shape = _onnx_value_shape(decode_model, "logits")
     if decode_logits_shape[1] != verify_length:
         raise AssertionError(
-            f"{preset.name}: target decode logits length must be verify_length={verify_length}, got {decode_logits_shape}"
+            f"{preset.name}: target decode logits length must be "
+            f"verify_length={verify_length}, got {decode_logits_shape}"
         )
     sliding_window = int(meta_dict.get("sliding_window") or model_config.get("sliding_window") or 0)
     target_decode_sliding_width = int(
         spec.get("target_decode_sliding_output_length")
         or (_aligned(sliding_window + verify_length - 1, 16) if sliding_window > 0 else 0)
     )
-    decode_sliding_mask_shape = _onnx_value_shape(decode_model, "sliding_attention_mask")
-    if target_decode_sliding_width and decode_sliding_mask_shape[-1] != target_decode_sliding_width:
-        raise AssertionError(
-            f"{preset.name}: target decode sliding mask width must be LLMCache compact output "
-            f"{target_decode_sliding_width}, got {decode_sliding_mask_shape}"
+    if not uses_target_flash_attention:
+        decode_sliding_mask_shape = _onnx_value_shape(
+            decode_model,
+            "sliding_attention_mask",
         )
+        if target_decode_sliding_width and decode_sliding_mask_shape[-1] != target_decode_sliding_width:
+            raise AssertionError(
+                f"{preset.name}: target decode sliding mask width must be "
+                f"LLMCache compact output {target_decode_sliding_width}, "
+                f"got {decode_sliding_mask_shape}"
+            )
     layer_shapes = meta_dict.get("layer_kv_shapes") or []
     context_length = int(model_config.get("context_max_length") or 0)
     shape_lengths = [int(shape[2]) for shape in layer_shapes if len(shape) > 2]
     sliding_candidates = [length for length in shape_lengths if context_length <= 0 or length < context_length]
     shared_sliding_len = int(spec.get("shared_sliding_cache_length") or max(sliding_candidates or shape_lengths))
     shared_full_len = int(spec.get("shared_full_cache_length") or context_length or max(shape_lengths))
-    sliding_shape = next((shape for shape in layer_shapes if len(shape) > 2 and int(shape[2]) == shared_sliding_len), None)
+    sliding_shape = next(
+        (shape for shape in layer_shapes if len(shape) > 2 and int(shape[2]) == shared_sliding_len), None
+    )
     full_shape = next((shape for shape in layer_shapes if len(shape) > 2 and int(shape[2]) == shared_full_len), None)
     if sliding_shape is None or full_shape is None:
         raise AssertionError(
@@ -323,27 +384,53 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
     draft_model = onnx.load(str(draft_path), load_external_data=False)
     draft_inputs = [inp.name for inp in draft_model.graph.input]
     draft_outputs = [out.name for out in draft_model.graph.output]
-    if draft_inputs != EXPECTED_DRAFT_INPUTS:
-        raise AssertionError(f"{preset.name}: draft inputs mismatch: {draft_inputs}")
+    draft_tag_nodes = [node.name for node in draft_model.graph.node if node.op_type in {"Tag", "XHTag"}]
+    if draft_tag_nodes:
+        raise AssertionError(f"{preset.name}: assistant draft graph retains scheduling tags: {draft_tag_nodes}")
+    readonly_page_nodes = [node for node in draft_model.graph.node if node.op_type == "PageAttentionReadOnly"]
+    uses_readonly_page_attention = bool(readonly_page_nodes)
+    expected_draft_inputs = READONLY_PAGE_DRAFT_INPUTS if uses_readonly_page_attention else LEGACY_DRAFT_INPUTS
+    kv_nodes: list[tuple[str, str, dict[str, Any], list[str]]] = []
+    if draft_inputs != expected_draft_inputs:
+        raise AssertionError(
+            f"{preset.name}: "
+            f"{'read-only PageAttention' if uses_readonly_page_attention else 'legacy/shared-tensor'} "
+            f"draft inputs mismatch: {draft_inputs}"
+        )
     if draft_outputs != EXPECTED_DRAFT_OUTPUTS:
         raise AssertionError(f"{preset.name}: draft outputs mismatch: {draft_outputs}")
-    for name, target_shape in target_shared_shapes.items():
-        draft_shape = _onnx_value_shape(draft_model, name)
-        if draft_shape != target_shape:
+    if uses_readonly_page_attention:
+        if len(readonly_page_nodes) != 4:
             raise AssertionError(
-                f"{preset.name}: draft {name} shape must match manifest shared KV cache for reuse; "
-                f"draft={draft_shape}, target={target_shape}"
+                f"{preset.name}: expected 4 PageAttentionReadOnly nodes, got {len(readonly_page_nodes)}"
             )
-    if _onnx_value_shape(draft_model, "sliding_attention_mask")[-1] != target_shared_shapes["shared_key_cache_sliding"][2]:
-        raise AssertionError(f"{preset.name}: draft sliding mask width does not match shared sliding KV length")
-    kv_nodes = _kv_nodes(draft_model)
-    if len(kv_nodes) != 4:
-        raise AssertionError(f"{preset.name}: expected 4 KVcache nodes, got {len(kv_nodes)}")
-    for node_name, _, attrs, _ in kv_nodes:
-        if attrs.get("only_handle_old_cache") != 1:
-            raise AssertionError(f"{preset.name}: {node_name} missing only_handle_old_cache=1: {attrs}")
-        if "passthrough" in attrs:
-            raise AssertionError(f"{preset.name}: {node_name} still has legacy passthrough attr")
+        # Production PageAttention binds the target-owned paged caches through
+        # runtime context, so cache tensors and the dense sliding mask are
+        # deliberately absent from the graph ABI.
+        draft_contract = dict(spec.get("draft") or {})
+        if draft_contract.get("cache_binding") != "target_attention_type_owner":
+            raise AssertionError(f"{preset.name}: read-only PageAttention draft must bind target_attention_type_owner")
+    else:
+        for name, target_shape in target_shared_shapes.items():
+            draft_shape = _onnx_value_shape(draft_model, name)
+            if draft_shape != target_shape:
+                raise AssertionError(
+                    f"{preset.name}: draft {name} shape must match manifest shared KV cache for reuse; "
+                    f"draft={draft_shape}, target={target_shape}"
+                )
+        if (
+            _onnx_value_shape(draft_model, "sliding_attention_mask")[-1]
+            != target_shared_shapes["shared_key_cache_sliding"][2]
+        ):
+            raise AssertionError(f"{preset.name}: draft sliding mask width does not match shared sliding KV length")
+        kv_nodes = _kv_nodes(draft_model)
+        if len(kv_nodes) != 4:
+            raise AssertionError(f"{preset.name}: expected 4 KVcache nodes, got {len(kv_nodes)}")
+        for node_name, _, attrs, _ in kv_nodes:
+            if attrs.get("only_handle_old_cache") != 1:
+                raise AssertionError(f"{preset.name}: {node_name} missing only_handle_old_cache=1: {attrs}")
+            if "passthrough" in attrs:
+                raise AssertionError(f"{preset.name}: {node_name} still has legacy passthrough attr")
 
     w4_nodes = _w4_nodes(draft_model)
     if len(w4_nodes) != 1:
@@ -353,6 +440,67 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         raise AssertionError(f"{preset.name}: missing W4A8H0 SSFP head: {quant_counter}")
     if quant_counter[(8, 1, "sefp")] <= 0:
         raise AssertionError(f"{preset.name}: missing W8A8H1 SEFP draft body: {quant_counter}")
+
+    standalone_validation = None
+    if uses_readonly_page_attention:
+        standalone_path = _resolve_draft_onnx(
+            preset,
+            draft_root,
+            None,
+            meta_path=meta_path,
+            meta_dict=meta_dict,
+            prefer_standalone=True,
+        )
+        if standalone_path != draft_path:
+            standalone_model = onnx.load(
+                str(standalone_path),
+                load_external_data=False,
+            )
+            standalone_inputs = [inp.name for inp in standalone_model.graph.input]
+            standalone_outputs = [out.name for out in standalone_model.graph.output]
+            if standalone_inputs != LEGACY_DRAFT_INPUTS:
+                raise AssertionError(f"{preset.name}: standalone draft inputs mismatch: {standalone_inputs}")
+            if standalone_outputs != EXPECTED_DRAFT_OUTPUTS:
+                raise AssertionError(f"{preset.name}: standalone draft outputs mismatch: {standalone_outputs}")
+            standalone_tags = [node.name for node in standalone_model.graph.node if node.op_type in {"Tag", "XHTag"}]
+            if standalone_tags:
+                raise AssertionError(f"{preset.name}: standalone draft retains scheduling tags: {standalone_tags}")
+            standalone_shapes = {name: _onnx_value_shape(standalone_model, name) for name in target_shared_shapes}
+            if standalone_shapes != target_shared_shapes:
+                raise AssertionError(
+                    f"{preset.name}: standalone shared-cache shapes do not "
+                    f"match target: draft={standalone_shapes}, "
+                    f"target={target_shared_shapes}"
+                )
+            standalone_kv_nodes = _kv_nodes(standalone_model)
+            if len(standalone_kv_nodes) != 4:
+                raise AssertionError(
+                    f"{preset.name}: standalone draft expected 4 read-only "
+                    f"KVcache nodes, got {len(standalone_kv_nodes)}"
+                )
+            for node_name, _, attrs, _ in standalone_kv_nodes:
+                if attrs.get("only_handle_old_cache") != 1:
+                    raise AssertionError(
+                        f"{preset.name}: standalone {node_name} missing only_handle_old_cache=1: {attrs}"
+                    )
+            standalone_w4 = _w4_nodes(standalone_model)
+            standalone_quant = _quant_counter(standalone_model)
+            if (
+                len(standalone_w4) != 1
+                or standalone_quant[(4, 0, "ssfp")] != 1
+                or standalone_quant[(8, 1, "sefp")] <= 0
+            ):
+                raise AssertionError(
+                    f"{preset.name}: standalone draft quant contract "
+                    f"mismatch: w4={standalone_w4}, quant={standalone_quant}"
+                )
+            standalone_validation = {
+                "onnx": str(standalone_path),
+                "inputs": standalone_inputs,
+                "outputs": standalone_outputs,
+                "shared_shapes": standalone_shapes,
+                "kv_cache_attrs": [attrs for _, _, attrs, _ in standalone_kv_nodes],
+            }
 
     return {
         "preset": preset.name,
@@ -365,12 +513,19 @@ def verify_preset(preset: Preset, base_root: Path, draft_root: Path, *, meta: st
         "decode_inputs": decode_inputs,
         "decode_input_shape": decode_input_shape,
         "decode_logits_shape": decode_logits_shape,
+        "target_attention_contract_version": attention_contract_version,
         "target_shared_shapes": target_shared_shapes,
         "base_outputs": decode_outputs,
         "draft_onnx": str(draft_path),
         "draft_inputs": draft_inputs,
         "draft_outputs": draft_outputs,
-        "draft_shared_shapes": {name: _onnx_value_shape(draft_model, name) for name in target_shared_shapes},
+        "draft_attention_contract": ("readonly_page_attention" if uses_readonly_page_attention else "shared_tensor"),
+        "standalone_draft": standalone_validation,
+        "draft_shared_shapes": (
+            {}
+            if uses_readonly_page_attention
+            else {name: _onnx_value_shape(draft_model, name) for name in target_shared_shapes}
+        ),
         "kv_cache_attrs": [attrs for _, _, attrs, _ in kv_nodes],
         "target_kv_cache_inputs": {node_name: node_inputs for node_name, _, _, node_inputs in decode_kv_nodes},
         "w4_head_node": {"name": w4_nodes[0][0], "op_type": w4_nodes[0][1], "attrs": w4_nodes[0][2]},
@@ -412,6 +567,18 @@ class AssistantDraftSession:
     """Thin HMONNXGraph wrapper for the exported assistant ONNX."""
 
     def __init__(self, onnx_path: str | Path, device):
+        graph_input_names = _load_inputs(Path(onnx_path))
+        if "shared_key_cache_sliding" not in graph_input_names:
+            # Reject before constructing/moving HMONNX. Loading the production
+            # PageAttention graph as an independent session cannot bind the
+            # target runtime's cache owner and may reserve substantial useless
+            # device memory before failing.
+            raise RuntimeError(
+                "Standalone Gemma4 MTP generation requires the shared-tensor "
+                "draft graph. The read-only PageAttention deploy graph relies "
+                "on Merak to bind target-owned paged caches. Use the manifest's "
+                "spec_decode.standalone_draft_decode_onnx artifact instead."
+            )
         from xhquant.xhonnxruntime import HMONNXGrapInference
 
         self.session = HMONNXGrapInference(str(onnx_path))
@@ -443,7 +610,8 @@ class AssistantDraftSession:
                 if expected_shape and tuple(value.shape) != expected_shape:
                     raise RuntimeError(
                         f"Assistant input {name!r} shape mismatch: got {tuple(value.shape)}, "
-                        f"expected {expected_shape}. Re-export target and draft from one manifest instead of slicing caches."
+                        f"expected {expected_shape}. Re-export target and draft from one "
+                        "manifest instead of slicing caches."
                     )
                 expected_dtype = self.input_infos[name].dtype
                 if value.dtype != expected_dtype:
@@ -455,7 +623,7 @@ class AssistantDraftSession:
         else:
             if not isinstance(outputs, (tuple, list)):
                 outputs = (outputs,)
-            output_map = {name: output for name, output in zip(self.output_names, outputs)}
+            output_map = {name: output for name, output in zip(self.output_names, outputs, strict=True)}
         return output_map[self.output_names[0]], output_map[self.output_names[1]]
 
 
@@ -478,6 +646,7 @@ class TorchAssistantDraftSession:
         dtype,
     ):
         import torch
+
         from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import Gemma4AssistantDraftModule
 
         model_config = meta.get("model_config", {})
@@ -495,17 +664,18 @@ class TorchAssistantDraftSession:
         self.device = device
         self.dtype = dtype
         shared_sliding = int(
-            spec.get("shared_sliding_cache_length")
-            or meta.get("kv_cache", {}).get("kv_cache_shape", [0, 0, 0, 0])[2]
+            spec.get("shared_sliding_cache_length") or meta.get("kv_cache", {}).get("kv_cache_shape", [0, 0, 0, 0])[2]
         )
-        shared_full = int(spec.get("shared_full_cache_length") or model_config.get("context_max_length") or context_length)
+        shared_full = int(
+            spec.get("shared_full_cache_length") or model_config.get("context_max_length") or context_length
+        )
         target_text = json.loads((Path(target_model_dir) / "config.json").read_text(encoding="utf-8"))["text_config"]
         full_heads = int(target_text.get("num_global_key_value_heads") or target_text["num_key_value_heads"])
         full_dim = int(target_text.get("global_head_dim") or target_text["head_dim"])
         sliding_heads = int(target_text["num_key_value_heads"])
         sliding_dim = int(target_text["head_dim"])
         hidden_size = int(self.module.backbone_hidden_size)
-        self.input_names = list(EXPECTED_DRAFT_INPUTS)
+        self.input_names = list(LEGACY_DRAFT_INPUTS)
         self.output_names = list(EXPECTED_DRAFT_OUTPUTS)
         self.input_infos = {
             "input_1": SimpleNamespace(shape=(1, input_sequence_length, hidden_size * 2), dtype=dtype),
@@ -583,7 +753,10 @@ class TorchTargetSession:
             trust_remote_code=True,
         ).eval()
         if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] < 9:
-            for cfg in (getattr(self.model, "config", None), getattr(getattr(self.model, "config", None), "text_config", None)):
+            for cfg in (
+                getattr(self.model, "config", None),
+                getattr(getattr(self.model, "config", None), "text_config", None),
+            ):
                 if cfg is not None and hasattr(cfg, "_experts_implementation"):
                     cfg._experts_implementation = "batched_mm"
         self.config_dict = json.loads((Path(self.model_dir) / "config.json").read_text(encoding="utf-8"))
@@ -592,10 +765,11 @@ class TorchTargetSession:
         self.sliding_window = int(self.text_config.get("sliding_window") or meta.get("sliding_window") or 1024)
         spec = _meta_spec_decode(meta)
         self.shared_sliding = int(
-            spec.get("shared_sliding_cache_length")
-            or meta.get("kv_cache", {}).get("kv_cache_shape", [0, 0, 0, 0])[2]
+            spec.get("shared_sliding_cache_length") or meta.get("kv_cache", {}).get("kv_cache_shape", [0, 0, 0, 0])[2]
         )
-        self.shared_full = int(spec.get("shared_full_cache_length") or meta.get("model_config", {}).get("context_max_length") or 2048)
+        self.shared_full = int(
+            spec.get("shared_full_cache_length") or meta.get("model_config", {}).get("context_max_length") or 2048
+        )
         self._cache = None
         self._pre_verify_cache = None
         self._last_verify_ids: list[int] = []
@@ -637,7 +811,9 @@ class TorchTargetSession:
     def _pad_cache(self, tensor, width: int):
         import torch
 
-        out = torch.zeros((tensor.shape[0], tensor.shape[1], width, tensor.shape[3]), dtype=tensor.dtype, device=tensor.device)
+        out = torch.zeros(
+            (tensor.shape[0], tensor.shape[1], width, tensor.shape[3]), dtype=tensor.dtype, device=tensor.device
+        )
         take = min(int(tensor.shape[2]), int(width))
         if take > 0:
             out[:, :, :take, :] = tensor[:, :, -take:, :]
@@ -697,10 +873,7 @@ class TorchTargetSession:
     def commit_cache(self, valid_length: int) -> dict[str, Any]:
         valid_length = int(valid_length)
         accepted_steps = valid_length - int(self._last_verify_past_seq_length)
-        if (
-            self._pre_verify_cache is not None
-            and 0 <= accepted_steps < len(self._last_verify_ids)
-        ):
+        if self._pre_verify_cache is not None and 0 <= accepted_steps < len(self._last_verify_ids):
             import torch
 
             self._cache = copy.deepcopy(self._pre_verify_cache)
@@ -841,7 +1014,6 @@ def _scalar_debug_value(value: Any) -> int | float | str:
 
 
 def _run_target_prefill(target_model, input_ids):
-    import torch
 
     if hasattr(target_model, "run_prefill_ids"):
         return target_model.run_prefill_ids(input_ids)
@@ -918,6 +1090,7 @@ def _cache_to_tensor(cache):
 
 def _clone_cache_tensor(cache):
     import torch
+
     from xhquant.core import CacheTensor
 
     if hasattr(cache, "data") and torch.is_tensor(cache.data):
@@ -989,7 +1162,9 @@ def _hmonnx_shared_from_cache(target_model) -> dict[str, Any]:
     }
 
 
-def _commit_one_hmonnx_cache(before_cache, verified_cache, past_seq_length: int, commit_length: int, verify_length: int):
+def _commit_one_hmonnx_cache(
+    before_cache, verified_cache, past_seq_length: int, commit_length: int, verify_length: int
+):
     del before_cache
     committed_cache = _clone_cache_tensor(verified_cache)
     committed_tensor = _cache_to_tensor(committed_cache)
@@ -1025,11 +1200,19 @@ def _commit_hmonnx_verified_cache(
     before_key_caches, before_value_caches = snapshot
     committed_key_caches = [
         _commit_one_hmonnx_cache(before, verified, past_seq_length, commit_length, verify_length)
-        for before, verified in zip(before_key_caches, target_model.past_key_caches)
+        for before, verified in zip(
+            before_key_caches,
+            target_model.past_key_caches,
+            strict=True,
+        )
     ]
     committed_value_caches = [
         _commit_one_hmonnx_cache(before, verified, past_seq_length, commit_length, verify_length)
-        for before, verified in zip(before_value_caches, target_model.past_value_caches)
+        for before, verified in zip(
+            before_value_caches,
+            target_model.past_value_caches,
+            strict=True,
+        )
     ]
     target_model._kvcache_mixin.past_key_caches.clear()
     target_model._kvcache_mixin.past_key_caches.extend(committed_key_caches)
@@ -1104,26 +1287,42 @@ def _build_assistant_inputs(
     import torch
 
     device = target_model.device
+    input_names = set(
+        getattr(
+            assistant_session,
+            "input_names",
+            assistant_session.input_infos.keys(),
+        )
+    )
     token = torch.tensor([[int(last_token_id)]], dtype=torch.long, device=device)
     token_embed = target_model.get_input_embeddings().to(device)(token).to(dtype=current_hidden.dtype)
     inputs_embeds = torch.cat([token_embed, current_hidden], dim=-1)
-    sliding_mask = _build_draft_masks(
-        target_model,
-        assistant_session,
-        cache_valid_length,
-        sliding_valid_length=sliding_valid_length,
-    )
+    sliding_mask = None
+    if "sliding_attention_mask" in input_names:
+        sliding_mask = _build_draft_masks(
+            target_model,
+            assistant_session,
+            cache_valid_length,
+            sliding_valid_length=sliding_valid_length,
+        )
     draft_valid_length = max(int(position_index) - 1, 0)
-    return {
+    result = {
         "inputs_embeds": inputs_embeds,
-        # Full-attention draft no longer feeds a context-length full mask.
-        # xhquant/compiler MaskedSoftmax exposes valid_length + 1 positions for
-        # q=1, so pass N-1 to expose the N valid keys already in the target KV.
+        # Both supported graph ABIs use N-1, for two equivalent reasons:
+        # * legacy/non-FA MaskedSoftmax exposes valid_length + 1 keys for q=1;
+        # * read-only Flash/PageAttention treats q as position N-1 and receives
+        #   current_length=1, so its visible target-KV length is N.
+        # The assistant never appends draft KV, therefore N stays constant for
+        # every proposal in one speculative round.
         "past_seq_length": torch.tensor([draft_valid_length], dtype=torch.int32, device=device),
         "current_length": torch.tensor([1], dtype=torch.int32, device=device),
-        "sliding_attention_mask": sliding_mask,
-        **shared,
     }
+    if sliding_mask is not None:
+        result["sliding_attention_mask"] = sliding_mask
+    for name, value in shared.items():
+        if name in input_names:
+            result[name] = value
+    return result
 
 
 def generate_with_mtp(
@@ -1170,19 +1369,19 @@ def generate_with_mtp(
         draft_tokens: list[int] = []
         assistant_hidden = last_hidden
         assistant_last_token_id = int(current_token_id)
-        # The draft full-attention MaskedSoftmax sees q=1 and exposes
-        # valid_length + 1 K positions, so the helper below passes
-        # (base_position + draft_step - 1) as the graph valid_length.
+        # Gemma4's Q-only assistant shares target KV and does not append draft
+        # K/V. Match the official proposer: every draft in this round uses the
+        # same last-target rotary position and target-cache visibility.
         base_position = max(int(past_seq_length), 0)
         _, sliding_valid_length = _hmonnx_shared_cache_valid_lengths(target_model, past_seq_length)
-        for draft_step in range(num_draft_tokens):
+        for _ in range(num_draft_tokens):
             round_inputs = _build_assistant_inputs(
                 target_model=target_model,
                 assistant_session=assistant_session,
                 last_token_id=assistant_last_token_id,
                 current_hidden=assistant_hidden,
                 shared=shared,
-                position_index=base_position + draft_step,
+                position_index=base_position,
                 sliding_valid_length=sliding_valid_length,
             )
             draft_logits, assistant_hidden = assistant_session(**round_inputs)
@@ -1204,30 +1403,34 @@ def generate_with_mtp(
             verify_ids = verify_ids + [verify_ids[-1]] * (verify_length - len(verify_ids))
         round_past_seq_length = int(past_seq_length)
         verify_input_accepted_count = int(getattr(target_model, "_mtp_next_verify_accepted_count", 0))
-        setattr(target_model, "_mtp_trace_accepted_count", bool(trace_accepted_count))
-        setattr(target_model, "_mtp_verify_round_index", int(stats["verify_rounds"]))
+        target_model._mtp_trace_accepted_count = bool(trace_accepted_count)
+        target_model._mtp_verify_round_index = int(stats["verify_rounds"])
         cache_snapshot = (
-            _snapshot_hmonnx_kv_cache(target_model)
-            if _target_needs_manual_cache_commit(target_model)
-            else None
+            _snapshot_hmonnx_kv_cache(target_model) if _target_needs_manual_cache_commit(target_model) else None
         )
-        verify_logits, verify_hidden, verify_shared = _run_target_verify(target_model, verify_ids, round_past_seq_length)
+        verify_logits, verify_hidden, verify_shared = _run_target_verify(
+            target_model, verify_ids, round_past_seq_length
+        )
         predicted_tokens = [
-            int(torch.argmax(verify_logits[:, idx : idx + 1, :], dim=-1)[0, 0].item())
-            for idx in range(len(verify_ids))
+            int(torch.argmax(verify_logits[:, idx : idx + 1, :], dim=-1)[0, 0].item()) for idx in range(len(verify_ids))
         ]
 
         accepted_count = 0
-        for predicted_token, draft_token in zip(predicted_tokens, draft_tokens):
+        for predicted_token, draft_token in zip(
+            predicted_tokens,
+            draft_tokens,
+            strict=False,
+        ):
             if int(predicted_token) != int(draft_token):
                 break
             accepted_count += 1
-        setattr(target_model, "_mtp_next_verify_accepted_count", int(accepted_count))
+        target_model._mtp_next_verify_accepted_count = int(accepted_count)
         stats["accepted_count_inputs"].append(verify_input_accepted_count)
         stats["draft_accepted"] += accepted_count
         stats["accepted_per_round"].append(accepted_count)
         if trace_accepted_count:
             kv_desc = trace_kv_input_info or {}
+            previous_accepted_count = stats["accepted_per_round"][-2] if len(stats["accepted_per_round"]) > 1 else 0
             print(
                 "[MTP accepted_count trace] "
                 f"verify_round={int(stats['verify_rounds'])} "
@@ -1236,7 +1439,7 @@ def generate_with_mtp(
                 f"input_accepted_count={verify_input_accepted_count} "
                 f"current_round_accepted_tokens={accepted_count} "
                 f"next_verify_expected_accepted_count={accepted_count} "
-                f"match_previous={verify_input_accepted_count == (stats['accepted_per_round'][-2] if len(stats['accepted_per_round']) > 1 else 0)}"
+                f"match_previous={verify_input_accepted_count == previous_accepted_count}"
             )
 
         for token in draft_tokens[:accepted_count]:
@@ -1315,6 +1518,7 @@ def run_verify(args: argparse.Namespace) -> None:
 
 def run_generate(args: argparse.Namespace) -> None:
     import torch
+
     from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
     from xhquant.api import get_xhquant_logger, xhquant_init
     from xhquant.utils import MemoryTracker, TimeProfiler
@@ -1324,15 +1528,31 @@ def run_generate(args: argparse.Namespace) -> None:
     meta_for_draft = json.loads(meta_path.read_text(encoding="utf-8"))
     draft_onnx = None
     if args.draft_backend == "hmonnx":
-        draft_onnx = _resolve_draft_onnx(
+        deploy_draft_onnx = _resolve_draft_onnx(
             preset, Path(args.draft_root), args.draft_onnx, meta_path=meta_path, meta_dict=meta_for_draft
         )
-        verify_preset(preset, Path(args.base_root), Path(args.draft_root), meta=str(meta_path), draft_onnx=str(draft_onnx))
+        verify_preset(
+            preset,
+            Path(args.base_root),
+            Path(args.draft_root),
+            meta=str(meta_path),
+            draft_onnx=str(deploy_draft_onnx),
+        )
+        draft_onnx = _resolve_draft_onnx(
+            preset,
+            Path(args.draft_root),
+            args.draft_onnx,
+            meta_path=meta_path,
+            meta_dict=meta_for_draft,
+            prefer_standalone=True,
+        )
     elif args.draft_onnx:
         # Keep the target/draft ONNX contract check available even when the
         # current run uses fp draft.  This catches stale manifests before a
         # mixed-backend diagnosis compares against the wrong exported graph.
-        verify_preset(preset, Path(args.base_root), Path(args.draft_root), meta=str(meta_path), draft_onnx=args.draft_onnx)
+        verify_preset(
+            preset, Path(args.base_root), Path(args.draft_root), meta=str(meta_path), draft_onnx=args.draft_onnx
+        )
 
     log_file = meta_path.parent / "gemma4_series_mtp_hmonnx_generate.log"
     xhquant_init(str(log_file), args.debug)
@@ -1368,7 +1588,12 @@ def run_generate(args: argparse.Namespace) -> None:
     if args.draft_backend == "hmonnx":
         if draft_onnx is None:
             draft_onnx = _resolve_draft_onnx(
-                preset, Path(args.draft_root), args.draft_onnx, meta_path=meta_path, meta_dict=meta_for_draft
+                preset,
+                Path(args.draft_root),
+                args.draft_onnx,
+                meta_path=meta_path,
+                meta_dict=meta_for_draft,
+                prefer_standalone=True,
             )
         assistant_session = AssistantDraftSession(draft_onnx, device)
         draft_desc = str(draft_onnx)
@@ -1396,7 +1621,10 @@ def run_generate(args: argparse.Namespace) -> None:
             raise RuntimeError(f"{args.preset}: cannot find a sliding KVcache node in target decode ONNX")
         print("[MTP accepted_count trace] first sliding KVcache node")
         print(json.dumps(trace_kv_input_info, ensure_ascii=False, indent=2))
-    with TimeProfiler("gemma4_series_mtp_hmonnx_generate", logger), MemoryTracker(device=str(device), name="generate", logger=logger):
+    with (
+        TimeProfiler("gemma4_series_mtp_hmonnx_generate", logger),
+        MemoryTracker(device=str(device), name="generate", logger=logger),
+    ):
         with ExitStack() as stack:
             if args.target_backend == "hmonnx":
                 stack.enter_context(LLMInferenceContextManager(target_model, [device]))

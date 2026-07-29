@@ -21,6 +21,7 @@ def _write_flash_contract_graph(
     attention_kv_source_layers: tuple[int, ...] | None = None,
     include_mm_prefix_input: bool = True,
     flash_mm_input_name: str | None = None,
+    full_mm_input_name: str | None = None,
     attention_scale: float = 1.0,
 ) -> None:
     past_length_name = "valid_length" if xhquant_export_names else "past_seq_length"
@@ -80,10 +81,12 @@ def _write_flash_contract_graph(
             if mm_input is None:
                 mm_input = "mm_prefix_ranges" if include_mm_prefix_input else ""
             flash_inputs.extend(["", mm_input, *compact_tail])
-        elif include_mm_prefix_input:
-            # Bidirectional visual ranges apply to both Gemma4 sliding and
-            # full attention; only the sliding layer consumes window scalars.
-            flash_inputs.extend(["", flash_mm_input_name or "mm_prefix_ranges"])
+        else:
+            # Gemma4 full attention is causal even for visual prompts. Keep
+            # the optional mm slot empty unless a negative test explicitly
+            # asks for a stale full-layer overlay.
+            if full_mm_input_name is not None or full_has_sliding_metadata:
+                flash_inputs.extend(["", full_mm_input_name or ""])
             if full_has_sliding_metadata:
                 flash_inputs.extend(compact_tail)
         nodes.append(
@@ -346,6 +349,21 @@ def test_onnx_validator_rejects_non_bidirectional_sliding_node_mm_slot(tmp_path)
         validate_gemma4_flash_attention_graph(graph_path, meta)
 
 
+def test_onnx_validator_rejects_bidirectional_overlay_on_full_layer(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        validate_gemma4_flash_attention_graph,
+    )
+
+    graph_path = tmp_path / "bidi_with_stale_full_overlay.onnx"
+    _write_flash_contract_graph(
+        graph_path,
+        full_mm_input_name="mm_prefix_ranges",
+    )
+
+    with pytest.raises(ValueError, match="full FlashAttention layer 1.*must remain causal"):
+        validate_gemma4_flash_attention_graph(graph_path, _flash_contract_meta())
+
+
 def test_onnx_validator_accepts_real_xhquant_hmonnx_input_names(tmp_path):
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
         validate_gemma4_flash_attention_graph,
@@ -543,15 +561,76 @@ def _patch_hf_config(monkeypatch, *, layer_types=None, sliding_window=512):
     return XHGemma4SeriesModelConfig
 
 
-def test_v2_mtp_is_rejected_by_public_config(monkeypatch):
+def test_v2_mtp_is_enabled_by_public_config(monkeypatch):
     config_cls = _patch_hf_config(monkeypatch)
 
-    with pytest.raises(ValueError, match="contract-v2.*MTP"):
-        config_cls(
-            model_name="e2b",
-            attention_contract_version=2,
-            spec_decode_mode="mtp",
-        )
+    config = config_cls(
+        model_name="e2b",
+        flash_attention={"enable": True},
+        spec_decode_mode="mtp",
+    )
+
+    assert config.attention_lowering == "flash_attention"
+    assert config.enable_mtp_outputs is True
+
+
+def test_v2_mtp_uses_compact_bridge_and_does_not_export_accepted_count(monkeypatch):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        XHGemma4SeriesModel,
+    )
+    from xhmodel_merak.xh_llm.models.gemma4_series.llm_text import (
+        _Gemma4FlashAttentionBridgeNoMM,
+        _make_text_export_bridge_if_needed,
+    )
+
+    class FakeLanguageModel(torch.nn.Module):
+        def forward(self, **kwargs):
+            return kwargs["inputs_embeds"]
+
+    class FakeHFModel:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                get_text_config=lambda: SimpleNamespace(hidden_size_per_layer_input=0),
+                text_config=SimpleNamespace(final_logit_softcapping=None),
+            )
+            self.model = SimpleNamespace(language_model=FakeLanguageModel())
+            self.lm_head = torch.nn.Identity()
+
+    bridge = _make_text_export_bridge_if_needed(
+        FakeHFModel(),
+        attention_contract_version=2,
+        enable_mtp_outputs=True,
+    )
+    assert isinstance(bridge, _Gemma4FlashAttentionBridgeNoMM)
+    assert bridge.enable_mtp_outputs is True
+
+    model = object.__new__(XHGemma4SeriesModel)
+    model.config = SimpleNamespace(
+        attention_contract_version=2,
+        attention_lowering="flash_attention",
+        spec_decode_mode="mtp",
+        enable_mtp_outputs=True,
+        bidirectional_vision_attention=False,
+        hidden_size_per_layer_input=0,
+        sliding_kv_cache_input_mode="slice_window",
+    )
+    model.per_layer_input_embedding = None
+    model._llm_prefill = False
+    model._kvcache_config = SimpleNamespace(num_layers=0)
+
+    assert model._uses_compact_attention_contract() is True
+    assert model._uses_target_verify_decode_accepted_count() is False
+    assert model._mtp_decode_wrap_cfg_overrides() == {"num_logits_to_keep": 0}
+    assert model.get_export_cfg() == {
+        "input_names": [
+            "inputs_embeds",
+            "past_seq_length",
+            "current_input_length",
+            "kv_window_start_abs",
+            "kv_valid_length",
+        ],
+        "output_names": ["logits", "target_hidden_state"],
+    }
 
 
 def test_contract_gate_is_typed_and_requires_explicit_sliding_layer(monkeypatch):
@@ -581,7 +660,10 @@ def test_contract_gate_is_typed_and_requires_explicit_sliding_layer(monkeypatch)
     assert v2.uses_sliding_flash_attention_v2 is True
 
     config_cls = _patch_hf_config(monkeypatch, layer_types=["full_attention"])
-    full_only = config_cls(model_name="full_only", attention_contract_version=2)
+    full_only = config_cls(
+        model_name="full_only",
+        flash_attention={"enable": True},
+    )
     assert full_only.uses_sliding_flash_attention_v2 is False
 
     legacy = config_cls(model_name="legacy")
@@ -597,7 +679,11 @@ def test_attention_visibility_spec_is_identical_across_lowering_versions(monkeyp
     )
 
     legacy = config_cls(model_name="legacy", attention_contract_version=1, max_mm_ranges_per_chunk=3)
-    flash = config_cls(model_name="flash", attention_contract_version=2, max_mm_ranges_per_chunk=3)
+    flash = config_cls(
+        model_name="flash",
+        flash_attention={"enable": True},
+        max_mm_ranges_per_chunk=3,
+    )
 
     assert legacy.attention_lowering == "legacy_attention"
     assert flash.attention_lowering == "flash_attention"
@@ -619,9 +705,15 @@ def test_attention_visibility_spec_is_identical_across_lowering_versions(monkeyp
     ("kwargs", "message"),
     [
         ({"attention_contract_version": 3}, "attention_contract_version"),
-        ({"attention_contract_version": 2, "max_mm_ranges_per_chunk": 0}, "max_mm_ranges_per_chunk"),
         (
-            {"attention_contract_version": 2, "sliding_kv_cache_input_mode": "legacy_full"},
+            {"flash_attention": {"enable": True}, "max_mm_ranges_per_chunk": 0},
+            "max_mm_ranges_per_chunk",
+        ),
+        (
+            {
+                "flash_attention": {"enable": True},
+                "sliding_kv_cache_input_mode": "legacy_full",
+            },
             "contract-v2.*slice_window",
         ),
     ],
@@ -659,17 +751,32 @@ def test_contract_metadata_fields_are_normalized():
     assert restored.uses_sliding_flash_attention_v2 is True
 
 
+def test_legacy_contract_metadata_defaults_to_version_one():
+    from xhmodel_merak.xh_llm.models.gemma4_series.xh_gemma4_series_config import (
+        Gemma4SeriesModelMeta,
+    )
+
+    meta = Gemma4SeriesModelMeta()
+
+    assert meta.attention_contract_version == 1
+    assert meta.attention_lowering == "legacy_attention"
+
+
 def test_flash_attention_yamls_are_additive_and_preserve_existing_configs():
     root = Path("configs_merak/workflows/xh2a/llm_models/gemma4_series")
     paths = sorted(root.glob("*/*.yaml"))
-    assert len(paths) == 24
 
-    mtp_paths = [path for path in paths if path.stem.endswith("_mtp")]
-    base_paths = [
-        path for path in paths if not path.stem.endswith(("_mtp", "_flash_attention"))
-    ]
     flash_paths = [path for path in paths if path.stem.endswith("_flash_attention")]
-    assert len(mtp_paths) == len(base_paths) == len(flash_paths) == 8
+    assert len(flash_paths) == 9
+    base_paths = [
+        path.with_name(path.name.removesuffix("_flash_attention.yaml") + ".yaml")
+        for path in flash_paths
+    ]
+    mtp_paths = [
+        path.with_name(path.name.removesuffix("_flash_attention.yaml") + "_mtp.yaml")
+        for path in flash_paths
+    ]
+    assert all(path in paths for path in [*base_paths, *mtp_paths])
 
     for path in [*mtp_paths, *base_paths]:
         model = yaml.safe_load(path.read_text(encoding="utf-8"))["export"]["model"]
@@ -682,9 +789,14 @@ def test_flash_attention_yamls_are_additive_and_preserve_existing_configs():
         base_payload = yaml.safe_load(base_path.read_text(encoding="utf-8"))
         flash_payload = yaml.safe_load(flash_path.read_text(encoding="utf-8"))
         flash_model = flash_payload["export"]["model"]
-        assert flash_model.pop("attention_contract_version") == 2, flash_path
-        assert flash_model.pop("max_mm_ranges_per_chunk") >= 1, flash_path
-        assert flash_model.pop("flash_attention") == {
+        # Older family presets serialize v2 explicitly; Gemma4-12B uses the
+        # canonical derived form. Both are equivalent and keep the paired
+        # non-FlashAttention YAML unchanged.
+        assert int(flash_model.pop("attention_contract_version", 2)) == 2, flash_path
+        assert int(flash_model.pop("max_mm_ranges_per_chunk", 1)) >= 1, flash_path
+        flash_attention = flash_model.pop("flash_attention")
+        assert flash_attention.pop("enable", True) is True, flash_path
+        assert flash_attention == {
             "q_bits": 8,
             "k_bits": 8,
             "v_bits": 8,
@@ -1692,7 +1804,7 @@ def test_all_flash_layers_receive_visual_ranges_but_only_sliding_receives_compac
     assert sliding_call["mm_prefix_range"] is mm_ranges
     assert sliding_call["kv_window_start_abs"] is start
     assert sliding_call["kv_valid_length"] is valid
-    assert full_call["mm_prefix_range"] is mm_ranges
+    assert full_call["mm_prefix_range"] is None
     assert full_call["kv_window_start_abs"] is None
     assert full_call["kv_valid_length"] is None
     assert sliding_call["past_seq_length"] is past

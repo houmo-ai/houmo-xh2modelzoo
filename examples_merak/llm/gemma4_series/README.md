@@ -13,6 +13,10 @@ Gemma4ForConditionalGeneration
 旧 `gemma4/`、`gemma4e/`、`gemma4_moe/` 目录只作为历史兼容面；新的
 Gemma4 Series 导出/生成不要再把它们当实现入口。
 
+Gemma4 Series Merak 路径已验证使用 Transformers 5.13。不要据此直接修改整个
+仓库的 4.57 依赖约束；专用环境、Safetensors 下限和验证矩阵见
+[Merak Transformers 5.13 兼容性结论](../../../docs/merak_transformers_5_13_compatibility_20260727.md)。
+
 ## 详细文档
 
 完整结构差异、输入输出 shape、HMONNX 产物说明、量化/导出/demo/e2e 命令见：

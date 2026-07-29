@@ -40,6 +40,47 @@ def test_qwen3_next_merak_config_keeps_hybrid_and_mtp_defaults():
     assert cfg.mtp_config.hf_model == "weights/qwen3-next"
 
 
+def test_qwen3_next_mtp_inherits_flash_attention_contract():
+    from xhmodel_merak.xh_llm.models.qwen3_next import XHQwen3NextModelConfig
+    from xhmodel_merak.xh_llm.models.qwen3_next._mtp_model_impl import (
+        MTPGatedAttention,
+    )
+    from xhquant.nn import FlashAttention
+
+    flash_attention = {
+        "enable": True,
+        "q_bits": 8,
+        "k_bits": 8,
+        "v_bits": 8,
+        "s_bits": 8,
+        "p_bits": 8,
+    }
+    cfg = XHQwen3NextModelConfig(
+        model_name="qwen3-next",
+        hf_model="weights/qwen3-next",
+        flash_attention=flash_attention,
+        spec_decode_mode="mtp",
+        mtp_config={},
+    )
+
+    assert cfg.mtp_config.flash_attention == flash_attention
+    attention = MTPGatedAttention(
+        hidden_size=8,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=4,
+        rotary_dim=2,
+        rms_norm_eps=1e-6,
+        input_sequence_length=1,
+        rope_theta=10_000.0,
+        max_pe_length=16,
+        use_cache=True,
+        flash_attention=cfg.mtp_config.flash_attention,
+    )
+    assert attention.use_flash_attention is True
+    assert isinstance(attention.flash_attn, FlashAttention)
+
+
 def test_qwen3_next_mtp_layer_discovery_requires_contiguous_indices():
     from xhmodel_merak.xh_llm.models.qwen3_next._mtp_model_impl import (
         infer_mtp_layer_indices,
@@ -337,16 +378,43 @@ def test_qwen3_next_target_verification_keeps_all_split_conv_snapshots():
     assert "conv_cache_out_list.append(conv_cache_out[0])" not in shared_source
 
 
-def test_qwen3_next_mtp_export_uses_the_quantized_target_verify_length():
-    from xhmodel_merak.xh_llm.models.qwen3_next import qwen3_next_model
+def test_qwen3_next_mtp_export_reuses_full_target_spec_decode_contract():
+    from xhmodel_merak.xh_llm.models.qwen3_next import (
+        XHQwen3NextModel,
+        qwen3_next_model,
+    )
 
     source = Path(qwen3_next_model.__file__).read_text()
     export_body = source.split("def export_hmonnx", 1)[1]
 
-    assert "self._decode_input_sequence_length = self.config.num_draft_tokens + 1" in export_body
-    assert '"verify_output_intermediates": True' in export_body
-    assert '"output_post_norm_hidden": True' in export_body
-    assert "self._quanted_model.prefill.apply" not in export_body
+    assert "self._configure_spec_decode_target_export()" in export_body
+    assert "build_qwen35_spec_decode_contract(" in export_body
+    assert "meta_info.spec_decode_draft_head_weight_bits" in export_body
+
+    class FakeTextGraph(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.num_logits_to_keep = 1
+            self.output_post_norm_hidden = False
+
+    target = SimpleNamespace(
+        config=SimpleNamespace(spec_decode_mode="mtp", num_draft_tokens=4),
+        wrap_cfg={},
+        _quanted_model=SimpleNamespace(
+            prefill=FakeTextGraph(),
+            decode=FakeTextGraph(),
+        ),
+    )
+
+    XHQwen3NextModel._configure_spec_decode_target_export(target)
+
+    assert target._decode_input_sequence_length == 5
+    assert target.wrap_cfg["num_logits_to_keep"] == 0
+    assert target.wrap_cfg["output_post_norm_hidden"] is True
+    assert target._quanted_model.prefill.num_logits_to_keep == 0
+    assert target._quanted_model.prefill.output_post_norm_hidden is True
+    assert target._quanted_model.decode.num_logits_to_keep == 0
+    assert target._quanted_model.decode.output_post_norm_hidden is True
 
 
 def test_qwen3_next_full_attention_exports_page_convertible_flash_op():
@@ -402,7 +470,7 @@ def test_qwen3_next_full_attention_exports_page_convertible_flash_op():
     module.flash_attn = FakeFlashAttention()
     past_seq_length = torch.tensor([7])
     current_input_length = torch.tensor([3])
-    output, _, _ = module(
+    output = module(
         torch.randn(1, 3, 8),
         past_seq_length=past_seq_length,
         current_input_length=current_input_length,

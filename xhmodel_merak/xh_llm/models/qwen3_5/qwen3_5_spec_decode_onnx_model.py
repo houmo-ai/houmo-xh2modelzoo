@@ -19,26 +19,23 @@
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
-import torch.nn as nn
 from transformers import TextStreamer
 
+from ._spec_decode_shared import SpecDecodeVerifyResult, run_spec_decode_loop
 from .qwen3_5_onnx_model import (
     HMONNXSession,
     Qwen3_5ONNXModel,
     _alloc_cache_inputs,
+    _apply_presence_penalty,
+    _apply_repetition_penalty,
     _as_cache_value,
-    _build_inputs_embeds,
-    _build_linear_attn_mask,
     _clone_cache_value,
     _ensure_logits_shape,
     _is_kv_cache_name,
     _parse_conv_cache_name,
     _sample_next_token,
     _select_last_valid_logits,
-    _apply_repetition_penalty,
-    _apply_presence_penalty,
 )
-from ._spec_decode_shared import SpecDecodeVerifyResult, run_spec_decode_loop
 
 
 def _pad_hidden_tensor(hidden: torch.Tensor, target_seq_len: int) -> torch.Tensor:
@@ -54,7 +51,7 @@ def _pad_hidden_tensor(hidden: torch.Tensor, target_seq_len: int) -> torch.Tenso
     return torch.cat([hidden, pad], dim=1)
 
 
-class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
+class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
     """Speculative decoding runtime extending Qwen3_5ONNXModel with a draft model.
 
     Supports two speculative decoding modes:
@@ -75,6 +72,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         spec_decode_mode: str = "mtp",
         block_size: int = 4,
         hidden_output_name: str = "post_norm_hidden",
+        dflash_noise_token_id: Optional[int] = None,
         max_context_tokens: Optional[int] = None,
         auto_offload: bool = True,
         auto_offload_max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
@@ -117,6 +115,28 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         self.spec_decode_mode = spec_decode_mode
         self.block_size = block_size
         self.hidden_output_name = hidden_output_name
+        self._dflash_noise_mask_token_id: Optional[int] = None
+        if self.spec_decode_mode == "dflash":
+            if dflash_noise_token_id is None or isinstance(
+                dflash_noise_token_id, bool
+            ):
+                raise ValueError(
+                    "Qwen3.5 DFlash runtime requires a non-negative "
+                    "dflash_noise_token_id from the exported assistant contract"
+                )
+            try:
+                parsed_noise_token_id = int(dflash_noise_token_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Qwen3.5 DFlash runtime requires a non-negative "
+                    "dflash_noise_token_id from the exported assistant contract"
+                ) from exc
+            if parsed_noise_token_id < 0:
+                raise ValueError(
+                    "Qwen3.5 DFlash runtime requires a non-negative "
+                    "dflash_noise_token_id from the exported assistant contract"
+                )
+            self._dflash_noise_mask_token_id = parsed_noise_token_id
         self.draft_prefill_session: Optional[HMONNXSession] = None
         self.draft_context_session: Optional[HMONNXSession] = None
         self.draft_context_decode_session: Optional[HMONNXSession] = None
@@ -124,7 +144,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         self._create_draft_sessions()
         self._mtp_cache_state: Optional[Dict[str, torch.Tensor]] = None
         self._dflash_cache_state: Optional[Dict[str, torch.Tensor]] = None
-        self._dflash_noise_mask_token_id: Optional[int] = 248070
 
     def _set_exec_device(self, device):
         super()._set_exec_device(device)
@@ -429,6 +448,47 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
         self._run_draft_session(
             self.draft_prefill_session,
             self._build_mtp_prefill_feed(hidden_states, next_token_ids, past_seq_len, cache_state),
+        )
+
+    def _complete_mtp_full_accept_tail(
+        self,
+        verify_result: SpecDecodeVerifyResult,
+        *,
+        accepted_steps: int,
+        mtp_past_seq_len: int,
+    ) -> None:
+        """Materialize the one shifted MTP pair missing on full acceptance.
+
+        Before a round, the private MTP cache is one token behind the target.
+        K draft invocations consume ``current, draft[0], ..., draft[K-2]`` and
+        therefore cache K shifted pairs, ending with
+        ``hidden(draft[K-2]) -> embedding(draft[K-1])``.  Full acceptance also
+        advances the target through ``draft[K-1]`` and emits the bonus token
+        ``draft[K]``.  Materialize exactly that final shifted pair so the next
+        round starts one token behind again:
+        ``hidden(draft[K-1]) -> embedding(draft[K])``.
+        """
+
+        verify_length = len(verify_result.verify_token_ids)
+        if accepted_steps != verify_length or verify_length <= 1:
+            return
+        if verify_result.verify_hidden is None:
+            raise RuntimeError(
+                "Qwen3.5 MTP full acceptance requires target verify hidden states"
+            )
+        tail_index = accepted_steps - 1
+        self._prefill_mtp_chunk(
+            verify_result.verify_hidden[
+                :,
+                tail_index - 1 : tail_index,
+                :,
+            ],
+            torch.tensor(
+                [[verify_result.verify_token_ids[tail_index]]],
+                dtype=torch.long,
+                device=verify_result.verify_hidden.device,
+            ),
+            mtp_past_seq_len + accepted_steps - 1,
         )
 
     def _append_dflash_context(
@@ -800,6 +860,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):
                 assert accepted_hidden is not None, "DFlash mode requires hidden states from the verify step."
                 self._append_dflash_context(accepted_hidden, verify_result.initial_seq_len, decode_step=True)
                 return next_hidden, round_mtp_past_seq_len
+            self._complete_mtp_full_accept_tail(
+                verify_result,
+                accepted_steps=accepted_steps,
+                mtp_past_seq_len=round_mtp_past_seq_len,
+            )
             return next_hidden, round_mtp_past_seq_len + accepted_steps
 
         generated_ids, stats = run_spec_decode_loop(

@@ -322,13 +322,27 @@ def test_gemma4_12b_workflow_demo_reports_audio_support():
     assert _audio_support_status(preset) == "supported"
 
 
+def test_gemma4_12b_mtp_inference_is_a_first_class_preset():
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
+        DEFAULT_HF_DIRS,
+        PRESETS,
+    )
+
+    preset = PRESETS["12b-unified"]
+    assert preset.slug == "gemma4_12b_unified"
+    assert preset.assistant_kind == "dense_lm_head"
+    assert DEFAULT_HF_DIRS["12b-unified"] == (
+        "weights/gemma-4-12B-it",
+        "weights/gemma-4-12B-it-assistant",
+    )
+
+
 def test_gemma4_12b_workflow_routes_gptqmodel_recipe(monkeypatch, tmp_path):
     from xhmodel_merak.xh_llm.models.gemma4_series.workflow import Gemma4SeriesWorkflow
     from xhmodel_merak.xh_llm.workflows.result import QuantResult
 
     config_path = (
-        Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified")
-        / "gemma4_12b_unified_full.yaml"
+        Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified") / "gemma4_12b_unified_full.yaml"
     )
     workflow = Gemma4SeriesWorkflow.from_config(str(MODEL_DIR), str(config_path))
     calls = []
@@ -350,8 +364,7 @@ def test_gemma4_12b_workflow_routes_autoround_mode1(monkeypatch, tmp_path):
     from xhmodel_merak.xh_llm.workflows.result import QuantResult
 
     config_path = (
-        Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified")
-        / "gemma4_12b_unified_full.yaml"
+        Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified") / "gemma4_12b_unified_full.yaml"
     )
     workflow = Gemma4SeriesWorkflow.from_config(str(MODEL_DIR), str(config_path))
     calls = []
@@ -405,8 +418,7 @@ def test_gemma4_12b_existing_quant_export_preserves_w4_metadata(tmp_path):
             "--hf-model-dir",
             str(MODEL_DIR),
             "--config",
-            "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/"
-            "gemma4_12b_unified_full.yaml",
+            "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml",
             "--export-output-dir",
             str(tmp_path / "export"),
             "--existing-hf-model-dir",
@@ -502,12 +514,8 @@ def test_gemma4_12b_runtime_preserves_padding_sentinel_for_encoder_free_frontend
 
     position_ids = torch.tensor([[[0, 0], [-1, -1]]], dtype=torch.int64)
 
-    encoder_free = _Gemma4HFCompatible._prepare_visual_position_ids(
-        position_ids, encoder_free=True
-    )
-    tower = _Gemma4HFCompatible._prepare_visual_position_ids(
-        position_ids, encoder_free=False
-    )
+    encoder_free = _Gemma4HFCompatible._prepare_visual_position_ids(position_ids, encoder_free=True)
+    tower = _Gemma4HFCompatible._prepare_visual_position_ids(position_ids, encoder_free=False)
 
     assert encoder_free.tolist() == [[[0, 0], [-1, -1]]]
     assert tower.tolist() == [[[0, 0], [0, 0]]]
@@ -704,9 +712,7 @@ def test_gemma4_12b_mtp_rope_matches_unified_hf(layer_type, head_dim_attr):
         getattr(rotary, f"{layer_type}_inv_freq"),
         getattr(rotary, f"{layer_type}_attention_scaling"),
         16,
-        partial_rotary_factor=float(
-            text_config.rope_parameters[layer_type].get("partial_rotary_factor", 1.0)
-        ),
+        partial_rotary_factor=float(text_config.rope_parameters[layer_type].get("partial_rotary_factor", 1.0)),
     )
 
     torch.testing.assert_close(cache_cos[7], hf_cos[0, 0])
@@ -740,24 +746,19 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
     config_path = Path(
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/"
-        "gemma4_12b_unified_full_mtp.yaml"
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full_mtp.yaml"
     )
     workflow_config = WorkflowConfig.from_file(config_path)
     model_config = workflow_config.export["model"]
     mtp_config = model_config["mtp_config"]
-    assistant = json.loads(
-        Path("/data01/datasets/gemma-4-12B-it-assistant/config.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    assistant = json.loads(Path("/data01/datasets/gemma-4-12B-it-assistant/config.json").read_text(encoding="utf-8"))
     text_config = assistant["text_config"]
 
     assert list_recommended_mtp_configs()["12b-unified"] == str(config_path)
     assert model_config["model_type"] == "Gemma4UnifiedForConditionalGeneration"
     assert model_config["spec_decode_mode"] == "mtp"
     assert model_config["context_max_length"] == 2048
-    assert mtp_config["context_max_length"] == 2048
+    assert "context_max_length" not in mtp_config
     assert mtp_config["assistant_hf_model"] is None
     assert mtp_config["target_hf_model"] is None
     from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
@@ -766,9 +767,7 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
 
     with pytest.raises(ValueError) as helper_error:
         validate_mtp_model_inputs(model_config)
-    assert "export.model.mtp_config.assistant_hf_model" in str(
-        helper_error.value
-    )
+    assert "export.model.mtp_config.assistant_hf_model" in str(helper_error.value)
     assert "export.model.mtp_config.target_hf_model" in str(helper_error.value)
     assert "--mtp-assistant-model-dir" in str(helper_error.value)
     from xhmodel_merak.xh_llm.models.gemma4_series.workflow import (
@@ -779,35 +778,23 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
         model_dir=str(MODEL_DIR),
         config_path=str(config_path),
     )
-    normalized_context = direct_workflow._normalize_export_overrides(
-        {"export.model.context_max_length": 4096}
-    )
+    normalized_context = direct_workflow._normalize_export_overrides({"export.model.context_max_length": 4096})
     assert normalized_context == {
         "export.model.context_max_length": 4096,
-        "export.model.mtp_config.context_max_length": 4096,
     }
     with pytest.raises(ValueError) as workflow_error:
         direct_workflow._validate_export_model(None)
-    assert "export.model.mtp_config.assistant_hf_model" in str(
-        workflow_error.value
-    )
-    assert "export.model.mtp_config.target_hf_model" in str(
-        workflow_error.value
-    )
+    assert "export.model.mtp_config.assistant_hf_model" in str(workflow_error.value)
+    assert "export.model.mtp_config.target_hf_model" in str(workflow_error.value)
     assert "--mtp-assistant-model-dir" in str(workflow_error.value)
     injected = workflow_config.with_overrides(
         {
-            "export.model.mtp_config.assistant_hf_model": (
-                "weights/gemma-4-12B-it-assistant"
-            ),
+            "export.model.mtp_config.assistant_hf_model": ("weights/gemma-4-12B-it-assistant"),
             "export.model.mtp_config.target_hf_model": "weights/gemma-4-12B-it",
         }
     )
     injected_mtp = injected.export["model"]["mtp_config"]
-    assert (
-        injected_mtp["assistant_hf_model"]
-        == "weights/gemma-4-12B-it-assistant"
-    )
+    assert injected_mtp["assistant_hf_model"] == "weights/gemma-4-12B-it-assistant"
     assert injected_mtp["target_hf_model"] == "weights/gemma-4-12B-it"
     validated_paths = validate_mtp_model_inputs(injected.export["model"])
     assert validated_paths["assistant"].name == "gemma-4-12B-it-assistant"
@@ -819,9 +806,7 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
         "shared_value_cache_full",
     ]
     duplicate_kv_model_config = json.loads(json.dumps(injected.export["model"]))
-    duplicate_kv_model_config["mtp_config"]["shared_kv_inputs"][1] = (
-        "shared_key_cache_sliding"
-    )
+    duplicate_kv_model_config["mtp_config"]["shared_kv_inputs"][1] = "shared_key_cache_sliding"
     with pytest.raises(ValueError, match="Duplicate and legacy KV names"):
         validate_mtp_model_inputs(duplicate_kv_model_config)
     missing_base_workflow = Gemma4SeriesWorkflow(
@@ -831,12 +816,8 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
     with pytest.raises(FileNotFoundError, match="base.*does not exist"):
         missing_base_workflow._validate_export_model(
             {
-                "export.model.mtp_config.assistant_hf_model": (
-                    "weights/gemma-4-12B-it-assistant"
-                ),
-                "export.model.mtp_config.target_hf_model": (
-                    "weights/gemma-4-12B-it"
-                ),
+                "export.model.mtp_config.assistant_hf_model": ("weights/gemma-4-12B-it-assistant"),
+                "export.model.mtp_config.target_hf_model": ("weights/gemma-4-12B-it"),
             }
         )
     assert mtp_config["assistant_num_hidden_layers"] == text_config["num_hidden_layers"]
@@ -844,12 +825,37 @@ def test_gemma4_12b_mtp_workflow_config_matches_assistant_checkpoint(tmp_path):
     assert mtp_config["assistant_hidden_size"] == text_config["hidden_size"]
     assert mtp_config["assistant_num_attention_heads"] == text_config["num_attention_heads"]
     assert mtp_config["assistant_num_key_value_heads"] == text_config["num_key_value_heads"]
-    assert (
-        mtp_config["assistant_num_global_key_value_heads"]
-        == text_config["num_global_key_value_heads"]
-    )
+    assert mtp_config["assistant_num_global_key_value_heads"] == text_config["num_global_key_value_heads"]
     assert mtp_config["head_dim"] == text_config["head_dim"]
     assert mtp_config["use_ordered_embeddings"] is assistant["use_ordered_embeddings"]
+
+
+def test_gemma4_12b_mtp_cli_inherits_target_context_length():
+    from argparse import Namespace
+
+    from examples_merak.llm.gemma4_series.gemma4_series_quant_export import (
+        _validate_mtp_config_complete,
+    )
+
+    config_path = (
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/"
+        "12b_unified/gemma4_12b_unified_full_mtp_page_attention.yaml"
+    )
+    args = Namespace(
+        config=config_path,
+        mtp_assistant_model_dir="weights/gemma-4-12B-it-assistant",
+    )
+    overrides = {
+        "export.model.context_max_length": 262144,
+        "export.model.mtp_config.assistant_hf_model": (
+            "weights/gemma-4-12B-it-assistant"
+        ),
+        "export.model.mtp_config.target_hf_model": "weights/gemma-4-12B-it",
+        "export.model.mtp_config.body_quant_type": "w8a8h1_sefp",
+        "export.model.mtp_config.lm_head_quant_type": "w4a8h0_ssfp",
+    }
+
+    _validate_mtp_config_complete(args, overrides)
 
 
 def test_gemma4_12b_mtp_assistant_target_contract_is_validated():
@@ -895,9 +901,7 @@ def test_gemma4_12b_mtp_model_paths_are_validated(tmp_path):
 def test_gemma4_12b_workflow_configs_keep_common_export_contract():
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
-    config_root = Path(
-        "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified"
-    )
+    config_root = Path("configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified")
     expected = {
         "model_type": "Gemma4UnifiedForConditionalGeneration",
         "context_max_length": 2048,
@@ -906,6 +910,7 @@ def test_gemma4_12b_workflow_configs_keep_common_export_contract():
     }
     for config_name in (
         "gemma4_12b_unified_full.yaml",
+        "gemma4_12b_unified_full_flash_attention.yaml",
         "gemma4_12b_unified_full_mtp.yaml",
         "gemma4_12b_unified_autoround.yaml",
     ):
@@ -925,6 +930,12 @@ def test_gemma4_12b_workflow_configs_keep_common_export_contract():
         model_cfg = WorkflowConfig.from_file(config_root / config_name).export["model"]
         assert "flash_attention" not in model_cfg
         assert "attention_contract_version" not in model_cfg
+
+    flash_model_cfg = WorkflowConfig.from_file(
+        config_root / "gemma4_12b_unified_full_flash_attention.yaml"
+    ).export["model"]
+    assert flash_model_cfg["flash_attention"]["enable"] is True
+    assert "attention_contract_version" not in flash_model_cfg
 
 
 def test_gemma4_12b_workflow_accepts_unified_base_for_export():

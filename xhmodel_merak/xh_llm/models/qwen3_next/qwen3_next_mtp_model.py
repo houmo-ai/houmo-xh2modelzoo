@@ -49,6 +49,7 @@ class XHQwen3NextMTPDraftModel(XHSubModel):
             max_pe_length=self.config.max_pe_length,
             use_cache=self.config.use_cache,
             mtp_layer_index=self.config.mtp_layer_index,
+            flash_attention=self.config.flash_attention,
         )
 
     def _to_fronted(self, wrap_model):

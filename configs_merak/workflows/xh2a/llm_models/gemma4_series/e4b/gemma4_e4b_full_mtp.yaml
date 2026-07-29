@@ -73,7 +73,6 @@ export:
       lm_head_quant_type: w4a8h0_ssfp
       batch_size: 1
       input_sequence_length: 1
-      context_max_length: 131072
       use_cache: true
       num_draft_tokens: 4
       assistant_num_hidden_layers: 4

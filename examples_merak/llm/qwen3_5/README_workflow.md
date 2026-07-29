@@ -36,6 +36,10 @@ quant -> export -> dump_golden -> quick_test_hmonnx
 conda activate xh2modelzoo
 ```
 
+Qwen3.5/Qwen3.6 Merak 路径已验证可使用 Transformers 5.13；共享仓库仍保留
+4.57 全局约束，推荐用独立环境。版本矩阵和升级边界见
+[Merak Transformers 5.13 兼容性结论](../../../docs/merak_transformers_5_13_compatibility_20260727.md)。
+
 导出和验证建议单任务使用一张 GPU：
 
 ```bash
@@ -136,6 +140,60 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --context-max-length 262144 \
   --enable-flash-attention \
   --enable-fuse-gdr-block-recurrent-ops \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_9b_mtp_flashattention_fuse_gdr_export \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_9b_dflash_flashattention_fuse_gdr_export \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.5-9B-mode1-llm-only \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_9b_fuse_3gdr_export \
+  --context-max-length 2048 \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --golden-device-map cuda:0 cuda:1 \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=1,5 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir work_dirs/qwen3_5_122B_quant \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_5_122b_a10b_fuse_3gdr_export \
+  --context-max-length 2048 \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=4 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/qwen36moe-no-rotate-attn8-shared8-n256-iter400 \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/qwen3_6_35b_flashattention_fuse_gdr_export \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
   --overwrite
 ```
 

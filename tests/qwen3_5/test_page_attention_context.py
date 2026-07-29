@@ -101,8 +101,8 @@ def test_page_attention_modules_support_legacy_interpreter_node_list(monkeypatch
     assert modules == [module]
 
 
-def test_page_attention_context_shares_stable_device_buffers_across_layers_and_requests(monkeypatch):
-    """One model/stage/device owns stable metadata buffers shared by its PA layers."""
+def test_page_attention_context_shares_stable_backing_with_active_views(monkeypatch):
+    """Layers share stable backing while PageAttention sees only live metadata."""
     monkeypatch.setattr(
         "xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model.PageAttentionContext",
         _FakePageAttentionContext,
@@ -128,9 +128,8 @@ def test_page_attention_context_shares_stable_device_buffers_across_layers_and_r
     assert first[0].slot_mapping is first[1].slot_mapping
     assert first[0].block_ids.dtype is torch.int64
     assert first[0].slot_mapping.dtype is torch.int64
-    assert first[0].block_ids.numel() == 8
-    torch.testing.assert_close(first[0].block_ids[:2], torch.tensor([1, 2]))
-    torch.testing.assert_close(first[0].block_ids[2:], torch.zeros(6, dtype=torch.int64))
+    assert first[0].block_ids.numel() == 2
+    torch.testing.assert_close(first[0].block_ids, torch.tensor([1, 2]))
 
     _set_context(
         model,
@@ -142,10 +141,10 @@ def test_page_attention_context_shares_stable_device_buffers_across_layers_and_r
 
     assert second[0].block_ids.data_ptr() == first_block_ptr
     assert second[0].slot_mapping.data_ptr() == first_slot_ptr
-    torch.testing.assert_close(second[0].block_ids[:3], torch.tensor([5, 6, 7]))
-    torch.testing.assert_close(second[0].block_ids[3:], torch.zeros(5, dtype=torch.int64))
+    assert second[0].block_ids.numel() == 3
+    torch.testing.assert_close(second[0].block_ids, torch.tensor([5, 6, 7]))
     torch.testing.assert_close(second[0].slot_mapping, torch.tensor([9, 10]))
-    assert clear_spy.calls == []
+    assert clear_spy.calls == [True]
 
 
 def test_page_attention_context_slot_growth_clears_only_active_graph(monkeypatch):

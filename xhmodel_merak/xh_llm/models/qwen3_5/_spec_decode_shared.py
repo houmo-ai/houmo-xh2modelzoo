@@ -97,7 +97,7 @@ def run_spec_decode_loop(
         verify_result = verify_round(current_token_id, draft_token_ids, past_seq_len)
         accepted_count = 0
         for predicted_token_id, draft_token_id in zip(
-            verify_result.predicted_token_ids, draft_token_ids
+            verify_result.predicted_token_ids, draft_token_ids, strict=False
         ):
             if predicted_token_id != draft_token_id:
                 break
@@ -105,6 +105,10 @@ def run_spec_decode_loop(
 
         total_accepted_tokens += accepted_count
         accepted_drafts_per_round.append(accepted_count)
+        # ``accepted_steps`` counts target-executed cache snapshots, not only
+        # accepted draft tokens.  Even when no draft token matches, the
+        # verifier contributes its recovery token, so snapshot zero must be
+        # committed and this value is always at least one.
         accepted_steps = accepted_count + 1
         apply_verify_result(verify_result, accepted_steps)
         past_seq_len = verify_result.initial_seq_len + accepted_steps

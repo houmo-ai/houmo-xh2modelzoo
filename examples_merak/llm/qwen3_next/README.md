@@ -4,6 +4,12 @@ Text-only Merak export for `Qwen3NextForCausalLM`, with optional
 `Qwen3NextMTP` draft graphs. The target graph is always exported with ordinary
 attention. Page attention is derived from that graph at runtime.
 
+This Merak path is validated with Transformers 5.13. Quantization and HMONNX
+export must run in the fixed `xhquant_55` (Torch 2.8) environment; the
+`vllm` (Torch 2.11) environment is only for Merak deployment and performance
+tests. See the
+[compatibility matrix](../../../docs/merak_transformers_5_13_compatibility_20260727.md).
+
 Qwen3-Next reuses the Qwen3.5-MoE workflow implementation and cache ABI. Each
 Qwen3.5-MoE and Qwen3-Next workflow YAML is nevertheless a standalone, complete
 configuration with its own quantization and export fields:

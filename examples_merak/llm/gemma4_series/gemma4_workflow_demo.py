@@ -179,10 +179,6 @@ def _export_overrides(args: argparse.Namespace, preset: Gemma4Preset, action: Ac
     overrides: dict[str, Any] = {}
     if args.context_max_length is not None:
         overrides["export.model.context_max_length"] = args.context_max_length
-        if args.mtp_config:
-            overrides["export.model.mtp_config.context_max_length"] = (
-                args.context_max_length
-            )
     if args.prefill_chunk_length is not None:
         overrides["export.model.prefill_chunk_length"] = args.prefill_chunk_length
     if action == "existing-hf" and _existing_artifact_format(args) == "gguf_qat":

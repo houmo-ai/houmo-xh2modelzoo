@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +23,7 @@ from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
 )
 from xhmodel_merak.xh_llm.types import CacheList, KVCacheWithLinearConfig
 from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+from xhmodel_merak.xh_llm.workflows.result import ExportResult
 from xhquant.api import Config
 
 
@@ -31,6 +33,37 @@ DFLASH_WORKFLOW_CONFIGS = [
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml",
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_dflash.yaml",
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml",
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b"
+    / "qwen3_5_122b_a10b_full_dflash.yaml",
+]
+SPEC_GPTQ_WORKFLOW_CONFIGS = [
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models"
+    / family
+    / size
+    / filename
+    for family, size, filename in (
+        ("qwen3_5", "9b", "qwen3_5_9b_full_mtp_gptq.yaml"),
+        ("qwen3_5", "9b", "qwen3_5_9b_full_dflash_gptq.yaml"),
+        ("qwen3_5", "27b", "qwen3_6_27b_full_mtp_gptq.yaml"),
+        ("qwen3_5", "27b", "qwen3_6_27b_full_dflash_gptq.yaml"),
+        (
+            "qwen3_5_moe",
+            "35b_a3b",
+            "qwen3_6_35b_a3b_full_mtp_gptq.yaml",
+        ),
+        (
+            "qwen3_5_moe",
+            "35b_a3b",
+            "qwen3_6_35b_a3b_full_dflash_gptq.yaml",
+        ),
+        (
+            "qwen3_5_moe",
+            "122b_a10b",
+            "qwen3_5_122b_a10b_full_dflash_gptq.yaml",
+        ),
+    )
 ]
 
 
@@ -51,6 +84,123 @@ def test_qwen3_5_config_uses_merak_export_defaults():
     assert cfg.mtp_head_k is None
     assert cfg.reranked_repo_dir is None
     assert cfg.force_rerank is False
+
+
+@pytest.mark.parametrize(
+    ("flash_attention_enabled", "expected_page_attention"),
+    [(True, True), (False, False)],
+)
+def test_qwen35_export_finalizer_writes_merak_runtime_config(
+    tmp_path,
+    flash_attention_enabled,
+    expected_page_attention,
+):
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import (
+        finalize_qwen35_merak_runtime_config,
+    )
+
+    exported_dir = tmp_path / "hmquant_qwen35"
+    exported_dir.mkdir()
+    (exported_dir / "golden_meta_info.json").write_text(
+        json.dumps(
+            {
+                "model_config": {
+                    "model_type": "Qwen3_5ForConditionalGeneration",
+                    "flash_attention": {"enable": flash_attention_enabled},
+                },
+                "prefill_hmonnx": "prefill/model.onnx",
+                "decode_hmonnx": "decode/model.onnx",
+            }
+        ),
+        encoding="utf-8",
+    )
+    export_result = ExportResult(
+        work_dir=str(tmp_path),
+        config_file=str(tmp_path / "workflow.yaml"),
+    )
+
+    config_path = finalize_qwen35_merak_runtime_config(export_result)
+
+    assert config_path == exported_dir / "merak_config.json"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "architectures": ["MerakForCausalLM"],
+        "config_format": "merak_llm",
+        "load_format": "merak_llm",
+        "xh_model": {
+            "model_type": "hmonnx",
+            "meta_info": "golden_meta_info.json",
+        },
+        "enable_page_attention": expected_page_attention,
+        "model_type": "merak_llm",
+    }
+
+
+def test_qwen35_export_finalizer_prefers_explicit_page_attention(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import (
+        finalize_qwen35_merak_runtime_config,
+    )
+
+    exported_dir = tmp_path / "hmquant_qwen35"
+    exported_dir.mkdir()
+    (exported_dir / "golden_meta_info.json").write_text(
+        json.dumps(
+            {
+                "model_config": {
+                    "enable_page_attention": False,
+                    "flash_attention": {"enable": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = finalize_qwen35_merak_runtime_config(
+        ExportResult(
+            work_dir=str(tmp_path),
+            config_file=str(tmp_path / "workflow.yaml"),
+        )
+    )
+
+    assert (
+        json.loads(config_path.read_text(encoding="utf-8"))[
+            "enable_page_attention"
+        ]
+        is False
+    )
+
+
+def test_qwen35_workflow_export_always_finalizes_runtime_config(monkeypatch):
+    from xhmodel_merak.xh_llm.models.qwen3_5 import workflow as workflow_module
+    from xhmodel_merak.xh_llm.workflows.base import BaseLLMWorkflow
+
+    workflow = object.__new__(workflow_module.Qwen35Workflow)
+    export_result = ExportResult(
+        work_dir="export-work-dir",
+        config_file="workflow.yaml",
+    )
+    finalized = []
+
+    monkeypatch.setattr(workflow, "_validate_lora_export", lambda _: None)
+    monkeypatch.setattr(workflow, "_validate_export_model", lambda _: None)
+    monkeypatch.setattr(
+        BaseLLMWorkflow,
+        "export",
+        lambda self, **kwargs: export_result,
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "finalize_qwen35_merak_runtime_config",
+        finalized.append,
+    )
+
+    actual = workflow.export(
+        quant_result=object(),
+        output_dir="unused",
+        device="cpu",
+    )
+
+    assert actual is export_result
+    assert finalized == [export_result]
 
 
 def test_qwen3_5_config_preserves_mtp_head_k_controls():
@@ -88,6 +238,44 @@ def test_qwen3_5_dflash_workflow_resolves_target_model_dir_from_export_hf_model(
     assert cfg.dflash_config.target_model_dir == str(override_hf_model)
 
 
+@pytest.mark.parametrize("config_path", DFLASH_WORKFLOW_CONFIGS, ids=lambda p: p.stem)
+def test_qwen3_5_dflash_workflow_keeps_checkpoint_capacity_and_default_width(
+    config_path,
+):
+    workflow_config = WorkflowConfig.from_file(str(config_path))
+    model_cfg = workflow_config.export["model"]
+
+    # The checkpoint can produce a 16-token block, but the workflow defaults
+    # to nine proposals. --num-draft-tokens may opt into any wider value that
+    # still fits the fixed checkpoint capacity.
+    assert model_cfg["num_draft_tokens"] == 9
+    assert model_cfg["num_draft_tokens"] + 1 <= model_cfg["dflash_config"]["block_size"]
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    SPEC_GPTQ_WORKFLOW_CONFIGS,
+    ids=lambda path: path.stem,
+)
+def test_qwen3_5_spec_gptq_configs_accept_required_flash_cli_override(
+    config_path,
+):
+    workflow_config = WorkflowConfig.from_file(str(config_path)).with_overrides(
+        {
+            "export.model.context_max_length": 262144,
+            "export.model.max_pe_length": 262144,
+            "export.model.flash_attention.enable": True,
+            "export.model.fuse_gdr_block_recurrent_ops": True,
+        }
+    )
+
+    model_config = workflow_config.export["model"]
+    assert model_config["context_max_length"] == 262144
+    assert model_config["max_pe_length"] == 262144
+    assert model_config["flash_attention"]["enable"] is True
+    assert model_config["fuse_gdr_block_recurrent_ops"] is True
+
+
 @pytest.mark.parametrize("mode", ["mtp", "dflash"])
 def test_qwen3_5_spec_decode_is_single_batch_only(mode):
     XHQwen3_5ModelConfig(model_name="qwen3_5", batch_size=1, spec_decode_mode=mode)
@@ -107,6 +295,15 @@ def test_qwen3_5_spec_draft_head_quant_defaults_to_w4():
     }
 
 
+def test_qwen3_5_spec_draft_head_quant_supports_qualified_node_name():
+    cfg = build_spec_draft_quant_scheme(
+        head_node_name="core_lm_head",
+    )
+
+    assert set(cfg["nodes_cfg"]) == {"core_lm_head"}
+    assert cfg["nodes_cfg"]["core_lm_head"]["w_schema"]["bits"] == 4
+
+
 def test_qwen3_5_spec_draft_head_quant_supports_w8_without_override():
     cfg = build_spec_draft_quant_scheme(8)
 
@@ -123,11 +320,75 @@ def test_qwen3_5_spec_draft_configs_default_lm_head_to_w4(config_cls):
     kwargs = dict(model_name="draft", hf_model="weights/draft")
     if config_cls is XHQwen3_5_DFlashConfig:
         kwargs["target_model_dir"] = "weights/target"
+        kwargs["noise_token_id"] = 1
 
     cfg = config_cls(**kwargs)
 
     assert cfg.draft_head_weight_bits == 4
-    assert cfg.quant_scheme["nodes_cfg"]["lm_head"]["w_schema"]["bits"] == 4
+    head_node_name = (
+        "core_lm_head"
+        if config_cls is XHQwen3_5_DFlashConfig
+        else "lm_head"
+    )
+    assert (
+        cfg.quant_scheme["nodes_cfg"][head_node_name]["w_schema"]["bits"]
+        == 4
+    )
+
+
+def test_qwen3_5_dflash_w4_head_contract_matches_fx_node_name():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_dflash_model import (
+        XHQwen3_5DFlashDraftModel,
+    )
+
+    cfg = XHQwen3_5_DFlashConfig(
+        model_name="draft",
+        hf_model="weights/draft",
+        target_model_dir="weights/target",
+        noise_token_id=1,
+    )
+    model = XHQwen3_5DFlashDraftModel(cfg)
+    frontend = SimpleNamespace(
+        graph=SimpleNamespace(
+            nodes=[SimpleNamespace(name="core_lm_head")],
+        )
+    )
+
+    model._validate_draft_head_quant_contract(frontend)
+
+
+def test_qwen3_5_dflash_accepts_zero_as_a_valid_mask_token_id():
+    cfg = XHQwen3_5_DFlashConfig(
+        model_name="draft",
+        hf_model="weights/draft",
+        target_model_dir="weights/target",
+        noise_token_id=0,
+    )
+
+    assert cfg.noise_token_id == 0
+
+
+def test_qwen3_5_dflash_w4_head_contract_rejects_unmatched_override():
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_dflash_model import (
+        XHQwen3_5DFlashDraftModel,
+    )
+
+    cfg = XHQwen3_5_DFlashConfig(
+        model_name="draft",
+        hf_model="weights/draft",
+        target_model_dir="weights/target",
+        noise_token_id=1,
+        quant_scheme=build_spec_draft_quant_scheme(),
+    )
+    model = XHQwen3_5DFlashDraftModel(cfg)
+    frontend = SimpleNamespace(
+        graph=SimpleNamespace(
+            nodes=[SimpleNamespace(name="core_lm_head")],
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="does not select FX node"):
+        model._validate_draft_head_quant_contract(frontend)
 
 
 def test_qwen3_5_spec_draft_configs_keep_explicit_quant_scheme():
@@ -147,7 +408,10 @@ def test_qwen3_5_spec_draft_head_bits_propagate_from_main_config():
         hf_model="weights/target",
         spec_draft_head_weight_bits=8,
         mtp_config=dict(),
-        dflash_config=dict(hf_model="weights/dflash"),
+        dflash_config=dict(
+            hf_model="weights/dflash",
+            noise_token_id=1,
+        ),
     )
 
     assert cfg.mtp_config.draft_head_weight_bits == 8
@@ -264,20 +528,17 @@ def test_qwen3_5_split_conv_cache_helpers_flatten_mtp_composite_outputs():
     assert _flatten_split_conv_cache_outputs is flatten_canonical
 
 
-def test_qwen3_5_decoder_layer_exposes_split_conv_cache_outputs_flat():
+def test_qwen3_5_decoder_layer_keeps_canonical_grouped_split_cache_outputs():
     from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
 
     class FakeLinearAttn(nn.Module):
-        split_conv_cache = True
-        _flat_split_conv_cache_outputs = True
-        _verify_output_intermediates = False
-        input_sequence_length = 1
-
         def forward(self, **kwargs):
             hidden_states = kwargs["hidden_states"]
-            return hidden_states, "q_cache", "k_cache", "v_cache", "recurrent_state"
+            return hidden_states, ("q_cache", "k_cache", "v_cache"), "recurrent_state"
 
-    layer = _llm_model_impl._Qwen3_5DecoderLayer.__new__(_llm_model_impl._Qwen3_5DecoderLayer)
+    layer = _llm_model_impl._Qwen3_5DecoderLayer.__new__(
+        _llm_model_impl._Qwen3_5DecoderLayer
+    )
     nn.Module.__init__(layer)
     layer.layer_type = "linear_attention"
     layer.input_layernorm = nn.Identity()
@@ -285,14 +546,18 @@ def test_qwen3_5_decoder_layer_exposes_split_conv_cache_outputs_flat():
     layer.post_attention_layernorm = nn.Identity()
     layer.mlp = nn.Identity()
 
-    output = layer(torch.ones(1, 1, 1), linear_attn_mask=torch.ones(1, 1))
-
-    assert len(output) == 5
-    assert output[1:] == ("q_cache", "k_cache", "v_cache", "recurrent_state")
-    assert _llm_model_impl._unpack_linear_decoder_layer_outputs(output, layer, True)[1:] == (
-        ("q_cache", "k_cache", "v_cache"),
-        "recurrent_state",
+    output = layer(
+        torch.ones(1, 1, 1),
+        linear_attn_mask=torch.ones(1, 1),
     )
+
+    assert len(output) == 3
+    assert output[1] == ("q_cache", "k_cache", "v_cache")
+    assert output[2] == "recurrent_state"
+    # Huge-model placeholder export consumes the same grouped production ABI;
+    # no runtime module advertises the stale test-only
+    # ``_flat_split_conv_cache_outputs`` protocol.
+    assert not hasattr(_llm_model_impl, "_unpack_linear_decoder_layer_outputs")
 
 
 def test_qwen3_5_merged_conv_cache_helper_flattens_spec_decode_steps_without_qkv_requirement():
@@ -495,16 +760,24 @@ def test_qwen3_5_moe_text_model_regroups_flat_split_conv_cache_before_layer_inde
     ],
 )
 def test_qwen3_5_linear_attention_mask_views_are_shared_before_decoder_layers(module_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        _prepare_linear_attn_mask_views,
+        _resolve_linear_attn_mask_views,
+    )
+
     module = importlib.import_module(module_path)
     mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
 
-    sequence_mask, channel_mask, state_mask = module._prepare_linear_attn_mask_views(mask, torch.float16)
+    sequence_mask, channel_mask, state_mask = _prepare_linear_attn_mask_views(
+        mask,
+        torch.float16,
+    )
 
     assert sequence_mask.shape == (1, 3, 1)
     assert channel_mask.shape == (1, 1, 3)
     assert state_mask.shape == (1, 3, 1, 1)
     assert sequence_mask.dtype == channel_mask.dtype == state_mask.dtype == torch.float16
-    resolved = module._resolve_linear_attn_mask_views(
+    resolved = _resolve_linear_attn_mask_views(
         (sequence_mask, channel_mask, state_mask),
         torch.float16,
     )
@@ -513,11 +786,11 @@ def test_qwen3_5_linear_attention_mask_views_are_shared_before_decoder_layers(mo
         for actual, expected in zip(resolved, (sequence_mask, channel_mask, state_mask), strict=True)
     )
 
-    text_model_source = inspect.getsource(
-        module._Qwen3_5MoeTextModel.forward
-        if hasattr(module, "_Qwen3_5MoeTextModel")
-        else module._Qwen3_5TextModel.forward
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_text_model import (
+        HybridTextModelMixin,
     )
+
+    text_model_source = inspect.getsource(HybridTextModelMixin.forward)
     gated_delta_net_source = inspect.getsource(
         module._Qwen3_5MoeGatedDeltaNet.forward
         if hasattr(module, "_Qwen3_5MoeGatedDeltaNet")
@@ -529,12 +802,34 @@ def test_qwen3_5_linear_attention_mask_views_are_shared_before_decoder_layers(mo
     assert "linear_attn_mask.unsqueeze" not in gated_delta_net_source
 
 
-def test_qwen3_5_text_models_use_merged_flatten_path_when_split_conv_cache_is_disabled():
-    from xhmodel_merak.xh_llm.models.qwen3_5 import _llm_model_impl
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe import _moe_model
+def test_qwen3_5_shared_linear_attention_mask_views_are_torchfx_traceable():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+        _prepare_linear_attn_mask_views,
+        _resolve_linear_attn_mask_views,
+    )
 
-    dense_source = inspect.getsource(_llm_model_impl._Qwen3_5TextModel.forward)
-    moe_source = inspect.getsource(_moe_model._Qwen3_5MoeTextModel.forward)
+    class SharedMaskViews(torch.nn.Module):
+        def forward(self, mask):
+            views = _prepare_linear_attn_mask_views(mask, torch.float16)
+            return _resolve_linear_attn_mask_views(views, torch.float16)
+
+    traced = torch.fx.symbolic_trace(SharedMaskViews())
+    mask = torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32)
+
+    expected = SharedMaskViews()(mask)
+    actual = traced(mask)
+
+    for actual_view, expected_view in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_view, expected_view)
+
+
+def test_qwen3_5_text_models_use_merged_flatten_path_when_split_conv_cache_is_disabled():
+    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_text_model import (
+        HybridTextModelMixin,
+    )
+
+    dense_source = inspect.getsource(HybridTextModelMixin.forward)
+    moe_source = dense_source
 
     assert "if split_conv_cache:" in dense_source
     assert "_flatten_merged_conv_cache_outputs(conv_cache_out_list)" in dense_source

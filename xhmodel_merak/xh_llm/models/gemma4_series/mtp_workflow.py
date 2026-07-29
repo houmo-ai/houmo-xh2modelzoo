@@ -7,15 +7,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .mtp_contract import (
+    MTP_SHARED_KV_INPUT_NAMES,
+    normalize_readonly_attention_lowering,
+)
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 MTP_DRAFT_DECODE_DIR = "mtp_draft_decode"
-REQUIRED_SHARED_KV_INPUTS = (
-    "shared_key_cache_sliding",
-    "shared_value_cache_sliding",
-    "shared_key_cache_full",
-    "shared_value_cache_full",
-)
+REQUIRED_SHARED_KV_INPUTS = MTP_SHARED_KV_INPUT_NAMES
 
 
 def quant_type_weight_bits(quant_type: str | None, default: int = 4) -> int:
@@ -40,7 +40,10 @@ def mtp_config_dict(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_context_length(model_cfg: dict[str, Any], mtp_cfg: dict[str, Any]) -> int:
-    return int(mtp_cfg.get("context_max_length") or model_cfg.get("context_max_length") or 2048)
+    # The target model owns cache capacity. Keep the nested value only as a
+    # compatibility fallback for old external manifests; checked-in configs
+    # and new exports have one authoritative top-level context length.
+    return int(model_cfg.get("context_max_length") or mtp_cfg.get("context_max_length") or 2048)
 
 
 def is_mtp_manifest(meta: dict[str, Any]) -> bool:
@@ -59,15 +62,10 @@ def resolve_model_path(path: str) -> Path:
 def require_model_dir(path: str, *, role: str) -> Path:
     model_dir = resolve_model_path(path)
     if not model_dir.is_dir():
-        raise FileNotFoundError(
-            f"Gemma4 MTP {role} model directory does not exist: {model_dir}"
-        )
+        raise FileNotFoundError(f"Gemma4 MTP {role} model directory does not exist: {model_dir}")
     config_path = model_dir / "config.json"
     if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Gemma4 MTP {role} model directory is missing config.json: "
-            f"{model_dir}"
-        )
+        raise FileNotFoundError(f"Gemma4 MTP {role} model directory is missing config.json: {model_dir}")
     return model_dir
 
 
@@ -198,6 +196,7 @@ def update_manifest_with_draft(
     meta_path: Path,
     draft_onnx: Path,
     *,
+    standalone_draft_onnx: Path | None = None,
     lm_head_quant_type: str,
     shared_sliding_len: int | None,
     shared_full_len: int | None,
@@ -206,6 +205,8 @@ def update_manifest_with_draft(
     target_max_pe_length_source: str | None = None,
     target_max_pe_length_hf_value: int | None = None,
     target_max_pe_length_hf_source: str | None = None,
+    readonly_page_attention: bool = False,
+    readonly_attention_lowering: str = "exact_range",
 ) -> None:
     export_dir = meta_path.parent
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -232,6 +233,14 @@ def update_manifest_with_draft(
         verify_length = int(_first_present(meta.get("spec_decode_verify_length"), block_size + 1))
     draft_head_bits = quant_type_weight_bits(lm_head_quant_type)
     rel_draft = relative_to_export_dir(draft_onnx, export_dir)
+    # Contract-v2 deploys the converted read-only PageAttention graph.  The
+    # original shared-tensor graph is intentionally retained for standalone
+    # HMONNX examples, where no Merak runtime exists to bind target-owned
+    # paged-cache contexts.  For legacy/non-FA exports both paths are the same.
+    rel_standalone_draft = relative_to_export_dir(
+        standalone_draft_onnx or draft_onnx,
+        export_dir,
+    )
     sliding_window = int(meta.get("sliding_window") or model_cfg.get("sliding_window") or 0)
     target_decode_sliding = None
     if sliding_window > 0:
@@ -241,16 +250,47 @@ def update_manifest_with_draft(
     shared_full_len = spec_decode.get("shared_full_cache_length") or shared_full_len
     spec_decode.update(
         mode="mtp",
+        num_draft_tokens=block_size,
         block_size=block_size,
         verify_length=verify_length,
         hidden_output_name="target_hidden_state",
         draft_head_weight_bits=draft_head_bits,
         draft_decode_onnx=rel_draft,
         draft_onnx=rel_draft,
+        standalone_draft_decode_onnx=rel_standalone_draft,
         shared_sliding_cache_length=shared_sliding_len,
         shared_full_cache_length=shared_full_len,
         target_decode_sliding_output_length=target_decode_sliding,
     )
+    if readonly_page_attention:
+        readonly_attention_lowering = normalize_readonly_attention_lowering(
+            readonly_attention_lowering
+        )
+        assistant_layer_pattern = list(mtp_config_dict(meta).get("assistant_layer_pattern") or [])
+        draft_contract = {
+            "abi": (
+                "gemma4_mtp_readonly_page_attention_v2"
+                if readonly_attention_lowering == "causal"
+                else "gemma4_mtp_readonly_page_attention_v1"
+            ),
+            "decode_hmonnx": rel_draft,
+            "standalone_decode_hmonnx": rel_standalone_draft,
+            "cache_mutation": "read_only",
+            "cache_binding": "target_attention_type_owner",
+            "constant_draft_positions": True,
+            "position_semantics": "target_kv_valid_length_minus_one",
+            "layer_attention_types": assistant_layer_pattern,
+            "minimum_sliding_cache_slack": block_size,
+        }
+        if readonly_attention_lowering == "causal":
+            draft_contract["attention_lowering"] = "causal"
+        spec_decode.update(
+            runtime_contract_version=2,
+            target={
+                "hidden_output_name": "target_hidden_state",
+            },
+            draft=draft_contract,
+        )
     if context_length is not None:
         spec_decode["context_length"] = int(context_length)
     if draft_rope_max_pe_length is not None:
@@ -359,12 +399,13 @@ def export_mtp_draft(
     target_dir = mtp_cfg.get("target_hf_model") or hf_model_dir
     if target_dir and not mtp_cfg.get("target_hf_model"):
         mtp_cfg["target_hf_model"] = target_dir
-    model_paths = validate_mtp_model_inputs(
-        {**model_cfg, "mtp_config": mtp_cfg}
-    )
+    model_paths = validate_mtp_model_inputs({**model_cfg, "mtp_config": mtp_cfg})
 
     body_quant_type = str(mtp_cfg.get("body_quant_type") or "w8a8h1_sefp")
     lm_head_quant_type = str(mtp_cfg.get("lm_head_quant_type") or "w4a8h0_ssfp")
+    readonly_attention_lowering = normalize_readonly_attention_lowering(
+        mtp_cfg.get("readonly_attention_lowering")
+    )
     chip_arch = str(model_cfg.get("chip_arch") or meta.get("chip_arch") or chip_arch or "XH2a")
     context_length = resolve_context_length(model_cfg, mtp_cfg)
     dtype = str(mtp_cfg.get("dtype") or mtp_cfg.get("draft_dtype") or draft_dtype)
@@ -407,6 +448,11 @@ def export_mtp_draft(
             shared_full_cache_length=shared_full_len,
             target_max_pe_length=target_max_pe_length,
             model_config=dict(model_cfg),
+            use_readonly_page_attention=int(
+                meta.get("attention_contract_version") or model_cfg.get("attention_contract_version") or 1
+            )
+            >= 2,
+            readonly_attention_lowering=readonly_attention_lowering,
         ),
         quant_config=draft_quant_config(body_quant_type, lm_head_quant_type),
     )
@@ -423,6 +469,29 @@ def export_mtp_draft(
             prefix=f"gemma4_series_{Path(hf_model_dir).name}_assistant_decode",
         )[0]
     )
+    standalone_onnx_file = onnx_file
+    readonly_page_attention = (
+        int(meta.get("attention_contract_version") or model_cfg.get("attention_contract_version") or 1) >= 2
+    )
+    if readonly_page_attention:
+        from xhquant.xhonnxruntime.convert_to_page_attention import (
+            convert_to_page_attention,
+        )
+
+        page_onnx_file = onnx_file.with_name(f"{onnx_file.stem}_readonly_page_attention{onnx_file.suffix}")
+        # The four-layer assistant is loaded on one device and PageAttention
+        # carries an explicit layer_idx. Synthetic Tag boundaries add no
+        # scheduling information here and must not leak into the deploy graph.
+        converted = convert_to_page_attention(
+            onnx_file,
+            page_onnx_file,
+            insert_layer_tags=False,
+            strip_layer_tags=True,
+        )
+        readonly_nodes = [node for node in converted.graph.node if node.op_type == "PageAttentionReadOnly"]
+        if not readonly_nodes:
+            raise RuntimeError("Gemma4 MTP contract-v2 draft conversion produced no PageAttentionReadOnly nodes")
+        onnx_file = page_onnx_file
     model.release_exported_model()
     model.release_quanted_model()
     model.release_frontend_model()
@@ -432,6 +501,7 @@ def export_mtp_draft(
     update_manifest_with_draft(
         meta_path,
         onnx_file,
+        standalone_draft_onnx=standalone_onnx_file,
         lm_head_quant_type=lm_head_quant_type,
         shared_sliding_len=shared_sliding_len,
         shared_full_len=shared_full_len,
@@ -440,6 +510,8 @@ def export_mtp_draft(
         target_max_pe_length_source=target_max_pe_length_source,
         target_max_pe_length_hf_value=target_max_pe_length_info.get("hf_value"),
         target_max_pe_length_hf_source=target_max_pe_length_info.get("hf_source"),
+        readonly_page_attention=readonly_page_attention,
+        readonly_attention_lowering=readonly_attention_lowering,
     )
     return onnx_file
 

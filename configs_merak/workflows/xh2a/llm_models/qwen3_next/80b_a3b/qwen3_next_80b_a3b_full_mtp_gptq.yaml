@@ -24,7 +24,10 @@ export:
     flash_attention:
       enable: false
       q_bits: 8
+      k_bits: 8
+      v_bits: 8
       s_bits: 8
+      p_bits: 8
     visual_config: null
     spec_decode_mode: mtp
     num_draft_tokens: 4
@@ -36,7 +39,6 @@ export:
       head_dim: 256
       batch_size: 1
       input_sequence_length: 1
-      context_max_length: 2048
       max_pe_length: 262144
       use_cache: true
 quant:

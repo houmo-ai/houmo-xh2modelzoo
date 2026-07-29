@@ -28,9 +28,8 @@ supports both dense MLP and Sparse MoE variants.
 """
 
 import json
-import math
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,10 +47,7 @@ def _build_rotary_cache(
     rope_theta: float,
     max_pe_length: int,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    inv_freq = 1.0 / (
-        rope_theta
-        ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
-    )
+    inv_freq = 1.0 / (rope_theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
     positions = torch.arange(max_pe_length, dtype=torch.float32).reshape(-1, 1)
     freqs = positions * inv_freq.reshape(1, -1)
     emb = torch.cat([freqs, freqs], dim=-1)
@@ -74,6 +70,7 @@ class MTPGatedAttention(nn.Module):
         rope_theta: float,
         max_pe_length: int,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -82,16 +79,29 @@ class MTPGatedAttention(nn.Module):
         self.rotary_dim = rotary_dim
         self.num_kv_groups = num_attention_heads // num_key_value_heads
         self.use_cache = use_cache
+        flash_attention = flash_attention or {}
+        self.use_flash_attention = bool(flash_attention.get("enable", False))
+        if self.use_flash_attention:
+            flash_bits = {
+                name: int(flash_attention.get(name, 8)) for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+            }
+            invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
+            if invalid_bits:
+                invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
+                raise ValueError(
+                    f"MTP flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                )
+            self.flash_attn = xhnn.FlashAttention(
+                num_heads=num_attention_heads,
+                num_kv_heads=num_key_value_heads,
+                scale=head_dim**-0.5,
+                is_causal=True,
+                **flash_bits,
+            )
 
-        self.q_proj = nn.Linear(
-            hidden_size, num_attention_heads * head_dim * 2, bias=False
-        )
-        self.k_proj = nn.Linear(
-            hidden_size, num_key_value_heads * head_dim, bias=False
-        )
-        self.v_proj = nn.Linear(
-            hidden_size, num_key_value_heads * head_dim, bias=False
-        )
+        self.q_proj = nn.Linear(hidden_size, num_attention_heads * head_dim * 2, bias=False)
+        self.k_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False)
         self.o_proj = nn.Linear(num_attention_heads * head_dim, hidden_size, bias=False)
         self.q_norm = RMSNorm(head_dim, rms_norm_eps)
         self.k_norm = RMSNorm(head_dim, rms_norm_eps)
@@ -121,9 +131,7 @@ class MTPGatedAttention(nn.Module):
         self.k_cache = LLMCacheV2(axis=2) if use_cache else None
         self.v_cache = LLMCacheV2(axis=2) if use_cache else None
 
-    def _apply_rotary_pos_emb(
-        self, q: Tensor, k: Tensor, cos: Tensor, sin: Tensor
-    ) -> Tuple[Tensor, Tensor]:
+    def _apply_rotary_pos_emb(self, q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> Tuple[Tensor, Tensor]:
         q_rot = self.q_rot_slice(q)
         q_pass = self.q_pass_slice(q)
         k_rot = self.k_rot_slice(k)
@@ -144,48 +152,52 @@ class MTPGatedAttention(nn.Module):
         past_v_cache: Optional[Tensor] = None,
     ) -> Tensor:
         bsz, q_len, _ = hidden_states.shape
-        qg = self.q_proj(hidden_states).view(
-            bsz, q_len, self.num_heads, self.head_dim * 2
-        )
+        qg = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim * 2)
         query_states, gate = torch.split(qg, self.head_dim, dim=-1)
         gate = gate.reshape(bsz, q_len, -1)
 
         query_states = self.q_norm(query_states).transpose(1, 2)
         key_states = self.k_norm(
-            self.k_proj(hidden_states).view(
-                bsz, q_len, self.num_kv_heads, self.head_dim
-            )
+            self.k_proj(hidden_states).view(bsz, q_len, self.num_kv_heads, self.head_dim)
         ).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(
-            bsz, q_len, self.num_kv_heads, self.head_dim
-        ).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
         cos = self.cos_slice(self.cos_cached, past_seq_length)
         sin = self.sin_slice(self.sin_cached, past_seq_length)
-        query_states, key_states = self._apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        query_states, key_states = self._apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         present_k_cache = key_states
         present_v_cache = value_states
         if self.use_cache:
-            present_k_cache = self.k_cache(
-                key_states, past_seq_length, current_input_length, past_k_cache
-            )
-            present_v_cache = self.v_cache(
-                value_states, past_seq_length, current_input_length, past_v_cache
-            )
+            present_k_cache = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
+            present_v_cache = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
-        query_states = query_states * self.kv_scale.to(query_states.dtype)
-        key_states_t = torch.repeat_interleave(
-            present_k_cache.transpose(2, 3), self.num_kv_groups, dim=1
-        )
-        attn_weights = torch.matmul(query_states, key_states_t)
-        attn_weights = self.masked_softmax(attn_weights, past_seq_length)
-        value_states = torch.repeat_interleave(
-            present_v_cache, self.num_kv_groups, dim=1
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                present_k_cache,
+                present_v_cache,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+            )
+        else:
+            query_states = query_states * self.kv_scale.to(query_states.dtype)
+            key_states_t = torch.repeat_interleave(
+                present_k_cache.transpose(2, 3),
+                self.num_kv_groups,
+                dim=1,
+            )
+            attn_weights = torch.matmul(query_states, key_states_t)
+            attn_weights = self.masked_softmax(
+                attn_weights,
+                past_seq_length,
+            )
+            value_states = torch.repeat_interleave(
+                present_v_cache,
+                self.num_kv_groups,
+                dim=1,
+            )
+            attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, -1)
         attn_output = attn_output * torch.sigmoid(gate)
         return self.o_proj(attn_output)
@@ -253,6 +265,7 @@ class MTPDecoderLayer(nn.Module):
         rope_theta: float,
         max_pe_length: int,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.self_attn = MTPGatedAttention(
@@ -266,6 +279,7 @@ class MTPDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
         self.mlp = MTPMLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
@@ -312,6 +326,7 @@ class MTPModel(nn.Module):
         partial_rotary_factor: float = 0.25,
         max_pe_length: int = 262144,
         use_cache: bool = True,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -336,7 +351,12 @@ class MTPModel(nn.Module):
             rope_theta=rope_theta,
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
+        # PageAttention conversion and device mapping use layer boundary tags.
+        # The assistant is a single decoder layer named ``layer`` rather than
+        # ``layers.0``, so the generic name-based fallback cannot infer it.
+        self.layer_tag = xhnn.XHTag("layer_0", "LLM", "layer_0")
         self.norm = RMSNorm(hidden_size, rms_norm_eps)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
 
@@ -359,6 +379,7 @@ class MTPModel(nn.Module):
             past_k_cache=past_key_cache,
             past_v_cache=past_value_cache,
         )
+        hidden_states = self.layer_tag(hidden_states)
         hidden_states = self.norm(hidden_states)
         post_norm_out = hidden_states
         logits = self.lm_head(hidden_states)
@@ -372,6 +393,7 @@ class MTPModel(nn.Module):
         input_sequence_length: int = 1,
         max_pe_length: int = 262144,
         use_cache: bool = True,
+        flash_attention: Mapping | None = None,
     ) -> "MTPModel":
         from safetensors import safe_open
 
@@ -411,6 +433,7 @@ class MTPModel(nn.Module):
             partial_rotary_factor=rope_params.get("partial_rotary_factor", 0.25),
             max_pe_length=max_pe_length,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
         if is_moe:
             num_experts = _cfg_value("num_experts")
@@ -429,9 +452,7 @@ class MTPModel(nn.Module):
             ).to(dtype=dtype)
 
         rms_norm_weight_keys = {
-            f"{name}.weight"
-            for name, module in model.named_modules()
-            if isinstance(module, RMSNorm) and name
+            f"{name}.weight" for name, module in model.named_modules() if isinstance(module, RMSNorm) and name
         }
 
         # K-trimmed lm_head from mtp_lm_head.pt (hot vocab support)
@@ -454,6 +475,7 @@ class MTPModel(nn.Module):
                     partial_rotary_factor=rope_params.get("partial_rotary_factor", 0.25),
                     max_pe_length=max_pe_length,
                     use_cache=use_cache,
+                    flash_attention=flash_attention,
                 )
                 if is_moe:
                     model.layer.mlp = MTPSparseMoEBlock(
@@ -492,7 +514,7 @@ class MTPModel(nn.Module):
                     if key.startswith("mtp."):
                         model_key = key[4:]
                         if model_key.startswith("layers.0."):
-                            model_key = "layer." + model_key[len("layers.0."):]
+                            model_key = "layer." + model_key[len("layers.0.") :]
                         tensor = f.get_tensor(key).to(dtype)
                         if is_moe and model_key == "layer.mlp.experts.gate_up_proj":
                             expert_intermediate_size = _cfg_value("moe_intermediate_size")
@@ -514,9 +536,7 @@ class MTPModel(nn.Module):
                             elif proj_name == "down_proj":
                                 packed_down_proj_weight[expert_idx].copy_(tensor)
                             else:
-                                raise RuntimeError(
-                                    f"Unsupported MoE MTP expert key: {model_key}"
-                                )
+                                raise RuntimeError(f"Unsupported MoE MTP expert key: {model_key}")
                             continue
                         if model_key in rms_norm_weight_keys:
                             tensor = tensor + 1.0
@@ -533,15 +553,12 @@ class MTPModel(nn.Module):
 
         missing, unexpected = model.load_state_dict(mtp_sd, strict=False)
         unexpected = [
-            name for name in unexpected
-            if not name.endswith("cos_cached") and not name.endswith("sin_cached")
+            name for name in unexpected if not name.endswith("cos_cached") and not name.endswith("sin_cached")
         ]
         missing = [
             name
             for name in missing
-            if not name.endswith("cos_cached")
-            and not name.endswith("sin_cached")
-            and name != "lm_head.weight"
+            if not name.endswith("cos_cached") and not name.endswith("sin_cached") and name != "lm_head.weight"
         ]
         if unexpected:
             raise RuntimeError(f"Unexpected MTP keys: {unexpected}")
@@ -549,9 +566,7 @@ class MTPModel(nn.Module):
             raise RuntimeError(f"Missing MTP keys: {missing}")
 
         if mtp_vocab_size_override is not None:
-            mtp_lm_head_tensor = torch.load(
-                str(mtp_lm_head_path), map_location="cpu"
-            ).to(dtype)
+            mtp_lm_head_tensor = torch.load(str(mtp_lm_head_path), map_location="cpu").to(dtype)
             model.lm_head.weight.data.copy_(mtp_lm_head_tensor)
             del mtp_lm_head_tensor
         elif lm_head_weight is not None:

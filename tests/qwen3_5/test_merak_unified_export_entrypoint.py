@@ -32,6 +32,11 @@ WORKFLOW_MOE_MTP = (
 WORKFLOW_MOE_DFLASH = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml"
 )
+WORKFLOW_122B_DFLASH = (
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b"
+    / "qwen3_5_122b_a10b_full_dflash.yaml"
+)
 WORKFLOW_27B_VISUAL_448 = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_448.yaml"
 )
@@ -215,6 +220,7 @@ def test_spec_decode_workflow_yamls_are_file_based():
     dflash_9b = _load_yaml(WORKFLOW_9B_DFLASH)["export"]["model"]
     mtp_moe = _load_yaml(WORKFLOW_MOE_MTP)["export"]["model"]
     dflash_moe = _load_yaml(WORKFLOW_MOE_DFLASH)["export"]["model"]
+    dflash_122b = _load_yaml(WORKFLOW_122B_DFLASH)["export"]["model"]
 
     assert mtp_9b["spec_decode_mode"] == "mtp"
     assert mtp_9b["hf_model"] is None
@@ -225,6 +231,22 @@ def test_spec_decode_workflow_yamls_are_file_based():
     assert mtp_moe["hf_model"] is None
     assert dflash_moe["dflash_config"]["hf_model"] == "weights/Qwen3.6-35B-A3B-DFlash"
     assert dflash_moe["output_hidden_state_indices"] == [1, 10, 19, 28, 37]
+
+    assert dflash_122b["dflash_config"]["hf_model"] == (
+        "weights/Qwen3.5-122B-A10B-DFlash"
+    )
+    assert dflash_122b["output_hidden_state_indices"] == [
+        1,
+        7,
+        14,
+        20,
+        26,
+        32,
+        39,
+        45,
+    ]
+    assert dflash_122b["dflash_config"]["num_hidden_layers"] == 6
+    assert dflash_122b["dflash_config"]["num_target_layers"] == 8
 
 
 def test_mtp_workflow_yamls_match_qwen35_hf_attention_shapes():

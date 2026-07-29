@@ -24,6 +24,7 @@ from ..qwen3_5.qwen3_5_llm_model import (
     Qwen3_5_ModelMeta,
     XHQwen3_5Model,
     _enforce_split_conv_cache_wrap_cfg,
+    build_qwen35_spec_decode_contract,
 )
 from .data_preprocess import Qwen3NextDataPreprocess
 from .qwen3_next_hmonnx_inference import XHQwen3NextHMONNXModel
@@ -321,17 +322,13 @@ class XHQwen3NextModel(XHQwen3_5Model):
         self._quanted_model.prefill.fixed()
         self._quanted_model.decode.fixed()
 
-        if self.config.spec_decode_mode == "mtp":
-            # The inherited quantization flow fixes the target decode graph at
-            # draft_tokens + 1. Keep the export dummy inputs and output naming
-            # on that same contract; falling back to the ordinary length-one
-            # decode input corrupts fixed Conv1d slice/reshape dimensions.
-            self._decode_input_sequence_length = self.config.num_draft_tokens + 1
-            self._decode_wrap_cfg_overrides = {
-                "verify_output_intermediates": True,
-                "num_logits_to_keep": 0,
-                "output_post_norm_hidden": True,
-            }
+        # Reuse the target-side speculative contract from Qwen3.5 instead of
+        # configuring only the decode dummy shape here.  MTP prefill consumes
+        # one post-norm hidden row per prompt token to build its private KV
+        # cache, so both target prefill and verify must retain every row
+        # (num_logits_to_keep=0).  A decode-only override silently exported a
+        # [B, 1, H] prefill hidden output and left the draft cache uninitialized.
+        self._configure_spec_decode_target_export()
 
         exported_info = self.get_export_info(output_dir)
         self._export_hmonnx(exported_info)
@@ -363,16 +360,18 @@ class XHQwen3NextModel(XHQwen3_5Model):
                 else:
                     meta_info.mtp_decode_config = draft_meta
 
-            meta_info.spec_decode = {
-                "mode": "mtp",
-                "block_size": self.config.num_draft_tokens,
-                "num_draft_tokens": self.config.num_draft_tokens,
-                "hidden_output_name": "post_norm_hidden",
-                "draft_prefill_onnx": meta_info.mtp_prefill_config.hmonnx,
-                "draft_decode_onnx": meta_info.mtp_decode_config.hmonnx,
-                "mtp_draft_prefill_onnx": meta_info.mtp_prefill_config.hmonnx,
-                "mtp_draft_decode_onnx": meta_info.mtp_decode_config.hmonnx,
-            }
+            # Qwen3-Next shares the Qwen3.5 proposer ABI. Use the common
+            # manifest builder so verify length, W4 draft-head precision,
+            # private-cache binding, and graph aliases cannot drift between
+            # the two model families.
+            spec_decode_section = build_qwen35_spec_decode_contract(
+                self.config,
+                meta_info,
+            )
+            meta_info.spec_decode_draft_head_weight_bits = (
+                spec_decode_section["draft_head_weight_bits"]
+            )
+            meta_info.spec_decode = spec_decode_section
 
         meta_info.prefill_onnx = meta_info.prefill_hmonnx
         meta_info.decode_onnx = meta_info.decode_hmonnx

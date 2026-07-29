@@ -1,6 +1,8 @@
 import gc
 import json
+import os
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,55 @@ _QWEN35_MODEL_CONFIG_CLS_NAMES = {
     "XHQwen3_5_VisualConfig",
     "XHQwen3_5Moe_VisualConfig",
 }
+
+
+def finalize_qwen35_merak_runtime_config(export_result: ExportResult) -> Path:
+    """Write the vLLM-Merak entry config next to the exported HMONNX.
+
+    ``export_hmonnx`` owns the graph and golden metadata while the workflow
+    owns the release layout.  Keeping this finalization here ensures normal,
+    MTP, and DFlash exports all receive the same runtime entry point instead
+    of relying on a later manual copy.
+    """
+
+    meta_path = Path(BaseLLMWorkflow._find_golden_meta_file(export_result))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(meta, dict):
+        raise TypeError(f"Qwen3.5 golden metadata must be an object: {meta_path}")
+
+    model_config = meta.get("model_config")
+    if not isinstance(model_config, dict):
+        raise TypeError(f"Qwen3.5 golden metadata must contain an object field 'model_config': {meta_path}")
+
+    # Page attention is a runtime capability of the exported target graph.
+    # Derive it from the finalized metadata (which includes CLI overrides),
+    # rather than from the workflow's original YAML.
+    explicit_page_attention = model_config.get("enable_page_attention")
+    if isinstance(explicit_page_attention, bool):
+        enable_page_attention = explicit_page_attention
+    else:
+        flash_attention = model_config.get("flash_attention")
+        enable_page_attention = bool(isinstance(flash_attention, dict) and flash_attention.get("enable") is True)
+
+    config = {
+        "architectures": ["MerakForCausalLM"],
+        "config_format": "merak_llm",
+        "load_format": "merak_llm",
+        "xh_model": {
+            "model_type": "hmonnx",
+            "meta_info": meta_path.name,
+        },
+        "enable_page_attention": enable_page_attention,
+        "model_type": "merak_llm",
+    }
+    config_path = meta_path.parent / "merak_config.json"
+    temporary_path = config_path.with_name(f".{config_path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(config_path)
+    return config_path
 
 
 class Qwen35Workflow(BaseLLMWorkflow):
@@ -100,12 +151,14 @@ class Qwen35Workflow(BaseLLMWorkflow):
     ) -> ExportResult:
         self._validate_lora_export(config_overrides)
         self._validate_export_model(config_overrides)
-        return super().export(
+        export_result = super().export(
             quant_result=quant_result,
             output_dir=output_dir,
             device=device,
             config_overrides=config_overrides,
         )
+        finalize_qwen35_merak_runtime_config(export_result)
+        return export_result
 
     def _validate_lora_export(self, config_overrides: Mapping[str, Any] | None) -> None:
         """Fail before creating an output directory or loading the base model."""
@@ -130,23 +183,52 @@ class Qwen35Workflow(BaseLLMWorkflow):
         export_result: ExportResult,
         device: str,
         input_messages: Any,
+        *,
+        auto_offload: bool | None = None,
+        device_map: list[Any] | None = None,
+        use_v2: bool | None = None,
     ) -> str:
         from xhquant.api import get_xhquant_logger
 
         root_meta_file = self._find_golden_meta_file(export_result)
         messages = self.build_input_message(input_messages)
         logger = get_xhquant_logger()
-        for meta_file in self._collect_golden_meta_files(root_meta_file):
-            logger.info(f"Dumping Qwen3.5 golden for model view: {meta_file}")
-            try:
-                self._dump_golden_for_meta(meta_file, device, messages, logger=logger)
-            finally:
-                # Collect after the per-model call frame has unwound.  Its
-                # context managers and HF-compatible wrapper may otherwise
-                # keep the previous HMONNX model alive while loading LoRA.
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        # Preserve the established single-device path unless the caller
+        # explicitly requests a multi-device map.  The latter exists for
+        # 122B golden generation; silently consuming every visible GPU for a
+        # 9B/27B run would be an unexpected global behavior change.
+        resolved_device_map = list(device_map) if device_map is not None else None
+        cuda_device_count = sum(self._is_cuda_device_entry(entry) for entry in (resolved_device_map or ()))
+        if auto_offload is None:
+            auto_offload = cuda_device_count > 1
+        if use_v2 is None:
+            use_v2 = auto_offload or self._env_flag_enabled("ENABLE_HMINFERENCE_V2")
+        if auto_offload and not use_v2:
+            raise ValueError("Qwen3.5 golden auto-offload requires HMONNXInferenceV2.")
+
+        logger.info(
+            f"Qwen3.5 golden runtime: device_map={resolved_device_map}, "
+            f"auto_offload={auto_offload}, inference_v2={use_v2}"
+        )
+        with self._hmonnx_v2_scope(use_v2):
+            for meta_file in self._collect_golden_meta_files(root_meta_file):
+                logger.info(f"Dumping Qwen3.5 golden for model view: {meta_file}")
+                try:
+                    self._dump_golden_for_meta(
+                        meta_file,
+                        device,
+                        messages,
+                        logger=logger,
+                        auto_offload=auto_offload,
+                        device_map=resolved_device_map,
+                    )
+                finally:
+                    # Collect after the per-model call frame has unwound.  Its
+                    # context managers and HF-compatible wrapper may otherwise
+                    # keep the previous HMONNX model alive while loading LoRA.
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
         return root_meta_file
 
     def _dump_golden_for_meta(
@@ -156,18 +238,44 @@ class Qwen35Workflow(BaseLLMWorkflow):
         messages: list[dict[str, Any]],
         *,
         logger: Any,
+        auto_offload: bool = False,
+        device_map: list[Any] | None = None,
     ) -> None:
         from transformers import TextStreamer
 
         from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
         from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
-        hmonnx_model = AutoLLMHONNXModel.from_pretrained(meta_file)
+        load_kwargs: dict[str, Any] = {"enable_golden": True}
+        if auto_offload:
+            load_kwargs["enable_auto_offload"] = True
+        if device_map is not None:
+            load_kwargs["device_map"] = device_map
+        else:
+            requested_device = torch.device(device)
+            if (
+                requested_device.type == "cuda"
+                and requested_device.index is None
+            ):
+                requested_device = torch.device(
+                    f"cuda:{torch.cuda.current_device()}"
+                )
+            # HMONNX otherwise treats every visible GPU as an implicit device
+            # map.  A normal golden run must honor --device and remain
+            # single-device; only --golden-device-map opts into sharding.
+            load_kwargs["device_map"] = [requested_device]
+        hmonnx_model = AutoLLMHONNXModel.from_pretrained(
+            meta_file,
+            **load_kwargs,
+        )
         try:
+            if auto_offload and hasattr(hmonnx_model, "enable_auto_offload"):
+                hmonnx_model.enable_auto_offload = True
+            runtime_device = getattr(hmonnx_model, "device", device)
             if self._messages_have_image(messages):
                 processor = hmonnx_model.get_tf_processor()
                 tokenizer = processor.tokenizer
-                model_inputs = processor.apply_chat_template(messages).to(device)
+                model_inputs = processor.apply_chat_template(messages).to(runtime_device)
                 decode = processor.batch_decode
             else:
                 tokenizer = hmonnx_model.get_tokenizer()
@@ -177,18 +285,27 @@ class Qwen35Workflow(BaseLLMWorkflow):
                     add_generation_prompt=True,
                     enable_thinking=True,
                 )
-                model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(device)
+                model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(runtime_device)
                 decode = tokenizer.batch_decode
 
             streamer = TextStreamer(tokenizer)
-            hmonnx_model.to(device)
+            hmonnx_model.to(runtime_device)
             hmonnx_model.enable_golden = True
             logger.warning("Golden outputs should be generated in aligned precision for stability.")
 
+            memory_devices = device_map if device_map and len(device_map) > 1 else runtime_device
+            inference_context = (
+                LLMInferenceContextManager(
+                    hmonnx_model,
+                    devices=[runtime_device],
+                )
+                if auto_offload
+                else LLMInferenceContextManager(hmonnx_model)
+            )
             contexts = [
                 TimeProfiler("hmonnx_generate_golden", logger),
-                MemoryTracker(device=device, name="generate_golden", logger=logger),
-                LLMInferenceContextManager(hmonnx_model),
+                MemoryTracker(device=memory_devices, name="generate_golden", logger=logger),
+                inference_context,
             ]
             with ContextManagers(contexts):
                 generated_ids = hmonnx_model.generate(
@@ -200,8 +317,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
                 )
 
             generated_ids_trimmed = [
-                out_ids[len(in_ids) :]
-                for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
+                out_ids[len(in_ids) :] for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids, strict=False)
             ]
             output_text = decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             logger.info(f"{'-' * 20} Golden output {'-' * 20}")
@@ -209,7 +325,45 @@ class Qwen35Workflow(BaseLLMWorkflow):
         finally:
             del hmonnx_model
 
-        self._dump_spec_decode_golden(meta_file, device, messages, logger=logger)
+        self._dump_spec_decode_golden(
+            meta_file,
+            device,
+            messages,
+            logger=logger,
+            auto_offload=auto_offload,
+            device_map=device_map,
+        )
+
+    @staticmethod
+    def _is_cuda_device_entry(device: Any) -> bool:
+        if isinstance(device, int):
+            return True
+        if isinstance(device, torch.device):
+            return device.type == "cuda"
+        normalized = str(device).strip().lower()
+        return normalized == "cuda" or normalized.startswith("cuda:") or normalized.isdigit()
+
+    @staticmethod
+    def _env_flag_enabled(name: str) -> bool:
+        return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    @contextmanager
+    def _hmonnx_v2_scope(enabled: bool):
+        if not enabled:
+            yield
+            return
+
+        env_name = "ENABLE_HMINFERENCE_V2"
+        previous = os.environ.get(env_name)
+        os.environ[env_name] = "1"
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = previous
 
     @staticmethod
     def _collect_golden_meta_files(root_meta_file: str) -> list[str]:
@@ -352,6 +506,8 @@ class Qwen35Workflow(BaseLLMWorkflow):
         messages: list[dict[str, Any]],
         *,
         logger: Any,
+        auto_offload: bool = False,
+        device_map: list[Any] | None = None,
     ) -> None:
         mode = self._spec_decode_mode(meta_file)
         if mode not in {"mtp", "dflash"}:
@@ -362,6 +518,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         prompt = self._messages_text_prompt(messages)
         max_new_tokens = self._spec_decode_golden_max_new_tokens(meta_file, mode)
         logger.info(f"Dumping {mode} draft golden via spec_decode_generate (max_new_tokens={max_new_tokens}).")
+        auto_offload_max_memory = self._auto_offload_max_memory_json(device_map) if auto_offload else None
         result = spec_decode_generate(
             meta_file=meta_file,
             prompt=prompt,
@@ -373,9 +530,44 @@ class Qwen35Workflow(BaseLLMWorkflow):
             warmup_runs=0,
             benchmark_runs=1,
             golden=True,
+            disable_auto_offload=not auto_offload,
+            auto_offload_max_memory=auto_offload_max_memory,
         )
         logger.info(f"{'-' * 20} Spec draft golden output {'-' * 20}")
         logger.info(result.output_text)
+
+    @classmethod
+    def _auto_offload_max_memory_json(
+        cls,
+        device_map: list[Any] | None,
+    ) -> str | None:
+        """Restrict standalone draft golden offload to explicit CUDA devices."""
+
+        if not device_map:
+            return None
+        device_indices: list[int] = []
+        for entry in device_map:
+            if not cls._is_cuda_device_entry(entry):
+                continue
+            if isinstance(entry, int):
+                index = entry
+            else:
+                device = torch.device(f"cuda:{entry}" if str(entry).isdigit() else entry)
+                index = int(device.index) if device.index is not None else int(torch.cuda.current_device())
+            if index not in device_indices:
+                device_indices.append(index)
+        if not device_indices:
+            raise ValueError("Qwen3.5 golden auto-offload requires at least one CUDA device in device_map")
+
+        # AutoOffloadGraphModel follows Accelerate's max_memory convention.
+        # Use current free memory with headroom, and omit every unrequested
+        # GPU so an explicit 122B golden run cannot spill onto other users'
+        # devices.
+        max_memory: dict[str, int] = {}
+        for index in device_indices:
+            free_bytes, _ = torch.cuda.mem_get_info(index)
+            max_memory[str(index)] = max(int(free_bytes * 0.9), 1)
+        return json.dumps(max_memory)
 
     @staticmethod
     def _spec_decode_mode(meta_file: str) -> str | None:

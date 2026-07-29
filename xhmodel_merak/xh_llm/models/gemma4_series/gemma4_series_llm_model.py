@@ -371,12 +371,13 @@ def validate_gemma4_flash_attention_graph(
                     f"carries input[7]={node.input[7]!r}"
                 )
         else:
-            if bidirectional_vision:
-                expected_inputs[7] = "mm_prefix_ranges"
-            elif len(node.input) > 7 and node.input[7]:
+            # Gemma4 (Transformers 5.13) keeps global/full layers causal even
+            # when visual bidirectional attention is enabled.  Only sliding
+            # layers may consume the visual block ranges.
+            if len(node.input) > 7 and node.input[7]:
                 raise ValueError(
-                    f"{graph_path}: non-bidirectional full FlashAttention layer {layer_idx} "
-                    f"carries input[7]={node.input[7]!r}"
+                    f"{graph_path}: full FlashAttention layer {layer_idx} "
+                    f"must remain causal but carries input[7]={node.input[7]!r}"
                 )
             if any(node.input[8:]):
                 raise ValueError(f"{graph_path}: full_attention layer {layer_idx} carries sliding metadata")
@@ -524,6 +525,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
     def _uses_target_verify_decode_accepted_count(self) -> bool:
         return (
             self._is_mtp_export()
+            and getattr(self.config, "attention_lowering", "legacy_attention") == "legacy_attention"
             and getattr(self.config, "sliding_kv_cache_input_mode", "slice_window") == "slice_window"
             and self.is_decode()
         )
@@ -558,7 +560,10 @@ class XHGemma4SeriesModel(VisionLLMModel):
         return ((int(self.sliding_window) + verify_length - 1 + 15) // 16) * 16
 
     def _mtp_decode_wrap_cfg_overrides(self) -> dict[str, int]:
-        return {"num_logits_to_keep": 0, "enable_accepted_count_input": True}
+        overrides = {"num_logits_to_keep": 0}
+        if getattr(self.config, "attention_lowering", "legacy_attention") == "legacy_attention":
+            overrides["enable_accepted_count_input"] = True
+        return overrides
 
     def _prefill_cache_input_length(self) -> int:
         return int(getattr(self.config, "prefill_chunk_length", 320))
@@ -1355,11 +1360,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
                 if int(getattr(self.config, "attention_contract_version", 1)) >= 2
                 else "legacy_attention"
             )
-        return (
-            attention_lowering == "flash_attention"
-            and not self._is_mtp_export()
-            and not bool(getattr(self.config, "enable_mtp_outputs", False))
-        )
+        return attention_lowering == "flash_attention"
 
     def _gemma4_v2_compact_input_names(self) -> list[str]:
         input_names = [

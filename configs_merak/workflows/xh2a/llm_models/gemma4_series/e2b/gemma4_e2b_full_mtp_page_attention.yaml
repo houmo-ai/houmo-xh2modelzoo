@@ -1,7 +1,7 @@
 quant:
   algorithm: gptqmodel
-  method: autoround
-  preset: mode1
+  method: gptq
+  preset: full_multimodal
   rotation: null
   artifact_format: gptqmodel_hf
   output_format: gptqmodel_hf
@@ -10,22 +10,40 @@ quant:
   sym: true
   iters: 200
   seed: 42
-  format: auto_gptq
+  quant_nontext_module: false
   calibration:
-    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
-    nsamples: 128
-    seqlen: 2048
+    jsonl: gptqmodel://quantization/calibration/dense_ivsg/gen_data/Qwen3.5-27B.jsonl
+    text_key: text
+    nsamples: 256
+    seqlen: 512
   runtime:
-    batch_size: 8
+    batch_size: 1
+    device_map: auto
     trust_remote_code: true
+    offload_to_disk: false
+  validation:
+    check_quant_text_demo: true
+    check_quant_image_demo: true
+    check_quant_video_demo: true
+    check_quant_audio_demo: true
 export:
   model:
     chip_arch: XH2a
     model_type: Gemma4ForConditionalGeneration
+    # 该字段仅用作占位，实际会在导出前实时覆盖
     hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
     model_name: gemma_4_e2b
-    context_max_length: 131072
+    context_max_length: 2048
     prefill_chunk_length: 320
+    max_mm_ranges_per_chunk: 1
+    flash_attention:
+      enable: true
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
     use_cache: true
     num_logits_to_keep: 1
     sliding_kv_cache_input_mode: slice_window
@@ -54,6 +72,8 @@ export:
         quant_type: w8a8h1_sefp
         ops: {}
     spec_decode_mode: mtp
+    num_draft_tokens: 4
+    output_post_norm_hidden: true
     mtp_config:
       assistant_hf_model: weights/gemma-4-E2B-it-assistant
       target_hf_model: weights/gemma-4-E2B-it
@@ -62,6 +82,7 @@ export:
       batch_size: 1
       input_sequence_length: 1
       use_cache: true
+      readonly_attention_lowering: causal
       num_draft_tokens: 4
       assistant_num_hidden_layers: 4
       assistant_layer_pattern:
@@ -80,5 +101,3 @@ export:
       - shared_value_cache_sliding
       - shared_key_cache_full
       - shared_value_cache_full
-    num_draft_tokens: 4
-    output_post_norm_hidden: true

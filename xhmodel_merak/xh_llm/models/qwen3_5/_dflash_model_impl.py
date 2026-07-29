@@ -29,7 +29,7 @@ It operates in two modes:
 
 import json
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Mapping, Tuple
 
 import torch
 import torch.nn as nn
@@ -47,9 +47,7 @@ def _build_rope_cache(
     rope_theta: float,
     max_pe_length: int,
 ) -> Tuple[Tensor, Tensor]:
-    inv_freq = 1.0 / (
-        rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
-    )
+    inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
     positions = torch.arange(max_pe_length, dtype=torch.float32).reshape(-1, 1)
     freqs = positions * inv_freq.reshape(1, -1)
     emb = torch.cat([freqs, freqs], dim=-1)
@@ -77,6 +75,7 @@ class DFlashCrossAttention(nn.Module):
         max_pe_length: int,
         rope_theta: float,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -84,6 +83,29 @@ class DFlashCrossAttention(nn.Module):
         self.head_dim = head_dim
         self.num_kv_groups = num_attention_heads // num_key_value_heads
         self.use_cache = use_cache
+        flash_attention = flash_attention or {}
+        self.use_flash_attention = bool(flash_attention.get("enable", False))
+        if self.use_flash_attention:
+            flash_bits = {
+                name: int(flash_attention.get(name, 8)) for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+            }
+            invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
+            if invalid_bits:
+                invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
+                raise ValueError(
+                    f"DFlash flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                )
+            # DFlash predicts its complete masked-token block in parallel.
+            # Every query sees the same target-prefix + noise-token K/V range,
+            # so this is deliberately non-causal. kv_valid_length below
+            # excludes the unused full-capacity cache tail.
+            self.flash_attn = xhnn.FlashAttention(
+                num_heads=num_attention_heads,
+                num_kv_heads=num_key_value_heads,
+                scale=head_dim**-0.5,
+                is_causal=False,
+                **flash_bits,
+            )
 
         self.q_proj = nn.Linear(hidden_size, num_attention_heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False)
@@ -124,9 +146,7 @@ class DFlashCrossAttention(nn.Module):
         key_states = self.k_norm(
             self.k_proj(target_hidden).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
         ).transpose(1, 2)
-        value_states = self.v_proj(target_hidden).view(
-            bsz, seq_len, self.num_kv_heads, self.head_dim
-        ).transpose(1, 2)
+        value_states = self.v_proj(target_hidden).view(bsz, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         cos = self.cos_slice(self.cos_cached, past_seq_length)
         sin = self.sin_slice(self.sin_cached, past_seq_length)
         key_states = self.k_rope(key_states, cos, sin)
@@ -144,25 +164,22 @@ class DFlashCrossAttention(nn.Module):
         current_input_length: Tensor,
         target_key_cache: Tensor,
         target_value_cache: Tensor,
-        attn_mask: Tensor,
+        attn_mask: Tensor | None,
     ) -> Tensor:
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_norm(
             self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim)
         ).transpose(1, 2)
         noise_key_states = self.k_norm(
-            self.k_proj(hidden_states).view(
-                bsz, q_len, self.num_kv_heads, self.head_dim
-            )
+            self.k_proj(hidden_states).view(bsz, q_len, self.num_kv_heads, self.head_dim)
         ).transpose(1, 2)
-        noise_value_states = self.v_proj(hidden_states).view(
-            bsz, q_len, self.num_kv_heads, self.head_dim
-        ).transpose(1, 2)
+        noise_value_states = (
+            self.v_proj(hidden_states).view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        )
         q_cos = self.cos_slice(self.cos_cached, past_seq_length)
         q_sin = self.sin_slice(self.sin_cached, past_seq_length)
         query_states = self.q_rope(query_states, q_cos, q_sin)
         noise_key_states = self.k_rope(noise_key_states, q_cos, q_sin)
-        query_states = query_states * self.scale.to(query_states.dtype)
         target_key_cache = _ensure_cache_tensor(target_key_cache)
         target_value_cache = _ensure_cache_tensor(target_value_cache)
 
@@ -178,18 +195,32 @@ class DFlashCrossAttention(nn.Module):
             current_input_length,
             target_value_cache,
         )
-        key_states = torch.repeat_interleave(
-            combined_key_states.transpose(2, 3), self.num_kv_groups, dim=1
-        )
-        value_states = torch.repeat_interleave(
-            combined_value_states, self.num_kv_groups, dim=1
-        )
-        attn_weights = torch.matmul(query_states, key_states)
-        attn_weights = self.masked_add(attn_weights, attn_mask.unsqueeze(1).unsqueeze(1))
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-            query_states.dtype
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                combined_key_states,
+                combined_value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                kv_valid_length=past_seq_length + current_input_length,
+            )
+        else:
+            if attn_mask is None:
+                raise ValueError("Non-FlashAttention DFlash decode requires attn_mask.")
+            query_states = query_states * self.scale.to(query_states.dtype)
+            key_states = torch.repeat_interleave(combined_key_states.transpose(2, 3), self.num_kv_groups, dim=1)
+            value_states = torch.repeat_interleave(combined_value_states, self.num_kv_groups, dim=1)
+            attn_weights = torch.matmul(query_states, key_states)
+            attn_weights = self.masked_add(
+                attn_weights,
+                attn_mask.unsqueeze(1).unsqueeze(1),
+            )
+            attn_weights = F.softmax(
+                attn_weights,
+                dim=-1,
+                dtype=torch.float32,
+            ).to(query_states.dtype)
+            attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, -1)
         return self.o_proj(attn_output)
 
@@ -219,6 +250,7 @@ class DFlashDecoderLayer(nn.Module):
         max_pe_length: int,
         rope_theta: float,
         use_cache: bool,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         self.self_attn = DFlashCrossAttention(
@@ -231,6 +263,7 @@ class DFlashDecoderLayer(nn.Module):
             max_pe_length=max_pe_length,
             rope_theta=rope_theta,
             use_cache=use_cache,
+            flash_attention=flash_attention,
         )
         self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
@@ -243,7 +276,7 @@ class DFlashDecoderLayer(nn.Module):
         current_input_length: Tensor,
         target_key_cache: Tensor,
         target_value_cache: Tensor,
-        attn_mask: Tensor,
+        attn_mask: Tensor | None,
     ) -> Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -282,6 +315,7 @@ class DFlashModel(nn.Module):
         max_pe_length: int,
         max_sequence_length: int,
         rope_theta: float = 10_000_000.0,
+        flash_attention: Mapping | None = None,
     ):
         super().__init__()
         if mode not in {"context", "decode"}:
@@ -311,7 +345,12 @@ class DFlashModel(nn.Module):
                     input_sequence_length=input_sequence_length,
                     max_pe_length=max_pe_length,
                     rope_theta=rope_theta,
+                    # All three DFlash graphs bind the same persistent cache.
+                    # Context/context_decode append verified target hidden
+                    # states; draft_decode appends the transient anchor/mask
+                    # query K/V after the valid target prefix.
                     use_cache=True,
+                    flash_attention=flash_attention,
                 )
                 for _ in range(num_hidden_layers)
             ]
@@ -319,15 +358,11 @@ class DFlashModel(nn.Module):
         self.norm = RMSNorm(hidden_size, rms_norm_eps)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
 
-    def _split_cache_tensors(
-        self, cache_tensors: Tuple[Tensor, ...]
-    ) -> Tuple[List[Tensor], List[Tensor]]:
+    def _split_cache_tensors(self, cache_tensors: Tuple[Tensor, ...]) -> Tuple[List[Tensor], List[Tensor]]:
         if len(cache_tensors) != self.num_hidden_layers * 2:
-            raise ValueError(
-                f"Expected {self.num_hidden_layers * 2} cache tensors, got {len(cache_tensors)}"
-            )
+            raise ValueError(f"Expected {self.num_hidden_layers * 2} cache tensors, got {len(cache_tensors)}")
         key_caches = list(cache_tensors[: self.num_hidden_layers])
-        value_caches = list(cache_tensors[self.num_hidden_layers:])
+        value_caches = list(cache_tensors[self.num_hidden_layers :])
         return key_caches, value_caches
 
     def forward_context(
@@ -358,7 +393,7 @@ class DFlashModel(nn.Module):
         noise_embedding: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
-        attn_mask: Tensor,
+        attn_mask: Tensor | None,
         *cache_tensors: Tensor,
     ) -> Tensor:
         past_key_caches, past_value_caches = self._split_cache_tensors(cache_tensors)
@@ -373,6 +408,23 @@ class DFlashModel(nn.Module):
                 attn_mask=attn_mask,
             )
         return self.lm_head(self.norm(hidden_states))
+
+    def forward_decode_flash(
+        self,
+        noise_embedding: Tensor,
+        past_seq_length: Tensor,
+        current_input_length: Tensor,
+        *cache_tensors: Tensor,
+    ) -> Tensor:
+        """FlashAttention ABI without the legacy dense attention mask input."""
+
+        return self.forward_decode(
+            noise_embedding,
+            past_seq_length,
+            current_input_length,
+            None,
+            *cache_tensors,
+        )
 
     def forward(
         self,
@@ -399,17 +451,44 @@ class DFlashModel(nn.Module):
     ):
         if self.mode == "context":
             cache_inputs = (
-                input3, input4, input5, input6, input7, input8, input9,
-                input10, input11, input12, input13, input14, input15,
-                input16, input17, input18, input19,
+                input3,
+                input4,
+                input5,
+                input6,
+                input7,
+                input8,
+                input9,
+                input10,
+                input11,
+                input12,
+                input13,
+                input14,
+                input15,
+                input16,
+                input17,
+                input18,
+                input19,
             )[: self.num_hidden_layers * 2]
             return self.forward_context(input0, input1, input2, *cache_inputs)
         if input3 is None:
             raise ValueError("DFlash decode requires attn_mask input.")
         cache_inputs = (
-            input4, input5, input6, input7, input8, input9, input10,
-            input11, input12, input13, input14, input15, input16,
-            input17, input18, input19,
+            input4,
+            input5,
+            input6,
+            input7,
+            input8,
+            input9,
+            input10,
+            input11,
+            input12,
+            input13,
+            input14,
+            input15,
+            input16,
+            input17,
+            input18,
+            input19,
         )[: self.num_hidden_layers * 2]
         return self.forward_decode(input0, input1, input2, input3, *cache_inputs)
 
@@ -423,6 +502,7 @@ class DFlashModel(nn.Module):
         input_sequence_length: int,
         max_pe_length: int,
         max_sequence_length: int,
+        flash_attention: Mapping | None = None,
     ) -> "DFlashModel":
         from safetensors import safe_open
 
@@ -448,19 +528,15 @@ class DFlashModel(nn.Module):
             max_pe_length=max_pe_length,
             max_sequence_length=max_sequence_length,
             rope_theta=cfg.get("rope_theta", 10_000_000.0),
+            flash_attention=flash_attention,
         )
 
         with safe_open(str(Path(dflash_model_dir) / "model.safetensors"), framework="pt") as f:
             dflash_sd = {k: f.get_tensor(k).to(dtype) for k in f.keys()}
         missing, unexpected = model.load_state_dict(dflash_sd, strict=False)
-        unexpected = [
-            name for name in unexpected
-            if not name.endswith(("cos_cached", "sin_cached"))
-        ]
+        unexpected = [name for name in unexpected if not name.endswith(("cos_cached", "sin_cached"))]
         missing = [
-            name for name in missing
-            if not name.endswith(("cos_cached", "sin_cached"))
-            and name != "lm_head.weight"
+            name for name in missing if not name.endswith(("cos_cached", "sin_cached")) and name != "lm_head.weight"
         ]
         if unexpected:
             raise RuntimeError(f"Unexpected DFlash keys: {unexpected}")

@@ -7,6 +7,13 @@ export:
     use_cache: true
     num_logits_to_keep: 1
     linear_chunk_size: 64
+    flash_attention:
+      enable: false
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
     split_conv_cache: true
     normalize_force_fp32: false
     use_manual_depthwise_conv1d: false
@@ -40,7 +47,6 @@ export:
       head_dim: 256
       batch_size: 1
       input_sequence_length: 1
-      context_max_length: 2048
       max_pe_length: 262144
       use_cache: true
 quant:

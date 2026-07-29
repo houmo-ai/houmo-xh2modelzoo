@@ -22,6 +22,37 @@ from ._delta_rule import torch_chunk_gated_delta_rule, torch_recurrent_gated_del
 from ._gdr_ops import GDRBlockTriInverse, GDRChunkScan, GDRRecurrentScan
 
 
+def _prepare_linear_attn_mask_views(
+    linear_attn_mask: Tensor,
+    dtype: torch.dtype,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Materialize the three GDN mask layouts once per model invocation."""
+
+    mask = linear_attn_mask.to(dtype=dtype)
+    sequence_mask = mask.unsqueeze(-1)
+    channel_mask = mask.unsqueeze(1)
+    state_mask = sequence_mask.unsqueeze(-1)
+    return sequence_mask, channel_mask, state_mask
+
+
+def _resolve_linear_attn_mask_views(
+    linear_attn_mask: Tensor | tuple[Tensor, Tensor, Tensor],
+    dtype: torch.dtype,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Accept the shared views while retaining the direct-layer test ABI."""
+
+    if isinstance(linear_attn_mask, tuple):
+        if len(linear_attn_mask) != 3:
+            raise ValueError("linear-attention mask views must contain sequence, channel, and state layouts")
+        # Shared views are created by ``_prepare_linear_attn_mask_views`` with
+        # the requested dtype before entering the decoder-layer loop.  Do not
+        # inspect tensor dtypes here: TorchFX represents tuple elements as
+        # Proxy objects, and a Python ``all(mask.dtype == dtype)`` turns the
+        # symbolic comparison into forbidden data-dependent control flow.
+        return linear_attn_mask
+    return _prepare_linear_attn_mask_views(linear_attn_mask, dtype)
+
+
 class HybridRMSNormMixin:
     """Shared 0-centered Qwen RMSNorm adapter."""
 
@@ -84,7 +115,7 @@ class HybridGatedAttentionMixin:
         past_k_cache: Optional[Tensor] = None,
         past_v_cache: Optional[Tensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
         q_proj = self.q_proj(hidden_states)
         q_proj = q_proj.view(bsz, q_len, self.num_heads, self.head_dim * 2)
@@ -427,8 +458,10 @@ class HybridGatedDeltaNetMixin:
         linear_attn_mask: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
     ):
-        mask = linear_attn_mask.to(hidden_states.dtype)
-        mask = mask.unsqueeze(-1)
+        mask, channel_mask, state_mask = _resolve_linear_attn_mask_views(
+            linear_attn_mask,
+            hidden_states.dtype,
+        )
         batch_size, seq_len, _ = hidden_states.shape
         query, key, value, z, b, a = self._project_qkvzba(hidden_states)
         use_recurrent = self.linear_attention_mode == "recurrent"
@@ -520,7 +553,7 @@ class HybridGatedDeltaNetMixin:
             query_states = F.silu(query_states).to(query_states.dtype)
             key_states = F.silu(key_states).to(key_states.dtype)
             value_states = F.silu(value_states).to(value_states.dtype)
-            mask_qkv = linear_attn_mask.unsqueeze(1)
+            mask_qkv = channel_mask
             query_states = query_states * mask_qkv
             key_states = key_states * mask_qkv
             value_states = value_states * mask_qkv
@@ -567,7 +600,7 @@ class HybridGatedDeltaNetMixin:
                 _l = self.input_sequence_length
                 conv_out = self.conv1d(hidden_states_new)[:, :, _k : _k + _l]
             mixed_qkv = F.silu(conv_out).to(mixed_qkv.dtype)
-            mask_qkv = linear_attn_mask.unsqueeze(1)
+            mask_qkv = channel_mask
             mixed_qkv = mixed_qkv * mask_qkv
             mixed_qkv = mixed_qkv.transpose(1, 2)
             query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
@@ -576,7 +609,7 @@ class HybridGatedDeltaNetMixin:
             value = value.reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
         beta = b.sigmoid()
         g = self.A_log_exp * F.softplus(a + self.dt_bias)
-        mask_qkv = linear_attn_mask.unsqueeze(-1).unsqueeze(-1)
+        mask_qkv = state_mask
         value = value * mask_qkv
         beta = beta * mask
         g = g * mask

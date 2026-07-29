@@ -6,11 +6,11 @@ from xhquant ops, so _to_wrap loads weights via MTPModel.from_pretrained()
 and _to_fronted uses TorchExport frontend.
 """
 
-from typing import Any, cast
+from typing import cast
 
 import torch
 
-from xhquant.api import FrontendType, get_xhquant_logger, to_frontend_graph
+from xhquant.api import FrontendType, to_frontend_graph
 
 from ...base_model import XHSubModel
 from ...builder import register_llm_model
@@ -59,15 +59,14 @@ class XHQwen3_5MTPDraftModel(XHSubModel):
             input_sequence_length=self.config.input_sequence_length,
             max_pe_length=self.config.max_pe_length,
             use_cache=self.config.use_cache,
+            flash_attention=self.config.flash_attention,
         )
         self._wrap_model = model
 
     def _to_fronted(self, wrap_model):
         dummy_inputs = self.get_dummy_inputs()
         dummy_args = list(dummy_inputs.values())
-        return to_frontend_graph(
-            wrap_model, FrontendType.TorchFX, dummy_args
-        )
+        return to_frontend_graph(wrap_model, FrontendType.TorchFX, dummy_args)
 
     def get_dummy_inputs(self) -> dict:
         bsz = self.config.batch_size
@@ -84,9 +83,7 @@ class XHQwen3_5MTPDraftModel(XHSubModel):
             "current_input_length": torch.tensor([seq_len], dtype=torch.int64),
         }
         if self.config.use_cache:
-            inputs["past_key_cache"] = torch.zeros(
-                bsz, num_kv_heads, context_max_length, head_dim, dtype=torch.float16
-            )
+            inputs["past_key_cache"] = torch.zeros(bsz, num_kv_heads, context_max_length, head_dim, dtype=torch.float16)
             inputs["past_value_cache"] = torch.zeros(
                 bsz, num_kv_heads, context_max_length, head_dim, dtype=torch.float16
             )

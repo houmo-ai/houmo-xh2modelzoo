@@ -10,6 +10,7 @@ from torch import Tensor
 
 from xhquant import nn as xhnn
 
+from ._hybrid_gated_delta_net import _prepare_linear_attn_mask_views
 from .split_conv_cache_utils import (
     _flatten_merged_conv_cache_outputs,
     _flatten_split_conv_cache_outputs,
@@ -140,6 +141,12 @@ class HybridTextModelMixin:
         collected_hidden_states = []
         full_attn_cache_idx = 0
         linear_attn_cache_idx = 0
+        # Cast/reshape once outside the layer loop so large exports do not
+        # replicate the same three mask-layout subgraphs in every GDN layer.
+        linear_attn_mask_views = _prepare_linear_attn_mask_views(
+            linear_attn_mask,
+            hidden_states.dtype,
+        )
         split_conv_cache = self.split_conv_cache
         if not split_conv_cache and (
             _looks_like_flat_split_conv_cache(past_conv_cache) or _layers_use_split_conv_cache(self.layers)
@@ -192,7 +199,7 @@ class HybridTextModelMixin:
                     past_seq_length=past_seq_length,
                     current_input_length=current_input_length,
                     position_embeddings=position_embeddings,
-                    linear_attn_mask=linear_attn_mask,
+                    linear_attn_mask=linear_attn_mask_views,
                     past_k_cache=_past_k_cache,
                     past_v_cache=_past_v_cache,
                     past_conv_cache=_past_conv_cache,
