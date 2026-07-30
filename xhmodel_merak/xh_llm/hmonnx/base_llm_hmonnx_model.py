@@ -12,6 +12,9 @@ from xhquant.api import get_xhquant_logger
 from xhquant.core.hmfp_kv_cache import HMFPPagedKVCache
 from xhquant.xhonnxruntime.convert_to_page_attention import convert_to_page_attention
 from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2
+from xhquant.xhonnxruntime.hmonnx_optimizer import (
+    materialize_parallel_linear_fusion,
+)
 from xhquant.xhonnxruntime.llm_hmonnx_loader import LLMHMONNXLoader
 from xhquant.xhonnxruntime.parsers import PageAttention, PageAttentionContext
 
@@ -34,6 +37,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         enable_prefill_cuda_graph: bool | None = None,
         enable_decode_cuda_graph: bool | None = None,
         enable_page_attention: bool = False,
+        enable_parallel_linear_fusion: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -48,14 +52,14 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         )
         self.use_cache = self.kvcache_config.num_layers > 0
         self.enable_page_attention = enable_page_attention
-        prefill_hmonnx = meta.prefill_hmonnx
-        decode_hmonnx = meta.decode_hmonnx
+        prefill_hmonnx, decode_hmonnx = self._prepare_hmonnx_paths(
+            meta.prefill_hmonnx,
+            meta.decode_hmonnx,
+            enable_parallel_linear_fusion=enable_parallel_linear_fusion,
+            enable_page_attention=enable_page_attention,
+        )
         prefill_graph = None
         decode_graph = None
-        if enable_page_attention:
-            # 对hmonnx做convert_to_page_attention转换
-            prefill_hmonnx = self._convert_to_page_attention_hmonnx(meta.prefill_hmonnx)
-            decode_hmonnx = self._convert_to_page_attention_hmonnx(meta.decode_hmonnx)
         if True:
             llm_loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
             prefill_graph = llm_loader.prefill_graph
@@ -90,6 +94,28 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)
         self._sync_page_attention_mode_to_kvcache()
         self.pad_token_id = self.meta_info.pad_token_id
+
+    @staticmethod
+    def _prepare_hmonnx_paths(
+        prefill_hmonnx: str | Path,
+        decode_hmonnx: str | Path,
+        *,
+        enable_parallel_linear_fusion: bool,
+        enable_page_attention: bool,
+    ) -> tuple[str, str]:
+        """Apply immutable graph derivations before loading any initializer."""
+
+        prefill_path = str(prefill_hmonnx)
+        decode_path = str(decode_hmonnx)
+        if enable_parallel_linear_fusion:
+            prefill_path = str(materialize_parallel_linear_fusion(prefill_path))
+            decode_path = str(materialize_parallel_linear_fusion(decode_path))
+        if enable_page_attention:
+            # PageAttention must lower the already fused graph so both
+            # optimizations are present in the one graph loaded at runtime.
+            prefill_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(prefill_path)
+            decode_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(decode_path)
+        return prefill_path, decode_path
 
     def _sync_page_attention_mode_to_kvcache(self) -> None:
         if hasattr(self._kvcache_mixin, "enable_page_attention"):
