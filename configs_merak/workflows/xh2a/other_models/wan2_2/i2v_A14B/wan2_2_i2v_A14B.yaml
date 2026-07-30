@@ -1,0 +1,21 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHWan22Model
+  quant_scheme:
+    quant_type: w8a8_sefp
+  wan2_2:
+    task: i2v-A14B
+    size: [832, 480]
+    frame_num: 81
+    sample_steps: 4
+    sample_shift: 5.0
+    sample_guide_scale: 5.0
+    prompt: A calm seaside scene with gentle waves.
+    negative_prompt: ""
+    components: [t5]
+    torch_dtype: float16
+    base_seed: 0
+    use_resolved_float_loader: false
