@@ -104,12 +104,13 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         *,
         mode: str = "decode",
         target_model_dir: str | None = None,
-        hidden_size: int = 3584,
-        num_attention_heads: int = 28,
-        num_key_value_heads: int = 4,
-        head_dim: int = 128,
-        num_hidden_layers: int = 1,
-        num_target_layers: int = 4,
+        hidden_size: int | None = None,
+        num_attention_heads: int | None = None,
+        num_key_value_heads: int | None = None,
+        head_dim: int | None = None,
+        num_hidden_layers: int | None = None,
+        num_target_layers: int | None = None,
+        block_size: int | None = None,
         batch_size: int = 1,
         input_sequence_length: int = 1,
         max_pe_length: int = 262144,
@@ -120,6 +121,87 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         **kwargs,
     ):
         super().__init__(**kwargs)
+        assistant_config_path = Path(str(self.hf_model)) / "config.json"
+        assistant_config: dict = {}
+        if assistant_config_path.is_file():
+            assistant_config = json.loads(
+                assistant_config_path.read_text(encoding="utf-8")
+            )
+        dflash_hf_config = assistant_config.get("dflash_config") or {}
+
+        def resolve_checkpoint_int(
+            name: str,
+            configured: int | None,
+            *,
+            legacy_default: int,
+            checkpoint_value: int | None = None,
+        ) -> int:
+            value = (
+                assistant_config.get(name)
+                if checkpoint_value is None
+                else checkpoint_value
+            )
+            if value is None:
+                return (
+                    legacy_default
+                    if configured is None
+                    else int(configured)
+                )
+            expected = int(value)
+            if configured is not None and int(configured) != expected:
+                raise ValueError(
+                    f"Qwen3.5 DFlash {name} must match assistant checkpoint "
+                    f"{assistant_config_path}: configured={configured}, "
+                    f"checkpoint={expected}"
+                )
+            return expected
+
+        target_layer_ids = dflash_hf_config.get("target_layer_ids") or []
+        hidden_size = resolve_checkpoint_int(
+            "hidden_size",
+            hidden_size,
+            legacy_default=3584,
+        )
+        num_attention_heads = resolve_checkpoint_int(
+            "num_attention_heads",
+            num_attention_heads,
+            legacy_default=28,
+        )
+        num_key_value_heads = resolve_checkpoint_int(
+            "num_key_value_heads",
+            num_key_value_heads,
+            legacy_default=4,
+        )
+        head_dim = resolve_checkpoint_int(
+            "head_dim",
+            head_dim,
+            legacy_default=128,
+        )
+        num_hidden_layers = resolve_checkpoint_int(
+            "num_hidden_layers",
+            num_hidden_layers,
+            legacy_default=1,
+        )
+        num_target_layers = resolve_checkpoint_int(
+            "num_target_layers",
+            num_target_layers,
+            legacy_default=4,
+            checkpoint_value=(
+                len(target_layer_ids)
+                if target_layer_ids
+                else None
+            ),
+        )
+        checkpoint_block_size = assistant_config.get("block_size")
+        if checkpoint_block_size is None:
+            checkpoint_block_size = dflash_hf_config.get("block_size")
+        block_size = resolve_checkpoint_int(
+            "block_size",
+            block_size,
+            legacy_default=16,
+            checkpoint_value=checkpoint_block_size,
+        )
+
         self.mode = mode
         self.target_model_dir = target_model_dir
         self.hidden_size = hidden_size
@@ -128,6 +210,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.head_dim = head_dim
         self.num_hidden_layers = num_hidden_layers
         self.num_target_layers = num_target_layers
+        self.block_size = block_size
         self.batch_size = batch_size
         self.input_sequence_length = input_sequence_length
         self.max_pe_length = max_pe_length
@@ -135,15 +218,12 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
         if noise_token_id is None:
-            assistant_config_path = Path(str(self.hf_model)) / "config.json"
             if not assistant_config_path.is_file():
                 raise ValueError(
                     "Qwen3.5 DFlash requires noise_token_id or an assistant "
                     f"config.json containing dflash_config.mask_token_id: "
                     f"{assistant_config_path}"
                 )
-            assistant_config = json.loads(assistant_config_path.read_text(encoding="utf-8"))
-            dflash_hf_config = assistant_config.get("dflash_config") or {}
             noise_token_id = dflash_hf_config.get("mask_token_id")
         if noise_token_id is None:
             raise ValueError("Qwen3.5 DFlash assistant config has no dflash_config.mask_token_id")
@@ -289,6 +369,9 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             # cache is not: one top-level context value owns both capacities.
             dflash_config["target_model_dir"] = hf_model
             dflash_config["max_sequence_length"] = context_max_length
+            dflash_config["max_pe_length"] = context_max_length
+            dflash_config["batch_size"] = batch_size
+            dflash_config["input_sequence_length"] = prefill_chunk_length
             if "draft_head_weight_bits" not in dflash_config:
                 dflash_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             # The unified workflow flag applies to the target and the DFlash
@@ -299,6 +382,9 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         elif dflash_config is not None:
             dflash_config.target_model_dir = hf_model
             dflash_config.max_sequence_length = context_max_length
+            dflash_config.max_pe_length = context_max_length
+            dflash_config.batch_size = batch_size
+            dflash_config.input_sequence_length = prefill_chunk_length
             dflash_config.flash_attention = flash_attention
         self.dflash_config = dflash_config
         if self.dflash_config is not None:

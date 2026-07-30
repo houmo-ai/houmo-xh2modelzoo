@@ -222,7 +222,7 @@ def test_qwen3_5_dflash_workflow_resolves_target_model_dir_from_export_hf_model(
     workflow_config = WorkflowConfig.from_file(str(config_path))
     raw_dflash_cfg = workflow_config.export["model"]["dflash_config"]
 
-    assert raw_dflash_cfg["target_model_dir"] is None
+    assert raw_dflash_cfg.get("target_model_dir") is None
 
     override_hf_model = tmp_path / "override_qwen3_5_hf"
     override_hf_model.mkdir()
@@ -230,7 +230,7 @@ def test_qwen3_5_dflash_workflow_resolves_target_model_dir_from_export_hf_model(
     export_cfg["model"]["hf_model"] = str(override_hf_model)
 
     assert export_cfg["model"]["hf_model"] == str(override_hf_model)
-    assert export_cfg["model"]["dflash_config"]["target_model_dir"] is None
+    assert export_cfg["model"]["dflash_config"].get("target_model_dir") is None
 
     cfg = AutoLLMConfig.from_pretrained(Config(export_cfg).model)
 
@@ -244,12 +244,141 @@ def test_qwen3_5_dflash_workflow_keeps_checkpoint_capacity_and_default_width(
 ):
     workflow_config = WorkflowConfig.from_file(str(config_path))
     model_cfg = workflow_config.export["model"]
+    cfg = XHQwen3_5ModelConfig(
+        **{
+            **workflow_config.build_export_dict()["model"],
+            "hf_model": "weights/target",
+        }
+    )
 
     # The checkpoint can produce a 16-token block, but the workflow defaults
     # to nine proposals. --num-draft-tokens may opt into any wider value that
     # still fits the fixed checkpoint capacity.
     assert model_cfg["num_draft_tokens"] == 9
-    assert model_cfg["num_draft_tokens"] + 1 <= model_cfg["dflash_config"]["block_size"]
+    assert model_cfg["num_draft_tokens"] + 1 <= cfg.dflash_config.block_size
+    # The assistant checkpoint is the only source of truth for the target
+    # architecture and target hidden-state layers. Duplicating either in YAML
+    # can silently export a shape-compatible but numerically invalid graph.
+    assert "output_hidden_state_indices" not in model_cfg
+    for key in (
+        "hidden_size",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+        "num_hidden_layers",
+        "num_target_layers",
+        "block_size",
+    ):
+        assert key not in model_cfg["dflash_config"]
+    assert cfg.dflash_config.max_sequence_length == cfg.context_max_length
+    assert cfg.dflash_config.max_pe_length == cfg.context_max_length
+    assert cfg.dflash_config.input_sequence_length == cfg.prefill_chunk_length
+
+
+def test_qwen3_5_dflash_target_layers_come_from_assistant_checkpoint(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    assistant_dir = tmp_path / "dflash"
+    assistant_dir.mkdir()
+    (assistant_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "dflash_config": {
+                    "mask_token_id": 7,
+                    "target_layer_ids": [1, 16, 31, 46, 61],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_6_27b",
+        hf_model="weights/target",
+        spec_decode_mode="dflash",
+        dflash_config={
+            "hf_model": str(assistant_dir),
+            "target_model_dir": "weights/target",
+        },
+    )
+
+    model = XHQwen3_5Model(cfg)
+
+    assert model.wrap_cfg["output_hidden_state_indices"] == [
+        1,
+        16,
+        31,
+        46,
+        61,
+    ]
+
+
+def test_qwen3_5_dflash_rejects_target_layer_override_mismatch(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+
+    assistant_dir = tmp_path / "dflash"
+    assistant_dir.mkdir()
+    (assistant_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "dflash_config": {
+                    "mask_token_id": 7,
+                    "target_layer_ids": [1, 16, 31, 46, 61],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = XHQwen3_5ModelConfig(
+        model_name="qwen3_6_27b",
+        hf_model="weights/target",
+        spec_decode_mode="dflash",
+        output_hidden_state_indices=[1, 10, 19, 28, 37],
+        dflash_config={
+            "hf_model": str(assistant_dir),
+            "target_model_dir": "weights/target",
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="output_hidden_state_indices must match",
+    ):
+        XHQwen3_5Model(cfg)
+
+
+def test_qwen3_5_dflash_rejects_assistant_architecture_override_mismatch(
+    tmp_path,
+):
+    assistant_dir = tmp_path / "dflash"
+    assistant_dir.mkdir()
+    (assistant_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "hidden_size": 5120,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 5,
+                "block_size": 16,
+                "dflash_config": {
+                    "mask_token_id": 7,
+                    "target_layer_ids": [1, 16, 31, 46, 61],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="num_attention_heads must match assistant checkpoint",
+    ):
+        XHQwen3_5_DFlashConfig(
+            model_name="qwen3_6_27b_dflash",
+            hf_model=str(assistant_dir),
+            target_model_dir="weights/target",
+            num_attention_heads=40,
+        )
 
 
 @pytest.mark.parametrize(
@@ -274,6 +403,15 @@ def test_qwen3_5_spec_gptq_configs_accept_required_flash_cli_override(
     assert model_config["max_pe_length"] == 262144
     assert model_config["flash_attention"]["enable"] is True
     assert model_config["fuse_gdr_block_recurrent_ops"] is True
+    if model_config.get("spec_decode_mode") == "dflash":
+        cfg = XHQwen3_5ModelConfig(
+            **{
+                **model_config,
+                "hf_model": "weights/target",
+            }
+        )
+        assert cfg.dflash_config.max_sequence_length == 262144
+        assert cfg.dflash_config.max_pe_length == 262144
 
 
 @pytest.mark.parametrize("mode", ["mtp", "dflash"])
@@ -454,15 +592,35 @@ def test_qwen3_5_spec_decode_restore_prefill_wrap_cfg():
     assert model.wrap_cfg["output_post_norm_hidden"] is True
 
 
-def test_qwen3_5_dflash_restore_prefill_wrap_cfg_without_post_norm_hidden():
+def test_qwen3_5_dflash_restore_prefill_wrap_cfg_without_post_norm_hidden(
+    tmp_path,
+):
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
 
+    assistant_dir = tmp_path / "dflash"
+    assistant_dir.mkdir()
+    (assistant_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "dflash_config": {
+                    "mask_token_id": 7,
+                    "target_layer_ids": [1],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     cfg = XHQwen3_5ModelConfig(
         model_name="qwen3_5",
+        hf_model="weights/target",
         spec_decode_mode="dflash",
         num_logits_to_keep=1,
         output_hidden_state_indices=[1],
         prefill_chunk_length=256,
+        dflash_config={
+            "hf_model": str(assistant_dir),
+            "target_model_dir": "weights/target",
+        },
     )
     model = XHQwen3_5Model(cfg)
     model.wrap_cfg["verify_output_intermediates"] = True

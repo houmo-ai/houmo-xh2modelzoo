@@ -542,10 +542,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             self.wrap_cfg["output_hidden_state_indices"] = self._get_dflash_target_layer_ids()
 
     def _get_dflash_target_layer_ids(self) -> list[int]:
-        configured = getattr(self.config, "output_hidden_state_indices", None)
-        if configured is not None:
-            return list(configured)
-
         dflash_config = self.config.dflash_config
         if dflash_config is None:
             raise ValueError("dflash_config is required when spec_decode_mode='dflash'")
@@ -556,7 +552,22 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             target_layer_ids = json.load(f).get("dflash_config", {}).get("target_layer_ids")
         if not target_layer_ids:
             raise ValueError(f"Failed to read dflash_config.target_layer_ids from {config_path}")
-        return list(target_layer_ids)
+        target_layer_ids = list(target_layer_ids)
+
+        # DFlash is trained against hidden states from these exact target
+        # layers.  A workflow-level override is therefore not a tuning knob:
+        # selecting different layers still exports a shape-compatible graph,
+        # but silently destroys draft acceptance.  Keep the checkpoint as the
+        # source of truth and fail before a multi-hour export if a legacy YAML
+        # duplicates the contract incorrectly.
+        configured = getattr(self.config, "output_hidden_state_indices", None)
+        if configured is not None and list(configured) != target_layer_ids:
+            raise ValueError(
+                "DFlash output_hidden_state_indices must match the assistant "
+                f"checkpoint {config_path}: configured={list(configured)}, "
+                f"checkpoint={target_layer_ids}"
+            )
+        return target_layer_ids
 
     @VisionLLMModel.work_dir.setter
     def work_dir(self, work_dir: str):
