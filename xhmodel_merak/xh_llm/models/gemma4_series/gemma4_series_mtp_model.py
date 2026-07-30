@@ -41,7 +41,7 @@ from xhquant.nn import RMSNorm as XHRMSNorm
 
 from .mtp_contract import (
     MTP_DRAFT_INPUT_NAMES,
-    normalize_readonly_attention_lowering,
+    MTP_FLASH_DRAFT_INPUT_NAMES,
 )
 
 
@@ -444,23 +444,10 @@ class Gemma4AssistantSelfAttention(nn.Module):
         layer_type: str,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
-        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
         self.layer_type = layer_type
         self.use_readonly_page_attention = bool(use_readonly_page_attention)
-        # Two read-only target-cache lowerings are kept intentionally:
-        # ``exact_range`` exports non-causal Padding Full Cross-Attention plus
-        # an absolute [start, end) range for every query.  It is the general
-        # ABI and also represents a sliding window without relying on causal
-        # alignment. ``causal`` is the faster Gemma4 MTP specialization:
-        # draft M is always 1, the causal mask is aligned at N-1, and the
-        # target cache exposes exactly N keys (the query's RoPE position still
-        # remains N). It therefore has identical visibility without a range
-        # tensor and preserves the paged split-K decode kernel.
-        self.readonly_attention_lowering = normalize_readonly_attention_lowering(
-            readonly_attention_lowering
-        )
         self.config = hf_attn.config
         self.q_proj = hf_attn.q_proj
         self.q_norm = hf_attn.q_norm
@@ -480,17 +467,16 @@ class Gemma4AssistantSelfAttention(nn.Module):
         self.k_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
         self.v_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
         if self.use_readonly_page_attention:
-            use_causal = self.readonly_attention_lowering == "causal"
             sliding_window = (
                 int(getattr(self.config, "sliding_window", 0) or 0)
-                if use_causal and self.layer_type == "sliding_attention"
+                if self.layer_type == "sliding_attention"
                 else None
             )
             self.flash_attn = xhnn.FlashAttention(
                 num_heads=self.num_attention_heads,
                 num_kv_heads=self.num_key_value_heads,
                 scale=1.0,
-                is_causal=use_causal,
+                is_causal=True,
                 sliding_window=sliding_window,
             )
         else:
@@ -504,38 +490,17 @@ class Gemma4AssistantSelfAttention(nn.Module):
         self.attn_compute_cast = xhnn.Cast(torch.float16).to(dtype=torch.float16)
         self.attn_output_cast = xhnn.Cast(self.o_proj.weight.dtype).to(dtype=self.o_proj.weight.dtype)
 
-    def _query_kv_range_abs(
-        self,
-        past_seq_length: torch.Tensor,
-        current_input_length: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return exact target-KV visibility for one Q-only draft query."""
-
-        kv_valid_length = past_seq_length + current_input_length
-        if self.layer_type == "sliding_attention":
-            sliding_window = int(getattr(self.config, "sliding_window", 0) or 0)
-            if sliding_window <= 0:
-                raise ValueError(
-                    "Gemma4 MTP sliding_attention requires a positive sliding_window"
-                )
-            range_start = torch.clamp(kv_valid_length - sliding_window, min=0)
-        else:
-            range_start = torch.zeros_like(kv_valid_length)
-        query_kv_range_abs = torch.stack(
-            (range_start, kv_valid_length),
-            dim=-1,
-        ).unsqueeze(1)
-        return kv_valid_length, query_kv_range_abs
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor | None,
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
         shared_key_cache: torch.Tensor,
         shared_value_cache: torch.Tensor,
+        kv_window_start_abs: torch.Tensor | None = None,
+        kv_valid_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, seq_length = hidden_states.shape[:2]
         cos, sin = position_embeddings
@@ -566,33 +531,28 @@ class Gemma4AssistantSelfAttention(nn.Module):
         )
 
         if self.use_readonly_page_attention:
-            if self.readonly_attention_lowering == "causal":
-                # M=1, causal-mask alignment=N-1 and visible target KV
-                # length=N. The independently rotated query remains at
-                # absolute position N. This expresses the exact Gemma4
-                # visibility without a per-query range tensor and keeps the
-                # paged full-attention split-K decode path available.
-                attn_output = self.flash_attn(
-                    query_states,
-                    key_states,
-                    value_states,
-                    past_seq_length=past_seq_length,
-                    current_input_length=current_input_length,
-                ).transpose(1, 2).contiguous()
+            if self.layer_type == "sliding_attention":
+                if kv_window_start_abs is None or kv_valid_length is None:
+                    raise ValueError(
+                        "Gemma4 MTP sliding FlashAttention requires "
+                        "kv_window_start_abs and kv_valid_length"
+                    )
             else:
-                kv_valid_length, query_kv_range_abs = self._query_kv_range_abs(
-                    past_seq_length,
-                    current_input_length,
-                )
-                attn_output = self.flash_attn(
-                    query_states,
-                    key_states,
-                    value_states,
-                    past_seq_length=past_seq_length,
-                    current_input_length=current_input_length,
-                    kv_valid_length=kv_valid_length,
-                    query_kv_range_abs=query_kv_range_abs,
-                ).transpose(1, 2).contiguous()
+                kv_window_start_abs = None
+                kv_valid_length = None
+            # M=1 uses causal-mask position N-1 while RoPE remains at N. The
+            # target-owned cache therefore exposes exactly N entries without
+            # writing assistant KV. Compact sliding storage additionally
+            # declares its physical origin and valid width.
+            attn_output = self.flash_attn(
+                query_states,
+                key_states,
+                value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                kv_window_start_abs=kv_window_start_abs,
+                kv_valid_length=kv_valid_length,
+            ).transpose(1, 2).contiguous()
         else:
             key_states = self.k_repeat_interleave(key_states.transpose(2, 3), self.num_key_value_groups, 1)
             value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
@@ -615,7 +575,6 @@ class Gemma4AssistantDecoderLayer(nn.Module):
         layer_type: str,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
-        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
         self.layer_type = layer_type
@@ -624,7 +583,6 @@ class Gemma4AssistantDecoderLayer(nn.Module):
             layer_type,
             cache_axis=cache_axis,
             use_readonly_page_attention=use_readonly_page_attention,
-            readonly_attention_lowering=readonly_attention_lowering,
         )
         self.input_layernorm = hf_layer.input_layernorm
         self.post_attention_layernorm = hf_layer.post_attention_layernorm
@@ -637,11 +595,13 @@ class Gemma4AssistantDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor,
+        attention_mask: torch.Tensor | None,
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
         shared_key_cache: torch.Tensor,
         shared_value_cache: torch.Tensor,
+        kv_window_start_abs: torch.Tensor | None = None,
+        kv_valid_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -653,6 +613,8 @@ class Gemma4AssistantDecoderLayer(nn.Module):
             current_input_length=current_input_length,
             shared_key_cache=shared_key_cache,
             shared_value_cache=shared_value_cache,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
@@ -673,7 +635,6 @@ class Gemma4AssistantBackbone(nn.Module):
         input_sequence_length: int,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
-        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
         self.use_readonly_page_attention = bool(use_readonly_page_attention)
@@ -685,7 +646,6 @@ class Gemma4AssistantBackbone(nn.Module):
                     text_model.config.layer_types[index],
                     cache_axis=cache_axis,
                     use_readonly_page_attention=self.use_readonly_page_attention,
-                    readonly_attention_lowering=readonly_attention_lowering,
                 )
                 for index, layer in enumerate(text_model.layers[: text_model.config.num_hidden_layers])
             ]
@@ -731,22 +691,26 @@ class Gemma4AssistantBackbone(nn.Module):
         inputs_embeds: torch.Tensor,
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
-        sliding_attention_mask: torch.Tensor,
+        sliding_attention_mask: torch.Tensor | None,
         shared_key_cache_sliding: torch.Tensor,
         shared_value_cache_sliding: torch.Tensor,
         shared_key_cache_full: torch.Tensor,
         shared_value_cache_full: torch.Tensor,
+        kv_window_start_abs: torch.Tensor | None = None,
+        kv_valid_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
-        # The MTP draft graph receives q=1.  For MaskedSoftmax, valid_length
-        # must be one less than the visible KV count because the compiler masks
-        # q=1 with valid_length + 1.  RoPE still needs the actual token position,
-        # so recover it with valid_length + current_length.
-        # ``past_seq_length`` is N-1 for the q=1 read-only attention ABI so
-        # causal PageAttention exposes exactly the N target-cache entries.
-        # That mask-alignment adjustment must not shift RoPE: the MTP input
-        # token is the next token at absolute position N. All draft iterations
-        # keep that same position because the assistant never appends its KV.
+        # Let N be the number of tokens already materialized in target KV.
+        # The assistant input token is the latest sampled token at absolute
+        # position N; it is not in target KV yet.  This is also the constant
+        # position_ids value used by Transformers' Gemma4 MTP generator.
+        #
+        # The graph length operand is deliberately N-1, not the RoPE position:
+        # legacy MaskedSoftmax and causal read-only Flash/PageAttention both
+        # expose N target keys for q=1 from (past=N-1, current=1).  Recovering
+        # N here keeps that mask-alignment trick independent from query RoPE.
+        # Both operands are integer tensors; DynamicSlice never uses a
+        # floating-point address.
         position_index = past_seq_length + current_input_length
         full_pos = self._get_position_embeddings(position_index, "full_attention")
         sliding_pos = self._get_position_embeddings(position_index, "sliding_attention")
@@ -760,11 +724,31 @@ class Gemma4AssistantBackbone(nn.Module):
                 position_embeddings = full_pos
                 shared_key_cache = shared_key_cache_full
                 shared_value_cache = shared_value_cache_full
+                layer_kv_window_start_abs = None
+                layer_kv_valid_length = None
             else:
-                attention_mask = sliding_attention_mask
+                if (
+                    not self.use_readonly_page_attention
+                    and sliding_attention_mask is None
+                ):
+                    raise ValueError(
+                        "Legacy Gemma4 MTP sliding attention requires "
+                        "sliding_attention_mask"
+                    )
+                # Legacy/non-FA keeps the explicit compact sliding mask because
+                # the target HybridCache is not moved after verify/rejection.
+                # Flash/PageAttention expresses the same visibility through
+                # the absolute compact-cache metadata below.
+                attention_mask = (
+                    None
+                    if self.use_readonly_page_attention
+                    else sliding_attention_mask
+                )
                 position_embeddings = sliding_pos
                 shared_key_cache = shared_key_cache_sliding
                 shared_value_cache = shared_value_cache_sliding
+                layer_kv_window_start_abs = kv_window_start_abs
+                layer_kv_valid_length = kv_valid_length
             hidden_states = layer(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
@@ -773,6 +757,8 @@ class Gemma4AssistantBackbone(nn.Module):
                 current_input_length=current_input_length,
                 shared_key_cache=shared_key_cache,
                 shared_value_cache=shared_value_cache,
+                kv_window_start_abs=layer_kv_window_start_abs,
+                kv_valid_length=layer_kv_valid_length,
             )
         return self.norm(hidden_states)
 
@@ -786,7 +772,6 @@ class Gemma4AssistantDraftModule(nn.Module):
         input_sequence_length: int = 1,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
-        readonly_attention_lowering: str = "exact_range",
     ):
         super().__init__()
         assistant_model_dir = str(Path(assistant_model_dir).resolve())
@@ -815,7 +800,6 @@ class Gemma4AssistantDraftModule(nn.Module):
             input_sequence_length=input_sequence_length,
             cache_axis=cache_axis,
             use_readonly_page_attention=use_readonly_page_attention,
-            readonly_attention_lowering=readonly_attention_lowering,
         )
         self.pre_projection = nn.Linear(2 * self.backbone_hidden_size, text_config.hidden_size, bias=False)
         self.post_projection = nn.Linear(text_config.hidden_size, self.backbone_hidden_size, bias=False)
@@ -869,16 +853,18 @@ class Gemma4AssistantDraftModule(nn.Module):
             )
         get_xhquant_logger().info(f"Loaded Gemma4 Series assistant weights from {weight_path}")
 
-    def forward(
+    def _forward_impl(
         self,
         inputs_embeds: torch.Tensor,
         past_seq_length: torch.Tensor,
         current_input_length: torch.Tensor,
-        sliding_attention_mask: torch.Tensor,
+        sliding_attention_mask: torch.Tensor | None,
         shared_key_cache_sliding: torch.Tensor,
         shared_value_cache_sliding: torch.Tensor,
         shared_key_cache_full: torch.Tensor,
         shared_value_cache_full: torch.Tensor,
+        kv_window_start_abs: torch.Tensor | None = None,
+        kv_valid_length: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states = self.pre_projection(inputs_embeds)
         hidden_states = self.model(
@@ -890,6 +876,8 @@ class Gemma4AssistantDraftModule(nn.Module):
             shared_value_cache_sliding=shared_value_cache_sliding,
             shared_key_cache_full=shared_key_cache_full,
             shared_value_cache_full=shared_value_cache_full,
+            kv_window_start_abs=kv_window_start_abs,
+            kv_valid_length=kv_valid_length,
         )
         if self.masked_embedding is not None:
             logits = self.masked_embedding(hidden_states, self.lm_head.weight)
@@ -897,6 +885,59 @@ class Gemma4AssistantDraftModule(nn.Module):
             logits = self.lm_head(hidden_states)
         assistant_hidden_state = self.post_projection(hidden_states)
         return logits, assistant_hidden_state
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        past_seq_length: torch.Tensor,
+        current_input_length: torch.Tensor,
+        sliding_attention_mask: torch.Tensor,
+        shared_key_cache_sliding: torch.Tensor,
+        shared_value_cache_sliding: torch.Tensor,
+        shared_key_cache_full: torch.Tensor,
+        shared_value_cache_full: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Legacy mask/softmax ABI; kept byte-for-byte compatible in arity."""
+
+        return self._forward_impl(
+            inputs_embeds,
+            past_seq_length,
+            current_input_length,
+            sliding_attention_mask,
+            shared_key_cache_sliding,
+            shared_value_cache_sliding,
+            shared_key_cache_full,
+            shared_value_cache_full,
+        )
+
+
+class Gemma4AssistantFlashDraftModule(Gemma4AssistantDraftModule):
+    """FlashAttention ABI without the legacy dense sliding-mask input."""
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        past_seq_length: torch.Tensor,
+        current_input_length: torch.Tensor,
+        shared_key_cache_sliding: torch.Tensor,
+        shared_value_cache_sliding: torch.Tensor,
+        shared_key_cache_full: torch.Tensor,
+        shared_value_cache_full: torch.Tensor,
+        kv_window_start_abs: torch.Tensor,
+        kv_valid_length: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._forward_impl(
+            inputs_embeds,
+            past_seq_length,
+            current_input_length,
+            None,
+            shared_key_cache_sliding,
+            shared_value_cache_sliding,
+            shared_key_cache_full,
+            shared_value_cache_full,
+            kv_window_start_abs,
+            kv_valid_length,
+        )
 
 
 class XHGemma4SeriesAssistantDraftModel(BaseModel):
@@ -913,8 +954,13 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
     ):
         self.assistant_model_dir = str(Path(assistant_model_dir).resolve())
         self.target_model_dir = str(Path(target_model_dir).resolve())
+        draft_input_names = (
+            MTP_FLASH_DRAFT_INPUT_NAMES
+            if bool(wrap_cfg.get("use_readonly_page_attention", False))
+            else MTP_DRAFT_INPUT_NAMES
+        )
         export_cfg = export_cfg or ConfigDict(
-            input_names=list(MTP_DRAFT_INPUT_NAMES),
+            input_names=list(draft_input_names),
             output_names=["logits", "assistant_hidden_state"],
         )
         super().__init__(
@@ -942,18 +988,21 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                 self.target_model_dir,
                 dict(self.wrap_cfg.get("model_config") or {}),
             )
-        self._wrap_model = Gemma4AssistantDraftModule(
+        use_readonly_page_attention = bool(
+            self.wrap_cfg.get("use_readonly_page_attention", False)
+        )
+        module_type = (
+            Gemma4AssistantFlashDraftModule
+            if use_readonly_page_attention
+            else Gemma4AssistantDraftModule
+        )
+        self._wrap_model = module_type(
             assistant_model_dir=self.assistant_model_dir,
             target_model_dir=self.target_model_dir,
             max_position_embeddings=int(max_position_embeddings),
             input_sequence_length=int(self.wrap_cfg.get("input_sequence_length", 1)),
             cache_axis=int(self.wrap_cfg.get("cache_axis", 2)),
-            use_readonly_page_attention=bool(
-                self.wrap_cfg.get("use_readonly_page_attention", False)
-            ),
-            readonly_attention_lowering=normalize_readonly_attention_lowering(
-                self.wrap_cfg.get("readonly_attention_lowering")
-            ),
+            use_readonly_page_attention=use_readonly_page_attention,
         )
         self._wrap_model = self._wrap_model.to(dtype=resolve_torch_dtype(self.wrap_cfg.get("dtype", "float16")))
         self._wrap_model.eval()
@@ -977,16 +1026,15 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
         shared_full_cache_length = int(self.wrap_cfg.get("shared_full_cache_length", context_length))
         full_heads = int(target_text_cfg.get("num_global_key_value_heads") or target_text_cfg["num_key_value_heads"])
         full_head_dim = int(target_text_cfg.get("global_head_dim") or target_text_cfg["head_dim"])
+        use_readonly_page_attention = bool(
+            self.wrap_cfg.get("use_readonly_page_attention", False)
+        )
 
         if data is None:
             data = dict(
                 inputs_embeds=torch.zeros((1, input_sequence_length, hidden_size * 2), dtype=dtype),
                 past_seq_length=torch.zeros((1,), dtype=torch.int32),
                 current_input_length=torch.full((1,), input_sequence_length, dtype=torch.int32),
-                sliding_attention_mask=torch.zeros(
-                    (1, 1, input_sequence_length, shared_sliding_cache_length),
-                    dtype=dtype,
-                ),
                 shared_key_cache_sliding=torch.zeros(
                     (
                         1,
@@ -1014,17 +1062,42 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                     dtype=dtype,
                 ),
             )
+            if use_readonly_page_attention:
+                data.update(
+                    kv_window_start_abs=torch.zeros((1,), dtype=torch.int32),
+                    kv_valid_length=torch.full(
+                        (1,),
+                        input_sequence_length,
+                        dtype=torch.int32,
+                    ),
+                )
+            else:
+                data["sliding_attention_mask"] = torch.zeros(
+                    (1, 1, input_sequence_length, shared_sliding_cache_length),
+                    dtype=dtype,
+                )
 
-        return (
+        common_prefix = (
             data["inputs_embeds"],
             data["past_seq_length"],
             data["current_input_length"],
-            data["sliding_attention_mask"],
+        )
+        shared_caches = (
             data["shared_key_cache_sliding"],
             data["shared_value_cache_sliding"],
             data["shared_key_cache_full"],
             data["shared_value_cache_full"],
         )
+        if use_readonly_page_attention:
+            inputs = common_prefix + shared_caches + (
+                data["kv_window_start_abs"],
+                data["kv_valid_length"],
+            )
+        else:
+            inputs = common_prefix + (
+                data["sliding_attention_mask"],
+            ) + shared_caches
+        return inputs
 
     @property
     def need_quant(self):

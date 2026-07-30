@@ -16,12 +16,13 @@ from torch import nn
 from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
     Gemma4AssistantBackbone,
     Gemma4AssistantDraftModule,
-    Gemma4AssistantSelfAttention,
+    Gemma4AssistantFlashDraftModule,
 )
 from xhmodel_merak.xh_llm.models.gemma4_series.mtp_contract import (
     MTP_DRAFT_INPUT_NAMES,
+    MTP_FLASH_DRAFT_INPUT_NAMES,
     MTP_SHARED_KV_INPUT_NAMES,
-    normalize_readonly_attention_lowering,
+    resolve_readonly_sliding_cache_range,
 )
 from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
     resolve_context_length,
@@ -30,49 +31,128 @@ from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import (
 )
 
 
-def _attention(layer_type: str, sliding_window: int = 4):
-    attention = object.__new__(Gemma4AssistantSelfAttention)
-    attention.layer_type = layer_type
-    attention.config = types.SimpleNamespace(sliding_window=sliding_window)
-    return attention
-
-
-def test_readonly_full_attention_reads_exact_target_prefix() -> None:
-    valid_length, ranges = _attention("full_attention")._query_kv_range_abs(
-        torch.tensor([7], dtype=torch.int32),
-        torch.tensor([1], dtype=torch.int32),
+@pytest.mark.parametrize(
+    ("target_visible_length", "expected"),
+    [
+        (3, (0, 3)),
+        (4, (0, 4)),
+        (5, (1, 4)),
+        (9, (5, 4)),
+        # Rejection only changes the committed target length.  The next range
+        # hides the stale speculative tail without moving the physical ring.
+        (6, (2, 4)),
+    ],
+)
+def test_readonly_sliding_cache_range_tracks_committed_prefix(
+    target_visible_length: int,
+    expected: tuple[int, int],
+) -> None:
+    assert (
+        resolve_readonly_sliding_cache_range(target_visible_length, 4)
+        == expected
     )
 
-    assert valid_length.tolist() == [8]
-    assert ranges.tolist() == [[[0, 8]]]
 
+def test_flash_draft_inputs_publish_committed_sliding_range() -> None:
+    from examples_merak.llm.gemma4_series.mtp_hmonnx_inference import (
+        _build_assistant_inputs,
+    )
 
-def test_readonly_sliding_attention_reads_target_window_only() -> None:
-    valid_length, ranges = _attention(
-        "sliding_attention",
+    class TokenEmbedding(nn.Module):
+        def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(
+                token_ids.shape[0],
+                token_ids.shape[1],
+                4,
+                dtype=torch.float16,
+            )
+
+    target_model = types.SimpleNamespace(
+        device=torch.device("cpu"),
         sliding_window=4,
-    )._query_kv_range_abs(
-        torch.tensor([7], dtype=torch.int32),
-        torch.tensor([1], dtype=torch.int32),
+        meta_info=types.SimpleNamespace(
+            model_config=types.SimpleNamespace(sliding_window=4)
+        ),
+        get_input_embeddings=lambda: TokenEmbedding(),
+    )
+    session = types.SimpleNamespace(
+        input_names=(
+            "input_1",
+            "valid_length",
+            "current_length",
+            "kv_window_start_abs",
+            "kv_valid_length",
+        ),
+        input_infos={},
+    )
+    result = _build_assistant_inputs(
+        target_model,
+        session,
+        last_token_id=7,
+        current_hidden=torch.zeros(1, 1, 4, dtype=torch.float16),
+        shared={},
+        position_index=5,
     )
 
-    assert valid_length.tolist() == [8]
-    assert ranges.tolist() == [[[4, 8]]]
+    assert result["past_seq_length"].tolist() == [4]
+    assert result["current_length"].tolist() == [1]
+    assert result["kv_window_start_abs"].tolist() == [1]
+    assert result["kv_valid_length"].tolist() == [4]
 
 
-def test_readonly_sliding_attention_clamps_short_context_start() -> None:
-    _, ranges = _attention(
-        "sliding_attention",
-        sliding_window=16,
-    )._query_kv_range_abs(
-        torch.tensor([2], dtype=torch.int32),
+def test_readonly_backbone_routes_compact_metadata_only_to_sliding_layers() -> None:
+    calls: list[tuple[str, torch.Tensor | None, torch.Tensor | None]] = []
+
+    class CaptureLayer(nn.Module):
+        def __init__(self, layer_type: str) -> None:
+            super().__init__()
+            self.layer_type = layer_type
+
+        def forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            kv_window_start_abs: torch.Tensor | None,
+            kv_valid_length: torch.Tensor | None,
+            **_kwargs,
+        ) -> torch.Tensor:
+            calls.append(
+                (self.layer_type, kv_window_start_abs, kv_valid_length)
+            )
+            return hidden_states
+
+    backbone = object.__new__(Gemma4AssistantBackbone)
+    nn.Module.__init__(backbone)
+    backbone.use_readonly_page_attention = True
+    backbone.layers = nn.ModuleList(
+        [CaptureLayer("sliding_attention"), CaptureLayer("full_attention")]
+    )
+    backbone.norm = nn.Identity()
+    backbone._get_position_embeddings = types.MethodType(
+        lambda self, position, layer_type: (torch.empty(1), torch.empty(1)),
+        backbone,
+    )
+    start = torch.tensor([3], dtype=torch.int32)
+    valid = torch.tensor([4], dtype=torch.int32)
+    cache = torch.empty(1)
+    backbone(
+        torch.empty(1, 1, 8),
+        torch.tensor([6], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
+        None,
+        cache,
+        cache,
+        cache,
+        cache,
+        start,
+        valid,
     )
 
-    assert ranges.tolist() == [[[0, 3]]]
+    assert calls[0] == ("sliding_attention", start, valid)
+    assert calls[1] == ("full_attention", None, None)
 
 
-def test_readonly_draft_keeps_next_token_rope_position() -> None:
+def test_readonly_draft_uses_target_kv_end_as_sampled_token_rope_position() -> None:
     backbone = object.__new__(Gemma4AssistantBackbone)
     nn.Module.__init__(backbone)
     backbone.use_readonly_page_attention = True
@@ -96,7 +176,7 @@ def test_readonly_draft_keeps_next_token_rope_position() -> None:
         hidden,
         torch.tensor([11], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
-        torch.empty(1),
+        None,
         cache,
         cache,
         cache,
@@ -150,13 +230,17 @@ def test_readonly_draft_manifest_declares_runtime_v2_contract(
     assert spec["runtime_contract_version"] == 2
     assert spec["num_draft_tokens"] == 4
     assert spec["draft"] == {
-        "abi": "gemma4_mtp_readonly_page_attention_v1",
+        "abi": "gemma4_mtp_readonly_page_attention_v2",
         "decode_hmonnx": "mtp/draft.onnx",
         "standalone_decode_hmonnx": "mtp/draft.onnx",
         "cache_mutation": "read_only",
         "cache_binding": "target_attention_type_owner",
         "constant_draft_positions": True,
-        "position_semantics": "target_kv_valid_length_minus_one",
+        "query_rope_position_semantics": "target_kv_valid_length",
+        "attention_past_length_semantics": (
+            "target_kv_valid_length_minus_one"
+        ),
+        "attention_lowering": "causal",
         "layer_attention_types": [
             "sliding_attention",
             "sliding_attention",
@@ -166,60 +250,6 @@ def test_readonly_draft_manifest_declares_runtime_v2_contract(
         "minimum_sliding_cache_slack": 4,
     }
     assert spec["standalone_draft_decode_onnx"] == "mtp/draft.onnx"
-
-
-def test_causal_readonly_draft_manifest_declares_v2_page_attention_abi(
-    tmp_path: Path,
-) -> None:
-    meta_path = tmp_path / "golden_meta_info.json"
-    draft_path = tmp_path / "mtp/draft.onnx"
-    draft_path.parent.mkdir()
-    draft_path.write_bytes(b"graph")
-    meta_path.write_text(
-        json.dumps(
-            {
-                "model_type": "Gemma4UnifiedForConditionalGeneration",
-                "model_config": {
-                    "num_draft_tokens": 4,
-                    "sliding_window": 1024,
-                    "mtp_config": {
-                        "assistant_layer_pattern": [
-                            "sliding_attention",
-                            "sliding_attention",
-                            "sliding_attention",
-                            "full_attention",
-                        ]
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    update_manifest_with_draft(
-        meta_path,
-        draft_path,
-        lm_head_quant_type="w4a8h0_ssfp",
-        shared_sliding_len=1344,
-        shared_full_len=2048,
-        readonly_page_attention=True,
-        readonly_attention_lowering="causal",
-    )
-
-    draft = json.loads(meta_path.read_text(encoding="utf-8"))["spec_decode"]["draft"]
-    assert draft["abi"] == "gemma4_mtp_readonly_page_attention_v2"
-    assert draft["attention_lowering"] == "causal"
-    assert draft["cache_mutation"] == "read_only"
-    assert draft["constant_draft_positions"] is True
-
-
-def test_readonly_attention_lowering_defaults_and_rejects_invalid_values() -> None:
-    assert normalize_readonly_attention_lowering() == "exact_range"
-    assert normalize_readonly_attention_lowering(None) == "exact_range"
-    assert normalize_readonly_attention_lowering(" causal ") == "causal"
-    for invalid in ("none", "unsupported"):
-        with pytest.raises(ValueError, match="exact_range.*causal"):
-            normalize_readonly_attention_lowering(invalid)
 
 
 @pytest.mark.parametrize(
@@ -526,23 +556,35 @@ def test_gemma4_readonly_mtp_configs_select_causal_contract_v2(
     assert model["flash_attention"]["enable"] is True
     assert model["spec_decode_mode"] == "mtp"
     assert model["num_draft_tokens"] == 4
-    assert model["mtp_config"]["readonly_attention_lowering"] == "causal"
+    assert "readonly_attention_lowering" not in model["mtp_config"]
     assert tuple(model["mtp_config"]["shared_kv_inputs"]) == (
         MTP_SHARED_KV_INPUT_NAMES
     )
 
-    # Keep YAML, BaseModel export names, and the source forward ABI tied to one
-    # contract.  The deploy lowering later replaces these four source tensors
-    # with target-owned PageAttention cache bindings; the retained standalone
-    # graph continues to expose them verbatim.
-    forward_inputs = tuple(
+    # FlashAttention exports compact sliding-cache metadata. The deploy
+    # lowering removes the four shared tensors and mask but retains these two
+    # scalar inputs for the target-owned PageAttention ring.
+    flash_forward_inputs = tuple(
+        name
+        for name in inspect.signature(
+            Gemma4AssistantFlashDraftModule.forward
+        ).parameters
+        if name != "self"
+    )
+    legacy_forward_inputs = tuple(
         name
         for name in inspect.signature(
             Gemma4AssistantDraftModule.forward
         ).parameters
         if name != "self"
     )
-    assert forward_inputs == MTP_DRAFT_INPUT_NAMES
+    assert flash_forward_inputs == MTP_FLASH_DRAFT_INPUT_NAMES
+    assert legacy_forward_inputs == MTP_DRAFT_INPUT_NAMES
+    assert "sliding_attention_mask" not in MTP_FLASH_DRAFT_INPUT_NAMES
+    assert MTP_FLASH_DRAFT_INPUT_NAMES[:3] == MTP_DRAFT_INPUT_NAMES[:3]
+    assert MTP_FLASH_DRAFT_INPUT_NAMES[3:7] == (
+        MTP_SHARED_KV_INPUT_NAMES
+    )
 
 
 def test_gemma4_mtp_context_is_owned_by_the_target_model_config() -> None:

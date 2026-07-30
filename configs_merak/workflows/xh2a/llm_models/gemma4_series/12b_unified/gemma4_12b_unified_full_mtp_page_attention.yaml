@@ -78,7 +78,6 @@ export:
       # KV length is N, and RoPE still uses the query's absolute position N.
       # Causal full/sliding lowering therefore avoids explicit range
       # materialization and keeps the full-attention split-K decode kernel.
-      readonly_attention_lowering: causal
       num_draft_tokens: 4
       assistant_num_hidden_layers: 4
       assistant_layer_pattern:

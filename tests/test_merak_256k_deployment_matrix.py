@@ -103,7 +103,7 @@ def test_gemma_page_yaml_selects_flash_without_hardcoding_context_or_abi(
     assert {name: model["flash_attention"][name] for name in FA8} == FA8
     assert "attention_contract_version" not in model
     assert "context_max_length" not in model["mtp_config"]
-    assert model["mtp_config"]["readonly_attention_lowering"] == "causal"
+    assert "readonly_attention_lowering" not in model["mtp_config"]
 
 
 @pytest.mark.parametrize(

@@ -252,15 +252,23 @@ def generate(args: argparse.Namespace) -> None:
             draft_tokens: list[torch.Tensor] = []
             draft_hidden = target_hidden
             shared_kv_states = target_out.shared_kv_states
+            # Gemma4 MTP reads the target-owned KV without appending assistant
+            # KV.  Match Transformers' SinglePosition generator: the query
+            # RoPE position is the last target-prefix position and remains
+            # constant while token/draft-hidden feedback advances the proposal.
+            draft_position_id = torch.tensor(
+                [[prefix_len - 1]],
+                dtype=torch.long,
+                device=device,
+            )
 
-            for step in range(args.num_assistant_tokens):
+            for _ in range(args.num_assistant_tokens):
                 token_embed = _token_embedding(target_model, cur_token)
-                pos = torch.tensor([[prefix_len + step - 1]], dtype=torch.long, device=device)
                 next_token, draft_hidden, _ = _assistant_logits_argmax(
                     assistant_model,
                     token_embed,
                     draft_hidden,
-                    pos,
+                    draft_position_id,
                     attn_mask,
                     shared_kv_states,
                 )

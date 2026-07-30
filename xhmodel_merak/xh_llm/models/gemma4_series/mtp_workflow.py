@@ -7,10 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .mtp_contract import (
-    MTP_SHARED_KV_INPUT_NAMES,
-    normalize_readonly_attention_lowering,
-)
+from .mtp_contract import MTP_SHARED_KV_INPUT_NAMES
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -206,7 +203,6 @@ def update_manifest_with_draft(
     target_max_pe_length_hf_value: int | None = None,
     target_max_pe_length_hf_source: str | None = None,
     readonly_page_attention: bool = False,
-    readonly_attention_lowering: str = "exact_range",
 ) -> None:
     export_dir = meta_path.parent
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -263,27 +259,25 @@ def update_manifest_with_draft(
         target_decode_sliding_output_length=target_decode_sliding,
     )
     if readonly_page_attention:
-        readonly_attention_lowering = normalize_readonly_attention_lowering(
-            readonly_attention_lowering
-        )
         assistant_layer_pattern = list(mtp_config_dict(meta).get("assistant_layer_pattern") or [])
         draft_contract = {
-            "abi": (
-                "gemma4_mtp_readonly_page_attention_v2"
-                if readonly_attention_lowering == "causal"
-                else "gemma4_mtp_readonly_page_attention_v1"
-            ),
+            "abi": "gemma4_mtp_readonly_page_attention_v2",
             "decode_hmonnx": rel_draft,
             "standalone_decode_hmonnx": rel_standalone_draft,
             "cache_mutation": "read_only",
             "cache_binding": "target_attention_type_owner",
             "constant_draft_positions": True,
-            "position_semantics": "target_kv_valid_length_minus_one",
+            # These are intentionally separate.  The assistant input token is
+            # at RoPE position N, while causal q=1 attention receives N-1 as
+            # its synthetic past length so it can read N target-owned keys.
+            "query_rope_position_semantics": "target_kv_valid_length",
+            "attention_past_length_semantics": (
+                "target_kv_valid_length_minus_one"
+            ),
+            "attention_lowering": "causal",
             "layer_attention_types": assistant_layer_pattern,
             "minimum_sliding_cache_slack": block_size,
         }
-        if readonly_attention_lowering == "causal":
-            draft_contract["attention_lowering"] = "causal"
         spec_decode.update(
             runtime_contract_version=2,
             target={
@@ -403,9 +397,6 @@ def export_mtp_draft(
 
     body_quant_type = str(mtp_cfg.get("body_quant_type") or "w8a8h1_sefp")
     lm_head_quant_type = str(mtp_cfg.get("lm_head_quant_type") or "w4a8h0_ssfp")
-    readonly_attention_lowering = normalize_readonly_attention_lowering(
-        mtp_cfg.get("readonly_attention_lowering")
-    )
     chip_arch = str(model_cfg.get("chip_arch") or meta.get("chip_arch") or chip_arch or "XH2a")
     context_length = resolve_context_length(model_cfg, mtp_cfg)
     dtype = str(mtp_cfg.get("dtype") or mtp_cfg.get("draft_dtype") or draft_dtype)
@@ -452,7 +443,6 @@ def export_mtp_draft(
                 meta.get("attention_contract_version") or model_cfg.get("attention_contract_version") or 1
             )
             >= 2,
-            readonly_attention_lowering=readonly_attention_lowering,
         ),
         quant_config=draft_quant_config(body_quant_type, lm_head_quant_type),
     )
@@ -511,7 +501,6 @@ def export_mtp_draft(
         target_max_pe_length_hf_value=target_max_pe_length_info.get("hf_value"),
         target_max_pe_length_hf_source=target_max_pe_length_info.get("hf_source"),
         readonly_page_attention=readonly_page_attention,
-        readonly_attention_lowering=readonly_attention_lowering,
     )
     return onnx_file
 

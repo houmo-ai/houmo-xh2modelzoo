@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 
 MTP_DRAFT_INPUT_NAMES = (
     "inputs_embeds",
@@ -17,26 +15,36 @@ MTP_DRAFT_INPUT_NAMES = (
 )
 MTP_SHARED_KV_INPUT_NAMES = MTP_DRAFT_INPUT_NAMES[-4:]
 
-# ``exact_range`` is the general read-only cache ABI: it lowers the assistant
-# attention to non-causal Padding Full Cross-Attention and supplies each
-# query's absolute [start, end) KV range. It supports arbitrary query widths
-# and expresses a sliding window exactly.
-#
-# ``causal`` is the optimized Gemma4 MTP ABI. The Q-only assistant always has
-# M=1 and never writes draft KV. Feeding attention valid length N-1 while the
-# target-owned cache contains N entries gives the same visibility through a
-# causal PageAttention mask, without materializing a per-query range tensor.
-READONLY_ATTENTION_LOWERINGS = frozenset({"exact_range", "causal"})
+# FlashAttention does not consume the legacy dense sliding mask.  It reads the
+# same target-owned K/V tensors plus the physical origin and valid width of the
+# compact sliding cache.  Their half-open absolute interval is
+# [kv_window_start_abs, kv_window_start_abs + kv_valid_length).
+MTP_FLASH_DRAFT_INPUT_NAMES = (
+    *MTP_DRAFT_INPUT_NAMES[:3],
+    *MTP_SHARED_KV_INPUT_NAMES,
+    "kv_window_start_abs",
+    "kv_valid_length",
+)
 
 
-def normalize_readonly_attention_lowering(value: Any = None) -> str:
-    """Resolve the optional read-only attention lowering to a valid ABI.
+def resolve_readonly_sliding_cache_range(
+    target_visible_length: int,
+    sliding_window: int,
+) -> tuple[int, int]:
+    """Return the compact target-KV ``(absolute_start, valid_width)``.
 
-    Choose ``exact_range`` for the general non-causal cross-attention form and
-    ``causal`` only for Gemma4's read-only, single-query MTP specialization.
+    Gemma4's assistant reads the target cache without appending draft K/V.
+    Consequently every proposal in one speculative round sees the same
+    committed target prefix ``[0, target_visible_length)``.  Sliding attention
+    stores only its suffix, represented without moving cache data as
+    ``[absolute_start, absolute_start + valid_width)``.
     """
 
-    lowering = str(value or "exact_range").strip().lower()
-    if lowering not in READONLY_ATTENTION_LOWERINGS:
-        raise ValueError("Gemma4 MTP readonly_attention_lowering must be 'exact_range' or 'causal'")
-    return lowering
+    target_visible_length = int(target_visible_length)
+    sliding_window = int(sliding_window)
+    if target_visible_length <= 0:
+        raise ValueError("target_visible_length must be positive")
+    if sliding_window <= 0:
+        raise ValueError("sliding_window must be positive")
+    absolute_start = max(0, target_visible_length - sliding_window)
+    return absolute_start, target_visible_length - absolute_start

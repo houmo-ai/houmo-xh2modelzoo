@@ -34,6 +34,10 @@ REPO_ROOT = SCRIPT_DIR.parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from xhmodel_merak.xh_llm.models.gemma4_series.mtp_contract import (  # noqa: E402, I001
+    resolve_readonly_sliding_cache_range,
+)
+
 EXPECTED_BASE_OUTPUTS = ["logits", "target_hidden_state"]
 LEGACY_DRAFT_INPUTS = [
     "input_1",
@@ -45,10 +49,23 @@ LEGACY_DRAFT_INPUTS = [
     "shared_key_cache_full",
     "shared_value_cache_full",
 ]
+FLASH_DRAFT_INPUTS = [
+    "input_1",
+    "valid_length",
+    "current_length",
+    "shared_key_cache_sliding",
+    "shared_value_cache_sliding",
+    "shared_key_cache_full",
+    "shared_value_cache_full",
+    "kv_window_start_abs",
+    "kv_valid_length",
+]
 READONLY_PAGE_DRAFT_INPUTS = [
     "input_1",
     "valid_length",
     "current_length",
+    "kv_window_start_abs",
+    "kv_valid_length",
 ]
 EXPECTED_DRAFT_OUTPUTS = ["logits", "assistant_hidden_state"]
 
@@ -410,6 +427,41 @@ def verify_preset(
         draft_contract = dict(spec.get("draft") or {})
         if draft_contract.get("cache_binding") != "target_attention_type_owner":
             raise AssertionError(f"{preset.name}: read-only PageAttention draft must bind target_attention_type_owner")
+        if (
+            draft_contract.get("abi") != "gemma4_mtp_readonly_page_attention_v2"
+            or draft_contract.get("attention_lowering") != "causal"
+        ):
+            raise AssertionError(
+                f"{preset.name}: read-only PageAttention must use the causal v2 ABI"
+            )
+        if any(node.op_type == "Clip" for node in draft_model.graph.node):
+            raise AssertionError(
+                f"{preset.name}: read-only PageAttention must not derive cache "
+                "ranges with graph-side Clip"
+            )
+        for node in readonly_page_nodes:
+            attrs = _node_attrs(node)
+            inputs = list(node.input)
+            if not bool(attrs.get("is_causal", 0)):
+                raise AssertionError(
+                    f"{preset.name}: {node.name} must be causal"
+                )
+            sliding_window_attr = int(attrs.get("sliding_window", -1))
+            has_compact_range = (
+                len(inputs) > 7
+                and inputs[6] == "kv_window_start_abs"
+                and inputs[7] == "kv_valid_length"
+            )
+            if sliding_window_attr > 0 and not has_compact_range:
+                raise AssertionError(
+                    f"{preset.name}: sliding {node.name} is missing compact "
+                    "target-cache metadata"
+                )
+            if sliding_window_attr <= 0 and has_compact_range:
+                raise AssertionError(
+                    f"{preset.name}: full {node.name} must not consume sliding "
+                    "target-cache metadata"
+                )
     else:
         for name, target_shape in target_shared_shapes.items():
             draft_shape = _onnx_value_shape(draft_model, name)
@@ -458,13 +510,46 @@ def verify_preset(
             )
             standalone_inputs = [inp.name for inp in standalone_model.graph.input]
             standalone_outputs = [out.name for out in standalone_model.graph.output]
-            if standalone_inputs != LEGACY_DRAFT_INPUTS:
+            if standalone_inputs != FLASH_DRAFT_INPUTS:
                 raise AssertionError(f"{preset.name}: standalone draft inputs mismatch: {standalone_inputs}")
             if standalone_outputs != EXPECTED_DRAFT_OUTPUTS:
                 raise AssertionError(f"{preset.name}: standalone draft outputs mismatch: {standalone_outputs}")
             standalone_tags = [node.name for node in standalone_model.graph.node if node.op_type in {"Tag", "XHTag"}]
             if standalone_tags:
                 raise AssertionError(f"{preset.name}: standalone draft retains scheduling tags: {standalone_tags}")
+            if any(node.op_type == "Clip" for node in standalone_model.graph.node):
+                raise AssertionError(
+                    f"{preset.name}: standalone FlashAttention draft retains Clip"
+                )
+            standalone_flash_nodes = [
+                node
+                for node in standalone_model.graph.node
+                if node.op_type == "FlashAttention"
+            ]
+            if len(standalone_flash_nodes) != 4:
+                raise AssertionError(
+                    f"{preset.name}: standalone draft expected 4 FlashAttention "
+                    f"nodes, got {len(standalone_flash_nodes)}"
+                )
+            for node in standalone_flash_nodes:
+                attrs = _node_attrs(node)
+                inputs = list(node.input)
+                sliding_window_attr = int(attrs.get("sliding_window", -1))
+                has_compact_range = (
+                    len(inputs) > 9
+                    and inputs[8] == "kv_window_start_abs"
+                    and inputs[9] == "kv_valid_length"
+                )
+                if sliding_window_attr > 0 and not has_compact_range:
+                    raise AssertionError(
+                        f"{preset.name}: standalone sliding {node.name} is "
+                        "missing compact target-cache metadata"
+                    )
+                if sliding_window_attr <= 0 and has_compact_range:
+                    raise AssertionError(
+                        f"{preset.name}: standalone full {node.name} consumes "
+                        "sliding target-cache metadata"
+                    )
             standalone_shapes = {name: _onnx_value_shape(standalone_model, name) for name in target_shared_shapes}
             if standalone_shapes != target_shared_shapes:
                 raise AssertionError(
@@ -1308,12 +1393,15 @@ def _build_assistant_inputs(
     draft_valid_length = max(int(position_index) - 1, 0)
     result = {
         "inputs_embeds": inputs_embeds,
-        # Both supported graph ABIs use N-1, for two equivalent reasons:
+        # Both supported graph ABIs use N-1 as their *attention length input*,
+        # not as the assistant token's RoPE position:
         # * legacy/non-FA MaskedSoftmax exposes valid_length + 1 keys for q=1;
         # * read-only Flash/PageAttention treats q as position N-1 and receives
         #   current_length=1, so its visible target-KV length is N.
-        # The assistant never appends draft KV, therefore N stays constant for
-        # every proposal in one speculative round.
+        # RoPE independently uses valid_length + current_length = N, matching
+        # the latest sampled token which is not yet in target KV. The assistant
+        # never appends draft KV, therefore N stays constant for every proposal
+        # in one speculative round.
         "past_seq_length": torch.tensor([draft_valid_length], dtype=torch.int32, device=device),
         "current_length": torch.tensor([1], dtype=torch.int32, device=device),
     }
@@ -1322,6 +1410,36 @@ def _build_assistant_inputs(
     for name, value in shared.items():
         if name in input_names:
             result[name] = value
+    compact_names = {"kv_window_start_abs", "kv_valid_length"}
+    requested_compact_names = compact_names.intersection(input_names)
+    if requested_compact_names:
+        if requested_compact_names != compact_names:
+            raise RuntimeError(
+                "Gemma4 MTP FlashAttention requires both compact cache inputs"
+            )
+        model_config = target_model.meta_info.model_config
+        sliding_window = int(
+            getattr(
+                target_model,
+                "sliding_window",
+                getattr(model_config, "sliding_window", 0),
+            )
+            or 0
+        )
+        start, valid = resolve_readonly_sliding_cache_range(
+            int(position_index),
+            sliding_window,
+        )
+        result["kv_window_start_abs"] = torch.tensor(
+            [start],
+            dtype=torch.int32,
+            device=device,
+        )
+        result["kv_valid_length"] = torch.tensor(
+            [valid],
+            dtype=torch.int32,
+            device=device,
+        )
     return result
 
 
