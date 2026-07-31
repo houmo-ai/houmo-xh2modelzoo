@@ -1,0 +1,14 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHHyMT2Model
+  hy_mt2:
+    batch_size: 1
+    context_length: 4096
+    input_sequence_length: 256
+    quant_type: w8a8h1_sefp
+    quant_weight: null
+    mix_search: null
+    num_logits_to_keep: 1
