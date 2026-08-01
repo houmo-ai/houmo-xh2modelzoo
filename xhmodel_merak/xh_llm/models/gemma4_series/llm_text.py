@@ -605,10 +605,17 @@ def _make_text_export_bridge_if_needed(
     *,
     enable_mtp_outputs: bool = False,
     attention_contract_version: int = 1,
+    attention_lowering: str | None = None,
     bidirectional_vision_attention: bool = False,
 ):
     text_config = hf_model.config.get_text_config()
-    if int(attention_contract_version) >= 2:
+    if attention_lowering is None:
+        attention_lowering = (
+            "flash_attention"
+            if int(attention_contract_version) >= 2
+            else "legacy_attention"
+        )
+    if attention_lowering == "flash_attention":
         has_ple = bool(getattr(text_config, "hidden_size_per_layer_input", 0))
         if has_ple:
             bridge_cls = (
@@ -629,6 +636,8 @@ def _make_text_export_bridge_if_needed(
             language_model_returns_tensor=True,
             enable_mtp_outputs=enable_mtp_outputs,
         )
+    if attention_lowering not in {"legacy_attention", "full_flash_attention"}:
+        raise ValueError(f"Unsupported Gemma4 attention_lowering: {attention_lowering!r}")
     if getattr(text_config, "hidden_size_per_layer_input", 0):
         return _Gemma4TextExportBridgePLE(
             hf_model,

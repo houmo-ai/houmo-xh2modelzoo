@@ -84,7 +84,7 @@ export:
       assistant_hidden_size: 256
       assistant_num_attention_heads: 4
       assistant_num_key_value_heads: 2
-      assistant_num_global_key_value_heads: null
+      assistant_num_global_key_value_heads: 0
       head_dim: 256
       use_ordered_embeddings: true
       shared_kv_inputs:

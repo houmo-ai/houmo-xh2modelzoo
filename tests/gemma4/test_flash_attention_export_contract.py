@@ -23,6 +23,7 @@ def _write_flash_contract_graph(
     flash_mm_input_name: str | None = None,
     full_mm_input_name: str | None = None,
     attention_scale: float = 1.0,
+    shared_lut_layer_idx: int | None = None,
 ) -> None:
     past_length_name = "valid_length" if xhquant_export_names else "past_seq_length"
     current_length_name = "current_length" if xhquant_export_names else "current_input_length"
@@ -52,9 +53,14 @@ def _write_flash_contract_graph(
         inputs.append(
             helper.make_tensor_value_info(cache_name("value", cache_idx), TensorProto.FLOAT16, [1, 2, width, 4])
         )
+    table_name = (
+        "table"
+        if shared_lut_layer_idx is None
+        else f"language_model.layers.{shared_lut_layer_idx}.self_attn.flash_attn.attention_lut_table"
+    )
     inputs.extend(
         [
-            helper.make_tensor_value_info("table", TensorProto.FLOAT16, [1]),
+            helper.make_tensor_value_info(table_name, TensorProto.FLOAT16, [1]),
             helper.make_tensor_value_info("mlp_in", TensorProto.FLOAT16, [1, 4]),
             helper.make_tensor_value_info("mlp_weight", TensorProto.FLOAT16, [4, 4]),
             helper.make_tensor_value_info("router_hidden", TensorProto.FLOAT16, [2, 8]),
@@ -72,7 +78,7 @@ def _write_flash_contract_graph(
             f"q_{layer_idx}",
             f"k_{kv_source_layer}",
             f"v_{kv_source_layer}",
-            "table",
+            table_name,
             past_length_name,
             current_length_name,
         ]
@@ -210,7 +216,10 @@ def test_onnx_validator_counts_attention_layers_separately_from_shared_kv_cache_
     }
 
 
-def test_e2b_layer_cache_layout_maps_every_shared_attention_layer_to_its_physical_owner():
+@pytest.mark.parametrize("explicit_owner_index", [True, False], ids=["legacy-explicit", "transformers-5.13"])
+def test_e2b_layer_cache_layout_maps_every_shared_attention_layer_to_its_physical_owner(
+    explicit_owner_index,
+):
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
         _build_gemma4_layer_cache_layout,
     )
@@ -221,14 +230,16 @@ def test_e2b_layer_cache_layout_maps_every_shared_attention_layer_to_its_physica
         is_shared = layer_idx >= 15
         owner_layer_idx = 14 if layer_type == "full_attention" else 13
         head_dim = 512 if layer_type == "full_attention" else 256
+        attention_attrs = {
+            "is_kv_shared_layer": is_shared,
+            "head_dim": head_dim,
+            "k_proj": SimpleNamespace(out_features=head_dim),
+        }
+        if explicit_owner_index and is_shared:
+            attention_attrs["kv_shared_layer_index"] = owner_layer_idx
         layers.append(
             SimpleNamespace(
-                self_attn=SimpleNamespace(
-                    is_kv_shared_layer=is_shared,
-                    kv_shared_layer_index=owner_layer_idx if is_shared else None,
-                    head_dim=head_dim,
-                    k_proj=SimpleNamespace(out_features=head_dim),
-                )
+                self_attn=SimpleNamespace(**attention_attrs)
             )
         )
 
@@ -287,6 +298,68 @@ def test_onnx_validator_accepts_v2_flash_contract_and_unrelated_router_softmax(t
         "flash_attention_nodes": 2,
         "sliding_nodes": 1,
         "full_nodes": 1,
+    }
+
+
+def test_onnx_validator_accepts_full_flash_with_unfused_sliding_attention(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        validate_gemma4_flash_attention_graph,
+    )
+
+    graph_path = tmp_path / "mixed_attention.onnx"
+    _write_flash_contract_graph(
+        graph_path,
+        include_dense_input=True,
+        compact_inputs=(),
+        sliding_windows=(-1,),
+        stale_attention=True,
+        include_mm_prefix_input=False,
+    )
+    meta = _flash_contract_meta()
+    meta.update(
+        attention_lowering="full_flash_attention",
+        uses_sliding_flash_attention_v2=False,
+        sliding_window=512,
+    )
+
+    assert validate_gemma4_flash_attention_graph(graph_path, meta) == {
+        "flash_attention_nodes": 1,
+        "sliding_nodes": 0,
+        "full_nodes": 1,
+    }
+
+
+def test_onnx_validator_ignores_shared_lut_name_as_layer_provenance(tmp_path):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
+        validate_gemma4_flash_attention_graph,
+    )
+
+    graph_path = tmp_path / "mixed_attention_shared_lut.onnx"
+    _write_flash_contract_graph(
+        graph_path,
+        include_dense_input=True,
+        compact_inputs=(),
+        sliding_windows=(-1, -1),
+        cache_widths=(832, 2048, 832, 2048),
+        include_mm_prefix_input=False,
+        shared_lut_layer_idx=1,
+    )
+    meta = _flash_contract_meta()
+    meta.update(
+        attention_lowering="full_flash_attention",
+        uses_sliding_flash_attention_v2=False,
+        sliding_window=512,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+        layer_cache_indices=[0, 1, 2, 3],
+        layer_cache_owner_indices=[0, 1, 2, 3],
+        layer_cache_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+        layer_kv_shapes=[[1, 2, 832, 4], [1, 2, 2048, 4], [1, 2, 832, 4], [1, 2, 2048, 4]],
+    )
+
+    assert validate_gemma4_flash_attention_graph(graph_path, meta) == {
+        "flash_attention_nodes": 2,
+        "sliding_nodes": 0,
+        "full_nodes": 2,
     }
 
 
@@ -574,6 +647,46 @@ def test_v2_mtp_is_enabled_by_public_config(monkeypatch):
     assert config.enable_mtp_outputs is True
 
 
+def test_public_config_selects_full_flash_and_rejects_untyped_switch(monkeypatch):
+    config_cls = _patch_hf_config(monkeypatch)
+
+    config = config_cls(
+        model_name="e2b",
+        flash_attention={"enable": True, "fuse_sliding_attention": False},
+    )
+
+    assert config.attention_contract_version == 2
+    assert config.attention_lowering == "full_flash_attention"
+    assert config.uses_sliding_flash_attention_v2 is False
+
+    with pytest.raises(TypeError, match="fuse_sliding_attention.*boolean"):
+        config_cls(
+            model_name="e2b",
+            flash_attention={"enable": True, "fuse_sliding_attention": "false"},
+        )
+
+
+def test_public_config_can_restore_legacy_bidirectional_vision_contract(monkeypatch):
+    config_cls = _patch_hf_config(monkeypatch)
+
+    config = config_cls(
+        model_name="e2b",
+        flash_attention={"enable": True, "fuse_sliding_attention": False},
+        bidirectional_vision_attention=True,
+    )
+
+    assert config.bidirectional_vision_attention is True
+    assert config.use_bidirectional_attention == "vision"
+    assert config.attention_visibility_spec["requires_mm_prefix_ranges"] is True
+
+    with pytest.raises(TypeError, match="bidirectional_vision_attention.*boolean or null"):
+        config_cls(
+            model_name="e2b",
+            flash_attention={"enable": True, "fuse_sliding_attention": False},
+            bidirectional_vision_attention="true",
+        )
+
+
 def test_v2_mtp_uses_compact_bridge_and_does_not_export_accepted_count(monkeypatch):
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_llm_model import (
         XHGemma4SeriesModel,
@@ -794,8 +907,10 @@ def test_flash_attention_yamls_are_additive_and_preserve_existing_configs():
         # non-FlashAttention YAML unchanged.
         assert int(flash_model.pop("attention_contract_version", 2)) == 2, flash_path
         assert int(flash_model.pop("max_mm_ranges_per_chunk", 1)) >= 1, flash_path
+        assert flash_model.pop("bidirectional_vision_attention") is True, flash_path
         flash_attention = flash_model.pop("flash_attention")
         assert flash_attention.pop("enable", True) is True, flash_path
+        assert flash_attention.pop("fuse_sliding_attention") is False, flash_path
         assert flash_attention == {
             "q_bits": 8,
             "k_bits": 8,
@@ -1596,6 +1711,7 @@ def _setup_tiny_attention(
     use_cache: bool = False,
     head_dim: int = 4,
     flash_attention: dict | None = None,
+    attention_lowering: str | None = None,
 ):
     from xhmodel_merak.xh_llm.models.gemma4_series import _llm_model_impl as impl
 
@@ -1618,6 +1734,7 @@ def _setup_tiny_attention(
     attention._setup(
         SimpleNamespace(
             attention_contract_version=version,
+            attention_lowering=attention_lowering,
             flash_attention=flash_attention,
             use_cache=use_cache,
             kv_cache=SimpleNamespace(cache_axis=2),
@@ -1648,6 +1765,30 @@ def test_v2_attention_builds_sliding_and_full_flash(monkeypatch):
     assert sliding.flash_attn.sliding_window_size == 512
     assert full.flash_attn.sliding_window_size is None
     assert not hasattr(sliding, "qk_matmul")
+    assert not hasattr(full, "qk_matmul")
+
+
+def test_full_flash_lowering_keeps_sliding_matmul_and_fuses_full(monkeypatch):
+    sliding = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="sliding_attention",
+        window=512,
+        version=2,
+        attention_lowering="full_flash_attention",
+    )
+    full = _setup_tiny_attention(
+        monkeypatch,
+        layer_type="full_attention",
+        window=None,
+        version=2,
+        attention_lowering="full_flash_attention",
+    )
+
+    assert sliding.use_flash_attention_v2 is False
+    assert hasattr(sliding, "qk_matmul")
+    assert hasattr(sliding, "softmax")
+    assert full.use_flash_attention_v2 is True
+    assert hasattr(full, "flash_attn")
     assert not hasattr(full, "qk_matmul")
 
 

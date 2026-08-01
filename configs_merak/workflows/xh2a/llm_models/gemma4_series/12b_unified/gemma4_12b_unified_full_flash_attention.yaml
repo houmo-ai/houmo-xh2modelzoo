@@ -40,11 +40,13 @@ export:
     model_name: gemma_4_12b_unified
     context_max_length: 2048
     prefill_chunk_length: 320
+    bidirectional_vision_attention: true
     use_cache: true
     num_logits_to_keep: 1
     # Presence with enable=true selects attention contract v2. The model
     # config derives the contract version; do not duplicate it in this YAML.
     flash_attention:
+      fuse_sliding_attention: false
       enable: true
       q_bits: 8
       k_bits: 8

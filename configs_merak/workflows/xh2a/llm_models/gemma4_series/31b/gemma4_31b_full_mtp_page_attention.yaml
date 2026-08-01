@@ -36,8 +36,10 @@ export:
     model_name: gemma_4_31b
     context_max_length: 2048
     prefill_chunk_length: 320
+    bidirectional_vision_attention: true
     max_mm_ranges_per_chunk: 1
     flash_attention:
+      fuse_sliding_attention: false
       enable: true
       q_bits: 8
       k_bits: 8

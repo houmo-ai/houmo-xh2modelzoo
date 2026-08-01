@@ -280,6 +280,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         sliding_kv_cache_input_mode: str = "slice_window",
         attention_contract_version: int | None = None,
         flash_attention: Mapping | None = None,
+        bidirectional_vision_attention: bool | None = None,
         max_mm_ranges_per_chunk: int = 1,
         **kwargs,
     ):
@@ -312,6 +313,19 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             self.flash_attention is not None
             and bool(self.flash_attention.get("enable", True))
         )
+        fuse_sliding_attention = True
+        if self.flash_attention is not None and "fuse_sliding_attention" in self.flash_attention:
+            raw_fuse_sliding_attention = self.flash_attention["fuse_sliding_attention"]
+            if type(raw_fuse_sliding_attention) is not bool:
+                raise TypeError(
+                    "Gemma4 flash_attention.fuse_sliding_attention must be a boolean"
+                )
+            fuse_sliding_attention = raw_fuse_sliding_attention
+        if not flash_attention_enabled and not fuse_sliding_attention:
+            raise ValueError(
+                "Gemma4 flash_attention.fuse_sliding_attention=false requires "
+                "flash_attention.enable=true"
+            )
         derived_attention_contract = 2 if flash_attention_enabled else 1
         if (
             attention_contract_version is not None
@@ -324,12 +338,16 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             )
         self.attention_contract_version = derived_attention_contract
         self.attention_lowering = (
-            "flash_attention" if flash_attention_enabled else "legacy_attention"
+            "flash_attention"
+            if flash_attention_enabled and fuse_sliding_attention
+            else "full_flash_attention"
+            if flash_attention_enabled
+            else "legacy_attention"
         )
         self.max_mm_ranges_per_chunk = int(max_mm_ranges_per_chunk)
         if self.max_mm_ranges_per_chunk <= 0:
             raise ValueError("Gemma4 max_mm_ranges_per_chunk must be positive")
-        if self.attention_lowering == "flash_attention" and sliding_kv_cache_input_mode != "slice_window":
+        if self.attention_contract_version >= 2 and sliding_kv_cache_input_mode != "slice_window":
             raise ValueError("Gemma4 contract-v2 requires sliding_kv_cache_input_mode='slice_window'")
         if self.spec_decode_mode == "mtp" and sliding_kv_cache_input_mode != "slice_window":
             raise ValueError(
@@ -372,8 +390,24 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
             if unified_contract is not None
             else None
         )
-        self.use_bidirectional_attention: str | None = text_config.get("use_bidirectional_attention")
-        self.bidirectional_vision_attention: bool = self._variant_spec.bidirectional_vision_attention
+        if (
+            bidirectional_vision_attention is not None
+            and type(bidirectional_vision_attention) is not bool
+        ):
+            raise TypeError(
+                "Gemma4 bidirectional_vision_attention must be a boolean or null"
+            )
+        self.bidirectional_vision_attention = (
+            self._variant_spec.bidirectional_vision_attention
+            if bidirectional_vision_attention is None
+            else bidirectional_vision_attention
+        )
+        # Keep the legacy serialized alias consistent with the effective
+        # export contract.  Explicit override is needed for pre-5.13
+        # checkpoints where the field was serialized as null.
+        self.use_bidirectional_attention: str | None = (
+            "vision" if self.bidirectional_vision_attention else None
+        )
         if int(prefill_chunk_length) <= 0:
             raise ValueError(
                 "Gemma4 Series prefill_chunk_length must be positive; "

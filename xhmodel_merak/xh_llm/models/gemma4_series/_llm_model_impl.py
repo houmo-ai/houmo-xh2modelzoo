@@ -284,7 +284,13 @@ class _Gemma4TextRotaryEmbedding(DynamicModule):
 class _Gemma4TextAttention(DynamicModule):
     def _setup(self, cfg=None):
         self.use_cache = bool(_cfg_get(cfg, "use_cache", True))
-        self.use_flash_attention_v2 = int(_cfg_get(cfg, "attention_contract_version", 1)) >= 2
+        attention_lowering = _cfg_get(cfg, "attention_lowering", None)
+        if attention_lowering is None:
+            attention_lowering = (
+                "flash_attention"
+                if int(_cfg_get(cfg, "attention_contract_version", 1)) >= 2
+                else "legacy_attention"
+            )
         self.layer_type = getattr(self, "layer_type", None)
         if self.layer_type not in ("full_attention", "sliding_attention"):
             raise ValueError(
@@ -335,6 +341,21 @@ class _Gemma4TextAttention(DynamicModule):
                 )
             attention_max_length = -1
             self.is_sliding_attention = False
+        if attention_lowering not in {
+            "legacy_attention",
+            "flash_attention",
+            "full_flash_attention",
+        }:
+            raise ValueError(
+                f"Unsupported Gemma4 attention_lowering: {attention_lowering!r}"
+            )
+        self.use_flash_attention_v2 = (
+            attention_lowering == "flash_attention"
+            or (
+                attention_lowering == "full_flash_attention"
+                and not self.is_sliding_attention
+            )
+        )
         self.enable_accepted_count_input = False
         if self.use_flash_attention_v2:
             flash_attention_cfg = _cfg_get(cfg, "flash_attention", {})

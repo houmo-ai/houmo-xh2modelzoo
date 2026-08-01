@@ -139,6 +139,33 @@ def _build_gemma4_layer_cache_layout(
 ) -> tuple[list[list[int]], list[str], list[int], list[int]]:
     """Build physical cache shapes and the per-attention-layer cache map."""
 
+    def resolve_owner_layer_idx(layer_idx: int) -> int:
+        attn = layers[layer_idx].self_attn
+        if not getattr(attn, "is_kv_shared_layer", False):
+            return layer_idx
+
+        explicit_owner = getattr(attn, "kv_shared_layer_index", None)
+        if explicit_owner is not None:
+            return int(explicit_owner)
+
+        # Transformers 5.13 no longer materializes
+        # ``kv_shared_layer_index``.  Its Gemma4 attention implementation
+        # instead stores the last non-shared KV pair of each attention type
+        # and lets every shared tail layer consume that pair by layer type.
+        # Reconstruct the same source here so cache allocation and graph
+        # metadata stay aligned with the model forward contract.
+        layer_type = layer_types[layer_idx]
+        for candidate_idx in range(layer_idx - 1, -1, -1):
+            candidate_attn = layers[candidate_idx].self_attn
+            if getattr(candidate_attn, "is_kv_shared_layer", False):
+                continue
+            if layer_types[candidate_idx] == layer_type:
+                return candidate_idx
+        raise ValueError(
+            "Gemma4 shared KV layer has no preceding non-shared owner of the same type: "
+            f"layer {layer_idx} ({layer_type!r})."
+        )
+
     layer_kv_shapes: list[list[int]] = []
     layer_cache_types: list[str] = []
     layer_cache_owner_indices: list[int] = []
@@ -163,9 +190,8 @@ def _build_gemma4_layer_cache_layout(
         layer_kv_shapes.append([1, num_key_value_heads, cache_seq_len, attn.head_dim])
 
     layer_cache_indices: list[int] = []
-    for layer_idx, layer in enumerate(layers):
-        attn = layer.self_attn
-        owner_layer_idx = int(attn.kv_shared_layer_index) if getattr(attn, "is_kv_shared_layer", False) else layer_idx
+    for layer_idx, _layer in enumerate(layers):
+        owner_layer_idx = resolve_owner_layer_idx(layer_idx)
         if owner_layer_idx not in owner_layer_to_cache_index:
             raise ValueError(
                 "Gemma4 layer cache mapping references a non-owning layer: "
@@ -234,6 +260,12 @@ def validate_gemma4_flash_attention_graph(
     graph_path = Path(path)
     model = onnx.load(str(graph_path), load_external_data=False)
     inputs = {value.name: value for value in model.graph.input}
+    attention_lowering = str(meta.get("attention_lowering") or "flash_attention")
+    if attention_lowering not in {"flash_attention", "full_flash_attention"}:
+        raise ValueError(
+            f"{graph_path}: contract-v2 graph has unsupported attention_lowering={attention_lowering!r}"
+        )
+    mixed_attention = attention_lowering == "full_flash_attention"
 
     def resolve_input_name(semantic_name: str, aliases: tuple[str, ...]) -> str:
         matches = [name for name in aliases if name in inputs]
@@ -244,16 +276,23 @@ def validate_gemma4_flash_attention_graph(
             )
         return matches[0]
 
-    if "sliding_attention_mask" in inputs:
-        raise ValueError(f"{graph_path}: contract-v2 graph retains sliding_attention_mask")
-    for name in ("kv_window_start_abs", "kv_valid_length"):
-        if name not in inputs:
-            raise ValueError(f"{graph_path}: contract-v2 graph missing {name}")
     bidirectional_vision = bool(meta.get("bidirectional_vision_attention"))
-    if bidirectional_vision and "mm_prefix_ranges" not in inputs:
-        raise ValueError(f"{graph_path}: bidirectional vision graph missing mm_prefix_ranges")
-    if not bidirectional_vision and "mm_prefix_ranges" in inputs:
-        raise ValueError(f"{graph_path}: non-bidirectional graph retains mm_prefix_ranges")
+    if mixed_attention:
+        if "sliding_attention_mask" not in inputs:
+            raise ValueError(f"{graph_path}: mixed-attention graph missing sliding_attention_mask")
+        for name in ("kv_window_start_abs", "kv_valid_length", "mm_prefix_ranges"):
+            if name in inputs:
+                raise ValueError(f"{graph_path}: mixed-attention graph unexpectedly retains {name}")
+    else:
+        if "sliding_attention_mask" in inputs:
+            raise ValueError(f"{graph_path}: contract-v2 graph retains sliding_attention_mask")
+        for name in ("kv_window_start_abs", "kv_valid_length"):
+            if name not in inputs:
+                raise ValueError(f"{graph_path}: contract-v2 graph missing {name}")
+        if bidirectional_vision and "mm_prefix_ranges" not in inputs:
+            raise ValueError(f"{graph_path}: bidirectional vision graph missing mm_prefix_ranges")
+        if not bidirectional_vision and "mm_prefix_ranges" in inputs:
+            raise ValueError(f"{graph_path}: non-bidirectional graph retains mm_prefix_ranges")
     embedding_input = resolve_input_name("input embeddings", ("inputs_embeds", "input_1"))
     past_length_input = resolve_input_name("past sequence length", ("past_seq_length", "valid_length"))
     current_length_input = resolve_input_name(
@@ -264,9 +303,12 @@ def validate_gemma4_flash_attention_graph(
     if not has_per_layer_inputs and "per_layer_inputs" in inputs:
         raise ValueError(f"{graph_path}: graph unexpectedly retains per_layer_inputs")
     expected_external_prefix = [embedding_input, past_length_input, current_length_input]
-    if bidirectional_vision:
-        expected_external_prefix.append("mm_prefix_ranges")
-    expected_external_prefix.extend(["kv_window_start_abs", "kv_valid_length"])
+    if mixed_attention:
+        expected_external_prefix.append("sliding_attention_mask")
+    else:
+        if bidirectional_vision:
+            expected_external_prefix.append("mm_prefix_ranges")
+        expected_external_prefix.extend(["kv_window_start_abs", "kv_valid_length"])
     if has_per_layer_inputs:
         expected_external_prefix.append("per_layer_inputs")
     actual_external_prefix = [value.name for value in model.graph.input[: len(expected_external_prefix)]]
@@ -276,7 +318,7 @@ def validate_gemma4_flash_attention_graph(
         )
 
     layer_types = list(meta.get("layer_types") or [])
-    expected_sliding_flash_v2 = int(meta.get("attention_contract_version") or 1) >= 2 and any(
+    expected_sliding_flash_v2 = attention_lowering == "flash_attention" and any(
         layer_type == "sliding_attention" for layer_type in layer_types
     )
     actual_sliding_flash_v2 = meta.get("uses_sliding_flash_attention_v2")
@@ -326,13 +368,53 @@ def validate_gemma4_flash_attention_graph(
             )
 
     flash_nodes = [node for node in model.graph.node if node.op_type == "FlashAttention"]
-    if len(flash_nodes) != attention_count:
-        raise ValueError(f"{graph_path}: FlashAttention count={len(flash_nodes)}, expected {attention_count}")
+    expected_flash_count = (
+        sum(layer_type == "full_attention" for layer_type in layer_types)
+        if mixed_attention
+        else attention_count
+    )
+    if len(flash_nodes) != expected_flash_count:
+        raise ValueError(
+            f"{graph_path}: FlashAttention count={len(flash_nodes)}, expected {expected_flash_count}"
+        )
+
+    flash_layer_indices: list[int] = []
+    if mixed_attention:
+        layer_pattern = re.compile(r"(?:^|[./_])layers[./_](\d+)(?:[./_]|$)")
+        for node in flash_nodes:
+            matches = {
+                int(match.group(1))
+                for text in (node.name, *node.input, *node.output)
+                # xhquant deduplicates the attention LUT and may retain the
+                # first full layer's source name on every FlashAttention
+                # node.  The table is shared data, not layer provenance.
+                if "attention_lut_table" not in text
+                for match in layer_pattern.finditer(text)
+            }
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{graph_path}: FlashAttention node {node.name!r} has ambiguous layer identities {sorted(matches)}"
+                )
+            if matches:
+                flash_layer_indices.append(next(iter(matches)))
+        if not flash_layer_indices:
+            # Small synthetic validator fixtures may omit provenance. Real
+            # exports carry model.layers.N in every attention node.
+            flash_layer_indices = [
+                layer_idx
+                for layer_idx, layer_type in enumerate(layer_types)
+                if layer_type == "full_attention"
+            ]
+        if len(flash_layer_indices) != len(flash_nodes) or len(set(flash_layer_indices)) != len(flash_layer_indices):
+            raise ValueError(f"{graph_path}: mixed FlashAttention layer identities are incomplete or duplicated")
+    else:
+        flash_layer_indices = list(range(attention_count))
 
     sliding_nodes = 0
     full_nodes = 0
     configured_window = int(meta.get("sliding_window") or 0)
-    for layer_idx, (node, layer_type) in enumerate(zip(flash_nodes, layer_types, strict=True)):
+    for node, layer_idx in zip(flash_nodes, flash_layer_indices, strict=True):
+        layer_type = layer_types[layer_idx]
         node_fact = node.name or f"FlashAttention[{layer_idx}]"
         attributes = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
         if "sliding_window" not in attributes:
@@ -386,10 +468,15 @@ def validate_gemma4_flash_attention_graph(
             if actual != input_name:
                 raise ValueError(f"{graph_path}: {node_fact} input[{input_pos}]={actual!r}, expected {input_name!r}")
 
-    for layer_idx, node in enumerate(flash_nodes):
+    flash_node_by_layer = dict(zip(flash_layer_indices, flash_nodes, strict=True))
+    for layer_idx, node in flash_node_by_layer.items():
         cache_idx = layer_cache_indices[layer_idx]
         owner_layer_idx = layer_cache_owner_indices[cache_idx]
-        owner_node = flash_nodes[owner_layer_idx]
+        owner_node = flash_node_by_layer.get(owner_layer_idx)
+        if owner_node is None:
+            raise ValueError(
+                f"{graph_path}: FlashAttention layer {layer_idx} maps to non-Flash cache owner {owner_layer_idx}"
+            )
         if list(node.input[1:3]) != list(owner_node.input[1:3]):
             raise ValueError(
                 f"{graph_path}: FlashAttention layer {layer_idx} maps to cache {cache_idx} owned by "
@@ -445,7 +532,8 @@ def validate_gemma4_flash_attention_graph(
         ):
             node_fact = node.name or (node.output[0] if node.output else "unnamed")
             producer_fact = producer.name or (producer.output[0] if producer.output else "unnamed")
-            raise ValueError(f"{graph_path}: attention Softmax {node_fact} remains after QK MatMul {producer_fact}")
+            if not mixed_attention:
+                raise ValueError(f"{graph_path}: attention Softmax {node_fact} remains after QK MatMul {producer_fact}")
 
     return {
         "flash_attention_nodes": len(flash_nodes),
@@ -525,7 +613,8 @@ class XHGemma4SeriesModel(VisionLLMModel):
     def _uses_target_verify_decode_accepted_count(self) -> bool:
         return (
             self._is_mtp_export()
-            and getattr(self.config, "attention_lowering", "legacy_attention") == "legacy_attention"
+            and getattr(self.config, "attention_lowering", "legacy_attention")
+            in {"legacy_attention", "full_flash_attention"}
             and getattr(self.config, "sliding_kv_cache_input_mode", "slice_window") == "slice_window"
             and self.is_decode()
         )
@@ -561,7 +650,10 @@ class XHGemma4SeriesModel(VisionLLMModel):
 
     def _mtp_decode_wrap_cfg_overrides(self) -> dict[str, int]:
         overrides = {"num_logits_to_keep": 0}
-        if getattr(self.config, "attention_lowering", "legacy_attention") == "legacy_attention":
+        if getattr(self.config, "attention_lowering", "legacy_attention") in {
+            "legacy_attention",
+            "full_flash_attention",
+        }:
             overrides["enable_accepted_count_input"] = True
         return overrides
 
@@ -1135,6 +1227,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             self.config.num_logits_to_keep,
             enable_mtp_outputs=self.config.enable_mtp_outputs,
             attention_contract_version=getattr(self.config, "attention_contract_version", 1),
+            attention_lowering=getattr(self.config, "attention_lowering", None),
             bidirectional_vision_attention=getattr(self.config, "bidirectional_vision_attention", False),
         )
         return super().init_wrap_model(hf_model)
@@ -1510,7 +1603,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             # take this identity-only fallback.
             layer_cache_owner_indices = list(range(len(layer_cache_types)))
         layer_kv_shapes = [list(shape) for shape in (getattr(self._kvcache_mixin, "layer_kv_shapes", []) or [])]
-        if self._uses_compact_attention_contract():
+        if int(getattr(self.config, "attention_contract_version", 1)) >= 2:
             self._validate_v2_export_metadata(
                 layer_types=layer_types,
                 layer_cache_types=layer_cache_types,
@@ -1540,7 +1633,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             max_mm_ranges_per_chunk=int(getattr(self.config, "max_mm_ranges_per_chunk", 1)),
         )
         meta_info.attention_visibility_spec = visibility_spec.to_dict()
-        meta_info.uses_sliding_flash_attention_v2 = meta_info.attention_contract_version >= 2 and any(
+        meta_info.uses_sliding_flash_attention_v2 = meta_info.attention_lowering == "flash_attention" and any(
             layer_type == "sliding_attention" for layer_type in layer_types
         )
         meta_info.layer_types = layer_types
