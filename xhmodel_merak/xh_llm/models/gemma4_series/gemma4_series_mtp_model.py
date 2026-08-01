@@ -444,10 +444,12 @@ class Gemma4AssistantSelfAttention(nn.Module):
         layer_type: str,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
+        fuse_sliding_attention: bool = True,
     ):
         super().__init__()
         self.layer_type = layer_type
         self.use_readonly_page_attention = bool(use_readonly_page_attention)
+        self.fuse_sliding_attention = bool(fuse_sliding_attention)
         self.config = hf_attn.config
         self.q_proj = hf_attn.q_proj
         self.q_norm = hf_attn.q_norm
@@ -464,14 +466,26 @@ class Gemma4AssistantSelfAttention(nn.Module):
             self.num_key_value_heads = int(self.config.num_key_value_heads)
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
         self.rope = xhnn.Rope()
-        self.k_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
-        self.v_old_cache = LLMCacheV2(axis=cache_axis, only_handle_old_cache=True)
-        if self.use_readonly_page_attention:
-            sliding_window = (
+        sliding_window = (
                 int(getattr(self.config, "sliding_window", 0) or 0)
                 if self.layer_type == "sliding_attention"
                 else None
             )
+        cache_window = sliding_window if sliding_window is not None else -1
+        self.k_old_cache = LLMCacheV2(
+            axis=cache_axis,
+            attention_max_length=cache_window,
+            only_handle_old_cache=True,
+        )
+        self.v_old_cache = LLMCacheV2(
+            axis=cache_axis,
+            attention_max_length=cache_window,
+            only_handle_old_cache=True,
+        )
+        self.use_flash_attention = self.use_readonly_page_attention and (
+            self.layer_type == "full_attention" or self.fuse_sliding_attention
+        )
+        if self.use_flash_attention:
             self.flash_attn = xhnn.FlashAttention(
                 num_heads=self.num_attention_heads,
                 num_kv_heads=self.num_key_value_heads,
@@ -530,7 +544,7 @@ class Gemma4AssistantSelfAttention(nn.Module):
             shared_value_cache,
         )
 
-        if self.use_readonly_page_attention:
+        if self.use_flash_attention:
             if self.layer_type == "sliding_attention":
                 if kv_window_start_abs is None or kv_valid_length is None:
                     raise ValueError(
@@ -575,6 +589,7 @@ class Gemma4AssistantDecoderLayer(nn.Module):
         layer_type: str,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
+        fuse_sliding_attention: bool = True,
     ):
         super().__init__()
         self.layer_type = layer_type
@@ -583,6 +598,7 @@ class Gemma4AssistantDecoderLayer(nn.Module):
             layer_type,
             cache_axis=cache_axis,
             use_readonly_page_attention=use_readonly_page_attention,
+            fuse_sliding_attention=fuse_sliding_attention,
         )
         self.input_layernorm = hf_layer.input_layernorm
         self.post_attention_layernorm = hf_layer.post_attention_layernorm
@@ -635,9 +651,11 @@ class Gemma4AssistantBackbone(nn.Module):
         input_sequence_length: int,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
+        fuse_sliding_attention: bool = True,
     ):
         super().__init__()
         self.use_readonly_page_attention = bool(use_readonly_page_attention)
+        self.fuse_sliding_attention = bool(fuse_sliding_attention)
         self.embed_tokens = text_model.embed_tokens
         self.layers = nn.ModuleList(
             [
@@ -646,6 +664,7 @@ class Gemma4AssistantBackbone(nn.Module):
                     text_model.config.layer_types[index],
                     cache_axis=cache_axis,
                     use_readonly_page_attention=self.use_readonly_page_attention,
+                    fuse_sliding_attention=self.fuse_sliding_attention,
                 )
                 for index, layer in enumerate(text_model.layers[: text_model.config.num_hidden_layers])
             ]
@@ -728,7 +747,10 @@ class Gemma4AssistantBackbone(nn.Module):
                 layer_kv_valid_length = None
             else:
                 if (
-                    not self.use_readonly_page_attention
+                    (
+                        not self.use_readonly_page_attention
+                        or not getattr(self, "fuse_sliding_attention", True)
+                    )
                     and sliding_attention_mask is None
                 ):
                     raise ValueError(
@@ -742,6 +764,7 @@ class Gemma4AssistantBackbone(nn.Module):
                 attention_mask = (
                     None
                     if self.use_readonly_page_attention
+                    and getattr(self, "fuse_sliding_attention", True)
                     else sliding_attention_mask
                 )
                 position_embeddings = sliding_pos
@@ -772,6 +795,7 @@ class Gemma4AssistantDraftModule(nn.Module):
         input_sequence_length: int = 1,
         cache_axis: int = 2,
         use_readonly_page_attention: bool = False,
+        fuse_sliding_attention: bool = True,
     ):
         super().__init__()
         assistant_model_dir = str(Path(assistant_model_dir).resolve())
@@ -800,6 +824,7 @@ class Gemma4AssistantDraftModule(nn.Module):
             input_sequence_length=input_sequence_length,
             cache_axis=cache_axis,
             use_readonly_page_attention=use_readonly_page_attention,
+            fuse_sliding_attention=fuse_sliding_attention,
         )
         self.pre_projection = nn.Linear(2 * self.backbone_hidden_size, text_config.hidden_size, bias=False)
         self.post_projection = nn.Linear(text_config.hidden_size, self.backbone_hidden_size, bias=False)
@@ -954,9 +979,15 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
     ):
         self.assistant_model_dir = str(Path(assistant_model_dir).resolve())
         self.target_model_dir = str(Path(target_model_dir).resolve())
+        use_readonly_page_attention = bool(
+            wrap_cfg.get("use_readonly_page_attention", False)
+        )
+        fuse_sliding_attention = bool(
+            wrap_cfg.get("fuse_sliding_attention", True)
+        )
         draft_input_names = (
             MTP_FLASH_DRAFT_INPUT_NAMES
-            if bool(wrap_cfg.get("use_readonly_page_attention", False))
+            if use_readonly_page_attention and fuse_sliding_attention
             else MTP_DRAFT_INPUT_NAMES
         )
         export_cfg = export_cfg or ConfigDict(
@@ -991,9 +1022,12 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
         use_readonly_page_attention = bool(
             self.wrap_cfg.get("use_readonly_page_attention", False)
         )
+        fuse_sliding_attention = bool(
+            self.wrap_cfg.get("fuse_sliding_attention", True)
+        )
         module_type = (
             Gemma4AssistantFlashDraftModule
-            if use_readonly_page_attention
+            if use_readonly_page_attention and fuse_sliding_attention
             else Gemma4AssistantDraftModule
         )
         self._wrap_model = module_type(
@@ -1003,6 +1037,7 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
             input_sequence_length=int(self.wrap_cfg.get("input_sequence_length", 1)),
             cache_axis=int(self.wrap_cfg.get("cache_axis", 2)),
             use_readonly_page_attention=use_readonly_page_attention,
+            fuse_sliding_attention=fuse_sliding_attention,
         )
         self._wrap_model = self._wrap_model.to(dtype=resolve_torch_dtype(self.wrap_cfg.get("dtype", "float16")))
         self._wrap_model.eval()
@@ -1028,6 +1063,9 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
         full_head_dim = int(target_text_cfg.get("global_head_dim") or target_text_cfg["head_dim"])
         use_readonly_page_attention = bool(
             self.wrap_cfg.get("use_readonly_page_attention", False)
+        )
+        fuse_sliding_attention = bool(
+            self.wrap_cfg.get("fuse_sliding_attention", True)
         )
 
         if data is None:
@@ -1062,7 +1100,7 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
                     dtype=dtype,
                 ),
             )
-            if use_readonly_page_attention:
+            if use_readonly_page_attention and fuse_sliding_attention:
                 data.update(
                     kv_window_start_abs=torch.zeros((1,), dtype=torch.int32),
                     kv_valid_length=torch.full(
@@ -1088,7 +1126,7 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
             data["shared_key_cache_full"],
             data["shared_value_cache_full"],
         )
-        if use_readonly_page_attention:
+        if use_readonly_page_attention and fuse_sliding_attention:
             inputs = common_prefix + shared_caches + (
                 data["kv_window_start_abs"],
                 data["kv_valid_length"],

@@ -252,6 +252,53 @@ def test_readonly_draft_manifest_declares_runtime_v2_contract(
     assert spec["standalone_draft_decode_onnx"] == "mtp/draft.onnx"
 
 
+def test_mixed_readonly_manifest_declares_physical_page_module_order(
+    tmp_path: Path,
+) -> None:
+    meta_path = tmp_path / "golden_meta_info.json"
+    draft_path = tmp_path / "mtp/draft.onnx"
+    draft_path.parent.mkdir()
+    draft_path.write_bytes(b"graph")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "model_type": "Gemma4UnifiedForConditionalGeneration",
+                "model_config": {
+                    "num_draft_tokens": 4,
+                    "sliding_window": 1024,
+                    "mtp_config": {
+                        "assistant_layer_pattern": [
+                            "sliding_attention",
+                            "sliding_attention",
+                            "sliding_attention",
+                            "full_attention",
+                        ]
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    update_manifest_with_draft(
+        meta_path,
+        draft_path,
+        lm_head_quant_type="w4a8h0_ssfp",
+        shared_sliding_len=1344,
+        shared_full_len=2048,
+        readonly_page_attention=True,
+        fuse_sliding_attention=False,
+    )
+
+    draft = json.loads(meta_path.read_text(encoding="utf-8"))["spec_decode"]["draft"]
+    assert draft["abi"] == "gemma4_mtp_readonly_mixed_attention_v3"
+    assert draft["attention_lowering"] == "full_page_sliding_unfused"
+    assert draft["layer_attention_types"] == [
+        "sliding_attention",
+        "full_attention",
+    ]
+
+
 @pytest.mark.parametrize(
     "shared_kv_inputs",
     [

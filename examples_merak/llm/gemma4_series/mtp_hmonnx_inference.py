@@ -67,6 +67,12 @@ READONLY_PAGE_DRAFT_INPUTS = [
     "kv_window_start_abs",
     "kv_valid_length",
 ]
+MIXED_READONLY_PAGE_DRAFT_INPUTS = [
+    "input_1",
+    "valid_length",
+    "current_length",
+    "sliding_attention_mask",
+]
 EXPECTED_DRAFT_OUTPUTS = ["logits", "assistant_hidden_state"]
 
 
@@ -284,7 +290,19 @@ def verify_preset(
     attention_contract_version = int(
         meta_dict.get("attention_contract_version") or model_config.get("attention_contract_version") or 1
     )
-    uses_target_flash_attention = attention_contract_version >= 2
+    target_attention_lowering = str(
+        meta_dict.get("attention_lowering")
+        or model_config.get("attention_lowering")
+        or "legacy_attention"
+    )
+    uses_target_mixed_attention = (
+        attention_contract_version >= 2
+        and target_attention_lowering == "full_flash_attention"
+    )
+    uses_target_compact_flash_attention = (
+        attention_contract_version >= 2
+        and not uses_target_mixed_attention
+    )
     if not model_config.get("enable_mtp_outputs"):
         raise AssertionError(f"{preset.name}: base export did not enable MTP outputs")
     if spec.get("mode") != "mtp" or meta_dict.get("spec_decode_mode") != "mtp":
@@ -312,7 +330,7 @@ def verify_preset(
         raise AssertionError(f"{preset.name}: decode outputs mismatch: {decode_outputs}")
     decode_input_shape = _onnx_value_shape(decode_model, "input_1")
     decode_inputs = _load_inputs(decode_onnx)
-    if uses_target_flash_attention:
+    if uses_target_compact_flash_attention:
         required_compact_inputs = {"kv_window_start_abs", "kv_valid_length"}
         missing = required_compact_inputs.difference(decode_inputs)
         if missing:
@@ -324,8 +342,15 @@ def verify_preset(
             raise AssertionError(
                 f"{preset.name}: target contract-v2 decode graph retains legacy sliding_attention_mask"
             )
-    elif "accepted_count" not in decode_inputs:
-        raise AssertionError(f"{preset.name}: legacy target MTP verify decode graph is missing accepted_count input")
+    else:
+        if "accepted_count" not in decode_inputs:
+            raise AssertionError(
+                f"{preset.name}: target MTP verify decode graph is missing accepted_count input"
+            )
+        if uses_target_mixed_attention and "sliding_attention_mask" not in decode_inputs:
+            raise AssertionError(
+                f"{preset.name}: mixed target MTP decode graph is missing sliding_attention_mask"
+            )
     decode_kv_nodes = _kv_nodes(decode_model)
     if not decode_kv_nodes:
         raise AssertionError(f"{preset.name}: target MTP verify decode graph has no KVcache nodes")
@@ -335,7 +360,7 @@ def verify_preset(
         attention_max_length = int(attrs.get("attention_max_length", attrs.get("attention-max-length", -1)))
         if attention_max_length > 0:
             sliding_kv_nodes.append(node_name)
-            if not uses_target_flash_attention and "accepted_count" not in node_inputs:
+            if not uses_target_compact_flash_attention and "accepted_count" not in node_inputs:
                 raise AssertionError(
                     f"{preset.name}: target sliding decode KVcache {node_name} does not consume accepted_count"
                 )
@@ -364,7 +389,7 @@ def verify_preset(
         spec.get("target_decode_sliding_output_length")
         or (_aligned(sliding_window + verify_length - 1, 16) if sliding_window > 0 else 0)
     )
-    if not uses_target_flash_attention:
+    if not uses_target_compact_flash_attention:
         decode_sliding_mask_shape = _onnx_value_shape(
             decode_model,
             "sliding_attention_mask",
@@ -404,9 +429,27 @@ def verify_preset(
     draft_tag_nodes = [node.name for node in draft_model.graph.node if node.op_type in {"Tag", "XHTag"}]
     if draft_tag_nodes:
         raise AssertionError(f"{preset.name}: assistant draft graph retains scheduling tags: {draft_tag_nodes}")
+    draft_contract = dict(spec.get("draft") or {})
+    uses_mixed_readonly_attention = (
+        draft_contract.get("abi")
+        == "gemma4_mtp_readonly_mixed_attention_v3"
+    )
     readonly_page_nodes = [node for node in draft_model.graph.node if node.op_type == "PageAttentionReadOnly"]
-    uses_readonly_page_attention = bool(readonly_page_nodes)
-    expected_draft_inputs = READONLY_PAGE_DRAFT_INPUTS if uses_readonly_page_attention else LEGACY_DRAFT_INPUTS
+    readonly_page_kv_nodes = [
+        node
+        for node in draft_model.graph.node
+        if node.op_type == "PageKVCacheReadOnly"
+    ]
+    uses_readonly_page_attention = bool(
+        readonly_page_nodes or readonly_page_kv_nodes
+    ) or uses_mixed_readonly_attention
+    expected_draft_inputs = (
+        MIXED_READONLY_PAGE_DRAFT_INPUTS
+        if uses_mixed_readonly_attention
+        else READONLY_PAGE_DRAFT_INPUTS
+        if uses_readonly_page_attention
+        else LEGACY_DRAFT_INPUTS
+    )
     kv_nodes: list[tuple[str, str, dict[str, Any], list[str]]] = []
     if draft_inputs != expected_draft_inputs:
         raise AssertionError(
@@ -417,51 +460,105 @@ def verify_preset(
     if draft_outputs != EXPECTED_DRAFT_OUTPUTS:
         raise AssertionError(f"{preset.name}: draft outputs mismatch: {draft_outputs}")
     if uses_readonly_page_attention:
-        if len(readonly_page_nodes) != 4:
-            raise AssertionError(
-                f"{preset.name}: expected 4 PageAttentionReadOnly nodes, got {len(readonly_page_nodes)}"
-            )
         # Production PageAttention binds the target-owned paged caches through
-        # runtime context, so cache tensors and the dense sliding mask are
-        # deliberately absent from the graph ABI.
-        draft_contract = dict(spec.get("draft") or {})
+        # runtime context, so target-owned cache tensors are deliberately
+        # absent from the graph ABI.
         if draft_contract.get("cache_binding") != "target_attention_type_owner":
             raise AssertionError(f"{preset.name}: read-only PageAttention draft must bind target_attention_type_owner")
-        if (
-            draft_contract.get("abi") != "gemma4_mtp_readonly_page_attention_v2"
-            or draft_contract.get("attention_lowering") != "causal"
-        ):
-            raise AssertionError(
-                f"{preset.name}: read-only PageAttention must use the causal v2 ABI"
-            )
         if any(node.op_type == "Clip" for node in draft_model.graph.node):
             raise AssertionError(
                 f"{preset.name}: read-only PageAttention must not derive cache "
                 "ranges with graph-side Clip"
             )
-        for node in readonly_page_nodes:
-            attrs = _node_attrs(node)
-            inputs = list(node.input)
-            if not bool(attrs.get("is_causal", 0)):
+        if uses_mixed_readonly_attention:
+            if draft_contract.get("attention_lowering") != "full_page_sliding_unfused":
                 raise AssertionError(
-                    f"{preset.name}: {node.name} must be causal"
+                    f"{preset.name}: mixed read-only draft must use full-page/sliding-unfused lowering"
                 )
-            sliding_window_attr = int(attrs.get("sliding_window", -1))
-            has_compact_range = (
-                len(inputs) > 7
-                and inputs[6] == "kv_window_start_abs"
-                and inputs[7] == "kv_valid_length"
-            )
-            if sliding_window_attr > 0 and not has_compact_range:
+            page_modules = [
+                node
+                for node in draft_model.graph.node
+                if node.op_type
+                in {"PageKVCacheReadOnly", "PageAttentionReadOnly"}
+            ]
+            module_attrs = [_node_attrs(node) for node in page_modules]
+            layer_indices = [int(attrs.get("layer_idx", -1)) for attrs in module_attrs]
+            if layer_indices != list(range(len(page_modules))):
                 raise AssertionError(
-                    f"{preset.name}: sliding {node.name} is missing compact "
-                    "target-cache metadata"
+                    f"{preset.name}: mixed read-only page module indices are not contiguous: {layer_indices}"
                 )
-            if sliding_window_attr <= 0 and has_compact_range:
+            module_types = [str(attrs.get("attention_kind") or "") for attrs in module_attrs]
+            declared_types = list(draft_contract.get("layer_attention_types") or [])
+            if module_types != declared_types:
                 raise AssertionError(
-                    f"{preset.name}: full {node.name} must not consume sliding "
-                    "target-cache metadata"
+                    f"{preset.name}: mixed page modules disagree with manifest: "
+                    f"graph={module_types}, manifest={declared_types}"
                 )
+            for node, attention_kind, attrs in zip(
+                page_modules,
+                module_types,
+                module_attrs,
+                strict=True,
+            ):
+                if attention_kind == "sliding_attention":
+                    if (
+                        node.op_type != "PageKVCacheReadOnly"
+                        or int(attrs.get("sliding_window", -1)) <= 0
+                        or list(node.input) != ["valid_length", "current_length"]
+                    ):
+                        raise AssertionError(
+                            f"{preset.name}: invalid mixed sliding cache module {node.name}"
+                        )
+                elif attention_kind == "full_attention":
+                    if (
+                        node.op_type != "PageAttentionReadOnly"
+                        or not bool(attrs.get("is_causal", 0))
+                        or int(attrs.get("sliding_window", -1)) > 0
+                        or "kv_window_start_abs" in node.input
+                        or "kv_valid_length" in node.input
+                    ):
+                        raise AssertionError(
+                            f"{preset.name}: invalid mixed full-attention module {node.name}"
+                        )
+                else:
+                    raise AssertionError(
+                        f"{preset.name}: unknown mixed attention kind {attention_kind!r}"
+                    )
+        else:
+            if len(readonly_page_nodes) != 4:
+                raise AssertionError(
+                    f"{preset.name}: expected 4 PageAttentionReadOnly nodes, got {len(readonly_page_nodes)}"
+                )
+            if (
+                draft_contract.get("abi") != "gemma4_mtp_readonly_page_attention_v2"
+                or draft_contract.get("attention_lowering") != "causal"
+            ):
+                raise AssertionError(
+                    f"{preset.name}: read-only PageAttention must use the causal v2 ABI"
+                )
+            for node in readonly_page_nodes:
+                attrs = _node_attrs(node)
+                inputs = list(node.input)
+                if not bool(attrs.get("is_causal", 0)):
+                    raise AssertionError(
+                        f"{preset.name}: {node.name} must be causal"
+                    )
+                sliding_window_attr = int(attrs.get("sliding_window", -1))
+                has_compact_range = (
+                    len(inputs) > 7
+                    and inputs[6] == "kv_window_start_abs"
+                    and inputs[7] == "kv_valid_length"
+                )
+                if sliding_window_attr > 0 and not has_compact_range:
+                    raise AssertionError(
+                        f"{preset.name}: sliding {node.name} is missing compact "
+                        "target-cache metadata"
+                    )
+                if sliding_window_attr <= 0 and has_compact_range:
+                    raise AssertionError(
+                        f"{preset.name}: full {node.name} must not consume sliding "
+                        "target-cache metadata"
+                    )
     else:
         for name, target_shape in target_shared_shapes.items():
             draft_shape = _onnx_value_shape(draft_model, name)
@@ -510,7 +607,12 @@ def verify_preset(
             )
             standalone_inputs = [inp.name for inp in standalone_model.graph.input]
             standalone_outputs = [out.name for out in standalone_model.graph.output]
-            if standalone_inputs != FLASH_DRAFT_INPUTS:
+            expected_standalone_inputs = (
+                LEGACY_DRAFT_INPUTS
+                if uses_mixed_readonly_attention
+                else FLASH_DRAFT_INPUTS
+            )
+            if standalone_inputs != expected_standalone_inputs:
                 raise AssertionError(f"{preset.name}: standalone draft inputs mismatch: {standalone_inputs}")
             if standalone_outputs != EXPECTED_DRAFT_OUTPUTS:
                 raise AssertionError(f"{preset.name}: standalone draft outputs mismatch: {standalone_outputs}")
@@ -526,9 +628,20 @@ def verify_preset(
                 for node in standalone_model.graph.node
                 if node.op_type == "FlashAttention"
             ]
-            if len(standalone_flash_nodes) != 4:
+            expected_standalone_flash_nodes = (
+                sum(
+                    attention_kind == "full_attention"
+                    for attention_kind in (
+                        draft_contract.get("layer_attention_types") or []
+                    )
+                )
+                if uses_mixed_readonly_attention
+                else 4
+            )
+            if len(standalone_flash_nodes) != expected_standalone_flash_nodes:
                 raise AssertionError(
-                    f"{preset.name}: standalone draft expected 4 FlashAttention "
+                    f"{preset.name}: standalone draft expected "
+                    f"{expected_standalone_flash_nodes} FlashAttention "
                     f"nodes, got {len(standalone_flash_nodes)}"
                 )
             for node in standalone_flash_nodes:
@@ -604,7 +717,13 @@ def verify_preset(
         "draft_onnx": str(draft_path),
         "draft_inputs": draft_inputs,
         "draft_outputs": draft_outputs,
-        "draft_attention_contract": ("readonly_page_attention" if uses_readonly_page_attention else "shared_tensor"),
+        "draft_attention_contract": (
+            "readonly_mixed_attention"
+            if uses_mixed_readonly_attention
+            else "readonly_page_attention"
+            if uses_readonly_page_attention
+            else "shared_tensor"
+        ),
         "standalone_draft": standalone_validation,
         "draft_shared_shapes": (
             {}

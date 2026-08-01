@@ -203,6 +203,7 @@ def update_manifest_with_draft(
     target_max_pe_length_hf_value: int | None = None,
     target_max_pe_length_hf_source: str | None = None,
     readonly_page_attention: bool = False,
+    fuse_sliding_attention: bool = True,
 ) -> None:
     export_dir = meta_path.parent
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -260,8 +261,17 @@ def update_manifest_with_draft(
     )
     if readonly_page_attention:
         assistant_layer_pattern = list(mtp_config_dict(meta).get("assistant_layer_pattern") or [])
+        runtime_page_module_pattern = (
+            assistant_layer_pattern
+            if fuse_sliding_attention
+            else list(dict.fromkeys(assistant_layer_pattern))
+        )
         draft_contract = {
-            "abi": "gemma4_mtp_readonly_page_attention_v2",
+            "abi": (
+                "gemma4_mtp_readonly_page_attention_v2"
+                if fuse_sliding_attention
+                else "gemma4_mtp_readonly_mixed_attention_v3"
+            ),
             "decode_hmonnx": rel_draft,
             "standalone_decode_hmonnx": rel_standalone_draft,
             "cache_mutation": "read_only",
@@ -274,8 +284,16 @@ def update_manifest_with_draft(
             "attention_past_length_semantics": (
                 "target_kv_valid_length_minus_one"
             ),
-            "attention_lowering": "causal",
-            "layer_attention_types": assistant_layer_pattern,
+            "attention_lowering": (
+                "causal"
+                if fuse_sliding_attention
+                else "full_page_sliding_unfused"
+            ),
+            # Causal v2 has one PageAttention module per logical draft layer.
+            # Mixed v3 instead has one page-bound module per shared physical
+            # attention-type owner: PageKVCacheReadOnly for sliding attention
+            # and PageAttentionReadOnly for full attention.
+            "layer_attention_types": runtime_page_module_pattern,
             "minimum_sliding_cache_slack": block_size,
         }
         spec_decode.update(
@@ -400,6 +418,12 @@ def export_mtp_draft(
     chip_arch = str(model_cfg.get("chip_arch") or meta.get("chip_arch") or chip_arch or "XH2a")
     context_length = resolve_context_length(model_cfg, mtp_cfg)
     dtype = str(mtp_cfg.get("dtype") or mtp_cfg.get("draft_dtype") or draft_dtype)
+    target_attention_lowering = str(
+        meta.get("attention_lowering")
+        or model_cfg.get("attention_lowering")
+        or "flash_attention"
+    )
+    fuse_sliding_attention = target_attention_lowering != "full_flash_attention"
     shared_sliding_len, shared_full_len = infer_shared_cache_lengths(meta)
     output_dir = exported_dir / MTP_DRAFT_DECODE_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -443,6 +467,7 @@ def export_mtp_draft(
                 meta.get("attention_contract_version") or model_cfg.get("attention_contract_version") or 1
             )
             >= 2,
+            fuse_sliding_attention=fuse_sliding_attention,
         ),
         quant_config=draft_quant_config(body_quant_type, lm_head_quant_type),
     )
@@ -477,10 +502,18 @@ def export_mtp_draft(
             page_onnx_file,
             insert_layer_tags=False,
             strip_layer_tags=True,
+            convert_unfused_sliding_kv_cache=not fuse_sliding_attention,
         )
         readonly_nodes = [node for node in converted.graph.node if node.op_type == "PageAttentionReadOnly"]
         if not readonly_nodes:
             raise RuntimeError("Gemma4 MTP contract-v2 draft conversion produced no PageAttentionReadOnly nodes")
+        if not fuse_sliding_attention and not any(
+            node.op_type == "PageKVCacheReadOnly"
+            for node in converted.graph.node
+        ):
+            raise RuntimeError(
+                "Gemma4 mixed-attention MTP conversion produced no PageKVCacheReadOnly nodes"
+            )
         onnx_file = page_onnx_file
     model.release_exported_model()
     model.release_quanted_model()
@@ -501,6 +534,7 @@ def export_mtp_draft(
         target_max_pe_length_hf_value=target_max_pe_length_info.get("hf_value"),
         target_max_pe_length_hf_source=target_max_pe_length_info.get("hf_source"),
         readonly_page_attention=readonly_page_attention,
+        fuse_sliding_attention=fuse_sliding_attention,
     )
     return onnx_file
 
