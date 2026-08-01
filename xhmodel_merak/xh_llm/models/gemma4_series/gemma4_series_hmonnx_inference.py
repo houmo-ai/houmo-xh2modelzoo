@@ -321,10 +321,29 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
                 slot_mapping=slot_mapping,
                 block_size=block_size,
             )
-        if self._attention_lowering() != "flash_attention":
+        if self._attention_lowering() not in {
+            "flash_attention",
+            "full_flash_attention",
+        }:
             raise RuntimeError("Gemma4 contexts_by_cache_index requires FlashAttention lowering")
 
         page_attention_modules = self._get_page_attention_modules(self._active_page_attention_model())
+        explicit_cache_indices = [
+            int(getattr(module, "cache_index", -1))
+            for module in page_attention_modules
+        ]
+        if explicit_cache_indices and all(cache_index >= 0 for cache_index in explicit_cache_indices):
+            missing = sorted(set(explicit_cache_indices) - set(contexts_by_cache_index))
+            if missing:
+                raise ValueError(
+                    "Gemma4 page modules reference missing cache contexts: "
+                    f"{missing}"
+                )
+            for page_module, cache_index in zip(
+                page_attention_modules, explicit_cache_indices, strict=True
+            ):
+                page_module.set_context(contexts_by_cache_index[cache_index])
+            return
         cache_indices = self._page_attention_cache_index_by_layer(
             len(page_attention_modules), set(contexts_by_cache_index)
         )
@@ -461,7 +480,13 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
         ).lower()
 
     def _uses_target_verify_decode_accepted_count(self) -> bool:
-        return self._is_mtp_export() and self._sliding_kv_cache_input_mode() == "slice_window" and self.is_decode()
+        return (
+            self._is_mtp_export()
+            and self._attention_lowering()
+            in {"legacy_attention", "full_flash_attention"}
+            and self._sliding_kv_cache_input_mode() == "slice_window"
+            and self.is_decode()
+        )
 
     def _validate_mtp_sliding_kv_cache_input_mode(self) -> None:
         if self._is_mtp_export() and self._sliding_kv_cache_input_mode() != "slice_window":
@@ -605,7 +630,13 @@ class XHGemma4SeriesHMONNXModel(VisonLLMHMONNXModel):
             ),
             max_mm_ranges_per_chunk=int(getattr(self.meta_info, "max_mm_ranges_per_chunk", 1)),
             emit_full_attention_mask=False,
-            emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
+            # PageKVCache owns speculative-cache transactions after page
+            # conversion, and the converter removes accepted_count from the
+            # graph ABI together with the legacy KVcache nodes.
+            emit_accepted_count_input=(
+                self._uses_target_verify_decode_accepted_count()
+                and not self.enable_page_attention
+            ),
         )
 
     def _set_enable_golden(self, enable: bool) -> None:
@@ -665,7 +696,10 @@ class XHGemma4MoeHMONNXModel(XHGemma4SeriesHMONNXModel):
             ),
             max_mm_ranges_per_chunk=int(getattr(self.meta_info, "max_mm_ranges_per_chunk", 1)),
             emit_full_attention_mask=False,
-            emit_accepted_count_input=self._uses_target_verify_decode_accepted_count(),
+            emit_accepted_count_input=(
+                self._uses_target_verify_decode_accepted_count()
+                and not self.enable_page_attention
+            ),
         )
 
 

@@ -386,6 +386,41 @@ def test_gemma_runtime_builds_page_attention_preprocessor_from_export_metadata()
     assert preprocess.max_mm_ranges_per_chunk == 2
 
 
+def test_mixed_page_runtime_does_not_feed_removed_accepted_count_input():
+    runtime = object.__new__(XHGemma4SeriesHMONNXModel)
+    runtime.meta_info = SimpleNamespace(
+        attention_contract_version=2,
+        attention_lowering="full_flash_attention",
+        spec_decode_mode="mtp",
+        max_mm_ranges_per_chunk=1,
+        model_config=SimpleNamespace(
+            context_max_length=64,
+            spec_decode_mode="mtp",
+            bidirectional_vision_attention=True,
+            image_token_id=7,
+            audio_token_id=-1,
+            video_token_id=-1,
+        ),
+    )
+    runtime.embed_tokens = nn.Embedding(32, 8)
+    runtime._kvcache_mixin = SimpleNamespace(
+        past_key_caches=[torch.zeros(1)],
+        past_value_caches=[torch.zeros(1)],
+    )
+    runtime.pad_token_id = 0
+    runtime.per_layer_input_embedding = None
+    runtime.sliding_window = 16
+    runtime.layer_types = ["sliding_attention", "full_attention"]
+    runtime._llm_prefill = False
+    runtime.get_input_sequence_length = lambda: 5
+
+    runtime.enable_page_attention = False
+    assert runtime._get_data_preprocessor().emit_accepted_count_input is True
+
+    runtime.enable_page_attention = True
+    assert runtime._get_data_preprocessor().emit_accepted_count_input is False
+
+
 class _GraphInterpreterSpy:
     def __init__(self, *, captured=False, replayed=False):
         self._capture_state = object() if captured else None

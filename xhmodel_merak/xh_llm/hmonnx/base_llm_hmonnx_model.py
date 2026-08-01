@@ -52,11 +52,16 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         )
         self.use_cache = self.kvcache_config.num_layers > 0
         self.enable_page_attention = enable_page_attention
+        convert_unfused_sliding_kv_cache = (
+            str(getattr(meta, "attention_lowering", ""))
+            == "full_flash_attention"
+        )
         prefill_hmonnx, decode_hmonnx = self._prepare_hmonnx_paths(
             meta.prefill_hmonnx,
             meta.decode_hmonnx,
             enable_parallel_linear_fusion=enable_parallel_linear_fusion,
             enable_page_attention=enable_page_attention,
+            convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
         )
         prefill_graph = None
         decode_graph = None
@@ -102,6 +107,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         *,
         enable_parallel_linear_fusion: bool,
         enable_page_attention: bool,
+        convert_unfused_sliding_kv_cache: bool = False,
     ) -> tuple[str, str]:
         """Apply immutable graph derivations before loading any initializer."""
 
@@ -113,8 +119,18 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         if enable_page_attention:
             # PageAttention must lower the already fused graph so both
             # optimizations are present in the one graph loaded at runtime.
-            prefill_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(prefill_path)
-            decode_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(decode_path)
+            if convert_unfused_sliding_kv_cache:
+                prefill_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(
+                    prefill_path,
+                    convert_unfused_sliding_kv_cache=True,
+                )
+                decode_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(
+                    decode_path,
+                    convert_unfused_sliding_kv_cache=True,
+                )
+            else:
+                prefill_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(prefill_path)
+                decode_path = BaseLLMHMONNXModel._convert_to_page_attention_hmonnx(decode_path)
         return prefill_path, decode_path
 
     def _sync_page_attention_mode_to_kvcache(self) -> None:
@@ -122,13 +138,25 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             self._kvcache_mixin.enable_page_attention = self.enable_page_attention
 
     @staticmethod
-    def _convert_to_page_attention_hmonnx(hmonnx_path: str | Path) -> str:
+    def _convert_to_page_attention_hmonnx(
+        hmonnx_path: str | Path,
+        *,
+        convert_unfused_sliding_kv_cache: bool = False,
+    ) -> str:
         input_path = Path(hmonnx_path)
-        digest = hashlib.sha256(str(input_path.resolve(strict=False)).encode("utf-8")).hexdigest()[:16]
+        digest_source = (
+            f"{input_path.resolve(strict=False)}|"
+            f"mixed={int(convert_unfused_sliding_kv_cache)}"
+        )
+        digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
         output_name = f"{input_path.stem}_page_attention_{digest}{input_path.suffix}"
         output_path = input_path.with_name(output_name)
         try:
-            convert_to_page_attention(input_path, output_path)
+            convert_to_page_attention(
+                input_path,
+                output_path,
+                convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
+            )
             return str(output_path)
         except PermissionError:
             logger = get_xhquant_logger()
@@ -137,7 +165,11 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             )
 
         output_path = Path(tempfile.gettempdir()) / "xhmodel_merak_page_attention" / digest / output_name
-        convert_to_page_attention(input_path, output_path)
+        convert_to_page_attention(
+            input_path,
+            output_path,
+            convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
+        )
         return str(output_path)
 
     def _get_page_attention_modules(self, hmonnx_model: HMONNXModel) -> list[PageAttention]:

@@ -152,7 +152,11 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         self.attention_lowering = attention_lowering or (
             "flash_attention" if self.attention_contract_version >= 2 else "legacy_attention"
         )
-        if self.attention_lowering not in {"legacy_attention", "flash_attention"}:
+        if self.attention_lowering not in {
+            "legacy_attention",
+            "flash_attention",
+            "full_flash_attention",
+        }:
             raise ValueError(f"Unsupported Gemma4 attention_lowering: {self.attention_lowering!r}")
         self.attention_visibility_spec = resolve_gemma4_attention_visibility_spec(
             attention_visibility_spec,
@@ -424,7 +428,10 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
         current_len_tensor = torch.tensor([current_input_length], dtype=torch.int32, device=device)
         output = [inputs_embeds, past_seq_tensor, current_len_tensor]
 
-        if self.enable_page_attention and self.attention_lowering != "flash_attention":
+        if self.enable_page_attention and self.attention_lowering not in {
+            "flash_attention",
+            "full_flash_attention",
+        }:
             raise RuntimeError("Gemma4 PageAttention requires FlashAttention lowering")
 
         if self.attention_lowering == "flash_attention":
@@ -449,7 +456,7 @@ class Gemma4DataPreprocess(BaseLLMInputProcessor):
             output.append(sliding_attention_mask)
         if per_layer_inputs is not None:
             output.append(per_layer_inputs)
-        if self.attention_lowering == "legacy_attention" and self.emit_accepted_count_input:
+        if self.attention_lowering in {"legacy_attention", "full_flash_attention"} and self.emit_accepted_count_input:
             accepted_count = data.get("accepted_count", 0)
             if torch.is_tensor(accepted_count):
                 accepted_count = accepted_count.to(device=device, dtype=torch.int32).reshape(1)
