@@ -7,6 +7,7 @@ from xhquant.api import QuantScheme
 
 from ...vision_llm_model import VisionLLMModelConfig
 from .lora import XHQwen3_5LoRAConfig, coerce_lora_config
+from .visual_token_gears import normalize_image_token_gears
 
 
 DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
@@ -50,6 +51,11 @@ class XHQwen3_5_VisualConfig(HFModelConfig):  # noqa: N801
         max_size_t: int = 2,
         patch_size: int = 16,
         temporal_patch_size: int = 2,
+        spatial_merge_size: int = 2,
+        visual_input_mode: str = "image",
+        image_token_capacity: int | None = None,
+        image_token_gears: list[int] | tuple[int, ...] | None = None,
+        visual_rope_cache_length: int | None = None,
         lora: Mapping[str, object] | None = None,
         **kwargs,
     ):
@@ -61,6 +67,48 @@ class XHQwen3_5_VisualConfig(HFModelConfig):  # noqa: N801
         self.max_size_t = max_size_t
         self.patch_size = patch_size
         self.temporal_patch_size = temporal_patch_size
+        self.spatial_merge_size = spatial_merge_size
+        if visual_input_mode not in {"image", "patches"}:
+            raise ValueError(f"visual_input_mode must be 'image' or 'patches', got {visual_input_mode!r}")
+        self.visual_input_mode = visual_input_mode
+        normalized_gears = None
+        if image_token_gears is not None:
+            if visual_input_mode != "patches":
+                raise ValueError("image_token_gears require visual_input_mode='patches'")
+            normalized_gears = normalize_image_token_gears(image_token_gears)
+            if image_token_capacity is None:
+                image_token_capacity = normalized_gears[-1]
+            elif int(image_token_capacity) not in normalized_gears:
+                raise ValueError(
+                    f"active image_token_capacity {image_token_capacity} must be one of {normalized_gears}"
+                )
+        if visual_input_mode == "patches" and image_token_capacity is None:
+            if max_size_w % patch_size or max_size_h % patch_size or max_size_t % temporal_patch_size:
+                raise ValueError("legacy max visual sizes must be divisible by their patch sizes")
+            patch_tokens = (max_size_t // temporal_patch_size) * (max_size_h // patch_size) * (max_size_w // patch_size)
+            merge_unit = spatial_merge_size * spatial_merge_size
+            if patch_tokens % merge_unit:
+                raise ValueError(f"derived patch token capacity {patch_tokens} is not divisible by {merge_unit}")
+            image_token_capacity = patch_tokens // merge_unit
+        if image_token_capacity is not None and int(image_token_capacity) <= 0:
+            raise ValueError(f"image_token_capacity must be positive, got {image_token_capacity}")
+        self.image_token_capacity = None if image_token_capacity is None else int(image_token_capacity)
+        self.image_token_gears = None if normalized_gears is None else list(normalized_gears)
+        if visual_input_mode == "patches":
+            largest_capacity = normalized_gears[-1] if normalized_gears is not None else self.image_token_capacity
+            minimum_rope_cache_length = int(largest_capacity) * spatial_merge_size
+            if visual_rope_cache_length is None:
+                visual_rope_cache_length = minimum_rope_cache_length
+            elif int(visual_rope_cache_length) < minimum_rope_cache_length:
+                raise ValueError(
+                    "visual_rope_cache_length must cover the longest valid patch-grid side: "
+                    f"got {visual_rope_cache_length}, need at least {minimum_rope_cache_length}"
+                )
+        elif visual_rope_cache_length is not None:
+            raise ValueError("visual_rope_cache_length requires visual_input_mode='patches'")
+        self.visual_rope_cache_length = (
+            None if visual_rope_cache_length is None else int(visual_rope_cache_length)
+        )
 
 
 class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
@@ -124,9 +172,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         assistant_config_path = Path(str(self.hf_model)) / "config.json"
         assistant_config: dict = {}
         if assistant_config_path.is_file():
-            assistant_config = json.loads(
-                assistant_config_path.read_text(encoding="utf-8")
-            )
+            assistant_config = json.loads(assistant_config_path.read_text(encoding="utf-8"))
         dflash_hf_config = assistant_config.get("dflash_config") or {}
 
         def resolve_checkpoint_int(
@@ -136,17 +182,9 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
             legacy_default: int,
             checkpoint_value: int | None = None,
         ) -> int:
-            value = (
-                assistant_config.get(name)
-                if checkpoint_value is None
-                else checkpoint_value
-            )
+            value = assistant_config.get(name) if checkpoint_value is None else checkpoint_value
             if value is None:
-                return (
-                    legacy_default
-                    if configured is None
-                    else int(configured)
-                )
+                return legacy_default if configured is None else int(configured)
             expected = int(value)
             if configured is not None and int(configured) != expected:
                 raise ValueError(
@@ -186,11 +224,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
             "num_target_layers",
             num_target_layers,
             legacy_default=4,
-            checkpoint_value=(
-                len(target_layer_ids)
-                if target_layer_ids
-                else None
-            ),
+            checkpoint_value=(len(target_layer_ids) if target_layer_ids else None),
         )
         checkpoint_block_size = assistant_config.get("block_size")
         if checkpoint_block_size is None:

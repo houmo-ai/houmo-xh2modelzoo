@@ -155,14 +155,11 @@ def build_qwen35_spec_decode_contract(
         noise_token_id_value = getattr(draft_config, "noise_token_id", None)
         if noise_token_id_value is None:
             raise ValueError(
-                "Qwen3.5 DFlash deployment metadata requires the assistant "
-                "checkpoint dflash_config.mask_token_id"
+                "Qwen3.5 DFlash deployment metadata requires the assistant checkpoint dflash_config.mask_token_id"
             )
         noise_token_id = int(noise_token_id_value)
         if noise_token_id < 0:
-            raise ValueError(
-                "Qwen3.5 DFlash noise_token_id must be non-negative"
-            )
+            raise ValueError("Qwen3.5 DFlash noise_token_id must be non-negative")
         flash_attention = getattr(draft_config, "flash_attention", None) or {}
         flash_attention_enabled = bool(
             flash_attention.get("enable", False)
@@ -178,17 +175,11 @@ def build_qwen35_spec_decode_contract(
             dflash_draft_decode_onnx=decode_path,
         )
         contract["draft"] = {
-            "abi": (
-                "qwen_dflash_paged_shared_v3"
-                if flash_attention_enabled
-                else "qwen_dflash_v1"
-            ),
+            "abi": ("qwen_dflash_paged_shared_v3" if flash_attention_enabled else "qwen_dflash_v1"),
             "context_hmonnx": context_path,
             "context_decode_hmonnx": context_decode_path,
             "decode_hmonnx": decode_path,
-            "cache_mutation": (
-                "page_attention" if flash_attention_enabled else "in_place"
-            ),
+            "cache_mutation": ("page_attention" if flash_attention_enabled else "in_place"),
             "cache_binding": "private_draft",
             "noise_token_id": noise_token_id,
         }
@@ -325,15 +316,32 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
         image_embeds = None
 
         if pixel_values is not None:
-            image_embeds = list()
-            for i in range(len(pixel_values)):
-                image_embeds_i = self._llm_model.visual.forward(
-                    pixel_values[i].type(self._llm_model.visual.dtype).to(self._llm_model.visual.device),
-                )
-                image_embeds.append(image_embeds_i)
+            if hasattr(self._llm_model.visual, "encode_many"):
+                image_embed_list = self._llm_model.visual.encode_many(pixel_values, image_grid_thw)
+                normalized_image_embeds = []
+                for embedding in image_embed_list:
+                    if embedding.ndim == 3 and embedding.shape[0] == 1:
+                        embedding = embedding[0]
+                    elif embedding.ndim != 2:
+                        raise ValueError(
+                            "Qwen3.5 visual token-gear output must have shape [N, D] "
+                            f"or [1, N, D], got {tuple(embedding.shape)}"
+                        )
+                    normalized_image_embeds.append(embedding)
+                image_embeds = torch.cat(
+                    normalized_image_embeds,
+                    dim=0,
+                ).to(inputs_embeds.device, inputs_embeds.dtype)
+            else:
+                image_embeds = list()
+                for i in range(len(pixel_values)):
+                    image_embeds_i = self._llm_model.visual.forward(
+                        pixel_values[i].type(self._llm_model.visual.dtype).to(self._llm_model.visual.device),
+                    )
+                    image_embeds.append(image_embeds_i)
 
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            image_embeds = image_embeds.squeeze(0)
+                image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+                image_embeds = image_embeds.squeeze(0)
 
         seq_length = inputs_embeds.shape[1]
         data_processor = self._llm_model.get_data_preprocessor()
@@ -1228,6 +1236,15 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self.visual.to_quanted_aligned()
         visual_meta = self.visual.export_hmonnx(visual_output_dir)
         visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
+        if getattr(visual_meta, "gears", None):
+            for gear in visual_meta.gears:
+                gear["hmonnx"] = str(
+                    (Path(visual_output_dir) / gear["hmonnx"]).relative_to(exported_info.exported_dir).as_posix()
+                )
+        if getattr(visual_meta, "gear_manifest", None):
+            visual_meta.gear_manifest = str(
+                Path(visual_meta.gear_manifest).relative_to(exported_info.exported_dir).as_posix()
+            )
         meta_info.visual_config = visual_meta
         json.dump(
             meta_info.to_dict(),

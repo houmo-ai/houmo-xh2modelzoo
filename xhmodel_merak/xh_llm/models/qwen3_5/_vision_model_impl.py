@@ -30,6 +30,22 @@ from .modeling_qwen3_5 import (
     Qwen3_5VisionPatchMerger,
     rotate_half,
 )
+from .visual_token_gears import VISUAL_INPUT_PATCHES
+
+
+def _build_visual_rotary_cache(rotary_emb, cache_length: int, *, device, dtype):
+    """Precompute one-dimensional RoPE tables in FP32, then store model dtype."""
+
+    inv_freq = 1.0 / (
+        rotary_emb.theta
+        ** (
+            torch.arange(0, rotary_emb.dim, 2, dtype=torch.float32, device=device)
+            / rotary_emb.dim
+        )
+    )
+    positions = torch.arange(cache_length, dtype=torch.float32, device=device)
+    freqs = positions[:, None] * inv_freq[None, :]
+    return freqs.cos().to(dtype=dtype), freqs.sin().to(dtype=dtype)
 
 
 @XHLLM_TRACEABLE_MODULES.register_module(
@@ -52,7 +68,11 @@ class _Qwen3_5VisionAttention(DynamicModule):  # noqa: N801
     def _setup(self, cfg: ConfigDict):
         self.only_first_block = False
 
-        self.enable_rope = cfg.get("enable_rope", False)
+        self.visual_input_mode = cfg.get("visual_input_mode", "image")
+        # Patch-token gears use the TorchFX frontend. Keep rotate-half inside
+        # the xhquant Rope leaf module so shape-derived FloorDiv/Slice nodes do
+        # not leak into the frontend graph.
+        self.enable_rope = cfg.get("enable_rope", False) or self.visual_input_mode == VISUAL_INPUT_PATCHES
         if self.enable_rope:
             self.rope = xhnn.Rope()
 
@@ -63,6 +83,13 @@ class _Qwen3_5VisionAttention(DynamicModule):  # noqa: N801
         head_dim = self.qkv.out_features // 3 // self.num_heads
 
         self.kv_scale = 1 / math.sqrt(head_dim)
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            # Vision padding uses an explicit additive key mask.  Do not use
+            # xhnn.MaskedSoftmax here: its second input is a causal
+            # past_kv_length.  MaskedAdd intentionally adds the mask twice
+            # (with saturation) before the regular quantizable softmax.
+            self.masked_add = xhnn.MaskedAdd()
+            self.softmax = xhnn.Softmax(dim=-1)
 
         weight = self.qkv.weight.data.clone()
         bias = self.qkv.bias.data.clone()
@@ -161,8 +188,9 @@ class _Qwen3_5VisionAttention(DynamicModule):  # noqa: N801
             expanded_proj.bias.data.copy_(proj_bias)
             self.proj = expanded_proj
 
-    def forward(self, hidden_states, position_embeddings):
-        batch, seq_length, _ = hidden_states.shape
+    def forward(self, hidden_states, position_embeddings, attention_mask=None):
+        batch = hidden_states.shape[0]
+        seq_length = hidden_states.shape[1]
 
         q = self.q_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
         k = self.k_proj(hidden_states).reshape(batch, seq_length, self.num_heads, -1)
@@ -179,7 +207,13 @@ class _Qwen3_5VisionAttention(DynamicModule):  # noqa: N801
         q = q * self.kv_scale
         dtype = q.dtype
         attn_weights = torch.matmul(q, k).to(dtype)
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            if attention_mask is None:
+                raise ValueError("patch-token visual attention requires an attention_mask input")
+            attn_weights = self.masked_add(attn_weights, attention_mask)
+            attn_weights = self.softmax(attn_weights)
+        else:
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype)
         attn_output = torch.matmul(attn_weights, v)
 
         attn_output = attn_output.transpose(1, 2)
@@ -198,10 +232,11 @@ class _Qwen3_5VisionBlock(DynamicModule):  # noqa: N801
     def _setup(self, cfg: ConfigDict):
         pass
 
-    def forward(self, hidden_states, position_embeddings):
+    def forward(self, hidden_states, position_embeddings, attention_mask=None):
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -229,6 +264,30 @@ class _Qwen3_5VisionPatchEmbed(DynamicModule):  # noqa: N801
         self.max_size_w = cfg.max_size_w
         self.max_size_h = cfg.max_size_h
         self.patch_size = cfg.patch_size
+        self.visual_input_mode = cfg.get("visual_input_mode", "image")
+
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            patch_dim = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
+            weight = self.proj.weight
+            self.proj_linear = nn.Linear(
+                patch_dim,
+                self.embed_dim,
+                bias=False,
+                device=weight.device,
+                dtype=weight.dtype,
+            )
+            self.proj_linear.weight.data.copy_(weight.reshape(self.embed_dim, patch_dim).contiguous())
+            if self.proj.bias is None:
+                bias = torch.zeros(self.embed_dim, device=weight.device, dtype=weight.dtype)
+            else:
+                bias = self.proj.bias.detach().clone()
+            # Keep the Conv3d bias as an explicit broadcast Add in HMONNX.
+            # A rank-1 parameter is folded back into Linear by FuseMatMulAdd,
+            # while [1, 1, D] is functionally identical and intentionally
+            # remains a standalone Add node.
+            self.proj_bias = nn.Parameter(bias.reshape(1, 1, self.embed_dim))
+            del self.proj
+            return
 
         kernel_size = [self.patch_size, self.patch_size]
         dev = self.proj.weight.device
@@ -268,6 +327,12 @@ class _Qwen3_5VisionPatchEmbed(DynamicModule):  # noqa: N801
         assert self.temporal_patch_size == 2, "temporal_patch_size must be 2"
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            # The patch-token runtime contract is always [1, capacity, patch_dim].
+            # Rank normalization belongs to the host-side pad helper so the
+            # visual graph remains directly traceable through TorchFX.
+            return self.proj_linear(hidden_states) + self.proj_bias
+
         # hidden_states: [b, c, t, h, w]
         b, c, t, h, w = hidden_states.shape
         t_new = t // self.temporal_patch_size
@@ -320,6 +385,41 @@ class _Qwen3_5VisionModel(DynamicModule):  # noqa: N801
         self.max_size_h = cfg.max_size_h
         self.max_size_t = cfg.max_size_t
         self.temporal_patch_size = cfg.temporal_patch_size
+        self.visual_input_mode = cfg.get("visual_input_mode", "image")
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            self.image_token_capacity = int(cfg.image_token_capacity)
+            self.patch_token_capacity = self.image_token_capacity * self.spatial_merge_size**2
+            self.visual_rope_cache_length = int(cfg.visual_rope_cache_length)
+            minimum_cache_length = self.image_token_capacity * self.spatial_merge_size
+            if self.visual_rope_cache_length < minimum_cache_length:
+                raise ValueError(
+                    "visual_rope_cache_length does not cover this gear: "
+                    f"got {self.visual_rope_cache_length}, need at least {minimum_cache_length}"
+                )
+
+            cache_device = self.pos_embed.weight.device
+            if cache_device.type == "meta":
+                cache_device = torch.device("cpu")
+            rotary_cos_cached, rotary_sin_cached = _build_visual_rotary_cache(
+                self.rotary_pos_emb,
+                self.visual_rope_cache_length,
+                device=cache_device,
+                dtype=self.pos_embed.weight.dtype,
+            )
+            self.register_buffer("rotary_cos_cached", rotary_cos_cached, persistent=False)
+            self.register_buffer("rotary_sin_cached", rotary_sin_cached, persistent=False)
+            self.rotary_gather = xhnn.Gather(axis=0)
+            self.rotary_axis_dim = int(rotary_cos_cached.shape[-1])
+
+            head_dim = self.config.hidden_size // self.config.num_heads
+            padded_head_dim = math.ceil(head_dim / 64) * 64
+            rotary_half_dim = rotary_cos_cached.shape[-1] * 2
+            self.rotary_padding_size = padded_head_dim // 2 - rotary_half_dim
+            if self.rotary_padding_size < 0:
+                raise ValueError(
+                    f"visual RoPE cache width {rotary_half_dim} exceeds padded half-head {padded_head_dim // 2}"
+                )
+            return
         grid_size_w = self.max_size_w // self.patch_size
         grid_size_h = self.max_size_h // self.patch_size
         grid_size_t = self.max_size_t // self.temporal_patch_size
@@ -358,14 +458,49 @@ class _Qwen3_5VisionModel(DynamicModule):  # noqa: N801
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor = None,
+        position_weights: torch.Tensor = None,
+        rotary_position_ids: torch.Tensor = None,
+        attention_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
-        hidden_states = hidden_states + self.patch_pos_embeds
-        cos = self.cos
-        sin = self.sin
+        if self.visual_input_mode == VISUAL_INPUT_PATCHES:
+            if position_ids is None or position_weights is None:
+                raise ValueError("patch-token visual input requires position_ids and position_weights")
+            if rotary_position_ids is None or attention_mask is None:
+                raise ValueError(
+                    "patch-token visual input requires rotary_position_ids and attention_mask"
+                )
+            position_values = self.pos_embed(position_ids)
+            patch_pos_embeds = (position_values * position_weights.unsqueeze(-1)).sum(dim=0).unsqueeze(0)
+            hidden_states = hidden_states + patch_pos_embeds
+            rotary_cos = self.rotary_gather(self.rotary_cos_cached, rotary_position_ids)
+            rotary_sin = self.rotary_gather(self.rotary_sin_cached, rotary_position_ids)
+            cos_half = rotary_cos.permute(1, 0, 2).reshape(
+                self.patch_token_capacity, self.rotary_axis_dim * 2
+            )
+            sin_half = rotary_sin.permute(1, 0, 2).reshape(
+                self.patch_token_capacity, self.rotary_axis_dim * 2
+            )
+            if self.rotary_padding_size:
+                cos_half = F.pad(cos_half, (0, self.rotary_padding_size), value=1.0)
+                sin_half = F.pad(sin_half, (0, self.rotary_padding_size), value=0.0)
+            cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(-2)
+            sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(-2)
+        else:
+            hidden_states = hidden_states + self.patch_pos_embeds
+            cos = self.cos
+            sin = self.sin
         position_embeddings = (cos, sin)
         for blk in self.blocks:
-            hidden_states = blk(hidden_states, position_embeddings=position_embeddings)
+            hidden_states = blk(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+            )
         hidden_states = self.merger(hidden_states)
         return hidden_states
 

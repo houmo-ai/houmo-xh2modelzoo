@@ -157,7 +157,14 @@ class Qwen35Workflow(BaseLLMWorkflow):
             device=device,
             config_overrides=config_overrides,
         )
-        finalize_qwen35_merak_runtime_config(export_result)
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        model_type = str(workflow_config.export["model"].get("model_type", ""))
+        # A visual-only export deliberately contains no language-model golden
+        # metadata.  Its graph/manifest is later referenced by the full model,
+        # so the Merak runtime entry point must only be finalized for full
+        # model exports.
+        if not model_type.endswith("_visual"):
+            finalize_qwen35_merak_runtime_config(export_result)
         return export_result
 
     def _validate_lora_export(self, config_overrides: Mapping[str, Any] | None) -> None:

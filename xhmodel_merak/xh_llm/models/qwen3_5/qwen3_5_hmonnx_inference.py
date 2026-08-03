@@ -2,6 +2,7 @@ import torch
 
 from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheWithLinearMixin
 from xhquant.core import CacheTensor
+from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
 
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
@@ -18,6 +19,17 @@ from .split_conv_cache_utils import (
     _flatten_split_conv_cache_outputs,
     _regroup_flat_split_conv_cache,  # noqa: F401 - compatibility re-export
 )
+from .visual_token_gears import (
+    VISUAL_ATTENTION_MASK_FORMAT,
+    VISUAL_ATTENTION_MASK_OPERATOR,
+    VISUAL_ATTENTION_MASK_SHAPE,
+    VISUAL_INPUT_PATCHES,
+    VISUAL_ROTARY_POSITION_FORMAT,
+    build_visual_token_gear_inputs,
+    pad_flattened_patches,
+    patch_token_capacity,
+    select_image_token_gear,
+)
 
 
 def _model_config_prefill_recurrent_state_uses_cache(model_config) -> bool:
@@ -30,6 +42,228 @@ class VisualHMONNXModel(HMONNXModel):
     def forward(self, *args):
         out = super().forward(*args)
         return out
+
+
+class VisualTokenGearHMONNXModel:
+    """Route one image at a time across shared-weight static visual graphs."""
+
+    INPUT_NAMES = (
+        "pixel_values",
+        "position_ids",
+        "position_weights",
+        "rotary_position_ids",
+        "attention_mask",
+    )
+
+    def __init__(self, visual_meta, *, device, enable_golden: bool = False):
+        if not HMONNXModel._is_inference_v2_env_enabled():
+            raise RuntimeError(
+                "multi-gear Qwen3.5 visual runtime requires ENABLE_HMINFERENCE_V2=1 "
+                "so MultiHMONNXLoader can preserve shared GPU weights"
+            )
+        expected_contract = {
+            "visual_input_mode": VISUAL_INPUT_PATCHES,
+            "attention_mask_format": VISUAL_ATTENTION_MASK_FORMAT,
+            "attention_mask_shape": VISUAL_ATTENTION_MASK_SHAPE,
+            "attention_mask_operator": VISUAL_ATTENTION_MASK_OPERATOR,
+            "rotary_position_format": VISUAL_ROTARY_POSITION_FORMAT,
+        }
+        for field, expected in expected_contract.items():
+            actual = getattr(visual_meta, field, None)
+            if actual != expected:
+                raise ValueError(f"Qwen3.5 visual token gears require {field}={expected!r}, got {actual!r}")
+        merge_size = int(visual_meta.spatial_merge_size)
+        rope_cache_length = int(visual_meta.visual_rope_cache_length)
+        for gear in visual_meta.gears:
+            image_capacity = int(gear.image_token_capacity)
+            expected_patch_capacity = patch_token_capacity(image_capacity, merge_size)
+            actual_patch_capacity = int(gear.patch_token_capacity)
+            if actual_patch_capacity != expected_patch_capacity:
+                raise ValueError(
+                    f"visual gear {image_capacity} declares patch capacity "
+                    f"{actual_patch_capacity}, expected {expected_patch_capacity}"
+                )
+            minimum_rope_cache_length = image_capacity * merge_size
+            if rope_cache_length < minimum_rope_cache_length:
+                raise ValueError(
+                    f"visual gear {image_capacity} needs RoPE cache length "
+                    f"{minimum_rope_cache_length}, got {rope_cache_length}"
+                )
+        self.visual_meta = visual_meta
+        self.gears = tuple(sorted(int(gear.image_token_capacity) for gear in visual_meta.gears))
+        graph_files = {f"m{int(gear.image_token_capacity)}": str(gear.hmonnx) for gear in visual_meta.gears}
+        self._loader = MultiHMONNXLoader(graph_files)
+        self.models: dict[int, VisualHMONNXModel] = {}
+        for gear in visual_meta.gears:
+            capacity = int(gear.image_token_capacity)
+            graph_name = f"m{capacity}"
+            self.models[capacity] = VisualHMONNXModel(
+                str(gear.hmonnx),
+                onnx_graph=self._loader.graphs[graph_name],
+                device_map=[device],
+                enable_golden=enable_golden,
+            )
+        self._device = self.models[self.gears[-1]].device
+        self._dtype = torch.float16
+        self._enable_golden = enable_golden
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def enable_golden(self):
+        return self._enable_golden
+
+    @property
+    def shared_weight_summary(self):
+        return self._loader.initializer_pool.summary()
+
+    @enable_golden.setter
+    def enable_golden(self, enabled: bool):
+        for model in self.models.values():
+            model.enable_golden = enabled
+        self._enable_golden = enabled
+
+    def to(self, device):
+        for model in self.models.values():
+            model.to(device)
+        # HMONNXInferenceV2 may intentionally keep an already materialized
+        # session on its construction device.  Report the session's actual
+        # device instead of claiming that a no-op move succeeded.
+        self._device = self.models[self.gears[-1]].device
+        return self
+
+    def _set_dtype(self, dtype):
+        for model in self.models.values():
+            model._set_dtype(dtype)
+        self._dtype = dtype
+        return self
+
+    @staticmethod
+    def _session_input_info(model: VisualHMONNXModel, name: str):
+        session = model.hmonnx_session
+        get_input = getattr(session, "get_input", None)
+        if not callable(get_input):
+            raise RuntimeError(f"HMONNX session does not expose input metadata for {name!r}")
+        return get_input(name)
+
+    def _coerce_inputs(self, model: VisualHMONNXModel, values: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        inputs = []
+        for name in self.INPUT_NAMES:
+            info = self._session_input_info(model, name)
+            inputs.append(values[name].to(device=model.device, dtype=info.dtype))
+        return tuple(inputs)
+
+    def _prepare_image(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> tuple[int, tuple, int]:
+        grid_thw = grid_thw.reshape(1, 3)
+        valid_patch_tokens = int(grid_thw.prod())
+        merge_unit = int(self.visual_meta.spatial_merge_size) ** 2
+        if valid_patch_tokens % merge_unit:
+            raise ValueError(
+                f"visual patch count {valid_patch_tokens} is not divisible by spatial merge unit {merge_unit}"
+            )
+        valid_image_tokens = valid_patch_tokens // merge_unit
+        gear = select_image_token_gear(valid_image_tokens, self.gears)
+        capacity = patch_token_capacity(gear, int(self.visual_meta.spatial_merge_size))
+        padded_pixels, tensor_patch_tokens = pad_flattened_patches(pixel_values, capacity)
+        if tensor_patch_tokens != valid_patch_tokens:
+            raise ValueError(
+                f"pixel_values has {tensor_patch_tokens} patches but image_grid_thw declares {valid_patch_tokens}"
+            )
+        model = self.models[gear]
+        position_dtype = self._session_input_info(model, "position_weights").dtype
+        geometry = build_visual_token_gear_inputs(
+            grid_thw,
+            patch_capacity=capacity,
+            num_position_embeddings=int(self.visual_meta.num_position_embeddings),
+            spatial_merge_size=int(self.visual_meta.spatial_merge_size),
+            dtype=position_dtype,
+            rotary_cache_length=int(self.visual_meta.visual_rope_cache_length),
+        )
+        values = {"pixel_values": padded_pixels}
+        values.update({name: geometry[name] for name in self.INPUT_NAMES if name != "pixel_values"})
+        return gear, self._coerce_inputs(model, values), valid_image_tokens
+
+    @staticmethod
+    def _slice_valid_output(output: torch.Tensor, valid_image_tokens: int) -> torch.Tensor:
+        if output.ndim == 3:
+            return output[:, :valid_image_tokens]
+        if output.ndim == 2:
+            return output[:valid_image_tokens]
+        raise ValueError(f"unexpected visual output shape: {tuple(output.shape)}")
+
+    def encode(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
+        gear, inputs, valid_image_tokens = self._prepare_image(pixel_values, grid_thw)
+        output = self.models[gear].forward(*inputs)
+        return self._slice_valid_output(output, valid_image_tokens)
+
+    def encode_many(self, pixel_values, image_grid_thw: torch.Tensor) -> list[torch.Tensor]:
+        grids = [grid.reshape(1, 3) for grid in image_grid_thw]
+        if isinstance(pixel_values, torch.Tensor):
+            split_sizes = [int(grid.prod()) for grid in grids]
+            pixels = list(torch.split(pixel_values, split_sizes, dim=0))
+        else:
+            pixels = list(pixel_values)
+        if len(pixels) != len(grids):
+            raise ValueError(f"got {len(pixels)} pixel tensors for {len(grids)} image grids")
+
+        prepared = [self._prepare_image(image, grid) for image, grid in zip(pixels, grids, strict=True)]
+        outputs: list[torch.Tensor | None] = [None] * len(prepared)
+        # Grouping by gear improves graph/CUDA-graph locality while preserving
+        # the caller-visible image order through indexed output placement.
+        for gear in self.gears:
+            for index, (selected_gear, inputs, valid_image_tokens) in enumerate(prepared):
+                if selected_gear != gear:
+                    continue
+                output = self.models[gear].forward(*inputs)
+                outputs[index] = self._slice_valid_output(output, valid_image_tokens)
+        if any(output is None for output in outputs):
+            missing = [index for index, output in enumerate(outputs) if output is None]
+            raise RuntimeError(f"visual gear scheduler did not produce outputs for image indices {missing}")
+        return [output for output in outputs if output is not None]
+
+    def forward(self, *args):
+        if len(args) == 2:
+            return self.encode(args[0], args[1])
+        if len(args) != len(self.INPUT_NAMES):
+            raise ValueError(
+                "visual token gear forward expects (pixel_values, grid_thw) or the five padded graph inputs"
+            )
+        patch_capacity_value = int(args[0].shape[1])
+        matching = [
+            gear
+            for gear in self.gears
+            if patch_token_capacity(gear, int(self.visual_meta.spatial_merge_size)) == patch_capacity_value
+        ]
+        if len(matching) != 1:
+            raise ValueError(f"no visual gear has patch capacity {patch_capacity_value}")
+        attention_mask = args[-1]
+        expected_mask_shape = (1, 1, 1, patch_capacity_value)
+        if tuple(attention_mask.shape) != expected_mask_shape:
+            raise ValueError(
+                "visual attention mask must be a compact additive key-padding bias with shape "
+                f"{expected_mask_shape}, got {tuple(attention_mask.shape)}"
+            )
+        flattened_mask = attention_mask.reshape(-1)
+        valid_patch_tokens = int(torch.count_nonzero(flattened_mask == 0).item())
+        merge_unit = int(self.visual_meta.spatial_merge_size) ** 2
+        if valid_patch_tokens <= 0 or valid_patch_tokens > patch_capacity_value or valid_patch_tokens % merge_unit:
+            raise ValueError(
+                f"visual attention mask declares invalid patch length {valid_patch_tokens} "
+                f"for capacity {patch_capacity_value} and merge unit {merge_unit}"
+            )
+        if not bool(torch.all(flattened_mask[:valid_patch_tokens] == 0).item()) or (
+            valid_patch_tokens < patch_capacity_value
+            and not bool(torch.all(flattened_mask[valid_patch_tokens:] < 0).item())
+        ):
+            raise ValueError("visual attention mask must contain a zero prefix followed by negative padding bias")
+        valid_image_tokens = valid_patch_tokens // merge_unit
+        return self._slice_valid_output(self.models[matching[0]].forward(*args), valid_image_tokens)
 
 
 class Qwen3_5HMONNXKVCacheMixin(KVCacheWithLinearMixin):  # noqa: N801
@@ -108,9 +342,16 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         enable_golden = kwargs.get("enable_golden", False)
-        self.visual = VisualHMONNXModel(
-            self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
-        )
+        if getattr(self.visual_meta, "gears", None):
+            self.visual = VisualTokenGearHMONNXModel(
+                self.visual_meta,
+                device=self.prefill_model.device,
+                enable_golden=enable_golden,
+            )
+        else:
+            self.visual = VisualHMONNXModel(
+                self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
+            )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
         self._sync_page_attention_mode_to_kvcache()
@@ -150,6 +391,10 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         processor.config.patch_size = meta_info.visual_config.patch_size
         processor.config.max_size_h = meta_info.visual_config.max_size_h
         processor.config.max_size_w = meta_info.visual_config.max_size_w
+        processor.config.visual_input_mode = getattr(meta_info.visual_config, "visual_input_mode", "image")
+        if getattr(meta_info.visual_config, "gears", None):
+            max_patch_capacity = max(int(gear.patch_token_capacity) for gear in meta_info.visual_config.gears)
+            processor.config.max_pixels = max_patch_capacity * int(meta_info.visual_config.patch_size) ** 2
         return processor
 
     def to_fast(self):

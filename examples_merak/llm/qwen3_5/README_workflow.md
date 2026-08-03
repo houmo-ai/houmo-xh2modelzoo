@@ -174,7 +174,7 @@ CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --golden-device-map cuda:0 cuda:1 \
   --overwrite
 
-CUDA_VISIBLE_DEVICES=1,5 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+CUDA_VISIBLE_DEVICES=6,7 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --model-dir work_dirs/qwen3_5_122B_quant \
   --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full.yaml \
   --export-from-quanted-model \
@@ -182,6 +182,7 @@ CUDA_VISIBLE_DEVICES=1,5 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --context-max-length 2048 \
   --enable-fuse-gdr-ops \
   --enable-fuse-gdr-block-recurrent-ops \
+  --golden-device-map cuda:0 cuda:1 \
   --dump-golden \
   --overwrite
 

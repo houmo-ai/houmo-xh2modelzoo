@@ -5,6 +5,8 @@ Follows the same pattern as xhquant_llm/models/qwen3_vl/qwen3_vl_vision_model.py
 but adapted for Qwen3.5 (no deepstack features).
 """
 
+import copy
+import gc
 import json
 import subprocess
 import sys
@@ -25,12 +27,24 @@ from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ...base_vision_model import BaseVisionModel
 from ...builder import register_llm_model
+from ...llm_data_processor import BaseVisualProcessor
 from ...types import VisualModelMeta
-from ...utils import get_cpu_memory_mb
+from ...utils import get_cpu_memory_mb, unfold_args
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForConditionalGeneration
 from .modeling_qwen3_5 import Qwen3_5VisionModel as HFQwen3_5VisionModel
 from .modeling_qwen3_5_patch import qwen3_5_patch
 from .qwen3_5_processor import XHQwen3_5Processor
+from .visual_token_gears import (
+    VISUAL_ATTENTION_MASK_FORMAT,
+    VISUAL_ATTENTION_MASK_OPERATOR,
+    VISUAL_ATTENTION_MASK_SHAPE,
+    VISUAL_INPUT_PATCHES,
+    VISUAL_ROTARY_POSITION_FORMAT,
+    build_visual_gear_manifest,
+    build_visual_token_gear_inputs,
+    factor_image_token_grid,
+    patch_token_capacity,
+)
 from .xh_qwen3_5_config import XHQwen3_5_VisualConfig
 
 
@@ -58,8 +72,24 @@ class _Qwen3_5_VisualHFCompatible(DynamicModule):  # noqa: N801
 
         self.visual = xh_visual_model
 
-    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-        return self.visual.forward(hidden_states, **kwargs)
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        return self.visual.forward(hidden_states, *args, **kwargs)
+
+
+class _Qwen3_5VisualTokenInputProcessor(BaseVisualProcessor):  # noqa: N801
+    INPUT_NAMES = (
+        "pixel_values",
+        "position_ids",
+        "position_weights",
+        "rotary_position_ids",
+        "attention_mask",
+    )
+
+    def forward(self, data: dict) -> tuple[torch.Tensor, ...]:
+        missing = [name for name in self.INPUT_NAMES if name not in data]
+        if missing:
+            raise ValueError(f"missing Qwen3.5 visual token inputs: {missing}")
+        return tuple(data[name] for name in self.INPUT_NAMES)
 
 
 def build_qwen3_5_visual_hf_compatible_model(
@@ -102,6 +132,8 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         qwen3_5_config = AutoConfig.from_pretrained(self.hf_model_dir)
         assert qwen3_5_config.vision_config.patch_size == config.patch_size
         assert qwen3_5_config.vision_config.temporal_patch_size == config.temporal_patch_size
+        assert qwen3_5_config.vision_config.spatial_merge_size == config.spatial_merge_size
+        self._vision_config = qwen3_5_config.vision_config
         self.config = cast(XHQwen3_5_VisualConfig, self.config)
         if self.config.model_type is None:
             self.config.model_type = "Qwen3_5ForConditionalGeneration_visual"
@@ -114,8 +146,24 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
 
     def _to_fronted(self, wrap_model):
         logger = get_xhquant_logger()
-        dummy_inputs = self.get_dummy_inputs()
-        dummy_input = list(dummy_inputs.values())[0][0]
+        dummy_inputs = unfold_args(self.get_data_preprocessor()(self.get_dummy_inputs()))
+        if not isinstance(dummy_inputs, (tuple, list)):
+            dummy_inputs = [dummy_inputs]
+        dummy_inputs = [
+            value.float().cpu() if torch.is_floating_point(value) else value.cpu() for value in dummy_inputs
+        ]
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            # Keep xhquant leaf modules (especially MaskedAdd) intact until
+            # quantization, matching the Gemma4 visual frontend path.  An
+            # intermediate eager ONNX export expands MaskedAdd into
+            # Add + Add + Clip, which loses the QMaskedAdd lowering contract.
+            logger.info("Converting patch-token visual model through TorchFX frontend")
+            return to_frontend_graph(
+                wrap_model.float().cpu(),
+                FrontendType.TorchFX,
+                dummy_inputs,
+            )
+
         work_dir = self.config.work_dir
         _tmp_dir_ctx = None
         if not work_dir:
@@ -128,13 +176,13 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
                 logger.info("Visual ONNX memory before torch export: %s", get_cpu_memory_mb())
                 torch.onnx.export(
                     wrap_model.float().cpu(),
-                    (dummy_input.float().cpu(),),
+                    tuple(dummy_inputs),
                     onnx_file,
                     export_params=True,
                     external_data=True,
                     opset_version=18,
                     do_constant_folding=True,
-                    input_names=["pixel_values"],
+                    input_names=self.get_export_cfg()["input_names"],
                     output_names=["image_embeds"],
                     verbose=False,
                 )
@@ -184,7 +232,7 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
             frontend_model = to_frontend_graph(
                 onnx_model,
                 FrontendType.ONNX,
-                [dummy_input],
+                dummy_inputs,
                 simplify=False,
             )
             del onnx_model
@@ -195,11 +243,40 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
                 _tmp_dir_ctx.cleanup()
 
     def get_dummy_inputs(self) -> Any:
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            dummy = self._get_dummy_inputs()
+            return {name: dummy[name] for name in _Qwen3_5VisualTokenInputProcessor.INPUT_NAMES}
         return {
             "image": self._get_dummy_inputs()["pixel_values"],
         }
 
     def _get_dummy_inputs(self) -> Any:
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            image_capacity = int(self.config.image_token_capacity)
+            capacity = patch_token_capacity(image_capacity, self.config.spatial_merge_size)
+            grid_thw = factor_image_token_grid(image_capacity, self.config.spatial_merge_size)
+            patch_dim = (
+                self._vision_config.in_channels
+                * self.config.temporal_patch_size
+                * self.config.patch_size
+                * self.config.patch_size
+            )
+            dummy = {
+                "pixel_values": torch.zeros((1, capacity, patch_dim), dtype=torch.float32),
+                "image_grid_thw": grid_thw,
+            }
+            dummy.update(
+                build_visual_token_gear_inputs(
+                    grid_thw,
+                    patch_capacity=capacity,
+                    num_position_embeddings=self._vision_config.num_position_embeddings,
+                    spatial_merge_size=self.config.spatial_merge_size,
+                    dtype=torch.float32,
+                    rotary_cache_length=self.config.visual_rope_cache_length,
+                )
+            )
+            return dummy
+
         processor = self.get_tf_processor()
 
         messages = [
@@ -292,7 +369,19 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         processor.config.patch_size = self.config.patch_size
         processor.config.max_size_h = self.config.max_size_h
         processor.config.max_size_w = self.config.max_size_w
+        processor.config.visual_input_mode = self.config.visual_input_mode
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            processor.config.max_pixels = (
+                patch_token_capacity(self.config.image_token_capacity, self.config.spatial_merge_size)
+                * self.config.patch_size
+                * self.config.patch_size
+            )
         return processor
+
+    def _get_data_preprocessor(self):
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            return _Qwen3_5VisualTokenInputProcessor()
+        return super()._get_data_preprocessor()
 
     def forward(self, *args, **kwargs):
         out = self._inference_model(*args, **kwargs)
@@ -315,6 +404,11 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         return cls.get_hf_model(hf_model_dir, **kwargs)
 
     def get_export_cfg(self) -> dict[str, list[str]]:
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            return dict(
+                input_names=list(_Qwen3_5VisualTokenInputProcessor.INPUT_NAMES),
+                output_names=["image_embeds"],
+            )
         export_cfg = dict(
             input_names=[
                 "pixel_values",
@@ -326,9 +420,80 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         return export_cfg
 
     def export_hmonnx(self, output_dir: str) -> VisualModelMeta:
+        gears = self.config.image_token_gears
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES and gears is not None and len(gears) > 1:
+            return self._export_token_gear_set(output_dir, gears)
+        return self._export_single_hmonnx(output_dir)
+
+    def _export_single_hmonnx(self, output_dir: str) -> VisualModelMeta:
         meta_info = self.create_export_metadata(output_dir)
         exported_hmonnx_file = super()._export_hmonnx(output_dir)
         meta_info.hmonnx = str(exported_hmonnx_file)
+        return meta_info
+
+    def _export_token_gear_set(self, output_dir: str, gears: list[int]) -> VisualModelMeta:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        base_model_name = self.config.model_name
+        active_capacity = int(self.config.image_token_capacity)
+        original_work_dir = self.config.work_dir
+        artifacts_by_gear: dict[int, dict] = {}
+
+        def export_one(model: "XHQwen3_5VisionModel", gear: int) -> None:
+            gear_dir = output_path / "gears" / f"m{gear}"
+            original_name = model.config.model_name
+            model.config.model_name = f"{base_model_name}_m{gear}"
+            try:
+                gear_meta = model._export_single_hmonnx(str(gear_dir))
+            finally:
+                model.config.model_name = original_name
+            artifacts_by_gear[gear] = {
+                "image_token_capacity": gear,
+                "patch_token_capacity": patch_token_capacity(gear, self.config.spatial_merge_size),
+                "hmonnx": str(Path(gear_meta.hmonnx).relative_to(output_path).as_posix()),
+            }
+
+        try:
+            export_one(self, active_capacity)
+            self.config.work_dir = original_work_dir
+            for gear in gears:
+                if gear == active_capacity:
+                    continue
+                gear_config = copy.deepcopy(self.config)
+                gear_config.image_token_capacity = int(gear)
+                gear_config.image_token_gears = None
+                gear_config.model_name = f"{base_model_name}_m{gear}"
+                gear_config.work_dir = None
+                gear_model = type(self)(gear_config)
+                try:
+                    export_one(gear_model, int(gear))
+                finally:
+                    del gear_model
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+        finally:
+            self.config.work_dir = original_work_dir
+
+        artifacts = [artifacts_by_gear[int(gear)] for gear in gears]
+        manifest = build_visual_gear_manifest(
+            artifacts,
+            spatial_merge_size=self.config.spatial_merge_size,
+            visual_rope_cache_length=self.config.visual_rope_cache_length,
+        )
+        manifest_path = output_path / "visual_gears.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        meta_info = self.create_export_metadata(output_dir)
+        largest_artifact = artifacts[-1]
+        meta_info.hmonnx = str(output_path / largest_artifact["hmonnx"])
+        meta_info.image_token_capacity = largest_artifact["image_token_capacity"]
+        meta_info.patch_token_capacity = largest_artifact["patch_token_capacity"]
+        meta_info.image_token_gears = [artifact["image_token_capacity"] for artifact in artifacts]
+        meta_info.gears = artifacts
+        meta_info.gear_manifest = str(manifest_path)
+        meta_info.routing_policy = manifest["routing_policy"]
+        meta_info.shared_weight_loader = manifest["shared_weight_loader"]
         return meta_info
 
     def create_export_metadata(self, output_dir: str) -> VisualModelMeta:
@@ -339,5 +504,24 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         meta_info.patch_size = self.config.patch_size
         meta_info.max_size_t = self.config.max_size_t
         meta_info.temporal_patch_size = self.config.temporal_patch_size
-        meta_info.spatial_merge_size = self.config.temporal_patch_size
+        meta_info.spatial_merge_size = self.config.spatial_merge_size
+        meta_info.visual_input_mode = self.config.visual_input_mode
+        if self.config.visual_input_mode == VISUAL_INPUT_PATCHES:
+            meta_info.image_token_capacity = self.config.image_token_capacity
+            meta_info.patch_token_capacity = patch_token_capacity(
+                self.config.image_token_capacity,
+                self.config.spatial_merge_size,
+            )
+            meta_info.input_names = list(_Qwen3_5VisualTokenInputProcessor.INPUT_NAMES)
+            meta_info.attention_mask_format = VISUAL_ATTENTION_MASK_FORMAT
+            meta_info.attention_mask_shape = VISUAL_ATTENTION_MASK_SHAPE
+            meta_info.attention_mask_operator = VISUAL_ATTENTION_MASK_OPERATOR
+            meta_info.hidden_size = self._vision_config.hidden_size
+            meta_info.num_heads = self._vision_config.num_heads
+            meta_info.in_channels = self._vision_config.in_channels
+            meta_info.num_position_embeddings = self._vision_config.num_position_embeddings
+            meta_info.rotary_position_format = VISUAL_ROTARY_POSITION_FORMAT
+            meta_info.visual_rope_cache_length = self.config.visual_rope_cache_length
+            if self.config.image_token_gears is not None:
+                meta_info.image_token_gears = list(self.config.image_token_gears)
         return meta_info

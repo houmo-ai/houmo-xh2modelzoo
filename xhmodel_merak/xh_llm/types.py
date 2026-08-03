@@ -329,7 +329,12 @@ class VLLMModelMeta(LLMModelMeta):
         self.visual_config = visual_config
         if "_meta_path_" in kwargs and self.visual_config is not None and getattr(self.visual_config, "hmonnx", None):
             _meta_path_ = kwargs.get("_meta_path_")
-            self.visual_config.hmonnx = str(Path(_meta_path_).parent / self.visual_config.hmonnx)
+            meta_dir = Path(_meta_path_).parent
+            self.visual_config.hmonnx = str(meta_dir / self.visual_config.hmonnx)
+            for gear in getattr(self.visual_config, "gears", ()):
+                gear.hmonnx = str(meta_dir / gear.hmonnx)
+            if getattr(self.visual_config, "gear_manifest", None):
+                self.visual_config.gear_manifest = str(meta_dir / self.visual_config.gear_manifest)
 
 
 class TextLLMModelConfig(BaseLLMModelConfig):

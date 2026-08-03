@@ -169,7 +169,20 @@ def test_qwen35_export_finalizer_prefers_explicit_page_attention(tmp_path):
     )
 
 
-def test_qwen35_workflow_export_always_finalizes_runtime_config(monkeypatch):
+@pytest.mark.parametrize(
+    ("model_type", "should_finalize"),
+    [
+        ("Qwen3_5ForConditionalGeneration", True),
+        ("Qwen3_5MoeForConditionalGeneration", True),
+        ("Qwen3_5ForConditionalGeneration_visual", False),
+        ("Qwen3_5MoeForConditionalGeneration_visual", False),
+    ],
+)
+def test_qwen35_workflow_export_only_finalizes_full_model_runtime_config(
+    monkeypatch,
+    model_type,
+    should_finalize,
+):
     from xhmodel_merak.xh_llm.models.qwen3_5 import workflow as workflow_module
     from xhmodel_merak.xh_llm.workflows.base import BaseLLMWorkflow
 
@@ -179,6 +192,12 @@ def test_qwen35_workflow_export_always_finalizes_runtime_config(monkeypatch):
         config_file="workflow.yaml",
     )
     finalized = []
+
+    workflow.workflow_config = SimpleNamespace(
+        with_overrides=lambda _: SimpleNamespace(
+            export={"model": {"model_type": model_type}}
+        )
+    )
 
     monkeypatch.setattr(workflow, "_validate_lora_export", lambda _: None)
     monkeypatch.setattr(workflow, "_validate_export_model", lambda _: None)
@@ -200,7 +219,7 @@ def test_qwen35_workflow_export_always_finalizes_runtime_config(monkeypatch):
     )
 
     assert actual is export_result
-    assert finalized == [export_result]
+    assert finalized == ([export_result] if should_finalize else [])
 
 
 def test_qwen3_5_config_preserves_mtp_head_k_controls():

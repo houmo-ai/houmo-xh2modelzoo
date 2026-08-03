@@ -9,7 +9,10 @@ from ..qwen3_5.hybrid_cache_runtime import (
     model_config_prefill_recurrent_state_uses_cache,
     normalize_hybrid_hmonnx_args,
 )
-from ..qwen3_5.qwen3_5_hmonnx_inference import Qwen3_5HMONNXKVCacheMixin
+from ..qwen3_5.qwen3_5_hmonnx_inference import (
+    Qwen3_5HMONNXKVCacheMixin,
+    VisualTokenGearHMONNXModel,
+)
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from .data_preprocess import Qwen3_5_DataPreprocess
 
@@ -31,9 +34,18 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         enable_golden = kwargs.get("enable_golden", False)
-        self.visual = VisualHMONNXModel(
-            self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
-        )
+        if getattr(self.visual_meta, "gears", None):
+            self.visual = VisualTokenGearHMONNXModel(
+                self.visual_meta,
+                device=self.prefill_model.device,
+                enable_golden=enable_golden,
+            )
+        else:
+            self.visual = VisualHMONNXModel(
+                self.visual_meta.hmonnx,
+                device_map=[self.prefill_model.device],
+                enable_golden=enable_golden,
+            )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
         self._sync_page_attention_mode_to_kvcache()
@@ -73,6 +85,12 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         processor.config.patch_size = meta_info.visual_config.patch_size
         processor.config.max_size_h = meta_info.visual_config.max_size_h
         processor.config.max_size_w = meta_info.visual_config.max_size_w
+        processor.config.visual_input_mode = getattr(meta_info.visual_config, "visual_input_mode", "image")
+        if getattr(meta_info.visual_config, "gears", None):
+            max_patch_capacity = max(
+                int(gear.patch_token_capacity) for gear in meta_info.visual_config.gears
+            )
+            processor.config.max_pixels = max_patch_capacity * int(meta_info.visual_config.patch_size) ** 2
         return processor
 
     def to_fast(self):
