@@ -125,6 +125,10 @@ class LLMConverter:
             from .models.qwen3_legacy import Qwen3LegacyConverterXH2a
 
             converter_cls = Qwen3LegacyConverterXH2a
+        elif architecture in ("HunYuanDenseV1ForCausalLM", "HyMT2ForCausalLM"):
+            from .models.hy_mt2 import HyMT2ConverterXH2a
+
+            converter_cls = HyMT2ConverterXH2a
         elif architecture == "Qwen3ForCausalLM_legacy_DM0":
             from .models.dm0 import Qwen3LegacyConverterXH2a_LLM
 

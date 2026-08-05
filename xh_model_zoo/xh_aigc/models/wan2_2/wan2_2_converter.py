@@ -210,8 +210,18 @@ class Wan22Converter:
         )
         vae.model = vae.model.to(cfg.param_dtype)
 
-        low_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
-        high_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+        need_low_noise = "low_noise_model" in self.export_components or "low_noise_model" in self.golden_components
+        need_high_noise = "high_noise_model" in self.export_components or "high_noise_model" in self.golden_components
+        low_noise_model = (
+            self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
+            if need_low_noise
+            else None
+        )
+        high_noise_model = (
+            self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+            if need_high_noise
+            else None
+        )
 
         return SimpleNamespace(
             device=device,

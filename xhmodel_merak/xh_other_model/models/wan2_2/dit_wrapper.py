@@ -30,6 +30,9 @@ from wan.modules.model import (  # noqa: E402
 )
 
 
+FLASH_ATTN_V_SCALE = 16.0
+
+
 def build_wan_time_embeddings(model: nn.Module, t: torch.Tensor, seq_len: int, output_dtype: torch.dtype):
     if t.dim() == 1:
         t = t.expand(t.size(0), seq_len)
@@ -56,14 +59,9 @@ class _Wan3DRope(nn.Module):
         freqs_real: torch.Tensor,
         freqs_imag: torch.Tensor,
     ) -> torch.Tensor:
-        # batch_size = x.size(0)
-        # if len(grid_sizes) != batch_size:
-        #     raise ValueError(f"Batch mismatch: x has {batch_size}, grid_sizes has {len(grid_sizes)}")
-
-        # f, h, w = grid_sizes[0]
-        batch_size = 1
-        f, h, w = 21, 39, 39
-        seq_len = f * h * w
+        batch_size = x.size(0)
+        if len(grid_sizes) != batch_size:
+            raise ValueError(f"Batch mismatch: x has {batch_size}, grid_sizes has {len(grid_sizes)}")
         num_heads = x.size(2)
         head_dim = x.size(3)
         half_dim = head_dim // 2
@@ -74,37 +72,43 @@ class _Wan3DRope(nn.Module):
         freqs_real_f, freqs_real_h, freqs_real_w = freqs_real.split([freq_f_dim, freq_h_dim, freq_w_dim], dim=1)
         freqs_imag_f, freqs_imag_h, freqs_imag_w = freqs_imag.split([freq_f_dim, freq_h_dim, freq_w_dim], dim=1)
 
-        freq_real_grid = torch.cat(
-            [
-                freqs_real_f[:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                freqs_real_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                freqs_real_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
-            ],
-            dim=-1,
-        ).reshape(1, seq_len, 1, half_dim)
-        freq_imag_grid = torch.cat(
-            [
-                freqs_imag_f[:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                freqs_imag_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                freqs_imag_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
-            ],
-            dim=-1,
-        ).reshape(1, seq_len, 1, half_dim)
+        outputs = []
+        for batch_idx, grid_size in enumerate(grid_sizes):
+            f, h, w = [int(v) for v in grid_size]
+            seq_len = f * h * w
+            freq_real_grid = torch.cat(
+                [
+                    freqs_real_f[:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                    freqs_real_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                    freqs_real_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
+                ],
+                dim=-1,
+            ).reshape(1, seq_len, 1, half_dim)
+            freq_imag_grid = torch.cat(
+                [
+                    freqs_imag_f[:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                    freqs_imag_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                    freqs_imag_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
+                ],
+                dim=-1,
+            ).reshape(1, seq_len, 1, half_dim)
 
-        x_valid = x[:, :seq_len].reshape(batch_size, seq_len, num_heads, half_dim, 2)
-        x_real = x_valid[..., 0]
-        x_imag = x_valid[..., 1]
+            x_item = x[batch_idx : batch_idx + 1]
+            x_valid = x_item[:, :seq_len].reshape(1, seq_len, num_heads, half_dim, 2)
+            x_real = x_valid[..., 0]
+            x_imag = x_valid[..., 1]
 
-        rope_input = torch.cat([x_real, x_imag], dim=-1)
-        cos = torch.cat([freq_real_grid, freq_real_grid], dim=-1)
-        sin = torch.cat([freq_imag_grid, freq_imag_grid], dim=-1)
-        rope_output = self.rope(rope_input, cos, sin)
-        out_valid = (
-            rope_output.reshape(batch_size, seq_len, num_heads, 2, half_dim)
-            .transpose(-1, -2)
-            .reshape(batch_size, seq_len, num_heads, head_dim)
-        )
-        return torch.cat([out_valid, x[:, seq_len:]], dim=1)
+            rope_input = torch.cat([x_real, x_imag], dim=-1)
+            cos = torch.cat([freq_real_grid, freq_real_grid], dim=-1)
+            sin = torch.cat([freq_imag_grid, freq_imag_grid], dim=-1)
+            rope_output = self.rope(rope_input, cos, sin)
+            out_valid = (
+                rope_output.reshape(1, seq_len, num_heads, 2, half_dim)
+                .transpose(-1, -2)
+                .reshape(1, seq_len, num_heads, head_dim)
+            )
+            outputs.append(torch.cat([out_valid, x_item[:, seq_len:]], dim=1))
+        return torch.cat(outputs, dim=0)
 
 
 class _WanModel(DynamicModule):
@@ -119,23 +123,14 @@ class _WanModel(DynamicModule):
     def unpatchify(self, x, grid_sizes):
         c = self.out_dim
         out = []
-        u = x[0]
-        f, h, w = 21, 39, 39
-        pf, ph, pw = self.patch_size
-        seq_len = f * h * w
-        u = u[:seq_len].view(f, h, w, pf, ph, pw, c)
-        u = u.permute(6, 0, 3, 1, 4, 2, 5)
-        u = u.reshape(c, f * pf, h * ph, w * pw)
-        out.append(u)
-
-        # for u, v in zip(x, grid_sizes, strict=True):
-        #     f, h, w = v
-        #     pf, ph, pw = self.patch_size
-        #     seq_len = f * h * w
-        #     u = u[:seq_len].view(f, h, w, pf, ph, pw, c)
-        #     u = u.permute(6, 0, 3, 1, 4, 2, 5)
-        #     u = u.reshape(c, f * pf, h * ph, w * pw)
-        #     out.append(u)
+        for u, v in zip(x, grid_sizes, strict=True):
+            f, h, w = [int(item) for item in v]
+            pf, ph, pw = self.patch_size
+            seq_len = f * h * w
+            u = u[:seq_len].view(f, h, w, pf, ph, pw, c)
+            u = u.permute(6, 0, 3, 1, 4, 2, 5)
+            u = u.reshape(c, f * pf, h * ph, w * pw)
+            out.append(u)
         return out
 
     def forward(
@@ -145,18 +140,11 @@ class _WanModel(DynamicModule):
         e,
         e0,
         context_lens,
-        y=None,
     ):
-        if self.model_type == "i2v":
-            assert y is not None
-
         device = self.patch_embedding.weight.device
         if self.freqs_real.device != device:
             self.freqs_real = self.freqs_real.to(device)
             self.freqs_imag = self.freqs_imag.to(device)
-
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y, strict=True)]
 
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = [u.shape[2:] for u in x]
@@ -245,7 +233,7 @@ class _WanSelfAttention(DynamicModule):
         q = self.rope(q, grid_sizes, freqs_real, freqs_imag).transpose(1, 2)
         k = self.rope(k, grid_sizes, freqs_real, freqs_imag).transpose(1, 2)
         v = v.transpose(1, 2)
-        x = self.flash_attn(q, k, v)
+        x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE) * FLASH_ATTN_V_SCALE
         x = x.transpose(1, 2).flatten(2)
         x = self.o(x)
         return x
@@ -268,7 +256,7 @@ class _WanCrossAttention(DynamicModule):
         k = self.norm_k(self.k(context)).view(b, -1, n, d).transpose(1, 2)
         v = self.v(context).view(b, -1, n, d).transpose(1, 2)
 
-        x = self.flash_attn(q, k, v, kv_valid_length=context_lens)
+        x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE, kv_valid_length=context_lens) * FLASH_ATTN_V_SCALE
         x = x.transpose(1, 2).flatten(2)
         x = self.o(x)
         return x
@@ -346,6 +334,35 @@ class Wan22DiTExportWrapper(nn.Module):
         super().__init__()
         self.model = wrap_dit_model(model)
 
+    def _prepare_latent(self, latent_model_input, y: Optional[torch.Tensor] = None):
+        latent_arg = latent_model_input if isinstance(latent_model_input, list) else [latent_model_input]
+        if y is None:
+            return latent_arg
+
+        y_arg = y if isinstance(y, list) else [y]
+        return [torch.cat([u, v], dim=0) for u, v in zip(latent_arg, y_arg, strict=True)]
+
+    def _prepare_context(self, context):
+        context_arg = context if isinstance(context, list) else [context]
+        if not context_arg:
+            return context_arg
+
+        device = self.model.patch_embedding.weight.device
+        text_len = getattr(self.model, "text_len", None)
+        if text_len is None:
+            return context_arg
+
+        padded_context = [
+            torch.cat(
+                [
+                    u,
+                    torch.zeros(text_len - u.size(0), u.size(1), device=device, dtype=u.dtype),
+                ]
+            )
+            for u in context_arg
+        ]
+        return torch.concat([u.unsqueeze(0) for u in padded_context], dim=0)
+
     def forward(
         self,
         latent_model_input,
@@ -353,18 +370,15 @@ class Wan22DiTExportWrapper(nn.Module):
         e: torch.Tensor,
         e0: torch.Tensor,
         context_lens: torch.Tensor,
-        y: Optional[torch.Tensor] = None,
     ):
-        latent_arg = latent_model_input if isinstance(latent_model_input, list) else [latent_model_input]
-        context_arg = context if isinstance(context, list) else [context]
+        latent_arg = self._prepare_latent(latent_model_input)
+        context_arg = self._prepare_context(context)
         kwargs = {
             "context": context_arg,
             "e": e,
             "e0": e0,
             "context_lens": context_lens,
         }
-        if y is not None:
-            kwargs["y"] = y if isinstance(y, list) else [y]
         return self.model(latent_arg, **kwargs)[0]
 
 

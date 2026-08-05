@@ -30,6 +30,9 @@ from wan.modules.model import (  # noqa: E402
 )
 
 
+FLASH_ATTN_V_SCALE = 16.0
+
+
 def build_wan_time_embeddings(model: nn.Module, t: torch.Tensor, seq_len: int, output_dtype: torch.dtype):
     if t.dim() == 1:
         t = t.expand(t.size(0), seq_len)
@@ -238,7 +241,7 @@ class _WanSelfAttention(DynamicModule):
         q = self.rope(q, grid_sizes, freqs_real, freqs_imag).transpose(1, 2)
         k = self.rope(k, grid_sizes, freqs_real, freqs_imag).transpose(1, 2)
         v = v.transpose(1, 2)
-        x = self.flash_attn(q, k, v, kv_valid_length=seq_lens)
+        x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE, kv_valid_length=seq_lens) * FLASH_ATTN_V_SCALE
         x = x.transpose(1, 2).flatten(2)
         x = self.o(x)
         # print(x.abs().mean())
@@ -268,9 +271,9 @@ class _WanCrossAttention(DynamicModule):
         v = self.v(context).view(b, -1, n, d).transpose(1, 2)
 
         if context_lens is None:
-            x = self.flash_attn(q, k, v)
+            x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE) * FLASH_ATTN_V_SCALE
         else:
-            x = self.flash_attn(q, k, v, kv_valid_length=context_lens)
+            x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE, kv_valid_length=context_lens) * FLASH_ATTN_V_SCALE
         x = x.transpose(1, 2).flatten(2)
         x = self.o(x)
         return x

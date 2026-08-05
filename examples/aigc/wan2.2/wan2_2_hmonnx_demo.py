@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="/data01/home/xuchen/Wan2.2-main/ckpt/Wan_2.2")
     parser.add_argument("--task", type=str, default="i2v-A14B")
     parser.add_argument("--meta-dir", type=str, required=True)
-    parser.add_argument("--components", nargs="+", default=["high_noise_model","t5","vae_encode", "low_noise_model", "vae_decode"]) #  
+    parser.add_argument("--components", nargs="+", default=["high_noise_model"]) #  ，"t5","vae_encode", "low_noise_model", "vae_decode"
     parser.add_argument("--prompt", type=str, default="A calm seaside scene with gentle waves.")
     parser.add_argument("--negative-prompt", type=str, default="")
     parser.add_argument("--output", type=str, default="outputs/wan2_2_hmonnx_demo.mp4")
@@ -81,11 +81,6 @@ def parse_args():
         "--use-low-noise-wrapper",
         action="store_true",
         help="Use Wan2_2DiTExportWrapper.forward instead of the HMONNX low_noise_model in generation.",
-    )
-    parser.add_argument(
-        "--use-high-noise-wrapper",
-        action="store_true",
-        help="Use Wan2_2DiTExportWrapper.forward instead of the HMONNX high_noise_model in generation.",
     )
     parser.add_argument("--t5-atol", type=float, default=5e-2)
     parser.add_argument("--t5-rtol", type=float, default=5e-2)
@@ -307,14 +302,9 @@ def main(args):
         else:
             pipe.set_hmonnx_components(low_noise_model=Wan2_2DiTInference.from_meta(meta_dir / "low_noise_model_meta.json"))
     if "high_noise_model" in args.components:
-        if args.use_high_noise_wrapper:
-            pipe.set_hmonnx_components(
-                high_noise_model=_LazyDiTExportWrapper(pipe, "high_noise_model", torch.device("cuda"))
-            )
-        else:
-            pipe.set_hmonnx_components(
-                high_noise_model=Wan2_2DiTInference.from_meta(meta_dir / "high_noise_model_meta.json")
-            )
+        pipe.set_hmonnx_components(
+            high_noise_model=Wan2_2DiTInference.from_meta(meta_dir / "high_noise_model_meta.json")
+        )
 
     if t5_hmonnx is not None and not args.skip_t5_check:
         metrics = _validate_t5(pipe, t5_hmonnx, args.prompt, atol=args.t5_atol, rtol=args.t5_rtol)
@@ -369,7 +359,6 @@ def main(args):
     print(f"Enabled components: {args.components}")
     print(f"Use VAE decode wrapper forward: {args.use_vae_decode_wrapper}")
     print(f"Use low_noise wrapper forward: {args.use_low_noise_wrapper}")
-    print(f"Use high_noise wrapper forward: {args.use_high_noise_wrapper}")
     print(f"Prompt: {args.prompt}")
     print(f"Sampling steps: {sample_steps}")
     print(f"Sampling shift: {sample_shift}")

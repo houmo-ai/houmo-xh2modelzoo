@@ -208,8 +208,18 @@ class Wan22Converter:
             dtype=cfg.param_dtype,
         )
         vae.model = vae.model.to(cfg.param_dtype)
-        low_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
-        high_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+        need_low_noise = "low_noise_model" in self.export_components or "low_noise_model" in self.golden_components
+        need_high_noise = "high_noise_model" in self.export_components or "high_noise_model" in self.golden_components
+        low_noise_model = (
+            self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
+            if need_low_noise
+            else None
+        )
+        high_noise_model = (
+            self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+            if need_high_noise
+            else None
+        )
         return SimpleNamespace(
             device=device,
             config=cfg,
@@ -410,19 +420,20 @@ class Wan22Converter:
                 y=[y_ref] if y_ref is not None else None,
             )[0]
 
-        Wan2_2DiTExportWrapper(model).to(self.device).eval()
+        wrapper = Wan2_2DiTExportWrapper(model).to(self.device).eval()
         e_ref, e0_ref = build_wan_time_embeddings(model, timestep, seq_len, validate_dtype)
+        latent_arg = wrapper._prepare_latent(latent_ref, y_ref)
+        context_arg = wrapper._prepare_context(context_ref)
 
         torch.cuda.empty_cache()
 
         with torch.no_grad():
             out_wrap = model(
-                [latent_ref],
-                context=[context_ref],
+                latent_arg,
+                context=context_arg,
                 e=e_ref,
                 e0=e0_ref,
                 context_lens=torch.tensor([512], device=self.device, dtype=torch.long),
-                y=[y_ref] if y_ref is not None else None,
             )[0]
 
         diff = (out_ref - out_wrap).abs()
@@ -446,21 +457,22 @@ class Wan22Converter:
         component_dir = work_dir / noise_model_name
         component_dir.mkdir(parents=True, exist_ok=True)
         model, latent, timestep, context, seq_len, y = self._build_dit_inputs(pipe, noise_model_name)
-        model = self._validate_dit_wrap(model, latent, timestep, context, seq_len, y, noise_model_name)
+        # model = self._validate_dit_wrap(model, latent, timestep, context, seq_len, y, noise_model_name)
         dit_dtype = self.config.torch_dtype
         wrapper = Wan2_2DiTExportWrapper(model).to(self.device).eval()
-        e, e0 = build_wan_time_embeddings(model, timestep, seq_len, latent.dtype)
-        seq_lens = torch.tensor([seq_len], device=self.device, dtype=torch.long)
+        model = wrapper.model.to(torch.float16).eval()
+        latent_arg = wrapper._prepare_latent(latent.to(torch.float16), y.to(torch.float16) if y is not None else None)
+        context_arg = wrapper._prepare_context(context.to(torch.float16))
+        e, e0 = build_wan_time_embeddings(model, timestep, seq_len, torch.float16)
         context_lens = torch.tensor([context.size(0)], device=self.device, dtype=torch.long)
         prefix = (
             f"wan2_2_{noise_model_name}-{self.config.quant_scheme.target_device}-{self.config.quant_scheme.quant_type}"
         )
         inputs = [
-            latent,
-            context,
+            latent_arg,
+            context_arg,
             e,
             e0,
-            seq_lens,
             context_lens,
         ]
         input_names = [
@@ -468,22 +480,19 @@ class Wan22Converter:
             "context",
             "e",
             "e0",
-            "seq_lens",
             "context_lens",
         ]
-        if y is not None:
-            inputs.append(y)
-            input_names.append("y")
 
-        inputs_fp16 = []
-        for data in inputs:
-            if data.dtype == torch.bfloat16:
-                inputs_fp16.append(data.to(torch.float16))
-            else:
-                inputs_fp16.append(data)
-        model = model.to(torch.float16)
+        def _to_fp16(value):
+            if isinstance(value, list):
+                return [item.to(torch.float16) if isinstance(item, torch.Tensor) and item.dtype == torch.bfloat16 else item for item in value]
+            if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16:
+                return value.to(torch.float16)
+            return value
+
+        inputs_fp16 = [_to_fp16(data) for data in inputs]
         export_meta = self._export_component(
-            model=wrapper,
+            model=model,
             inputs=inputs_fp16,
             input_names=input_names,
             output_names=["sample"],
@@ -495,14 +504,21 @@ class Wan22Converter:
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "task": self.config.task,
             "checkpoint_dir": str(self.pretrained_model_path),
-            "subfolder": getattr(WAN_CONFIGS[self.config.task], "low_noise_checkpoint "),
+            "subfolder": (
+                WAN_CONFIGS[self.config.task].low_noise_checkpoint
+                if noise_model_name == "low_noise_model"
+                else WAN_CONFIGS[self.config.task].high_noise_checkpoint
+            ),
             "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(work_dir)),
             "golden_dir": (
                 str(Path(export_meta["golden_dir"]).relative_to(work_dir)) if export_meta["golden_dir"] else None
             ),
             "input_names": export_meta["input_names"],
             "output_names": export_meta["output_names"],
-            "sample_input_shapes": {name: list(t.shape) for name, t in zip(input_names, inputs, strict=True)},
+            "sample_input_shapes": {
+                name: list(t.shape) if isinstance(t, torch.Tensor) else list(t[0].shape)
+                for name, t in zip(input_names, inputs, strict=True)
+            },
             "seq_len": int(seq_len),
             "sample_timestep": timestep.tolist(),
             "dtype": str(dit_dtype).replace("torch.", ""),
@@ -631,9 +647,9 @@ class Wan22Converter:
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "task": self.config.task,
-            "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(component_dir)),
+            "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(work_dir)),
             "golden_dir": (
-                str(Path(export_meta["golden_dir"]).relative_to(component_dir)) if export_meta["golden_dir"] else None
+                str(Path(export_meta["golden_dir"]).relative_to(work_dir)) if export_meta["golden_dir"] else None
             ),
             "input_names": export_meta["input_names"],
             "output_names": export_meta["output_names"],
