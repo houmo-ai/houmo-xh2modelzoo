@@ -214,6 +214,7 @@ class _LingBotVideoAttention(DynamicModule):
             value,
             current_input_length=current_input_length,
         )
+        output = output.transpose(1, 2).contiguous()
         output = output * value_scale
         output = output.reshape(batch_size, sequence_length, self.num_heads * self.head_dim)
         return self.to_out(output.to(x.dtype))
@@ -233,10 +234,8 @@ class _LingBotVideoAttention(DynamicModule):
         self.attention_scale = self.head_dim**-0.5
         bits = self.lingbot_flash_attention_bits
         self.flash_attn = xhnn.FlashAttention(
-            embed_dim=self.num_heads * self.head_dim,
             num_heads=self.num_heads,
             num_kv_heads=self.num_heads,
-            batch_first=True,
             is_causal=False,
             scale=self.attention_scale,
             q_bits=bits["q_bits"],

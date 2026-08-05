@@ -171,6 +171,80 @@ def test_lingbot_flash_attention_value_scale(sequence_length: int, expected_scal
     assert flash_attention_value_scale(sequence_length) == expected_scale
 
 
+def test_lingbot_attention_setup_uses_current_flash_attention_contract():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_other_model.models.lingbot_video.transformer_wrapper import (
+        _LingBotVideoAttention,
+        xhnn,
+    )
+
+    attention = SimpleNamespace(
+        head_dim=64,
+        num_heads=4,
+        lingbot_flash_attention_bits={name: 8 for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")},
+    )
+
+    assert _LingBotVideoAttention._setup(attention) is attention
+    assert isinstance(attention.flash_attn, xhnn.FlashAttention)
+    assert attention.flash_attn.num_heads == 4
+    assert attention.flash_attn.num_kv_heads == 4
+    assert attention.flash_attn.is_causal is False
+    assert attention.flash_attn.scale == 0.125
+    assert {
+        name: getattr(attention.flash_attn, name) for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+    } == {name: 8 for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")}
+
+
+def test_lingbot_attention_restores_sequence_major_output_layout():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_other_model.models.lingbot_video.transformer_wrapper import (
+        _LingBotVideoAttention,
+    )
+
+    batch_size, sequence_length, num_heads, head_dim = 1, 3, 2, 2
+    canonical_bhsd = torch.arange(
+        batch_size * num_heads * sequence_length * head_dim,
+        dtype=torch.float32,
+    ).reshape(batch_size, num_heads, sequence_length, head_dim)
+    current_input_length = torch.tensor([sequence_length], dtype=torch.int32)
+
+    class FakeFlashAttention:
+        def __call__(self, query, key, value, *, current_input_length):
+            assert query.shape == key.shape == value.shape == canonical_bhsd.shape
+            assert current_input_length is expected_current_input_length
+            return canonical_bhsd
+
+    expected_current_input_length = current_input_length
+    attention = SimpleNamespace(
+        lingbot_export_batch_size=batch_size,
+        lingbot_export_sequence_length=sequence_length,
+        lingbot_flash_attention_value_scale=1.0,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        to_q=torch.nn.Identity(),
+        to_k=torch.nn.Identity(),
+        to_v=torch.nn.Identity(),
+        norm_q=torch.nn.Identity(),
+        norm_k=torch.nn.Identity(),
+        flash_attn=FakeFlashAttention(),
+        to_out=torch.nn.Identity(),
+        _apply_rotary=lambda hidden_states, rotary_emb: hidden_states,
+    )
+    hidden_states = torch.zeros(batch_size, sequence_length, num_heads * head_dim)
+
+    actual = _LingBotVideoAttention.forward(
+        attention,
+        hidden_states,
+        rotary_emb=(torch.empty(0), torch.empty(0)),
+        current_input_length=current_input_length,
+    )
+
+    expected = canonical_bhsd.transpose(1, 2).reshape(batch_size, sequence_length, num_heads * head_dim)
+    torch.testing.assert_close(actual, expected)
+
+
 def test_lingbot_export_geometry_applies_attention_value_scale():
     from types import SimpleNamespace
 
