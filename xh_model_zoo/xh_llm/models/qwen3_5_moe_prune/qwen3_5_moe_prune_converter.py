@@ -2,9 +2,10 @@ import json
 import re
 import types
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Union
 
 import torch
+
 from xhquant.api import Config, get_root_logger
 
 from ..builder import wrap_llm_model
@@ -17,7 +18,7 @@ from ..qwen3_5_moe.qwen3_5_moe_converter import (
 from .qwen3_5_moe_prune_convert_config import Qwen3_5MoePruneConvertConfig
 
 
-class Qwen3_5MoePruneConverterXH2a(Qwen3_5MoeConverterXH2a):
+class Qwen3_5MoePruneConverterXH2a(Qwen3_5MoeConverterXH2a):  # noqa: N801
     def __init__(self, config: Qwen3_5MoePruneConvertConfig):
         super().__init__(config)
         self.config: Qwen3_5MoePruneConvertConfig = config
@@ -83,9 +84,7 @@ class Qwen3_5MoePruneConverterXH2a(Qwen3_5MoeConverterXH2a):
                 linear_chunk_size=self.config.linear_chunk_size,
                 enable_rope=self.config.enable_rope,
                 max_pe_length=getattr(self.config, "max_pe_length", 262144),
-                support_long_context_over_fp16_limit=getattr(
-                    self.config, "support_long_context_over_fp16_limit", True
-                ),
+                support_long_context_over_fp16_limit=getattr(self.config, "support_long_context_over_fp16_limit", True),
                 alpha_scaling_layers=list(self.config.alpha_scaling_layers),
                 chunk_inverse_alpha=self.config.chunk_inverse_alpha,
                 output_hidden_state_indices=output_hidden_state_indices,
@@ -115,8 +114,8 @@ class Qwen3_5MoePruneConverterXH2a(Qwen3_5MoeConverterXH2a):
 
         prune_modules_found = 0
         for name, module in wraped_model.named_modules():
-            if hasattr(module, "prune_router") and hasattr(module, "s_scalar") and hasattr(module, "moeblock_prune"):
-                module.threshold = threshold
+            if hasattr(module, "moeblock") and hasattr(module.moeblock, "s_scalar"):
+                module.moeblock.prune_threshold = float(threshold)
                 prune_modules_found += 1
                 if s_scalars is None:
                     continue
@@ -148,13 +147,19 @@ class Qwen3_5MoePruneConverterXH2a(Qwen3_5MoeConverterXH2a):
                 else:
                     raise TypeError(f"Unsupported s_scalar payload type: {type(s_scalars)}")
 
-                if selected_s_scalar.numel() != module.s_scalar.numel():
+                if selected_s_scalar.numel() != module.moeblock.s_scalar.numel():
                     raise ValueError(
                         f"s_scalar for prune block '{name}' has {selected_s_scalar.numel()} entries, "
-                        f"expected {module.s_scalar.numel()}"
+                        f"expected {module.moeblock.s_scalar.numel()}"
                     )
-                module.s_scalar = selected_s_scalar.to(module.s_scalar.device, dtype=module.s_scalar.dtype)
+                module.moeblock.s_scalar = selected_s_scalar.to(
+                    module.moeblock.s_scalar.device,
+                    dtype=module.moeblock.s_scalar.dtype,
+                )
 
-        logger.info(f"Set threshold={threshold} on {prune_modules_found} Qwen3.5 prune MoE blocks")
+        logger.info(
+            f"Set MoeBlock operator attribute prune_threshold={threshold} "
+            f"on {prune_modules_found} Qwen3.5 prune MoE blocks"
+        )
         if prune_modules_found == 0:
             raise RuntimeError("No Qwen3.5 MoE prune blocks found; dynamic pruning wrapper registration failed")

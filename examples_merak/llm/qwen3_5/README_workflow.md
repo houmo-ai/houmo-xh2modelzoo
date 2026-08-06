@@ -67,11 +67,81 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/
 
 常用配置：
 
-| 模型 | 默认 full 配置 | 其他导出形态 |
-| --- | --- | --- |
-| Qwen3.5-9B | `qwen3_5/9b/qwen3_5_9b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
-| Qwen3.6-27B | `qwen3_5/27b/qwen3_6_27b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| 模型            | 默认 full 配置                                    | 其他导出形态                                                            |
+| --------------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
+| Qwen3.5-9B      | `qwen3_5/9b/qwen3_5_9b_full.yaml`               | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.6-27B     | `qwen3_5/27b/qwen3_6_27b_full.yaml`             | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
 | Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+
+## Qwen3.6-35B-A3B 动态剪枝 Workflow
+
+动态剪枝使用独立的 workflow 入口和 YAML：
+
+```text
+examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_workflow.py
+configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml
+```
+
+以下命令导出 Qwen3.6-35B-A3B 完整 40 层的动态剪枝 HMONNX，并在导出完成后生成 golden：
+
+```bash
+cd /data01/home/xuzk/workspace/xh2/xh2modelzoo_2
+
+CUDA_VISIBLE_DEVICES=0 python \
+  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_workflow.py \
+  --model-dir /data01/datasets/Qwen3.6-35B-A3B/ \
+  --config-path \
+    configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml \
+  --export-output-dir \
+    work_dirs/qwen3_6_35b_a3b_dynamic_prune_full_export \
+  --model-name \
+    qwen3_6_35b_a3b_dynamic_prune_full \
+  --context-max-length 262144 \
+  --threshold 0.05 \
+  --auto-s-scalar \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --overwrite
+```
+
+导出完成后，可用 text-only runtime 对动态剪枝 HMONNX 做连续生成验证：
+
+```bash
+CUDA_VISIBLE_DEVICES=5 python \
+  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_hmonnx_generate.py \
+  --config work_dirs/qwen3_6_35b_a3b_dynamic_prune_mixed_w4w8_export \
+  --device 0 \
+  --prompt "用中文简单介绍 Qwen3.5。" \
+  --max-new-tokens 64 \
+  --min-output-tokens 8
+```
+
+脚本会复用通用 `hmonnx_generate()`，并在 LLM-only meta 下自动选择动态剪枝
+text-only runtime。只有完成 prefill、连续 decode 且生成 token 数不小于
+`--min-output-tokens` 时才视为验证通过。
+
+这条命令不需要提前生成或传入 `s_scalar` 文件。`--auto-s-scalar`
+会在 workflow 内直接从 HF checkpoint 计算 Method1 expert scalar：
+
+- 首次运行时计算全部 40 层的 `s_scalar`。
+- 默认保存为
+  `work_dirs/qwen3_6_35b_a3b_dynamic_prune_full_export_method1_s_scalar.pt`。
+- 后续使用相同导出目录重跑时，已存在的标量文件会被自动复用。
+- 正式 HMONNX 和 golden 产物位于
+  `work_dirs/qwen3_6_35b_a3b_dynamic_prune_full_export/`。
+
+完整模型导出时不要传 `--only-first-block`，否则只会导出用于查图的
+layer 0～3。自动计算时也不需要传 `--s-scalar-path`；只有需要显式复用
+其他标量文件时才使用该参数。
+
+新版动态剪枝逻辑已集成在标准 `MoeBlock` 中，不再导出旧的
+`PruningRouter -> MoeBlockPrune` 组合。剪枝阈值通过 `MoeBlock` 的
+`prune_threshold` attribute 传入，每层的 `s_scalar` 通过 input 15 传入。
+HMONNX 节点上看不到
+`topk_outside` 属性是正常的：该属性的默认值为 `false`，导出时会省略默认值；
+top-k、`gate_score * s_scalar`、threshold 筛选和动态专家数计算都在
+`MoeBlock` 内部完成。
 
 完整 HMONNX 输入输出说明见：
 

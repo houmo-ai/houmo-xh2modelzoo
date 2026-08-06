@@ -4,11 +4,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
-from xhquant.nn.modules.moeblock_prune import PruningRouter, MoeBlockPrune
+
+from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils.registry import DynamicModule
 
 from ..builder import XHLLM_TRACEABLE_MODULES
 from ..qwen3_5_moe._moe_model import (  # noqa: F401
+    _copy_defused_expert_weights_to_moeblock,
+    _get_activation_name,
+    _init_moe_linear_storage,
     _Qwen3_5MoeAttention,
     _Qwen3_5MoeDecoderLayer,
     _Qwen3_5MoeForCausalLM,
@@ -18,10 +22,8 @@ from ..qwen3_5_moe._moe_model import (  # noqa: F401
     _Qwen3_5MoeRMSNormGated,
     _Qwen3_5MoeTextModel,
     _Qwen3_5MoeTextRotaryEmbedding,
-    _copy_defused_expert_weights_to_moeblock,
-    _get_activation_name,
-    _init_moe_linear_storage,
 )
+
 
 if Qwen3_5MoeSparseMoeBlock in XHLLM_TRACEABLE_MODULES._registry:
     del XHLLM_TRACEABLE_MODULES._registry[Qwen3_5MoeSparseMoeBlock]
@@ -32,16 +34,11 @@ if Qwen3_5MoeSparseMoeBlock in XHLLM_TRACEABLE_MODULES._dynamic_classes:
 
 
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeSparseMoeBlock: "Qwen3_5MoeSparseMoeBlock"})
-class _Qwen3_5MoeSparseMoeBlockPrune(DynamicModule):
+class _Qwen3_5MoeSparseMoeBlockPrune(DynamicModule):  # noqa: N801
     def forward(self, hidden_states):
         router_logits = self.gate(hidden_states)
         routing_weights = F.softmax(router_logits, dim=-1)
-        routing_weights, selected_experts, k_tensor = self.prune_router(
-            routing_weights,
-            self.s_scalar,
-            self.threshold,
-        )
-        moe_out = self.moeblock_prune(hidden_states, routing_weights, k_tensor, selected_experts)
+        moe_out = self.moeblock(hidden_states, routing_weights)
         shared_out = self.shared_expert(hidden_states)
         shared_out = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_out
         return moe_out + shared_out, router_logits
@@ -70,11 +67,12 @@ class _Qwen3_5MoeSparseMoeBlockPrune(DynamicModule):
         else:
             act_fn_name = _get_activation_name(experts[0].act_fn)
 
-        self.moeblock_prune = MoeBlockPrune(
+        self.moeblock = MoeBlock(
             act_fn_name,
             top_k,
             True,
-            topk_outside=True,
+            s_scalar=torch.ones(num_experts_dim, device=self.device),
+            prune_threshold=0.0,
         )
 
         if hasattr(experts, "gate_up_proj"):
@@ -84,12 +82,12 @@ class _Qwen3_5MoeSparseMoeBlockPrune(DynamicModule):
             up_proj_weight = gate_up[:, intermediate_dim:, :].contiguous()
             down_proj_weight = experts.down_proj.data.to(self.device).contiguous()
 
-            self.moeblock_prune.expert_gate_proj_weight = nn.Parameter(gate_proj_weight)
-            self.moeblock_prune.expert_gate_proj_bias = None
-            self.moeblock_prune.expert_up_proj_weight = nn.Parameter(up_proj_weight)
-            self.moeblock_prune.expert_up_proj_bias = None
-            self.moeblock_prune.expert_down_proj_weight = nn.Parameter(down_proj_weight)
-            self.moeblock_prune.expert_down_proj_bias = None
+            self.moeblock.expert_gate_proj_weight = nn.Parameter(gate_proj_weight)
+            self.moeblock.expert_gate_proj_bias = None
+            self.moeblock.expert_up_proj_weight = nn.Parameter(up_proj_weight)
+            self.moeblock.expert_up_proj_bias = None
+            self.moeblock.expert_down_proj_weight = nn.Parameter(down_proj_weight)
+            self.moeblock.expert_down_proj_bias = None
             del self.experts
         elif (
             len(experts) > 0
@@ -98,15 +96,12 @@ class _Qwen3_5MoeSparseMoeBlockPrune(DynamicModule):
             and hasattr(experts[0], "down_proj")
         ):
             for linear_name in ("gate_proj", "up_proj", "down_proj"):
-                _init_moe_linear_storage(self.moeblock_prune, experts, linear_name, self.device)
-            _copy_defused_expert_weights_to_moeblock(self.moeblock_prune, experts, self.device)
+                _init_moe_linear_storage(self.moeblock, experts, linear_name, self.device)
+            _copy_defused_expert_weights_to_moeblock(self.moeblock, experts, self.device)
             self.experts = nn.ModuleList()
         else:
             raise RuntimeError(f"Unsupported Qwen3.5-MoE experts structure: {type(experts)}")
 
-        self.prune_router = PruningRouter(top_k, True)
-        self.register_buffer("s_scalar", torch.ones(num_experts_dim, device=self.device))
-        self.threshold = 0.0
         torch.cuda.empty_cache()
         return self
 

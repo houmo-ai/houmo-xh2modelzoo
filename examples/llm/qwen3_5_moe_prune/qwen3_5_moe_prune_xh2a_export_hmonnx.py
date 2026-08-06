@@ -21,6 +21,7 @@ from xh_model_zoo.xh_llm import LLMConverter
 from xh_model_zoo.xh_llm.models.qwen3_5_moe_prune import Qwen3_5MoePruneConvertConfig
 from xhquant.api import DeviceType, QuantScheme, get_root_logger, xhquant_init
 
+
 # Suppress noisy onnxscript logs during golden/export
 logging.getLogger("onnxscript.rewriter.rules.common._collapse_slices").setLevel(logging.WARNING)
 logging.getLogger("onnxscript.optimizer._constant_folding").setLevel(logging.WARNING)
@@ -39,11 +40,7 @@ def _validate_offline_rope_required_for_fp16_limit(args):
         "context_length": int(getattr(args, "context_length", 0) or 0),
         "input_sequence_length": int(getattr(args, "input_sequence_length", 0) or 0),
     }
-    offenders = {
-        name: value
-        for name, value in checked_ranges.items()
-        if value > FP16_MAX_FINITE_POSITION
-    }
+    offenders = {name: value for name, value in checked_ranges.items() if value > FP16_MAX_FINITE_POSITION}
     if not offenders:
         return
 
@@ -217,6 +214,7 @@ def _resolve_s_scalar_path(args, hf_model_dir: Path, work_dir: Path, logger):
 # Golden / release helpers (verbatim from qwen3_5_moe_xh2a_export_hmonnx.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _get_default_device() -> torch.device:
     return torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -255,9 +253,7 @@ def _build_release_prefix_moe(args, hf_model_path: str) -> str:
     modelscope_name = getattr(args, "release_modelscope_name", None)
     if not modelscope_name:
         modelscope_name = Path(hf_model_path).name
-    modelscope_name = (
-        str(modelscope_name).strip().lower().replace(".", "_").replace("-", "_").replace(" ", "_")
-    )
+    modelscope_name = str(modelscope_name).strip().lower().replace(".", "_").replace("-", "_").replace(" ", "_")
 
     wmix_amix_raw = getattr(args, "release_wmix_amix", None) or _detect_release_wmix_amix(hf_model_path)
     wmix_amix = _normalize_wmix_amix(wmix_amix_raw)
@@ -274,9 +270,7 @@ def _build_release_prefix_moe(args, hf_model_path: str) -> str:
     return f"hmquant_{xh_version}_{modelscope_name}_{wmix_amix}_{prefill_len}_{ctx_str}_{date_str}"
 
 
-def _save_onnx_with_renamed_external_data(
-    src_onnx: Path, dst_onnx: Path, new_external_data_name: str, logger
-) -> None:
+def _save_onnx_with_renamed_external_data(src_onnx: Path, dst_onnx: Path, new_external_data_name: str, logger) -> None:
     dst_onnx.parent.mkdir(parents=True, exist_ok=True)
     stale = dst_onnx.parent / new_external_data_name
     if stale.exists() or stale.is_symlink():
@@ -289,7 +283,9 @@ def _save_onnx_with_renamed_external_data(
             dst_onnx.unlink()
         except OSError:
             pass
-    logger.info(f"Resaving ONNX with renamed external_data: {src_onnx.name} -> {dst_onnx.name} (ext={new_external_data_name})")
+    logger.info(
+        f"Resaving ONNX with renamed external_data: {src_onnx.name} -> {dst_onnx.name} (ext={new_external_data_name})"
+    )
     model = onnx.load(str(src_onnx), load_external_data=True)
     onnx.save_model(
         model,
@@ -312,9 +308,29 @@ def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: 
     prefix_stripped = release_prefix.split("_", 2)[-1]
     segments = prefix_stripped.split("_")
     scheme_keywords = {
-        "xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
-        "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
-        "ssfp", "sefp", "fp16", "fp32", "gptq",
+        "xh1",
+        "xh2",
+        "wmix",
+        "amix",
+        "w4a8",
+        "w8a8",
+        "w4",
+        "w8",
+        "a4",
+        "a8",
+        "256",
+        "2k",
+        "4k",
+        "8k",
+        "16k",
+        "32k",
+        "h0",
+        "h1",
+        "ssfp",
+        "sefp",
+        "fp16",
+        "fp32",
+        "gptq",
     }
     model_parts = []
     for seg in segments:
@@ -325,9 +341,12 @@ def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: 
     short_prefix = f"hmquant_{model_name}"
 
     role_tokens = [
-        "prefill", "decode",
-        "draft_prefill", "draft_decode",
-        "draft_context", "draft_context_decode",
+        "prefill",
+        "decode",
+        "draft_prefill",
+        "draft_decode",
+        "draft_context",
+        "draft_context_decode",
     ]
 
     for fpath in list(step0_dir.iterdir()):
@@ -355,20 +374,20 @@ def _rename_golden_to_short_format(golden_dir: Path, release_prefix: str, role: 
             continue
 
         model_prefix = short_prefix
-        after_model = name_without_ext[len(model_prefix):suffix_idx]
+        after_model = name_without_ext[len(model_prefix) : suffix_idx]
         rest = after_model.lstrip("_")
         io_name = rest
         for rt in role_tokens:
             if rest.startswith(rt + "_"):
-                io_name = rest[len(rt) + 1:]
+                io_name = rest[len(rt) + 1 :]
                 break
             for mode_prefix in ("xh2a_", "xh2_", "xh1a_", "xh1_"):
                 combined = mode_prefix + rt + "_"
                 if rest.startswith(combined):
-                    io_name = rest[len(combined):]
+                    io_name = rest[len(combined) :]
                     break
                 if rt in ("prefill", "decode") and rest.startswith(rt + "_"):
-                    io_name = rest[len(rt) + 1:]
+                    io_name = rest[len(rt) + 1 :]
                     break
             else:
                 continue
@@ -387,9 +406,29 @@ def _create_step0_onnx_symlinks(golden_dir: Path, release_prefix: str, logger) -
     prefix_stripped = release_prefix.split("_", 2)[-1]
     segments = prefix_stripped.split("_")
     scheme_keywords = {
-        "xh1", "xh2", "wmix", "amix", "w4a8", "w8a8", "w4", "w8", "a4", "a8",
-        "256", "2k", "4k", "8k", "16k", "32k", "h0", "h1",
-        "ssfp", "sefp", "fp16", "fp32", "gptq",
+        "xh1",
+        "xh2",
+        "wmix",
+        "amix",
+        "w4a8",
+        "w8a8",
+        "w4",
+        "w8",
+        "a4",
+        "a8",
+        "256",
+        "2k",
+        "4k",
+        "8k",
+        "16k",
+        "32k",
+        "h0",
+        "h1",
+        "ssfp",
+        "sefp",
+        "fp16",
+        "fp32",
+        "gptq",
     }
     model_parts = []
     for seg in segments:
@@ -495,8 +534,9 @@ def _build_inputs_embeds(
         input_ids = torch.cat([input_ids, pad], dim=1)
     elif seq_len > target_seq_len:
         input_ids = input_ids[:, :target_seq_len]
+    embedding_device = token_embedding.weight.device
     with torch.no_grad():
-        embeds = token_embedding(input_ids.to(device))
+        embeds = token_embedding(input_ids.to(embedding_device))
     return embeds.to(dtype=dtype, device=device)
 
 
@@ -506,6 +546,7 @@ def _is_cache_input_name(name: str) -> bool:
 
 def _ensure_cache_tensor(tensor: torch.Tensor):
     from xhquant.xhonnxruntime.parsers.llm_cache import CacheTensor
+
     if isinstance(tensor, CacheTensor):
         return tensor
     return CacheTensor(tensor)
@@ -541,7 +582,7 @@ def _resolve_input_name(session, candidates, fallback=None) -> str:
 def _batch_suffix(name: str, base: str) -> Optional[int]:
     prefix = f"{base}_batch_"
     if name.startswith(prefix):
-        return int(name[len(prefix):])
+        return int(name[len(prefix) :])
     return None
 
 
@@ -586,13 +627,17 @@ def _infer_inputs_embeds_name(session) -> str:
 
 def _create_golden_session(onnx_file: str, golden_dir: Path, device: torch.device, logger):
     from xhquant.xhonnxruntime.hmonnx_inference import HMONNXGoldenInference
+
     golden_dir.mkdir(exist_ok=True, parents=True)
     session = HMONNXGoldenInference(onnx_file)
     session.exec_device = device
-    session.to(device)
     session.save_golden = True
     session.golden_dir = golden_dir
     session.initialize()
+    # Move the parsed full-network model before cache/input tensors are
+    # allocated. Otherwise run() moves the model after inputs already occupy
+    # GPU memory, causing an avoidable peak-memory OOM.
+    session.to(device)
     return session
 
 
@@ -601,7 +646,7 @@ def _run_hmonnx_with_golden(session, input_feed: Dict[str, torch.Tensor]):
     if not isinstance(outputs, (tuple, list)):
         outputs = (outputs,)
     output_names = session.get_output_names()
-    output_map = {name: out for name, out in zip(output_names, outputs)}
+    output_map = {name: out for name, out in zip(output_names, outputs, strict=True)}
     return tuple(outputs), output_map
 
 
@@ -645,9 +690,7 @@ def _ensure_step0_layout(golden_dir: Path, logger) -> None:
             shutil.move(str(item), str(target))
 
 
-def _cleanup_hmonnx_in_golden(
-    golden_dir: Path, release_prefix: str, role: Optional[str], logger
-) -> None:
+def _cleanup_hmonnx_in_golden(golden_dir: Path, release_prefix: str, role: Optional[str], logger) -> None:
     _ensure_step0_layout(golden_dir, logger)
     if role:
         _rename_golden_to_short_format(golden_dir, release_prefix, role, logger)
@@ -693,9 +736,6 @@ def _generate_draft_golden_for_onnx(
     """Run draft ONNX once and let HMONNXGoldenInference dump step_0 golden."""
     golden_dir.mkdir(exist_ok=True, parents=True)
     valid_len = input_ids_full.shape[1]
-    work_meta = _load_work_meta(work_dir, logger)
-    export_batch = int(work_meta.get("wrap_cfg", {}).get("batch_size", getattr(args, "batch_size", 1)))
-    input_ids_batch = input_ids_full.expand(export_batch, -1).contiguous()
     past_seq_val = valid_len if is_decode else 0
 
     session = _create_golden_session(onnx_file, golden_dir, device, logger)
@@ -786,7 +826,10 @@ def _generate_golden(
             f"Neither quant_embedding.pt nor token_embedding.pt found under {work_dir}. "
             "Re-run the export step or supply a completed work_dir."
         )
-    token_embedding = _load_token_embedding(token_embedding_file).to(device).to(dtype)
+    # Keep the ~1 GB embedding module on CPU. Only the small lookup result is
+    # transferred to the execution device, leaving more GPU memory for the
+    # full-network HMONNX weights during golden generation.
+    token_embedding = _load_token_embedding(token_embedding_file).to(dtype)
     token_embedding.eval()
 
     pad_token_id = tokenizer.pad_token_id
@@ -804,8 +847,7 @@ def _generate_golden(
         input_ids_batch = input_ids_full.expand(export_batch, -1).contiguous()
     else:
         raise ValueError(
-            f"Cannot build golden inputs for export_batch={export_batch} "
-            f"from prompt batch={input_ids_full.shape[0]}"
+            f"Cannot build golden inputs for export_batch={export_batch} from prompt batch={input_ids_full.shape[0]}"
         )
     logger.info(f"Golden export batch: {export_batch}")
 
@@ -872,17 +914,35 @@ def _generate_golden(
     for name in prefill_session.get_input_names():
         if _feed_any_batched_tensor(prefill_input_feed, name, ("inputs_embeds", "input_1"), prefill_inputs_embeds):
             pass
-        elif _feed_any_batched_tensor(prefill_input_feed, name, ("past_seq_length", "valid_length"), prefill_past_seq_length):
+        elif _feed_any_batched_tensor(
+            prefill_input_feed,
+            name,
+            ("past_seq_length", "valid_length"),
+            prefill_past_seq_length,
+        ):
             pass
-        elif _feed_any_batched_tensor(prefill_input_feed, name, ("current_input_length", "current_length"), prefill_current_input_length):
+        elif _feed_any_batched_tensor(
+            prefill_input_feed,
+            name,
+            ("current_input_length", "current_length"),
+            prefill_current_input_length,
+        ):
             pass
-        elif _feed_any_batched_tensor(prefill_input_feed, name, ("linear_attn_mask", "attention_mask", "attn_mask"), prefill_linear_attn_mask):
+        elif _feed_any_batched_tensor(
+            prefill_input_feed,
+            name,
+            ("linear_attn_mask", "attention_mask", "attn_mask"),
+            prefill_linear_attn_mask,
+        ):
             pass
         elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or any(
-            _batch_suffix(name, base) is not None for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
+            _batch_suffix(name, base) is not None
+            for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
         ):
             info = prefill_session.get_input(name)
-            pos_batch = torch.arange(0, prefill_seq_len, device=device, dtype=info.dtype).view(1, -1).expand(export_batch, -1)
+            pos_batch = (
+                torch.arange(0, prefill_seq_len, device=device, dtype=info.dtype).view(1, -1).expand(export_batch, -1)
+            )
             for base in ("time_position_ids", "hight_position_ids", "width_position_ids"):
                 batch_idx = _batch_suffix(name, base)
                 if batch_idx is not None:
@@ -944,18 +1004,43 @@ def _generate_golden(
     for name in decode_session.get_input_names():
         if _feed_any_batched_tensor(decode_input_feed, name, ("inputs_embeds", "input_1"), decode_inputs_embeds):
             pass
-        elif _feed_any_batched_tensor(decode_input_feed, name, ("past_seq_length", "valid_length"), decode_past_seq_length):
+        elif _feed_any_batched_tensor(
+            decode_input_feed,
+            name,
+            ("past_seq_length", "valid_length"),
+            decode_past_seq_length,
+        ):
             pass
-        elif _feed_any_batched_tensor(decode_input_feed, name, ("current_input_length", "current_length"), decode_current_input_length):
+        elif _feed_any_batched_tensor(
+            decode_input_feed,
+            name,
+            ("current_input_length", "current_length"),
+            decode_current_input_length,
+        ):
             pass
-        elif _feed_any_batched_tensor(decode_input_feed, name, ("linear_attn_mask", "attention_mask", "attn_mask"), decode_linear_attn_mask):
+        elif _feed_any_batched_tensor(
+            decode_input_feed,
+            name,
+            ("linear_attn_mask", "attention_mask", "attn_mask"),
+            decode_linear_attn_mask,
+        ):
             pass
         elif name in ("time_position_ids", "hight_position_ids", "width_position_ids") or any(
-            _batch_suffix(name, base) is not None for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
+            _batch_suffix(name, base) is not None
+            for base in ("time_position_ids", "hight_position_ids", "width_position_ids")
         ):
             info = decode_session.get_input(name)
             n_decode_tokens = decode_inputs_info.shape[1]
-            decode_pos_batch = torch.arange(valid_len, valid_len + n_decode_tokens, device=device, dtype=info.dtype).view(1, -1).expand(export_batch, -1)
+            decode_pos_batch = (
+                torch.arange(
+                    valid_len,
+                    valid_len + n_decode_tokens,
+                    device=device,
+                    dtype=info.dtype,
+                )
+                .view(1, -1)
+                .expand(export_batch, -1)
+            )
             for base in ("time_position_ids", "hight_position_ids", "width_position_ids"):
                 batch_idx = _batch_suffix(name, base)
                 if batch_idx is not None:
@@ -964,7 +1049,7 @@ def _generate_golden(
             else:
                 decode_input_feed[name] = decode_pos_batch.reshape(info.shape)
         elif name.startswith("past_conv_cache_"):
-            suffix = name[len("past_conv_cache_"):]
+            suffix = name[len("past_conv_cache_") :]
             out_keys = [f"conv_cache_out_{suffix}"]
             if "_batch_" in suffix:
                 base, batch = suffix.rsplit("_batch_", 1)
@@ -978,7 +1063,7 @@ def _generate_golden(
                 info = decode_session.get_input(name)
                 decode_input_feed[name] = _ensure_cache_tensor(torch.zeros(info.shape, dtype=info.dtype, device=device))
         elif name.startswith("past_recurrent_state_"):
-            suffix = name[len("past_recurrent_state_"):]
+            suffix = name[len("past_recurrent_state_") :]
             out_keys = [f"recurrent_state_out_{suffix}"]
             if "_batch_" in suffix:
                 base, batch = suffix.rsplit("_batch_", 1)
@@ -1005,6 +1090,7 @@ def _generate_golden(
     decode_logits = _extract_logits_from_output_map(decode_output_map) if isinstance(decode_output_map, dict) else None
     if decode_logits is not None:
         import numpy as np
+
         np.save(str(decode_dir / "logits.npy"), decode_logits.detach().cpu().numpy())
 
     del decode_session
@@ -1277,7 +1363,7 @@ def main(args):
         batch_size=args.batch_size,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
-        max_layers=args.num_blocks,
+        max_layers=None,
         max_pe_length=args.max_pe_length,
         support_long_context_over_fp16_limit=getattr(args, "support_long_context_over_fp16_limit", True),
         quant_scheme=quant_scheme,
@@ -1354,8 +1440,12 @@ if __name__ == "__main__":
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--input-sequence-length", type=int, default=256)
     parser.add_argument(
-        "--max-pe-length", "--max_pe_length", dest="max_pe_length", type=int, default=262144,
-        help="RoPE cache length; 256K is required for long context over fp16 position limit"
+        "--max-pe-length",
+        "--max_pe_length",
+        dest="max_pe_length",
+        type=int,
+        default=262144,
+        help="RoPE cache length; 256K is required for long context over fp16 position limit",
     )
     parser.set_defaults(support_long_context_over_fp16_limit=True)
     long_context_group = parser.add_mutually_exclusive_group()
@@ -1392,13 +1482,6 @@ if __name__ == "__main__":
         default=False,
     )
     parser.add_argument("--fuse-gdr-ops", dest="fuse_gdr_ops", action="store_true", default=False)
-    parser.add_argument(
-        "--num-blocks",
-        dest="num_blocks",
-        type=int,
-        default=None,
-        help="Number of decoder blocks to export. Default exports all blocks.",
-    )
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--s-scalar-path", type=str, default=None)
     parser.add_argument("--auto-s-scalar", action=argparse.BooleanOptionalAction, default=True)
@@ -1453,8 +1536,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help=(
-            "Release wmix_amix field. Pure 'w<bits>a<bits>' is preserved; "
-            "anything else is normalised to 'wmix_amix'."
+            "Release wmix_amix field. Pure 'w<bits>a<bits>' is preserved; anything else is normalised to 'wmix_amix'."
         ),
     )
     parser.add_argument(

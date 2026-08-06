@@ -1,6 +1,6 @@
-# MoeBlockPrune & PruningRouter 设计说明
+# MoeBlock 动态剪枝设计说明
 
-> 本文档以标准 `MoeBlock` 为参照，详细介绍 `PruningRouter` 和 `MoeBlockPrune` 的设计思想、内部计算逻辑以及与标准 MoE 的核心差异。
+> 剪枝路由和动态专家执行已合并进标准 `MoeBlock`。本文档介绍剪枝属性、内部计算逻辑以及与普通 MoE 模式的差异。
 
 ---
 
@@ -8,32 +8,36 @@
 
 标准 `MoeBlock` 的 top-k 专家选择是**编译时固定**的：`k` 在构造时指定（`self.k`），每次推理都选择相同数量的专家。
 
-在剪枝（pruning）场景下，不同 token 保留的专家数可能不同。为了实现**动态 k**，将 MoE block 拆分为两个独立模块：
+在剪枝（pruning）场景下，不同 token 保留的专家数可能不同。`MoeBlock` 通过可选的剪枝配置同时完成路由筛选和专家执行：
 
 | 模块 | 职责 |
 |---|---|
-| **`PruningRouter`** | 上游剪枝路由器：从 top-k 候选中进一步筛选专家，动态算出当前 step 应保留的专家数 `dynamic_k` |
-| **`MoeBlockPrune`** | 下游执行模块：接收上游预选好的 `selected_experts`、`routing_weights` 和 `k_tensor`，按动态 k 执行 MLP 计算 |
+| **`s_scalar`** | buffer，各专家的重要性标量 |
+| **`prune_threshold`** | 浮点算子属性；非 `None` 时启用剪枝，不作为网络 tensor 输入 |
 
 ---
 
-## 2. PruningRouter — 动态剪枝路由器
+## 2. MoeBlock 动态剪枝路由
 
 ### 2.1 forward 签名
 
 ```python
 def forward(
     self,
-    routing_weights: Tensor,   # (batch, seq_len, num_experts) — 原始路由权重
-    s_scalar: Tensor,          # (num_experts,) — 各专家的重要性标量
-    threshold: float,          # 剪枝阈值
-) -> tuple[Tensor, Tensor, Tensor]:
+    hidden_states: Tensor,
+    routing_weights: Tensor,
+    selected_experts: Tensor | None = None,
+) -> Tensor:
 ```
+
+`prune_threshold` 是 `MoeBlock` 算子的浮点属性，在构造/导出时固化，
+不作为网络 tensor 输入。
 
 ### 2.2 内部计算流程
 
 ```
-输入: routing_weights [B, S, E], s_scalar [E], threshold
+输入: routing_weights [B, S, E], s_scalar [E]
+属性: prune_threshold
                     │
                     ▼
           ┌─────────────────────┐
@@ -55,7 +59,7 @@ def forward(
           ┌─────────────────────┐
           │ Step 3: 阈值筛选     │
           │ keep = score_norm >=│
-          │   threshold         │
+          │ prune_threshold    │
           │ 强制保留下标最大的   │
           │ 那个 slot           │
           └─────────┬───────────┘
@@ -76,7 +80,7 @@ def forward(
           │ 仍为 [B,S,top_k]    │
           └─────────┬───────────┘
                     │
-输出: topk_weights [B,S,K], selected_experts [B,S,K], dynamic_k int32
+内部结果: topk_weights [B,S,K'], selected_experts [B,S,K'], dynamic_k
 ```
 
 **关键算法**：标准的 **Method1** 剪枝算法——先做 top-k 选候选人，再用 `importance = gate_score × s_scalar` 评估每个候选人的"真正重要性"，低于阈值的剪掉，但保证每个 token 至少保留一个专家（importance 最大的 slot 强制保留）。
@@ -86,13 +90,13 @@ def forward(
 | 方面 | 标准 `MoeBlock` | `PruningRouter` |
 |---|---|---|
 | 专家选择 | 内嵌在 `MoeBlock.forward()` 中 | 独立模块，输出给下游 |
-| `k` 值 | 固定 `self.k` | 动态 `dynamic_k`（随 token 和推理步变化） |
+| `k` 值 | 固定 `self.k` | 内部动态 `dynamic_k`（随 token 和推理步变化） |
 | 剪枝能力 | 无 | 有 — 用 score + threshold 做二次筛选 |
-| 输出 shape | 不适用（内部完成） | 保留 `[B,S,top_k]`，被剪 slot 权重置 0 |
+| 输出 shape | `[B,S,D]` | `[B,S,D]`，动态路由结果在算子内部消费 |
 
 ---
 
-## 3. MoeBlockPrune — 动态 k 的 MoE 执行模块
+## 3. 动态 k 的 MoE 执行
 
 ### 3.1 forward 签名
 
@@ -100,9 +104,8 @@ def forward(
 def forward(
     self,
     hidden_states: torch.Tensor,        # [B, S, D]
-    routing_weights: torch.Tensor,      # [B, S, K] — 已由上游筛选后的权重
-    k_tensor: torch.Tensor,             # 标量或 1-D 整数 tensor — 运行时动态 k
-    selected_experts: Tensor | None,    # [B, S, K] — 已由上游筛选后的专家索引
+    routing_weights: torch.Tensor,      # [B, S, E] — 原始路由权重
+    selected_experts: Tensor | None = None,
     fast_mode: bool = True,
 ) -> torch.Tensor:
 ```
@@ -112,8 +115,8 @@ def forward(
 | 方面 | `MoeBlock` | `MoeBlockPrune` |
 |---|---|---|
 | **`k` 存储** | `self.k` — 构造时固定 | `self.k` — 仅作为 fallback/预分配参考 |
-| **实际 `k` 值** | `self.k` | `dynamic_k = int(k_tensor.item())` — 运行时 tensor |
-| **forward 参数** | 无 `k_tensor` | **多一个 `k_tensor`** |
+| **实际 `k` 值** | `self.k` | 由内部剪枝结果计算 `dynamic_k` |
+| **forward 参数** | 标准输入 | 标准输入；阈值是属性，不增加 tensor 输入 |
 | **topk_outside 截断** | 不截断（直接用 `self.k`） | `routing_weights[:, :dynamic_k]`, `selected_experts[:, :dynamic_k]` |
 | **非 topk_outside 模式** | `torch.topk(..., k=self.k)` | `torch.topk(..., k=dynamic_k)` |
 | **输出 shape** | `[B, S, D]` | `[B, S, D]`（相同） |
