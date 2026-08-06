@@ -200,7 +200,12 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         return page_attention_modules
 
     def set_page_attention_context(
-        self, paged_kv_caches: list[HMFPPagedKVCache], block_ids: Tensor, slot_mapping: Tensor, block_size: int
+        self,
+        paged_kv_caches: list[HMFPPagedKVCache],
+        block_ids: Tensor,
+        slot_mapping: Tensor,
+        block_size: int,
+        effective_kv_length: int | None = None,
     ):
         if paged_kv_caches is None:
             raise ValueError("paged_kv_caches is required for page attention.")
@@ -228,11 +233,18 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 f"{len(page_attention_modules)} modules vs {len(paged_kv_caches)} caches."
             )
 
+        length_classes = tuple(
+            page_attn_m.capture_cache_length_class(effective_kv_length)
+            for page_attn_m in page_attention_modules
+            if callable(getattr(page_attn_m, "capture_cache_length_class", None))
+        )
+        capture_cache_variant = length_classes if length_classes else None
         contexts_by_device = BaseLLMHMONNXModel._stage_page_attention_context_by_device(
             self,
             paged_kv_caches,
             block_ids,
             slot_mapping,
+            capture_cache_variant=capture_cache_variant,
         )
 
         for layer_idx, page_attn_m in enumerate(page_attention_modules):
@@ -243,6 +255,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 block_ids=block_ids_tensor,
                 slot_mapping=slot_mapping_tensor,
                 block_size=block_size,
+                effective_kv_length=effective_kv_length,
             )
             page_attn_m.set_context(page_attn_context)
 
@@ -251,6 +264,8 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         paged_kv_caches: list[HMFPPagedKVCache],
         block_ids: Tensor,
         slot_mapping: Tensor,
+        *,
+        capture_cache_variant: object | None = None,
     ) -> dict[str, tuple[Tensor, Tensor]]:
         """Update model-local, fixed-address metadata buffers on each cache device."""
         stage = "prefill" if self._llm_prefill else "decode"
@@ -271,6 +286,14 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         invalidate_active_graph = False
         block_ids_flat = block_ids.reshape(-1)
         slot_mapping_flat = slot_mapping.reshape(-1)
+        block_view_length = int(block_ids_flat.numel())
+        slot_view_length = int(slot_mapping_flat.numel())
+        uses_capture_cache = BaseLLMHMONNXModel._select_active_page_attention_capture_cache(
+            self,
+            stage=stage,
+            block_table_capacity=block_view_length,
+            capture_cache_variant=capture_cache_variant,
+        )
         for device_key, block_capacity in capacities_by_device.items():
             device = torch.device(device_key)
             key = (stage, device_key)
@@ -298,13 +321,19 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                     f"on {device}."
                 )
 
-            block_view_length = int(block_ids_flat.numel())
-            slot_view_length = int(slot_mapping_flat.numel())
             previous_block_view_length = device_buffers.get("block_ids_view_length")
             previous_slot_view_length = device_buffers.get("slot_mapping_view_length")
-            if previous_block_view_length is not None and previous_block_view_length != block_view_length:
+            if (
+                not uses_capture_cache
+                and previous_block_view_length is not None
+                and previous_block_view_length != block_view_length
+            ):
                 invalidate_active_graph = True
-            if previous_slot_view_length is not None and previous_slot_view_length != slot_view_length:
+            if (
+                not uses_capture_cache
+                and previous_slot_view_length is not None
+                and previous_slot_view_length != slot_view_length
+            ):
                 invalidate_active_graph = True
             device_buffers["block_ids_view_length"] = block_view_length
             device_buffers["slot_mapping_view_length"] = slot_view_length
@@ -332,6 +361,25 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         if invalidate_active_graph:
             BaseLLMHMONNXModel._clear_active_page_attention_cuda_graph(self)
         return staged
+
+    def _select_active_page_attention_capture_cache(
+        self,
+        *,
+        stage: str,
+        block_table_capacity: int,
+        capture_cache_variant: object | None = None,
+    ) -> bool:
+        active_model = self.prefill_model if self._llm_prefill else self.decode_model
+        session = getattr(active_model, "hmonnx_session", None)
+        interpreter = getattr(session, "interpreter", None)
+        select_capture = getattr(interpreter, "set_capture_cache_key", None)
+        if not callable(select_capture):
+            return False
+        cache_key = ("page_attention", stage, int(block_table_capacity))
+        if capture_cache_variant is not None:
+            cache_key = (*cache_key, capture_cache_variant)
+        select_capture(cache_key)
+        return True
 
     def _clear_active_page_attention_cuda_graph(self) -> None:
         """Clear only the prefill/decode HMONNX graph whose metadata pointer changed."""

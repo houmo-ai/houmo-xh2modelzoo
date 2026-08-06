@@ -46,13 +46,14 @@ def _make_model(prefill_modules, decode_modules=()):
     return model, clear_spy
 
 
-def _set_context(model, caches, block_ids, slot_mapping):
+def _set_context(model, caches, block_ids, slot_mapping, *, effective_kv_length=None):
     BaseLLMHMONNXModel.set_page_attention_context(
         model,
         paged_kv_caches=caches,
         block_ids=block_ids,
         slot_mapping=slot_mapping,
         block_size=64,
+        effective_kv_length=effective_kv_length,
     )
 
 
@@ -164,6 +165,79 @@ def test_page_attention_context_slot_growth_clears_only_active_graph(monkeypatch
     assert module.contexts[-1].slot_mapping.data_ptr() != old_ptr
     assert prefill_clear_spy.calls == [True]
     assert model.decode_model.hmonnx_session.interpreter.calls == []
+
+
+def test_page_attention_context_switches_capture_cache_instead_of_clearing(monkeypatch):
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model.PageAttentionContext",
+        _FakePageAttentionContext,
+    )
+    module = _FakePageAttention()
+    model, _ = _make_model([module])
+    selected = []
+
+    class CaptureCacheSpy:
+        def set_capture_cache_key(self, key):
+            selected.append(key)
+
+        def clear(self, *, clear_disabled_reason):
+            raise AssertionError(f"bucket cache switching must not clear captures: {clear_disabled_reason}")
+
+    model.prefill_model.hmonnx_session.interpreter = CaptureCacheSpy()
+    cache = SimpleNamespace(device=torch.device("cpu"), num_blocks=8)
+
+    _set_context(model, [cache], torch.tensor([1, 2]), torch.tensor([3, 4]))
+    first_ptr = module.contexts[-1].block_ids.data_ptr()
+    _set_context(model, [cache], torch.tensor([5, 6, 7, 0]), torch.tensor([8, 9]))
+    _set_context(model, [cache], torch.tensor([1, 2]), torch.tensor([10, 11]))
+
+    assert selected == [
+        ("page_attention", "prefill", 2),
+        ("page_attention", "prefill", 4),
+        ("page_attention", "prefill", 2),
+    ]
+    assert module.contexts[-1].block_ids.data_ptr() == first_ptr
+
+
+def test_page_attention_context_separates_kernel_length_classes(monkeypatch):
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model.PageAttentionContext",
+        _FakePageAttentionContext,
+    )
+
+    class KernelAwarePageAttention(_FakePageAttention):
+        @staticmethod
+        def capture_cache_length_class(effective_kv_length):
+            return "split_kv" if effective_kv_length >= 1024 else "single_kv"
+
+    module = KernelAwarePageAttention()
+    model, _ = _make_model([module])
+    selected = []
+    model.prefill_model.hmonnx_session.interpreter = SimpleNamespace(
+        set_capture_cache_key=selected.append
+    )
+    cache = SimpleNamespace(device=torch.device("cpu"), num_blocks=32)
+
+    _set_context(
+        model,
+        [cache],
+        torch.arange(16),
+        torch.tensor([0]),
+        effective_kv_length=513,
+    )
+    _set_context(
+        model,
+        [cache],
+        torch.arange(16),
+        torch.tensor([0]),
+        effective_kv_length=1024,
+    )
+
+    assert selected == [
+        ("page_attention", "prefill", 16, ("single_kv",)),
+        ("page_attention", "prefill", 16, ("split_kv",)),
+    ]
+    assert module.contexts[-1].effective_kv_length == 1024
 
 
 def test_page_attention_context_buffers_are_model_and_stage_local(monkeypatch):
