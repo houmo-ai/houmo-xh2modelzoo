@@ -439,7 +439,6 @@ class Wan22Converter:
         latent_ref = latent.to(self.device, dtype=validate_dtype)
         context_ref = context.to(self.device, dtype=validate_dtype)
         y_ref = y.to(self.device, dtype=validate_dtype) if y is not None else None
-        context_lens = None
 
         
         model.time_embedding = model.time_embedding.to(torch.float32)
@@ -467,7 +466,6 @@ class Wan22Converter:
                 context=context_arg,
                 e=e_ref,
                 e0=e0_ref,
-                context_lens=context_lens,
             )[0]
 
         diff = (out_ref - out_wrap).abs()
@@ -501,7 +499,6 @@ class Wan22Converter:
         latent_arg = wrapper._prepare_latent(latent_fp16, y_fp16)
         context_arg = wrapper._prepare_context(context_fp16)
         e, e0 = build_wan_time_embeddings(model, timestep, seq_len, torch.float16)
-        context_lens = torch.tensor([512], device=self.device, dtype=torch.int32)
         prefix = (
             f"wan2_2_{noise_model_name}-{self.config.quant_scheme.target_device}-{self.config.quant_scheme.quant_type}"
         )
@@ -510,14 +507,12 @@ class Wan22Converter:
             context_arg,
             e,
             e0,
-            context_lens,
         ]
         input_names = [
             "latent",
             "context",
             "e",
             "e0",
-            "context_lens",
         ]
         export_meta = self._export_component(
             model=model,

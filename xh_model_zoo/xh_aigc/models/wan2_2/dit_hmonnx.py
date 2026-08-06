@@ -76,21 +76,18 @@ class Wan22DiTInference(nn.Module):
         context,
         e,
         e0,
-        context_lens,
         y=None,
     ):
         latent = self._prepare_single_tensor(latent_model_input, "latent_model_input", self._dtype)
         cond = self._prepare_single_tensor(context, "context", self._dtype)
         e = self._prepare_tensor(e, self._dtype)
         e0 = self._prepare_tensor(e0, self._dtype)
-        context_lens = context_lens.to(self.device, dtype=torch.int32)
 
         inputs = [
             latent,
             cond,
             e,
             e0,
-            context_lens,
         ]
         if y is not None:
             inputs.append(self._prepare_single_tensor(y, "y", self._dtype))

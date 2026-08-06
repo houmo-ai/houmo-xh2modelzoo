@@ -85,7 +85,6 @@ class _Wan22HmonnxDiTProxy:
 
     def _prepare_context(self, context):
         context_tensor = self._as_single_tensor(context, "context")
-        context_lens = torch.tensor([context_tensor.size(0)], device=context_tensor.device, dtype=torch.int32)
         text_len = getattr(self._float_model, "text_len", None)
         if text_len is not None and context_tensor.size(0) < text_len:
             context_tensor = torch.cat(
@@ -98,8 +97,7 @@ class _Wan22HmonnxDiTProxy:
         if context_tensor.dim() == 2:
             context_tensor = context_tensor.unsqueeze(0)
 
-        context_lens = torch.tensor([512], device=context_tensor.device, dtype=torch.int32)
-        return context_tensor.half(), context_lens
+        return context_tensor.half()
 
     def __call__(self, x, *args, **kwargs):
         if "t" not in kwargs:
@@ -120,14 +118,13 @@ class _Wan22HmonnxDiTProxy:
         latent = x[0] if isinstance(x, list) else x
         e, e0 = build_wan_time_embeddings(self._float_model, t, seq_len, torch.float16)
         latent_tensor = self._prepare_latent(x, y)
-        context_tensor, context_lens = self._prepare_context(context)
+        context_tensor = self._prepare_context(context)
 
         runtime_out = self._runtime_model(
             latent_tensor,
             context=context_tensor,
             e=e,
             e0=e0,
-            context_lens=context_lens,
         )
         if not isinstance(runtime_out, (list, tuple)):
             runtime_out = (runtime_out,)

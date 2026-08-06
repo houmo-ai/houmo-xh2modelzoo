@@ -182,7 +182,7 @@ class _LazyDiTExportWrapper:
             self.wrapper = Wan2_2DiTExportWrapper(model).to(self.device).eval()
         return self.wrapper
 
-    def __call__(self, latent, *, context, e, e0, context_lens):
+    def __call__(self, latent, *, context, e, e0):
         wrapper = self._build()
         with torch.no_grad():
             return wrapper.model(
@@ -190,7 +190,6 @@ class _LazyDiTExportWrapper:
                 context=context.to(self.device, dtype=torch.float16),
                 e=e.to(self.device, dtype=torch.float16),
                 e0=e0.to(self.device, dtype=torch.float16),
-                context_lens=None,
             )[0]
 
 

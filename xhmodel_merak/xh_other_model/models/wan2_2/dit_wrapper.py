@@ -33,6 +33,13 @@ from wan.modules.model import (  # noqa: E402
 FLASH_ATTN_V_SCALE = 16.0
 
 
+def _scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    scale = 1 / math.sqrt(q.size(-1))
+    attn = torch.matmul(q, k.transpose(-1, -2)) * scale
+    attn = attn.softmax(dim=-1)
+    return torch.matmul(attn, v)
+
+
 def build_wan_time_embeddings(model: nn.Module, t: torch.Tensor, seq_len: int, output_dtype: torch.dtype):
     if t.dim() == 1:
         t = t.expand(t.size(0), seq_len)
@@ -139,7 +146,6 @@ class _WanModel(DynamicModule):
         context,
         e,
         e0,
-        context_lens,
     ):
         device = self.patch_embedding.weight.device
         if self.freqs_real.device != device:
@@ -177,7 +183,6 @@ class _WanModel(DynamicModule):
             freqs_real=self.freqs_real,
             freqs_imag=self.freqs_imag,
             context=context,
-            context_lens=context_lens,
         )
 
         for block in self.blocks:
@@ -242,21 +247,15 @@ class _WanSelfAttention(DynamicModule):
 class _WanCrossAttention(DynamicModule):
     def _setup(self, *args, **kwargs):
         del args, kwargs
-        self.flash_attn = xhnn.FlashAttention(
-            self.num_heads,
-            scale=1 / math.sqrt(self.head_dim),
-            is_causal=False,
-            sliding_window=None,
-        )
         return self
 
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context):
         b, s, n, d = x.size(0), x.size(1), self.num_heads, self.head_dim
         q = self.norm_q(self.q(x)).view(b, s, n, d).transpose(1, 2)
         k = self.norm_k(self.k(context)).view(b, -1, n, d).transpose(1, 2)
         v = self.v(context).view(b, -1, n, d).transpose(1, 2)
 
-        x = self.flash_attn(q, k, v / FLASH_ATTN_V_SCALE, kv_valid_length=context_lens) * FLASH_ATTN_V_SCALE
+        x = _scaled_dot_product_attention(q, k, v / FLASH_ATTN_V_SCALE) * FLASH_ATTN_V_SCALE
         x = x.transpose(1, 2).flatten(2)
         x = self.o(x)
         return x
@@ -275,7 +274,6 @@ class _WanAttentionBlock(DynamicModule):
         freqs_real,
         freqs_imag,
         context,
-        context_lens,
     ):
         mod = self.modulation.unsqueeze(0) + e
         e0, e1, e2, e3, e4, e5 = mod.split(1, dim=2)
@@ -288,7 +286,7 @@ class _WanAttentionBlock(DynamicModule):
         )
         x = x + y * e2.squeeze(2)
 
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        x = x + self.cross_attn(self.norm3(x), context)
         y = self.ffn(self.norm2(x) * (1 + e4.squeeze(2)) + e3.squeeze(2))
         x = x + y * e5.squeeze(2)
         return x
@@ -369,7 +367,6 @@ class Wan22DiTExportWrapper(nn.Module):
         context,
         e: torch.Tensor,
         e0: torch.Tensor,
-        context_lens: torch.Tensor,
     ):
         latent_arg = self._prepare_latent(latent_model_input)
         context_arg = self._prepare_context(context)
@@ -377,7 +374,6 @@ class Wan22DiTExportWrapper(nn.Module):
             "context": context_arg,
             "e": e,
             "e0": e0,
-            "context_lens": context_lens,
         }
         return self.model(latent_arg, **kwargs)[0]
 
