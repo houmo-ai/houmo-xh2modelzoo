@@ -38,6 +38,9 @@ from .qwen3_5_onnx_model import (
 )
 
 
+_DFLASH_ATTN_MASK_FILL_VALUE = -65504.0
+
+
 def _pad_hidden_tensor(hidden: torch.Tensor, target_seq_len: int) -> torch.Tensor:
     if hidden.shape[1] >= target_seq_len:
         return hidden[:, :target_seq_len, :]
@@ -576,7 +579,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                 batch_size,
                 next(iter(cache_state.values())).shape[2] if cache_state else self.max_context_tokens,
             ),
-            -10000.0,
+            _DFLASH_ATTN_MASK_FILL_VALUE,
             dtype=self._dtype,
             device=self.device,
         )
