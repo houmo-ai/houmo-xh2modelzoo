@@ -1,0 +1,36 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMV46ForConditionalGeneration
+    hf_model: null
+    model_name: minicpm_v_4_6_qwen3_5_0_8b
+    context_max_length: 8192
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_chunk_size: 64
+    split_conv_cache: true
+    only_first_block: false
+    visual_config: null
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+
+  vision:
+    token_capacity: 1536
+    keep_onnx: false
+
+  components:
+    vision_4x:
+      enabled: true
+      quant_type: w8a8h1_sefp
+      validation_target: [30, 40]
+    vision_16x:
+      enabled: true
+      quant_type: w8a8h1_sefp
+      validation_target: [28, 40]
+    llm:
+      enabled: true
+      quant_type: w8a8h1_sefp
