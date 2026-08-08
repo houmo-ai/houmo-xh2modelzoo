@@ -4,13 +4,25 @@ from pathlib import Path
 
 
 DEFAULTS = {
-    "libero": {
-        "config": "configs_merak/workflows/xh2a/other_models/pi05/libero/pi05_libero.yaml",
-        "output": "work_dirs/pi05_libero_XH2a",
+    "droid-customer-h50": {
+        "config": "configs_merak/workflows/xh2a/other_models/pi05/droid/pi05_droid_customer_h50.yaml",
+        "output": "work_dirs/pi05_droid_customer_h50_compact_maskadd2_XH2a",
     },
-    "droid": {
-        "config": "configs_merak/workflows/xh2a/other_models/pi05/droid/pi05_droid.yaml",
-        "output": "work_dirs/pi05_droid_XH2a",
+    "droid-openpi-h15": {
+        "config": "configs_merak/workflows/xh2a/other_models/pi05/droid/pi05_droid_openpi_h15.yaml",
+        "output": "work_dirs/pi05_droid_openpi_h15_compact_maskadd2_XH2a",
+    },
+    "libero-openpi-h10": {
+        "config": "configs_merak/workflows/xh2a/other_models/pi05/libero/pi05_libero_openpi_h10.yaml",
+        "output": "work_dirs/pi05_libero_openpi_h10_compact_XH2a",
+    },
+    "libero-lerobot-h50": {
+        "config": "configs_merak/workflows/xh2a/other_models/pi05/libero/pi05_libero_lerobot_h50.yaml",
+        "output": "work_dirs/pi05_libero_lerobot_h50_compact_XH2a",
+    },
+    "aloha-openpi-h50": {
+        "config": "configs_merak/workflows/xh2a/other_models/pi05/aloha/pi05_aloha_openpi_h50.yaml",
+        "output": "work_dirs/pi05_aloha_openpi_h50_compact_XH2a",
     },
 }
 
@@ -23,7 +35,7 @@ def _remove_output_dir_if_needed(output_dir: str, force: bool) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the PI05 Merak workflow.")
-    parser.add_argument("--variant", choices=sorted(DEFAULTS), default="libero")
+    parser.add_argument("--variant", choices=sorted(DEFAULTS), default="droid-customer-h50")
     parser.add_argument("--model-dir", required=True, help="PI05 model directory.")
     parser.add_argument("--config-path", default=None, help="Override workflow YAML path.")
     parser.add_argument("--export-output-dir", default=None, help="Override export output directory.")
@@ -32,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-device", default=None, help="Override export.target_device.")
     parser.add_argument("--quant-type", default=None, help="Override all component quant types.")
     parser.add_argument("--components", default=None, help="Comma-separated component list override.")
-    parser.add_argument("--config-dir", default=None, help="Override Paligemma tokenizer config directory.")
+    parser.add_argument("--config-dir", required=True, help="Paligemma tokenizer config directory.")
     parser.add_argument("--dump-golden", action="store_true", help="Generate golden data after export.")
     parser.add_argument("--overwrite", action="store_true", help="Remove export output dir first.")
     parser.add_argument("--debug", action="store_true")
@@ -45,8 +57,7 @@ def _build_config_overrides(args: argparse.Namespace) -> dict[str, object]:
         overrides["export.target_device"] = args.target_device
     if args.components:
         overrides["export.components"] = [item.strip() for item in args.components.split(",") if item.strip()]
-    if args.config_dir is not None:
-        overrides["export.config_dir"] = args.config_dir
+    overrides["export.config_dir"] = args.config_dir
     if args.quant_type is not None:
         for name in ("vision", "gemma", "expert", "other"):
             overrides[f"export.quant_types.{name}"] = args.quant_type

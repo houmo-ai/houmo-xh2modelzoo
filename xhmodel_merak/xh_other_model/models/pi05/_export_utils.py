@@ -1,3 +1,4 @@
+import json
 import random
 from pathlib import Path
 from typing import Any, Sequence
@@ -11,13 +12,13 @@ from onnxsim import simplify
 class Siglip(nn.Module):
     def __init__(self, model):
         super().__init__()
-        self.vision_tower = model.vision_tower.eval()
-        self.multi_modal_projector = model.multi_modal_projector.eval()
+        self.model = model.eval()
 
     def forward(self, pixel_values):
-        image_outputs = self.vision_tower(pixel_values)
-        selected_image_feature = image_outputs.last_hidden_state
-        return self.multi_modal_projector(selected_image_feature)
+        image_features = self.model.get_image_features(pixel_values)
+        if isinstance(image_features, torch.Tensor):
+            return image_features
+        return image_features.pooler_output * self.model.config.text_config.hidden_size**0.5
 
 
 class TimeMLPWrapper(nn.Module):
@@ -44,10 +45,32 @@ def set_seed(seed: int = 42) -> None:
 def load_pi05_policy(model_path: str, device: str = "cpu"):
     from lerobot.policies.pi05 import PI05Policy
 
-    policy = PI05Policy.from_pretrained(model_path, strict=True)
+    config = _load_local_pi05_config_compat(model_path)
+    if config is None:
+        from lerobot.configs.policies import PreTrainedConfig
+
+        config = PreTrainedConfig.from_pretrained(model_path)
+    policy = PI05Policy.from_pretrained(model_path, config=config, strict=True)
     policy.to(device)
     policy.config.device = device
     return policy.eval()
+
+
+def _load_local_pi05_config_compat(model_path: str):
+    config_file = Path(model_path) / "config.json"
+    if not config_file.is_file():
+        return None
+
+    raw_config = json.loads(config_file.read_text(encoding="utf-8"))
+    if raw_config.get("relative_exclude_joints", []) is not None:
+        return None
+
+    import draccus
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+
+    raw_config.pop("type", None)
+    raw_config["relative_exclude_joints"] = []
+    return draccus.decode(PI05Config, raw_config)
 
 
 def export_onnx_and_simplify(

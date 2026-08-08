@@ -2,9 +2,11 @@ quant: null
 
 export:
   target_device: XH2a
-  variant: libero
-  config_dir: /data02/datasets/paligemma-3b-pt-224
+  variant: libero_lerobot_h50
+  config_dir: null
   prompt: 请解释Gemma模型的核心优势是什么？
+  selected_image_indices: [0, 1]
+  text_max_length: 200
   components:
     - vision
     - gemma
@@ -20,7 +22,7 @@ export:
     hf_model: null
     wrap_cfg:
       max_sequence_length: 1024
-      input_sequence_length: 968
+      input_sequence_length: 712
       use_cache: true
       num_logits_to_keep: 1
       kv_cache:

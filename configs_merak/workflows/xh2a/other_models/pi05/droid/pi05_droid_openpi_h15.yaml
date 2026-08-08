@@ -2,16 +2,12 @@ quant: null
 
 export:
   target_device: XH2a
-  variant: droid_customer_h50
+  variant: droid_openpi_h15
   config_dir: null
   prompt: 请解释Gemma模型的核心优势是什么？
   selected_image_indices: [0, 1]
   text_max_length: 200
-  components:
-    - vision
-    - gemma
-    - expert
-    - other
+  components: [vision, gemma, expert, other]
   quant_types:
     vision: w8a8h1_sefp
     gemma: w8a8h1_sefp
@@ -30,19 +26,14 @@ export:
     quant_config: {}
     frontend_type: TorchFX
     export_cfg:
-      input_names:
-        - inputs_embeds
-        - past_seq_length
-        - current_input_length
-        - attention_mask
-      output_names:
-        - last_hidden_state
+      input_names: [inputs_embeds, past_seq_length, current_input_length, attention_mask]
+      output_names: [last_hidden_state]
   expert_model:
     type: XHGemma05CLLMModel
     hf_model: null
     wrap_cfg:
       max_sequence_length: 1024
-      input_sequence_length: 50
+      input_sequence_length: 15
       use_cache: true
       num_logits_to_keep: 1
       kv_cache:
@@ -50,22 +41,12 @@ export:
     quant_config: {}
     frontend_type: TorchFX
     export_cfg:
-      input_names:
-        - inputs_embeds
-        - past_seq_length
-        - current_input_length
-        - cond
-        - attention_mask
-      output_names:
-        - last_hidden_state
+      input_names: [inputs_embeds, past_seq_length, current_input_length, cond, attention_mask]
+      output_names: [last_hidden_state]
   vision:
-    input_shape:
-      - 1
-      - 3
-      - 224
-      - 224
+    input_shape: [1, 3, 224, 224]
     opset: 17
   other:
-    sequence_length: 50
+    sequence_length: 15
     hidden_size: 1024
     opset: 17

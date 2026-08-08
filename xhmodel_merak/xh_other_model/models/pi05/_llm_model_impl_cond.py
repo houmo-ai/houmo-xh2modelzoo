@@ -1,27 +1,27 @@
 import math
 import sys
 import types
-from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import xhquant.nn as xhnn
 from torch import Tensor
-from transformers import Cache
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.gemma.modeling_gemma import (
     GemmaAttention,
     GemmaDecoderLayer,
     GemmaForCausalLM,
-    GemmaRMSNorm,
     GemmaModel,
+    GemmaRMSNorm,
 )
+
+import xhquant.nn as xhnn
 from xhquant.api import ConfigDict
-from xhquant.nn import LLMCache, MaskedSoftmax, AdaRMSNorm, Rope
+from xhquant.nn import AdaRMSNorm, LLMCache, MaskedSoftmax, Rope
 from xhquant.utils.registry import DynamicModule
 
 from ...builder import XHLLM_TRACEABLE_MODULES
+
 
 step_i = 0
 
@@ -89,7 +89,6 @@ class _GemmaAttention(DynamicModule):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         
         bsz, q_len, _ = hidden_states.size()
-        causal_mask = None
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -130,7 +129,7 @@ class _GemmaAttention(DynamicModule):
             # attn_weights = self.key_group_broadcast_matmul(query_states, key_states)
             # attn_weights = torch.matmul(query_states, key_states) / math.sqrt(self.head_dim) #fp16下会出现nan
             # attn_weights: Optional[Tensor] = self.masked_softmax(attn_weights, past_seq_length)
-            attn_weights = attn_weights + attention_mask
+            attn_weights = self.masked_add(attn_weights, attention_mask)
             attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
             # TODO: HMMatMul broadcast
@@ -177,6 +176,7 @@ class _GemmaAttention(DynamicModule):
         attention_max_length = -1
 
         self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=attention_max_length)
+        self.masked_add = xhnn.MaskedAdd()
         use_cache = cfg.use_cache
         self.use_cache = use_cache
         self.key_extra_scale = 1.0 if "key_extra_scale" not in cfg else cfg.key_extra_scale
@@ -353,7 +353,6 @@ class _GemmaModel(DynamicModule):
         adarms_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        causal_mask = None  # 在Attention中处理
         # embed positions
         hidden_states = inputs_embeds
         cos = self.cos_slice(self.cos_cached, past_seq_length)
@@ -431,9 +430,19 @@ class _GemmaForCausalLM(DynamicModule):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
         return hidden_states
 
 
 def register_wrap_cls(hf_model):
-    pass
+    if hf_model is None:
+        return
+    model = hf_model.model
+    registrations = (
+        (type(hf_model), _GemmaForCausalLM),
+        (type(model), _GemmaModel),
+        (type(model.layers[0]), _GemmaDecoderLayer),
+        (type(model.norm), _GemmaRMSNorm),
+    )
+    for hf_cls, wrapper_cls in registrations:
+        if hf_cls not in XHLLM_TRACEABLE_MODULES:
+            XHLLM_TRACEABLE_MODULES.register_module({hf_cls: hf_cls.__name__}, wrapper_cls)

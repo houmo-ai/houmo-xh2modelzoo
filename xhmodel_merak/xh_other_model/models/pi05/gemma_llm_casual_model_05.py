@@ -1,14 +1,10 @@
-from typing import List, Optional, Tuple, Union
-import torch.nn as nn
+from typing import List, Optional, Union
 
 import torch
+import torch.nn as nn
 from torch import Tensor
-
-# import transformers_modules
-from transformers import GemmaModel, AutoTokenizer, GemmaForCausalLM
-from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
-from xhquant.api import get_root_logger
-from xhquant.core import HybridCacheTensor
+from transformers import AutoTokenizer, GemmaForCausalLM, GemmaModel
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ...base_llm_model import LLMBaseModel
 from ...builder import XHLLM_TRACEABLE_MODULES, register_other_model
@@ -23,7 +19,17 @@ def _clear_gemma_traceable_modules() -> None:
         GemmaRMSNorm,
     )
 
-    for cls in (GemmaRMSNorm, GemmaAttention, GemmaDecoderLayer, GemmaModel, GemmaForCausalLM):
+    classes = {
+        GemmaRMSNorm,
+        GemmaAttention,
+        GemmaDecoderLayer,
+        GemmaModel,
+        GemmaForCausalLM,
+    }
+    classes.update(
+        cls for cls in XHLLM_TRACEABLE_MODULES._registry if cls.__module__ == "lerobot.policies.pi_gemma"
+    )
+    for cls in classes:
         XHLLM_TRACEABLE_MODULES._registry.pop(cls, None)
         XHLLM_TRACEABLE_MODULES._key_registry.pop(cls, None)
     XHLLM_TRACEABLE_MODULES._dynamic_classes.clear()
@@ -52,13 +58,9 @@ class XHGemma05CLLMModel(LLMBaseModel):
 
     def get_hf_model(self, device_map="cpu", **kwargs) -> GemmaForCausalLM:
         assert self.hf_model_dir is not None
-        from lerobot.policies.pi05 import PI05Policy
+        from ._export_utils import load_pi05_policy
 
-        policy = PI05Policy.from_pretrained(
-                pretrained_name_or_path=self.hf_model_dir,
-                strict=True
-            ).eval()
-        return policy
+        return load_pi05_policy(self.hf_model_dir, device=str(device_map))
     
     def get_tokenizer(self, config_dir: str):
         tokenizer = AutoTokenizer.from_pretrained(config_dir)
@@ -78,7 +80,7 @@ class XHGemma05CLLMModel(LLMBaseModel):
         random_embedding[0] = 0.0
         state_dict = {"weight": random_embedding}
         self.token_embedding.load_state_dict(state_dict)
-        self.generation_config = _llm.generation_config
+        self.generation_config = getattr(_llm, "generation_config", None)
         self.num_hidden_layers = _llm.config.num_hidden_layers
         head_dim = _llm.model.layers[0].self_attn.head_dim
         batch_size = 1
@@ -93,34 +95,27 @@ class XHGemma05CLLMModel(LLMBaseModel):
             )
         _llm = None
 
-    # def prepare_kv_cache(self, num_decoder_layers, kv_cache_shape):
-    #     self.past_key_caches = []
-    #     self.past_value_caches = []
-    #     if self.use_cache:
-    #         for i in range(num_decoder_layers):
-    #             layer_kv_cache_shape = kv_cache_shape
-    #             self.past_key_caches.append(HybridCacheTensor(torch.zeros(layer_kv_cache_shape, dtype=torch.float16)))
-    #             self.past_value_caches.append(HybridCacheTensor(torch.zeros(layer_kv_cache_shape, dtype=torch.float16)))
-
-    #         for layer_idx in range(num_decoder_layers):
-    #             self.export_cfg.input_names.append(f"past_key_cache_{layer_idx}")
-    #         for layer_idx in range(num_decoder_layers):
-    #             self.export_cfg.input_names.append(f"past_value_cache_{layer_idx}")
     def prepare_inputs(self, data: Union[dict, tuple, list], out_padding=True):
         raw_input_ids: List[List[int]] = data["input_ids"]
         assert self.token_embedding is not None, "Token embedding is not available."
 
         device = self.execution_device
         input_ids = []
+        requested_lengths = data.get("current_input_length")
         current_input_length = []
         for batch_idx, input_id in enumerate(raw_input_ids):
-            input_id = torch.tensor(input_id, dtype=torch.long)
+            input_id = torch.as_tensor(input_id, dtype=torch.long)
             seq_length = input_id.shape[0]
             past_seq_length = data["past_seq_length"][batch_idx]
-            current_input_length.append(seq_length)
+            current_input_length.append(
+                int(requested_lengths[batch_idx]) if requested_lengths is not None else seq_length
+            )
             assert (
                 seq_length <= self.input_sequence_length
-            ), f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
+            ), (
+                f"Input sequence length is too long. max input sequence length is "
+                f"{self.input_sequence_length} but got {seq_length}"
+            )
             if self.input_sequence_length > seq_length and out_padding:
                 padding_input_ids = torch.zeros(
                     (self.input_sequence_length - seq_length), dtype=torch.long, device=input_id.device
@@ -140,6 +135,10 @@ class XHGemma05CLLMModel(LLMBaseModel):
         past_seq_length = data["past_seq_length"]
         past_seq_length = torch.tensor(past_seq_length, dtype=torch.int32).to(device)
         assert torch.all(past_seq_length >= 0)
+        if torch.any(current_input_length <= 0) or torch.any(current_input_length > self.input_sequence_length):
+            raise ValueError("PI05 Expert current_input_length is outside the static input sequence")
+        if torch.any(past_seq_length + current_input_length > self.cache_length):
+            raise ValueError("PI05 Expert cache write exceeds cache capacity")
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
         torch.manual_seed(42)
@@ -149,13 +148,13 @@ class XHGemma05CLLMModel(LLMBaseModel):
         else:
             # attention_mask = torch.zeros((1, 8, 50, 1024), dtype=torch.bfloat16, device=device)
             attention_mask = torch.full(
-                (1, 1, self.input_sequence_length, 1024),
+                (1, 1, 1, self.cache_length),
                 torch.finfo(torch.float16).min,
                 dtype=torch.float16,
                 device=device,
             )
 
-            attention_mask[..., :self.input_sequence_length] = 0.0
+            attention_mask[..., : int((past_seq_length + current_input_length).max().item())] = 0.0
 
         # inputs_embeds = torch.load("/data01/home/she.gao/lerobot/suffix_embs.pt").to(torch.float32)
         # cond = torch.load("/data01/home/she.gao/xhquant_llm/examples/cond.pt")
@@ -172,9 +171,15 @@ class XHGemma05CLLMModel(LLMBaseModel):
         )
 
     def prepare_inputs_for_graph(self, data: Union[dict, tuple, list]):
-        inputs_embeds, past_seq_length, seg_length, cond, attention_mask, past_key_caches, past_value_caches = (
-            self.prepare_inputs(data)
-        )
+        (
+            inputs_embeds,
+            past_seq_length,
+            seg_length,
+            cond,
+            attention_mask,
+            past_key_caches,
+            past_value_caches,
+        ) = self.prepare_inputs(data)
         return (
             inputs_embeds,
             past_seq_length,
