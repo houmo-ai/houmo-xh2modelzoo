@@ -1,0 +1,33 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: HunYuanVLForConditionalGeneration
+    hf_model: null
+    model_name: hunyuan_ocr_base
+    context_max_length: 131072
+    prefill_chunk_length: 256
+    max_pe_length: 131072
+    use_cache: true
+    num_logits_to_keep: 1
+    pad_token_id: 120002
+    tokenizer_eos_token_id: 120007
+    generation_eos_token_id: 120020
+    image_token_id: 120120
+    smoke_only: true
+    calibration: {}
+    resolution_bucket_manifest: examples_merak/llm/hunyuan_ocr/assets/hunyuan_ocr_resolution_buckets.json
+    quant_scheme:
+      quant_type: w16a16h0_sefp
+      nodes:
+        lm_head:
+          quant_type: w16a16h0_sefp
+      ops: {}
+    visual_config:
+      model_type: HunYuanVLForConditionalGeneration_visual
+      model_name: hunyuan_ocr_base_visual
+      quant_scheme:
+        quant_type: w16a16h0_sefp
+        ops: {}
+    only_first_block: false

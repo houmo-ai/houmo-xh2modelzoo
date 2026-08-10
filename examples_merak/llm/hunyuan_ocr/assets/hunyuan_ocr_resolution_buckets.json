@@ -1,0 +1,97 @@
+{
+  "schema_version": 2,
+  "status": "approved",
+  "alignment": {
+    "patch_size": 16,
+    "spatial_merge_size": 2,
+    "dimension_multiple": 32
+  },
+  "input_policy": {
+    "max_images_per_request": 3,
+    "resize_mode": "scale_to_fit",
+    "allow_crop": false,
+    "allow_distortion": false,
+    "padding_color_rgb": [255, 255, 255],
+    "processor_do_resize": false,
+    "native_4k_vision": false,
+    "accept_4k_source_file": true
+  },
+  "routing": {
+    "algorithm": "fidelity_then_utilization_v1",
+    "min_content_ratio": 0.8,
+    "min_downscale": 0.25,
+    "unsupported_input": "reject"
+  },
+  "resource_limits": {
+    "max_image_tokens": 1400,
+    "max_canonical_prefill_length": 1446,
+    "max_vision_attention_pair_count": 27040000
+  },
+  "buckets": [
+    {
+      "id": "bucket_1280x960",
+      "width": 1280,
+      "height": 960,
+      "image_grid_thw": [1, 60, 80],
+      "vit_patch_count": 4800,
+      "merged_patch_hw": [30, 40],
+      "image_token_count": 1232,
+      "canonical_prefill_length": 1278,
+      "vision_attention_pair_count": 23040000,
+      "legacy_baseline": false,
+      "approval_rationale": "approved v1 base portfolio horizontal coverage within resource limits"
+    },
+    {
+      "id": "bucket_1440x896",
+      "width": 1440,
+      "height": 896,
+      "image_grid_thw": [1, 56, 90],
+      "vit_patch_count": 5040,
+      "merged_patch_hw": [28, 45],
+      "image_token_count": 1290,
+      "canonical_prefill_length": 1336,
+      "vision_attention_pair_count": 25401600,
+      "legacy_baseline": false,
+      "approval_rationale": "approved v1 base portfolio accepts high-resolution source files through static downsampling"
+    },
+    {
+      "id": "bucket_672x1408",
+      "width": 672,
+      "height": 1408,
+      "image_grid_thw": [1, 88, 42],
+      "vit_patch_count": 3696,
+      "merged_patch_hw": [44, 21],
+      "image_token_count": 970,
+      "canonical_prefill_length": 1016,
+      "vision_attention_pair_count": 13660416,
+      "legacy_baseline": false,
+      "approval_rationale": "approved v1 base portfolio vertical coverage within resource limits"
+    },
+    {
+      "id": "bucket_928x1312",
+      "width": 928,
+      "height": 1312,
+      "image_grid_thw": [1, 82, 58],
+      "vit_patch_count": 4756,
+      "merged_patch_hw": [41, 29],
+      "image_token_count": 1232,
+      "canonical_prefill_length": 1278,
+      "vision_attention_pair_count": 22619536,
+      "legacy_baseline": false,
+      "approval_rationale": "approved v1 base portfolio vertical coverage without crop or distortion"
+    }
+  ],
+  "multi_image_policy": {
+    "target_semantics": "independent_bucket_per_image",
+    "enabled": true,
+    "max_total_image_tokens": 4200
+  },
+  "approval": {
+    "approved_on": "2026-07-22",
+    "model_owner": "junjie.yang",
+    "deployment_owner": "none",
+    "accuracy_owner": "none",
+    "evidence_report": "internal evaluation record",
+    "evidence_sha256": "9c00261d3751894e38b56f83d2878d55db65ec3d4c389965c751974fb946f344"
+  }
+}

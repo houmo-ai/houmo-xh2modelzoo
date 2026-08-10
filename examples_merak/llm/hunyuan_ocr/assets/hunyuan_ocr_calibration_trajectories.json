@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source": "native_transformers_fp16_greedy",
+  "model": "data/models/HunyuanOCR",
+  "prompt": "Extract the document as markdown.",
+  "max_new_tokens": 16,
+  "trajectories": [
+    {
+      "request_index": 0,
+      "image": "data/calib_data/sampledata/a.png",
+      "image_sha256": "5cce6b4dff7a44362591bf83dc50e8ae4038f751d02ab83a5cfb41c3514283c6",
+      "token_ids": [2, 206, 1818, 10620, 20831, 120007]
+    },
+    {
+      "request_index": 1,
+      "image": "data/calib_data/sampledata/image-2025-09-15-14-13-29-031.png",
+      "image_sha256": "4767bc4156736e7a132fbdeba87268917ef04ebb236f57cd9344d2ef6549fae2",
+      "token_ids": [5390, 206, 12161, 267, 19177, 342, 185, 5390, 206, 16, 13, 206, 3080, 507, 1414, 515]
+    },
+    {
+      "request_index": 2,
+      "image": "data/calib_data/sampledata/image-2025-09-15-14-15-23-853.png",
+      "image_sha256": "e6df9c30868668a89036c9e2152cfecac654bf9a686d45d60448fbce36b12547",
+      "token_ids": [2, 206, 1698, 16, 120007]
+    },
+    {
+      "request_index": 3,
+      "image": "data/images/ILSVRC2012_val_00002031.JPEG",
+      "image_sha256": "d78d1e8d94cc215103c162c7e0045bee9551dfeb2c44992b29e23ba4f01a890a",
+      "token_ids": [12858, 38750, 9738, 292, 120007]
+    },
+    {
+      "request_index": 4,
+      "image": "examples/llm/minicpmo/assets/radar.jpg",
+      "image_sha256": "4b7a34a200aca379cd13e56e34224130c320da32d49c74983ffbff8b9f571029",
+      "token_ids": [91, 206, 867, 119460, 12, 19, 78, 12, 1717, 24999, 867, 53000, 7179, 12, 16, 13]
+    }
+  ]
+}

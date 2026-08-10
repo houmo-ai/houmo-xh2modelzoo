@@ -1,0 +1,62 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: HunYuanVLForConditionalGeneration
+    hf_model: null
+    model_name: hunyuan_ocr_base
+    context_max_length: 131072
+    prefill_chunk_length: 256
+    max_pe_length: 131072
+    use_cache: true
+    num_logits_to_keep: 1
+    pad_token_id: 120002
+    tokenizer_eos_token_id: 120007
+    generation_eos_token_id: 120020
+    image_token_id: 120120
+    smoke_only: false
+    calibration:
+      prompt: Extract the document as markdown.
+      images:
+        - data/calib_data/sampledata/a.png
+        - data/calib_data/sampledata/image-2025-09-15-14-13-29-031.png
+        - data/calib_data/sampledata/image-2025-09-15-14-15-23-853.png
+        - data/images/ILSVRC2012_val_00002031.JPEG
+        - examples/llm/minicpmo/assets/radar.jpg
+      reference_trajectory_manifest: examples_merak/llm/hunyuan_ocr/assets/hunyuan_ocr_calibration_trajectories.json
+    resolution_bucket_manifest: examples_merak/llm/hunyuan_ocr/assets/hunyuan_ocr_resolution_buckets.json
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    precision_boundary:
+      quantized_modules:
+        - text_backbone_linear
+        - lm_head
+        - visual_encoder
+        - patch_merger
+      high_precision_modules:
+        - input_embedding
+        - attention_matmul
+        - rms_norm
+        - xd_rope
+        - masked_softmax
+        - residual_add
+        - kv_cache
+    visual_config:
+      model_type: HunYuanVLForConditionalGeneration_visual
+      model_name: hunyuan_ocr_base_visual
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false
