@@ -4,11 +4,20 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
 from examples_merak.vla.pi05.pi05_droid_fae_pipeline import VARIANTS, validate_summary
+from examples_merak.vla.pi05.pi05_droid_hmonnx_validation import _create_hmonnx_session
+from examples_merak.vla.pi05.pi05_droid_standard_eval import (
+    decode_observation_images,
+    to_droid_relative_actions,
+)
+from examples_merak.vla.pi05.pi05_libero_fp_eval import _merge_local_tokenizer_override
+from examples_merak.vla.pi05.pi05_libero_hmonnx_eval import _parse_hmonnx_wrapper_args
+from examples_merak.vla.pi05.pi05_libero_hmonnx_validation import _parse_task_ids
 from examples_merak.vla.pi05.pi05_modelscope_droid import verify_snapshot
 from xhmodel_merak.xh_other_model.builder import XHLLM_TRACEABLE_MODULES
 from xhmodel_merak.xh_other_model.models.pi05._export_utils import Siglip, _load_local_pi05_config_compat
@@ -82,14 +91,22 @@ class _CompactPrefixPolicyModel(nn.Module):
     def embed_prefix(self, images, image_masks, tokens, token_masks):
         del images, tokens
         image_embs = [
-            torch.full((1, 256, 4), float(index + 1), device=self.anchor.device)
+            torch.full(
+                (1, 256, 4),
+                float(index + 1),
+                device=self.anchor.device,
+                dtype=self.anchor.dtype,
+            )
             for index in range(len(image_masks))
         ]
-        language_embs = torch.full((1, token_masks.shape[1], 4), 9.0, device=self.anchor.device)
-        prefix_embs = torch.cat([*image_embs, language_embs], dim=1)
-        prefix_pad_masks = torch.cat(
-            [mask[:, None].expand(-1, 256) for mask in image_masks] + [token_masks], dim=1
+        language_embs = torch.full(
+            (1, token_masks.shape[1], 4),
+            9.0,
+            device=self.anchor.device,
+            dtype=self.anchor.dtype,
         )
+        prefix_embs = torch.cat([*image_embs, language_embs], dim=1)
+        prefix_pad_masks = torch.cat([mask[:, None].expand(-1, 256) for mask in image_masks] + [token_masks], dim=1)
         return prefix_embs, prefix_pad_masks, torch.zeros_like(prefix_pad_masks)
 
     @staticmethod
@@ -104,6 +121,22 @@ class _CompactTokenizer:
             input_ids=torch.tensor([[1, 2, 0, 0]]),
             attention_mask=torch.tensor([[1, 1, 0, 0]]),
         )
+
+
+class _PrefixKVLanguageModel:
+    def __call__(self, *, inputs_embeds, attention_mask, position_ids, use_cache):
+        assert attention_mask.dtype == inputs_embeds.dtype
+        assert position_ids.shape == inputs_embeds.shape[:2]
+        assert use_cache is True
+        cache = torch.zeros(
+            1,
+            1,
+            inputs_embeds.shape[1],
+            2,
+            dtype=inputs_embeds.dtype,
+            device=inputs_embeds.device,
+        )
+        return SimpleNamespace(past_key_values=[(cache, cache.clone())])
 
 
 def test_gemma_prepare_inputs_preserves_scaled_embedding() -> None:
@@ -192,10 +225,121 @@ def test_modelscope_snapshot_verification_records_sha256_and_md5(tmp_path) -> No
     }
 
 
+def test_standard_droid_actions_convert_joint_targets_but_not_gripper() -> None:
+    actions = np.asarray([[2.0, 4.0, 0.75], [3.0, 5.0, 0.25]], dtype=np.float32)
+    state = np.asarray([1.0, 2.0, 0.5], dtype=np.float32)
+
+    relative = to_droid_relative_actions(
+        actions,
+        state,
+        ["joint_0", "joint_1", "gripper"],
+    )
+
+    np.testing.assert_allclose(
+        relative,
+        np.asarray([[1.0, 2.0, 0.75], [2.0, 3.0, 0.25]], dtype=np.float32),
+    )
+
+
+def test_standard_droid_video_timestamps_are_local_to_each_camera_file() -> None:
+    class _Meta:
+        episodes = {
+            7: {
+                "videos/observation.images.exterior_1_left/from_timestamp": 10.0,
+                "videos/observation.images.wrist_left/from_timestamp": 20.0,
+            }
+        }
+
+    class _Dataset:
+        meta = _Meta()
+        fps = 15
+
+        def _query_videos(self, timestamps, episode_id):
+            return {"timestamps": timestamps, "episode_id": episode_id}
+
+    result = decode_observation_images(_Dataset(), episode_id=7, frame_index=30)
+
+    assert result == {
+        "timestamps": {
+            "observation.images.exterior_1_left": [12.0],
+            "observation.images.wrist_left": [22.0],
+        },
+        "episode_id": 7,
+    }
+
+
+def test_libero_local_tokenizer_override_preserves_eval_overrides(tmp_path) -> None:
+    kwargs = {
+        "preprocessor_overrides": {
+            "device_processor": {"device": "cuda"},
+            "tokenizer_processor": {"max_length": 200},
+        },
+        "postprocessor_overrides": {"device_processor": {"device": "cpu"}},
+    }
+
+    merged = _merge_local_tokenizer_override(kwargs, tmp_path)
+
+    assert merged == {
+        "preprocessor_overrides": {
+            "device_processor": {"device": "cuda"},
+            "tokenizer_processor": {
+                "max_length": 200,
+                "tokenizer_name": str(tmp_path),
+            },
+        },
+        "postprocessor_overrides": {"device_processor": {"device": "cpu"}},
+    }
+    assert "tokenizer_name" not in kwargs["preprocessor_overrides"]["tokenizer_processor"]
+
+
+def test_libero_hmonnx_task_ids_are_unique_and_ordered() -> None:
+    assert _parse_task_ids("2,0,2,9") == [2, 0, 9]
+    assert _parse_task_ids(None) is None
+
+
+def test_libero_hmonnx_eval_forwards_official_cli_arguments() -> None:
+    tokenizer_dir, export_dir, runtime_mode, remaining = _parse_hmonnx_wrapper_args(
+        [
+            "--tokenizer-dir=tokenizer",
+            "--export-dir",
+            "graphs",
+            "--hmonnx-runtime=v2",
+            "--env.type=libero",
+            "--eval.n_episodes=20",
+        ]
+    )
+
+    assert tokenizer_dir == Path("tokenizer")
+    assert export_dir == Path("graphs")
+    assert runtime_mode == "v2"
+    assert remaining == ["--env.type=libero", "--eval.n_episodes=20"]
+
+
+def test_libero_hmonnx_v2_cuda_graph_session_config(monkeypatch) -> None:
+    from xhquant.xhonnxruntime import hmonnx_inference_v2
+
+    class _FakeHMONNXInferenceV2:
+        def __init__(self, path, config):
+            self.path = path
+            self.config = config
+
+    monkeypatch.setattr(hmonnx_inference_v2, "HMONNXInferenceV2", _FakeHMONNXInferenceV2)
+
+    session = _create_hmonnx_session(
+        Path("graph.onnx"),
+        torch.device("cuda:0"),
+        "v2-cuda-graph",
+    )
+
+    assert session.path == "graph.onnx"
+    assert session.config.enable_cuda_graph is True
+    assert session.config.exec_devices == [torch.device("cuda:0")]
+
+
 def test_expert_calibration_uses_action_suffix_and_time_conditioning() -> None:
     policy = SimpleNamespace(
         config=SimpleNamespace(max_action_dim=2),
-        model=_ExpertPolicyModel(),
+        model=_ExpertPolicyModel().half(),
     )
     contexts = [
         {
@@ -233,7 +377,9 @@ def test_expert_calibration_uses_action_suffix_and_time_conditioning() -> None:
     assert [batch[0].shape for batch in batches] == [(1, 3, 4)] * 3
     assert [batch[1].item() for batch in batches] == [3] * 3
     assert [batch[2].item() for batch in batches] == [3] * 3
-    torch.testing.assert_close(batches[1][3], torch.full((1, 4), 0.5))
+    torch.testing.assert_close(batches[1][3], torch.full((1, 4), 0.5, dtype=torch.float16))
+    assert batches[0][0].dtype == torch.float16
+    assert batches[0][3].dtype == torch.float16
     assert batches[0][4].shape == (1, 1, 1, 8)
     assert torch.all(batches[0][4][..., :6] == 0)
     assert torch.all(batches[0][4][..., 6:] < 0)
@@ -291,7 +437,7 @@ def test_calibration_context_packs_selected_images_before_language_padding() -> 
         image_features=["base", "left_wrist", "right_wrist"],
         tokenizer_max_length=4,
     )
-    policy.model = _CompactPrefixPolicyModel()
+    policy.model = _CompactPrefixPolicyModel().half()
 
     contexts = _build_pi05_calibration_contexts(
         policy=policy,
@@ -312,6 +458,35 @@ def test_calibration_context_packs_selected_images_before_language_padding() -> 
     assert not bool(context["prefix_pad_masks"][:, 514:].any())
 
 
+def test_calibration_prefix_kv_uses_forced_float16_dtype() -> None:
+    policy = nn.Module()
+    policy.config = SimpleNamespace(
+        image_resolution=(2, 2),
+        image_features=["base", "left_wrist", "empty"],
+        tokenizer_max_length=4,
+    )
+    policy.model = _CompactPrefixPolicyModel().half()
+    policy.model.paligemma_with_expert = SimpleNamespace(
+        paligemma=SimpleNamespace(
+            model=SimpleNamespace(language_model=_PrefixKVLanguageModel()),
+        )
+    )
+
+    contexts = _build_pi05_calibration_contexts(
+        policy=policy,
+        tokenizer=_CompactTokenizer(),
+        prefix_sequence_length=516,
+        include_prefix_kv=True,
+        selected_image_indices=[0, 1],
+        text_max_length=4,
+    )
+
+    key, value = contexts[0]["prefix_key_values"][0]
+    assert key.dtype == torch.float16
+    assert value.dtype == torch.float16
+    assert key.shape == value.shape == (1, 1, 514, 2)
+
+
 @pytest.mark.parametrize(
     ("relative_path", "image_indices", "prefix_length", "horizon"),
     [
@@ -330,10 +505,7 @@ def test_compact_variant_contracts(
     prefix_length: int,
     horizon: int,
 ) -> None:
-    config_root = (
-        Path(__file__).resolve().parents[1]
-        / "configs_merak/workflows/xh2a/other_models/pi05"
-    )
+    config_root = Path(__file__).resolve().parents[1] / "configs_merak/workflows/xh2a/other_models/pi05"
     export_cfg = WorkflowConfig.from_file(str(config_root / relative_path)).build_export_dict()
 
     assert export_cfg["config_dir"] is None
@@ -363,17 +535,13 @@ def test_compact_graph_signatures_use_one_cache_and_rope_offset() -> None:
 
     assert "self.masked_add(attn_weights, attention_mask)" in inspect.getsource(_GemmaAttention.forward)
     _clear_gemma_traceable_modules()
-    expert_impl = importlib.import_module(
-        "xhmodel_merak.xh_other_model.models.pi05._llm_model_impl_cond"
-    )
+    expert_impl = importlib.import_module("xhmodel_merak.xh_other_model.models.pi05._llm_model_impl_cond")
     expert_attention = expert_impl._GemmaAttention
     expert_model = expert_impl._GemmaModel
 
     assert "position_ids" not in inspect.signature(_GemmaModel.forward).parameters
     assert "position_seq_length" not in inspect.signature(expert_model.forward).parameters
-    assert "self.masked_add(attn_weights, attention_mask)" in inspect.getsource(
-        expert_attention.forward
-    )
+    assert "self.masked_add(attn_weights, attention_mask)" in inspect.getsource(expert_attention.forward)
 
 
 def test_xhquant_masked_add_applies_mask_twice_with_saturation() -> None:
@@ -464,9 +632,7 @@ def test_pi05_runtime_classes_register_for_dynamic_wrapping() -> None:
     assert PiGemmaModel in XHLLM_TRACEABLE_MODULES
 
     _clear_gemma_traceable_modules()
-    _llm_model_impl_cond = importlib.import_module(
-        "xhmodel_merak.xh_other_model.models.pi05._llm_model_impl_cond"
-    )
+    _llm_model_impl_cond = importlib.import_module("xhmodel_merak.xh_other_model.models.pi05._llm_model_impl_cond")
     _llm_model_impl_cond.register_wrap_cls(expert)
 
     assert PiGemmaModel in XHLLM_TRACEABLE_MODULES

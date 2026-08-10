@@ -22,6 +22,7 @@ DEFAULT_MODEL_DIR = "pi05_droid_openpi_to_lerobot"
 DEFAULT_EXPORT_DIR = "pi05_droid_customer_h50_compact_maskadd2_XH2a"
 DEFAULT_NOISE = "noise_droid_100_h50_a32_seed20260707.npz"
 MASK_VALUE = torch.finfo(torch.float16).min
+HMONNX_RUNTIME_CHOICES = ("legacy", "v2", "v2-cuda-graph")
 
 
 def sha256_file(path: Path) -> str:
@@ -67,12 +68,7 @@ def load_records(path: Path | None) -> dict[int, dict]:
     if path is None or not path.exists():
         return {}
     with path.open() as file:
-        return {
-            int(record["sample_id"]): record
-            for line in file
-            if line.strip()
-            for record in [json.loads(line)]
-        }
+        return {int(record["sample_id"]): record for line in file if line.strip() for record in [json.loads(line)]}
 
 
 def cosine(left: np.ndarray, right: np.ndarray) -> float:
@@ -107,9 +103,7 @@ def write_summary(
         reference = action_array(reference_records[sample_id])
         hmonnx = action_array(hmonnx_records[sample_id])
         if reference.shape != hmonnx.shape:
-            raise ValueError(
-                f"sample {sample_id} shape mismatch: reference={reference.shape}, hmonnx={hmonnx.shape}"
-            )
+            raise ValueError(f"sample {sample_id} shape mismatch: reference={reference.shape}, hmonnx={hmonnx.shape}")
         difference = hmonnx - reference
         per_sample.append(
             {
@@ -143,9 +137,7 @@ def write_summary(
 
     first_record = hmonnx_records[matched_ids[0]]
     valid_prefix_lengths = [hmonnx_records[sample_id]["valid_prefix_length"] for sample_id in matched_ids]
-    valid_language_lengths = [
-        hmonnx_records[sample_id]["valid_language_length"] for sample_id in matched_ids
-    ]
+    valid_language_lengths = [hmonnx_records[sample_id]["valid_language_length"] for sample_id in matched_ids]
     runtime_contract = {
         "static_prefix_length": first_record["physical_prefix_length"],
         "valid_prefix_length": {
@@ -199,13 +191,40 @@ def load_config(
     return config
 
 
-class CompactHMONNX:
-    def __init__(self, policy, export_dir: Path, device: torch.device):
+def _create_hmonnx_session(path: Path, device: torch.device, runtime_mode: str):
+    if runtime_mode not in HMONNX_RUNTIME_CHOICES:
+        raise ValueError(f"Unsupported HMONNX runtime mode: {runtime_mode}")
+    if runtime_mode == "legacy":
         from xhquant.api import HMONNXInference
+
+        return HMONNXInference(str(path)).to(device)
+
+    from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
+
+    session_config = HMONNXInferenceConfig(
+        enable_cuda_graph=runtime_mode == "v2-cuda-graph",
+        exec_devices=[device],
+    )
+    return HMONNXInferenceV2(str(path), session_config)
+
+
+class CompactHMONNX:
+    def __init__(
+        self,
+        policy,
+        export_dir: Path,
+        device: torch.device,
+        runtime_mode: str = "legacy",
+    ):
         from xhquant.core import CacheTensor
 
         self.policy = policy
         self.device = device
+        self.runtime_mode = runtime_mode
+        self._active_runtime_mode = runtime_mode
+        self._cuda_graph_primed = runtime_mode != "v2-cuda-graph"
+        self._cuda_graph_prewarming = False
+        self._cuda_graph_prewarm_ms: float | None = None
         self.CacheTensor = CacheTensor
         export_meta = json.loads((export_dir / "export_meta_info.json").read_text(encoding="utf-8"))
         contract = export_meta["compact_prefix"]
@@ -213,41 +232,86 @@ class CompactHMONNX:
         self.prefix_sequence_length = int(contract["prefix_sequence_length"])
         self.action_horizon = int(contract["action_horizon"])
         self.cache_length = int(contract["cache_length"])
-        self.sessions = {
-            "vision": HMONNXInference(
-                str(export_dir / "Vision/hmonnx/vision_XH2a_w8a8h1_sefp.onnx")
-            ).to(device),
-            "action_in": HMONNXInference(
-                str(export_dir / "Other/hmonnx/action_in_proj_XH2a_w8a8h1_sefp.onnx")
-            ).to(device),
-            "action_out": HMONNXInference(
-                str(export_dir / "Other/hmonnx/action_out_proj_XH2a_w8a8h1_sefp.onnx")
-            ).to(device),
-            "time_mlp": HMONNXInference(
-                str(export_dir / "Other/hmonnx/time_mlp_XH2a_w8a8h1_sefp.onnx")
-            ).to(device),
-            "gemma": HMONNXInference(
-                str(
-                    export_dir
-                    / "Gemma2B/prefill_onnx/pi05_gemma_2b_XH2a_w8a8h1_sefp_prefill.onnx"
-                )
-            ).to(device),
-            "expert": HMONNXInference(
-                str(
-                    export_dir
-                    / "GemmaExpert/decode_onnx/pi05_gemma_expert_300m_XH2a_w8a8h1_sefp_decode.onnx"
-                )
-            ).to(device),
+        self.action_dim = int(policy.config.output_features["action"].shape[0])
+        self.session_paths = {
+            "vision": export_dir / "Vision/hmonnx/vision_XH2a_w8a8h1_sefp.onnx",
+            "action_in": export_dir / "Other/hmonnx/action_in_proj_XH2a_w8a8h1_sefp.onnx",
+            "action_out": export_dir / "Other/hmonnx/action_out_proj_XH2a_w8a8h1_sefp.onnx",
+            "time_mlp": export_dir / "Other/hmonnx/time_mlp_XH2a_w8a8h1_sefp.onnx",
+            "gemma": export_dir / "Gemma2B/prefill_onnx/pi05_gemma_2b_XH2a_w8a8h1_sefp_prefill.onnx",
+            "expert": export_dir / "GemmaExpert/decode_onnx/pi05_gemma_expert_300m_XH2a_w8a8h1_sefp_decode.onnx",
         }
+        self.sessions = self._create_sessions(self._active_runtime_mode)
+
+    def _create_sessions(self, runtime_mode: str):
+        return {
+            name: _create_hmonnx_session(path, self.device, runtime_mode) for name, path in self.session_paths.items()
+        }
+
+    def _prime_cuda_graph(self, batch: dict[str, torch.Tensor], noise: torch.Tensor) -> None:
+        started = time.perf_counter()
+        self._cuda_graph_prewarming = True
+        try:
+            # Keep the warmed graph module so Triton autotuning survives until capture.
+            self._predict(batch, noise)
+        finally:
+            self._cuda_graph_prewarming = False
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        self._cuda_graph_primed = True
+        self._cuda_graph_prewarm_ms = (time.perf_counter() - started) * 1000.0
+
+    def _run_session(self, name: str, *args: torch.Tensor):
+        session = self.sessions[name]
+        if self._cuda_graph_prewarming:
+            eager_warmup = getattr(session, "warmup_without_cuda_graph", None)
+            if callable(eager_warmup):
+                return eager_warmup(*args)
+        return session(*args)
+
+    def _runtime_status(self) -> dict[str, object]:
+        sessions = {}
+        for name, session in self.sessions.items():
+            interpreter = getattr(session, "interpreter", None)
+            sessions[name] = {
+                "session": type(session).__name__,
+                "interpreter": type(interpreter).__name__ if interpreter is not None else None,
+                "cuda_graph_captured": bool(getattr(interpreter, "has_captured_graph", False)),
+                "cuda_graph_capture_disabled_reason": getattr(interpreter, "capture_disabled_reason", None),
+            }
+        return {
+            "requested": self.runtime_mode,
+            "active": self._active_runtime_mode,
+            "cuda_graph_prewarm_ms": self._cuda_graph_prewarm_ms,
+            "sessions": sessions,
+        }
+
+    def _require_cuda_graph_capture(self) -> None:
+        failed_sessions = {
+            name: status["cuda_graph_capture_disabled_reason"] or "capture did not complete"
+            for name, status in self._runtime_status()["sessions"].items()
+            if not status["cuda_graph_captured"]
+        }
+        if failed_sessions:
+            raise RuntimeError(f"CUDA Graph capture failed: {failed_sessions}")
 
     @torch.inference_mode()
     def predict(self, batch: dict[str, torch.Tensor], noise: torch.Tensor):
+        if not self._cuda_graph_primed:
+            self._prime_cuda_graph(batch, noise)
+        result = self._predict(batch, noise)
+        if self.runtime_mode == "v2-cuda-graph":
+            self._require_cuda_graph_capture()
+        return result
+
+    @torch.inference_mode()
+    def _predict(self, batch: dict[str, torch.Tensor], noise: torch.Tensor):
         images, image_masks = self.policy._preprocess_images(batch)
         vision_outputs = []
         for image_index in self.selected_image_indices:
             if not bool(image_masks[image_index].item()):
                 raise ValueError(f"Selected compact-prefix image {image_index} is not valid")
-            vision_outputs.append(self.sessions["vision"](images[image_index].half()))
+            vision_outputs.append(self._run_session("vision", images[image_index].half()))
 
         tokens = batch["observation.language.tokens"]
         token_masks = batch["observation.language.attention_mask"]
@@ -258,9 +322,7 @@ class CompactHMONNX:
         prefix_embs = torch.cat([*vision_outputs, language_embs], dim=1)
         prefix_pad_masks = torch.cat(
             [
-                image_masks[image_index][:, None].expand(
-                    image_masks[image_index].shape[0], output.shape[1]
-                )
+                image_masks[image_index][:, None].expand(image_masks[image_index].shape[0], output.shape[1])
                 for image_index, output in zip(
                     self.selected_image_indices,
                     vision_outputs,
@@ -289,12 +351,11 @@ class CompactHMONNX:
         prefix_attention[..., :valid_prefix_length] = 0
 
         caches = [
-            self.CacheTensor(
-                torch.zeros(1, 1, self.cache_length, 256, dtype=torch.float16, device=self.device)
-            )
+            self.CacheTensor(torch.zeros(1, 1, self.cache_length, 256, dtype=torch.float16, device=self.device))
             for _ in range(36)
         ]
-        self.sessions["gemma"](
+        self._run_session(
+            "gemma",
             prefix_embs,
             torch.zeros(1, dtype=torch.int32, device=self.device),
             torch.tensor([valid_prefix_length], dtype=torch.int32, device=self.device),
@@ -317,9 +378,10 @@ class CompactHMONNX:
                 dtype=torch.float32,
                 device=self.device,
             )
-            suffix_embs = self.sessions["action_in"](current.half())
-            cond = self.sessions["time_mlp"](create_time_embedding(timestep).half())
-            expert_hidden = self.sessions["expert"](
+            suffix_embs = self._run_session("action_in", current.half())
+            cond = self._run_session("time_mlp", create_time_embedding(timestep).half())
+            expert_hidden = self._run_session(
+                "expert",
                 suffix_embs,
                 torch.tensor([valid_prefix_length], dtype=torch.int32, device=self.device),
                 torch.tensor([self.action_horizon], dtype=torch.int32, device=self.device),
@@ -327,16 +389,17 @@ class CompactHMONNX:
                 expert_attention,
                 *caches,
             )
-            velocity = self.sessions["action_out"](expert_hidden).float()
+            velocity = self._run_session("action_out", expert_hidden).float()
             current = current - velocity / 10.0
 
-        return current[:, :, :8], {
+        return current[:, :, : self.action_dim], {
             "physical_prefix_length": physical_prefix_length,
             "valid_prefix_length": valid_prefix_length,
             "valid_language_length": valid_prefix_length - len(self.selected_image_indices) * 256,
             "image_masks": [bool(mask.item()) for mask in image_masks],
             "selected_image_indices": self.selected_image_indices,
             "vision_runs": len(vision_outputs),
+            "runtime": self._runtime_status(),
         }
 
 
@@ -372,6 +435,11 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated sample IDs; overrides --start-sample-id/--num-samples.",
     )
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--hmonnx-runtime",
+        choices=HMONNX_RUNTIME_CHOICES,
+        default="v2-cuda-graph",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--hmonnx-only", action="store_true")
     return parser.parse_args()
@@ -426,7 +494,7 @@ def main() -> None:
         },
         postprocessor_overrides={"device_processor": {"device": "cpu", "float_dtype": None}},
     )
-    hmonnx = CompactHMONNX(policy, export_dir, device)
+    hmonnx = CompactHMONNX(policy, export_dir, device, runtime_mode=args.hmonnx_runtime)
     noise_sha = sha256_file(noise_file)
 
     reference_records = load_records(args.reference_jsonl)
@@ -439,11 +507,7 @@ def main() -> None:
         with np.load(noise_file, allow_pickle=False) as noises, hmonnx_output.open(mode) as hmonnx_file:
             if args.sample_ids:
                 sample_ids = list(
-                    dict.fromkeys(
-                        int(value.strip())
-                        for value in args.sample_ids.split(",")
-                        if value.strip()
-                    )
+                    dict.fromkeys(int(value.strip()) for value in args.sample_ids.split(",") if value.strip())
                 )
             else:
                 sample_ids = range(args.start_sample_id, args.start_sample_id + args.num_samples)
@@ -454,15 +518,9 @@ def main() -> None:
                 input_file = find_sample(inputs_dir, sample_id)
                 with np.load(input_file, allow_pickle=False) as sample_file:
                     sample = {
-                        "observation.images.base_0_rgb": chw_float(
-                            sample_file["exterior_image_1_left"]
-                        ),
-                        "observation.images.left_wrist_0_rgb": chw_float(
-                            sample_file["wrist_image_left"]
-                        ),
-                        "observation.state": torch.from_numpy(
-                            np.asarray(sample_file["state"], dtype=np.float32)
-                        ),
+                        "observation.images.base_0_rgb": chw_float(sample_file["exterior_image_1_left"]),
+                        "observation.images.left_wrist_0_rgb": chw_float(sample_file["wrist_image_left"]),
+                        "observation.state": torch.from_numpy(np.asarray(sample_file["state"], dtype=np.float32)),
                         "action": torch.zeros(
                             config.output_features[ACTION].shape[0],
                             dtype=torch.float32,
@@ -473,8 +531,7 @@ def main() -> None:
                 noise_array = np.asarray(noises[key], dtype=np.float32)
                 if noise_array.ndim != 2 or noise_array.shape[0] < action_horizon:
                     raise ValueError(
-                        f"Noise {key} has shape {noise_array.shape}, expected at least "
-                        f"[{action_horizon}, action_dim]"
+                        f"Noise {key} has shape {noise_array.shape}, expected at least [{action_horizon}, action_dim]"
                     )
                 noise = torch.from_numpy(noise_array[:action_horizon].copy())[None].to(device)
                 batch = preprocessor(sample)
@@ -520,9 +577,7 @@ def main() -> None:
                     torch.cuda.synchronize(device)
                 started = time.perf_counter()
                 normalized_hmonnx, contract = hmonnx.predict(batch, noise.clone())
-                hmonnx_actions = (
-                    postprocessor(normalized_hmonnx).detach().cpu().numpy().astype(np.float32)
-                )
+                hmonnx_actions = postprocessor(normalized_hmonnx).detach().cpu().numpy().astype(np.float32)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 hmonnx_latency = (time.perf_counter() - started) * 1000.0
@@ -530,6 +585,7 @@ def main() -> None:
                 hmonnx_record = {
                     "source": "hmm",
                     "backend": "hmonnx_software",
+                    "runtime": args.hmonnx_runtime,
                     "sample_id": sample_id,
                     "dataset_index": parse_dataset_index(input_file),
                     "input_file": str(input_file),

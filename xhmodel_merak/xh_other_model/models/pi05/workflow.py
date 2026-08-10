@@ -13,6 +13,9 @@ from xhmodel_merak.xh_other_model.workflows.config import WorkflowConfig
 from xhmodel_merak.xh_other_model.workflows.result import ExportResult, QuantResult
 
 
+PI05_EXPORT_DTYPE = torch.float16
+
+
 class PI05Workflow(BaseOtherModelWorkflow):
     SUPPORTED_COMPONENTS = {"vision", "gemma", "expert", "other"}
 
@@ -299,9 +302,7 @@ def _build_pi05_runtime_contract(export_cfg: Mapping[str, Any]) -> dict[str, Any
     expert_cache_length = int(expert_wrap_cfg["max_sequence_length"])
     required_cache_length = prefix_sequence_length + action_horizon
     if cache_length < required_cache_length or expert_cache_length < required_cache_length:
-        raise ValueError(
-            f"PI05 cache capacity must be at least compact prefix + horizon ({required_cache_length})"
-        )
+        raise ValueError(f"PI05 cache capacity must be at least compact prefix + horizon ({required_cache_length})")
     if cache_length != expert_cache_length:
         raise ValueError("PI05 Gemma and Expert cache capacities must match")
 
@@ -319,9 +320,7 @@ def _build_pi05_runtime_contract(export_cfg: Mapping[str, Any]) -> dict[str, Any
         component_export_cfg = component_cfg.get("export_cfg")
         input_names = component_export_cfg.get("input_names") if isinstance(component_export_cfg, Mapping) else None
         if input_names != expected_input_names[config_name]:
-            raise ValueError(
-                f"PI05 {config_name}.export_cfg.input_names must be {expected_input_names[config_name]}"
-            )
+            raise ValueError(f"PI05 {config_name}.export_cfg.input_names must be {expected_input_names[config_name]}")
 
     return {
         "selected_image_indices": selected_image_indices,
@@ -520,13 +519,13 @@ def export_pi05_llm_component(
     logger = get_root_logger()
     device = torch.device(str(runtime_cfg["device"]))
     exec_device = torch.device(str(runtime_cfg["device"]))
-    dtype = torch.float16 if kind == "gemma" else torch.float32
+    dtype = PI05_EXPORT_DTYPE
     cfg_name = f"{component_name}_{target_device}_{quant_type}"
 
     xh_model = MODELS.build(ConfigDict(dict(model_cfg)))
     tokenizer = xh_model.get_tokenizer(str(runtime_cfg["config_dir"]))
     if kind == "gemma":
-        policy = xh_model.get_hf_model(model="pi0.5").to(device).eval()
+        policy = xh_model.get_hf_model(model="pi0.5").to(device=device, dtype=dtype).eval()
         calibration_contexts = _build_pi05_calibration_contexts(
             policy=policy,
             tokenizer=tokenizer,
@@ -536,7 +535,7 @@ def export_pi05_llm_component(
         )
         xh_model.init_wrap_model(policy.model.paligemma_with_expert.paligemma.model.language_model)
     elif kind == "expert":
-        policy = xh_model.get_hf_model().to(device).eval()
+        policy = xh_model.get_hf_model().to(device=device, dtype=dtype).eval()
         _configure_pi05_action_horizon(policy, int(runtime_cfg["action_horizon"]))
         calibration_contexts = _build_pi05_calibration_contexts(
             policy=policy,
@@ -756,7 +755,7 @@ def _build_pi05_llm_golden_inputs(
     input_ids = _build_prompt_input_ids(tokenizer, prompt, torch_device)
 
     if kind == "gemma":
-        policy = xh_model.get_hf_model(model="pi0.5").to(torch_device).eval()
+        policy = xh_model.get_hf_model(model="pi0.5").to(device=torch_device, dtype=PI05_EXPORT_DTYPE).eval()
         contexts = _build_pi05_calibration_contexts(
             policy=policy,
             tokenizer=tokenizer,
@@ -766,7 +765,7 @@ def _build_pi05_llm_golden_inputs(
         )
         xh_model.init_wrap_model(policy.model.paligemma_with_expert.paligemma.model.language_model)
     elif kind == "expert":
-        policy = xh_model.get_hf_model().to(torch_device).eval()
+        policy = xh_model.get_hf_model().to(device=torch_device, dtype=PI05_EXPORT_DTYPE).eval()
         _configure_pi05_action_horizon(policy, int(comp_meta["prefill_input_sequence_length"]))
         prefix_sequence_length = len(selected_image_indices) * 256 + text_max_length
         contexts = _build_pi05_calibration_contexts(
@@ -849,7 +848,10 @@ def _build_pi05_calibration_contexts(
 ) -> list[dict[str, Any]]:
     from lerobot.policies.pi05.modeling_pi05 import make_att_2d_masks
 
-    model_device = next(policy.parameters()).device
+    model_parameter = next(policy.parameters())
+    model_device = model_parameter.device
+    if model_parameter.dtype != PI05_EXPORT_DTYPE:
+        raise TypeError(f"PI05 calibration policy must use {PI05_EXPORT_DTYPE}, got {model_parameter.dtype}")
     image_height, image_width = policy.config.image_resolution
     image_count = len(policy.config.image_features)
     token_length = int(policy.config.tokenizer_max_length)
@@ -857,13 +859,9 @@ def _build_pi05_calibration_contexts(
     if not selected_indices or len(set(selected_indices)) != len(selected_indices):
         raise ValueError("PI05 selected_image_indices must be non-empty and unique")
     if any(image_index < 0 or image_index >= image_count for image_index in selected_indices):
-        raise ValueError(
-            f"PI05 selected_image_indices {selected_indices} exceed checkpoint image count {image_count}"
-        )
+        raise ValueError(f"PI05 selected_image_indices {selected_indices} exceed checkpoint image count {image_count}")
     if token_length != text_max_length:
-        raise ValueError(
-            f"PI05 checkpoint tokenizer_max_length is {token_length}, expected {text_max_length}"
-        )
+        raise ValueError(f"PI05 checkpoint tokenizer_max_length is {token_length}, expected {text_max_length}")
     expected_prefix_length = len(selected_indices) * 256 + text_max_length
     if prefix_sequence_length != expected_prefix_length:
         raise ValueError(
@@ -883,7 +881,7 @@ def _build_pi05_calibration_contexts(
             torch.rand(
                 (1, 3, image_height, image_width),
                 generator=generator,
-                dtype=torch.float32,
+                dtype=PI05_EXPORT_DTYPE,
                 device=model_device,
             )
             * 2.0
@@ -951,7 +949,7 @@ def _build_pi05_calibration_contexts(
             with torch.no_grad():
                 output = policy.model.paligemma_with_expert.paligemma.model.language_model(
                     inputs_embeds=prefix_embs,
-                    attention_mask=prefix_attention_mask,
+                    attention_mask=prefix_attention_mask.to(dtype=prefix_embs.dtype),
                     position_ids=prefix_position_ids,
                     use_cache=True,
                 )
@@ -1010,7 +1008,10 @@ def _build_pi05_expert_calibration_inputs(
     from xhquant.core import CacheTensor
 
     action_dim = int(policy.config.max_action_dim)
-    model_device = next(policy.model.action_in_proj.parameters()).device
+    action_parameter = next(policy.model.action_in_proj.parameters())
+    model_device = action_parameter.device
+    if action_parameter.dtype != PI05_EXPORT_DTYPE:
+        raise TypeError(f"PI05 Expert calibration policy must use {PI05_EXPORT_DTYPE}, got {action_parameter.dtype}")
     calibration_batches = []
 
     timestep_values = (1.0, 0.5, 0.1)[: len(contexts)]
@@ -1019,17 +1020,16 @@ def _build_pi05_expert_calibration_inputs(
         noisy_actions = torch.randn(
             (1, sequence_length, action_dim),
             generator=generator,
-            dtype=torch.float32,
+            dtype=PI05_EXPORT_DTYPE,
             device=model_device,
         )
-        timestep = torch.full((1,), timestep_value, dtype=torch.float32, device=model_device)
+        timestep = torch.full((1,), timestep_value, dtype=PI05_EXPORT_DTYPE, device=model_device)
         with torch.no_grad():
             suffix_embs, suffix_pad_masks, suffix_att_masks, cond = policy.model.embed_suffix(noisy_actions, timestep)
 
         if suffix_embs.shape[1] != sequence_length:
             raise ValueError(
-                f"PI05 expert calibration produced {suffix_embs.shape[1]} suffix tokens, "
-                f"expected {sequence_length}"
+                f"PI05 expert calibration produced {suffix_embs.shape[1]} suffix tokens, expected {sequence_length}"
             )
 
         del suffix_pad_masks, suffix_att_masks
@@ -1041,10 +1041,10 @@ def _build_pi05_expert_calibration_inputs(
         )
 
         inputs = list(template_inputs)
-        inputs[0] = suffix_embs.to(device=device, dtype=torch.float32)
+        inputs[0] = suffix_embs.to(device=device, dtype=PI05_EXPORT_DTYPE)
         inputs[1] = torch.tensor([valid_prefix_length], dtype=torch.int32, device=device)
         inputs[2] = torch.tensor([sequence_length], dtype=torch.int32, device=device)
-        inputs[3] = cond.to(device=device, dtype=torch.float32)
+        inputs[3] = cond.to(device=device, dtype=PI05_EXPORT_DTYPE)
         inputs[4] = attention_mask
         prefix_key_values = context.get("prefix_key_values")
         if prefix_key_values is not None:
