@@ -330,10 +330,32 @@ workflow.dump_golden(
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir work_dirs/Ornith-35B-A3B_autoround_quant \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/ornith-1.0-35b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/Ornith-35B-A3B_fuse_gdr_export \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir work_dirs/Ornith-35B-A3B_autoround_quant \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/ornith-1.0-35b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/Ornith-35B-A3B_flashattention_fuse_gdr_export \
+  --enable-flash-attention \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --model-dir /path/to/hf_model \
   --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml \
   --quant-output-dir work_dirs/qwen3_5_quant \
-  --export-output-dir work_dirs/qwen3_5_export \
   --dump-golden \
   --quick-test \
   --overwrite
