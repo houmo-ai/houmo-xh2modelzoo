@@ -1,0 +1,41 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: UnlimitedOCRForCausalLM
+    hf_model: null
+    model_name: unlimited_ocr_base
+    context_max_length: 32768
+    prefill_chunk_length: 256
+    max_pe_length: 32768
+    use_cache: true
+    num_logits_to_keep: 1
+    sliding_window_size: 128
+    image_token_id: 128815
+    visual_config:
+      model_type: UnlimitedOCRForCausalLM_visual
+      model_name: unlimited_ocr_base_visual
+      export_mode: base
+      hmonnx_export: true
+      image_size: 1024
+      base_size: 1024
+      crop_mode: false
+      patch_size: 16
+      downsample_ratio: 4
+      image_token_id: 128815
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    calib_config:
+      enable: false
+      image_dir: ./data/calib_data/sampledata
+      prompt: "<image>\\nFree OCR. "
+      num_samples: 8
+    only_first_block: false

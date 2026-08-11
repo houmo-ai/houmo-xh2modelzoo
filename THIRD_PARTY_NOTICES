@@ -247,6 +247,27 @@ The following paths are used:
     xh_model_zoo/xh_llm/models/minicpmo
 
 ----------------------------------------------------------------------
+Unlimited-OCR
+----------------------------------------------------------------------
+Component Name: Unlimited-OCR
+Source: https://github.com/baidu/Unlimited-OCR
+Model Card: https://huggingface.co/baidu/Unlimited-OCR
+Local Source Baseline: data/models/Unlimited-OCR checkpoint-shipped remote code
+Copyright Statement: Copyright (c) 2026 Baidu
+License: MIT License
+License File: licenses/Unlimited-OCR/LICENSE
+Usage in this project:
+The following paths localize the checkpoint-shipped remote code and add Merak/XH2a
+wrappers, preprocessors, export config, debug scripts, and tests:
+    xhmodel_merak/xh_llm/models/unlimited_ocr
+    configs_merak/xh2a/llm_models/unlimited_ocr
+    examples_merak/llm/unlimited_ocr
+    tests/unlimited_ocr_*.py
+The localized DeepSeekV2/Hugging Face-derived files retain their original
+Apache-2.0 headers where present. Users are responsible for complying with the
+MIT License and any upstream notices retained in the source files.
+
+----------------------------------------------------------------------
 Flux
 ----------------------------------------------------------------------
 Component Name: Flux
