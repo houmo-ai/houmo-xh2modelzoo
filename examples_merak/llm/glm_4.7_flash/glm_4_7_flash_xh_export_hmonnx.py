@@ -124,7 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="")
     parser.add_argument("--context-length", type=int, default=2048, help="max context sequence length")
     parser.add_argument("--prefill-chunk-length", type=int, default=256, help="prefill chunk length")
-    parser.add_argument("--quant-type", default="w8a8_sefp", help="quant type, default is w8a8_sefp")
+    parser.add_argument("--quant-type", default="w4a8h1_ssfp", help="quant type, default is w8a8_sefp")
     parser.add_argument(
         "--quant-weight",
         type=str,

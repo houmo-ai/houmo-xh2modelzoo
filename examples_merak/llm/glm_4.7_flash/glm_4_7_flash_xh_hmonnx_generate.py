@@ -36,7 +36,12 @@ def main(args):
 
     messages = [{"role": "user", "content": prompt}]
     tokenizer = hmonnx_model.get_tokenizer()
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=not args.disable_thinking,
+    )
 
     model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(device)
     streamer = TextStreamer(tokenizer)
@@ -80,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode")
     parser.add_argument("--prompt", type=str, default="你多大了？用中文回答。")
     parser.add_argument("--golden", action="store_true", help="Whether to save golden outputs for testing.")
+    parser.add_argument("--disable-thinking", action="store_true", help="Disable reasoning output in the chat template.")
     parser.add_argument("--max-new-tokens", type=int, default=64, help="The maximum number of tokens to generate.")
     parser.add_argument(
         "--auto-offload", action="store_true", help="Whether to enable auto offload, only for debug and development"

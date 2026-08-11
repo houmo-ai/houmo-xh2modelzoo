@@ -326,14 +326,14 @@ class _Glm4MoeLiteAttention(DynamicModule):
         q_content = self.q_absorbed_proj(inp).view(batch_size, seq_length, self.num_heads, self.kv_lora_rank)
 
         # =================================================================
-        
-        
+
+
         # 2. Key/Value 生成：Latent 空间 (压缩)
         # =================================================================
         # 生成压缩的 KV (Latent Vector)
         # A. 生成 Latent 向量 [B, S, LatentDim]
         k_latent_raw = self.kv_a_proj_latent(hidden_states)
-        
+
         # 对 Latent 向量做 Layernorm (这是 MLA 的标准操作)
         k_latent = self.kv_a_layernorm(k_latent_raw)
 
@@ -358,28 +358,23 @@ class _Glm4MoeLiteAttention(DynamicModule):
 
         query_states = torch.cat((q_content, q_pe), dim=-1).transpose(1,2) * self.kv_scale
         k_rot = k_rot.squeeze(1)
-        key_states = torch.cat((k_latent, k_rot), dim=-1)
+        key_states = torch.cat((k_latent, k_rot), dim=-1).unsqueeze(1)
+        value_states = k_latent.unsqueeze(1)
 
         # =================================================================
         # 4. KV Cache 管理 (极低显存占用)
         # =================================================================
         if self.use_cache:
-            # k_rot用于RoPE计算，存储在k_cache中
-            # [B, S, H, D]
-            key_states = key_states.unsqueeze(1)
+            # K cache: [B, 1, S_total, LatentDim + RopeDim], 序列轴为 -2。
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
-            key_states = key_states.transpose(2, 3)
 
-            # k_latent用于Content计算和Value投影，存储在v_cache中
-            # k_latent原始形状 [B, S, LatentDim]
-            # 为了适配cache (通常支持B, S, H, D)，这里将其扩展为 [B, S, 1, LatentDim]
-            # 这样既可以复用Cache逻辑，又节省显存(Head=1)
-            k_latent = k_latent.unsqueeze(1)
-            k_latent = self.v_cache(k_latent, past_seq_length, current_input_length, past_v_cache)
-            k_latent = k_latent.squeeze(1) # 恢复为 [B, S_total, LatentDim]
+            # V cache: [B, 1, S_total, LatentDim], 序列轴为 -2。
+            value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
+
+        key_states = key_states.transpose(2, 3)
 
         # MQA/MLA 优化：因为unsqueeze(1)之后对应的维度大小为 1，直接利用 Matmul 的原生广播（Broadcasting）免去 repeat_interleave
-        
+
         # xh_pragma_fx(
         #     query_states,
         #     {
@@ -405,12 +400,11 @@ class _Glm4MoeLiteAttention(DynamicModule):
         #         "action": "end",
         #     },
         # )
-        
+
         attn_weights: Tensor | None = self.masked_softmax(attn_weights, past_seq_length)
-        
-        value_states = k_latent.unsqueeze(1)
+
         attn_output = torch.matmul(attn_weights, value_states)
-        
+
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -441,7 +435,7 @@ class _Glm4MoeLiteAttention(DynamicModule):
 
         # # 总分融合
         # attn_weights = (scores_content + scores_rope) * self.kv_scale
-        
+
         # # Mask & Softmax
         # attn_weights = self.masked_softmax(attn_weights, past_seq_length)
 
@@ -507,7 +501,7 @@ class _Glm4MoeLiteAttention(DynamicModule):
 
         def _maybe_register_quant_weight(linear: torch.nn.Linear, quant_weight: torch.Tensor | None):
             if quant_weight is not None:
-                assert quant_weight.dtype == torch.int8
+                assert quant_weight.dtype in (torch.int8, torch.int16)
                 linear.register_buffer("quant_weight", quant_weight.contiguous())
 
         with torch.no_grad(): # 将kv_b_proj融合到q_absorbed_proj 和 o_proj中
@@ -786,13 +780,12 @@ class _Glm4MoeLiteTopkRouter(DynamicModule):
     }
 )
 class _Glm4MoeLiteNaiveMoe(DynamicModule):
-    def graph_forward(self, hidden_states, routing_weights=None, selected_experts=None):
+    def graph_forward(self, hidden_states, routing_weights=None):
         if routing_weights is None:
-            raise ValueError("routing_weights must be provided when MoeBlock.topk_outside is enabled")
+            raise ValueError("routing_weights must be provided for MoeBlock routing")
         out = self.moeblock(
             hidden_states,
             routing_weights,
-            selected_experts,
         )
         return out
 
@@ -835,7 +828,7 @@ class _Glm4MoeLiteNaiveMoe(DynamicModule):
                 torch.nn.Parameter(weight.contiguous(), requires_grad=False),
             )
             if quant_weight is not None:
-                assert quant_weight.dtype == torch.int8
+                assert quant_weight.dtype in (torch.int8, torch.int16)
                 self.moeblock.register_buffer(
                     f"expert_{name}_quant_weight",
                     quant_weight.contiguous(),
@@ -844,8 +837,8 @@ class _Glm4MoeLiteNaiveMoe(DynamicModule):
         self.moeblock = MoeBlock(
             self.act_fn._get_name().lower(),
             self.config.num_experts_per_tok,
-            False,
-            topk_outside=True,
+            self.config.norm_topk_prob,
+            topk_outside=False,
         )
 
         _register_expert_linear("gate_proj", gate_weight, gate_quant_weight)
@@ -887,78 +880,19 @@ class _Glm4MoeLiteMoE(DynamicModule):
 
         router_logits = self.gate(hidden_states)
         routing_scores = router_logits.sigmoid().view(batch_size, seq_length, -1)
-        topk_indices, topk_weights = self.route_tokens_to_experts(router_logits)
-
-        selected_experts = topk_indices.view(batch_size, seq_length, -1)
-
-        # bug fix
-        routing_weights = self.zero_routing(routing_scores, 0)
-        routing_weights = self.scatter_routing(
-            routing_weights,
-            selected_experts,
-            topk_weights.view(batch_size, seq_length, -1),
-        )
-        # bug fix end
-
-
         hidden_states = self.experts(
             hidden_states,
-            # bug fix
-            routing_weights=routing_weights,
-            selected_experts=selected_experts,
+            routing_weights=routing_scores,
         ).view(
             batch_size,
             seq_length,
             hidden_dim,
         )
+        hidden_states = hidden_states * self.routed_scaling_factor
         hidden_states = hidden_states + self.shared_experts(residuals)
         return hidden_states
 
-    def route_tokens_to_experts(self, router_logits):
-        router_logits = router_logits.sigmoid()
-        scores_for_choice = router_logits + self.gate.e_score_correction_bias
-        if self.use_group_filter:
-            reshaped = scores_for_choice.view(
-                -1, self.n_group, self.group_scores_last_dim
-            )
-            group_scores = self.topk_2(reshaped)[0].sum(dim=-1)
-            group_idx = self.topk_group(group_scores)[1]
-            group_mask = group_scores * 0
-            ones = group_scores * 0 + 1.0
-            group_mask = self.scatter_group_mask(group_mask, group_idx, ones)
-            score_mask = (
-                group_mask.unsqueeze(-1)
-                .expand(-1, self.n_group, self.group_scores_last_dim)
-                .reshape(-1, self.n_routed_experts)
-            )
-            scores_for_choice = scores_for_choice * score_mask
-
-        topk_indices = self.topk_score(scores_for_choice)[1]
-        topk_weights = self.gather_weights(router_logits, topk_indices)
-        if self.norm_topk_prob:
-            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-            topk_weights = topk_weights / denominator
-        topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights
-
     def _setup(self, cfg):
-        # 与 Nemotron (_NemotronHTopkRouter) 对齐：
-        # 只在 topk_group < n_group 时才真正做 group-filter；
-        # GLM-4.7-Flash 默认 n_group=topk_group=1，此时 route 里只剩一个 TopK。
-        self.use_group_filter = self.topk_group < self.n_group
-        self.group_scores_last_dim = self.n_routed_experts // self.n_group
-        self.topk_score = xhnn.TopK(self.top_k, axis=-1)
-        self.gather_weights = xhnn.GatherElements(axis=1)
-        if self.use_group_filter:
-            self.topk_2 = xhnn.TopK(2, axis=-1)
-            self.topk_group = xhnn.TopK(self.topk_group, axis=-1)
-            self.scatter_group_mask = xhnn.ScatterElements(axis=1)
-        
-        # bug fix
-        self.zero_routing = xhnn.Mul()
-        self.scatter_routing = xhnn.ScatterElements(axis=2)
-        
-
         return self
 
 

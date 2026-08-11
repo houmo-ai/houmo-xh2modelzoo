@@ -315,6 +315,16 @@ class TextLLMHFCompatible(DynamicModule):  # noqa: N801
             del self._xh_orig_forward
         return out
 
+    def set_experts_implementation(self, experts_implementation):
+        """Keep Transformers 5.x MoE decode optimization hooks compatible."""
+        self.config.experts_implementation = experts_implementation
+
+    def get_correct_experts_implementation(self, experts_implementation):
+        return experts_implementation
+
+    def _grouped_mm_can_dispatch(self):
+        return False
+
 
 class _TextLLMLegacyHFCompatible_(TextLLMHFCompatible):  # noqa: N801
     def _setup(self, text_llm_model):
