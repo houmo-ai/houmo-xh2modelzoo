@@ -27,6 +27,7 @@ text-only specialization of `Qwen35Workflow`):
 
 ```bash
 conda activate xhquant_55
+export HUGE_MODEL_EXPORT_ENABLED=1
 CUDA_VISIBLE_DEVICES=0,1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --model-dir weights/Qwen3-Next-80B-A3B-Instruct \
   --config-path configs_merak/workflows/xh2a/llm_models/qwen3_next/80b_a3b/qwen3_next_80b_a3b_full_mtp_gptq.yaml \
@@ -43,6 +44,13 @@ CUDA_VISIBLE_DEVICES=0,1 python examples_merak/llm/qwen3_next/qwen3_next_xh_expo
   --output-dir work_dirs/qwen3_next_merak_first4 \
   --max-layers 4 --mtp --split-conv-cache
 ```
+
+Full 80B exports should set `HUGE_MODEL_EXPORT_ENABLED=1` so the target model
+uses placeholder subgraphs and materializes one sparse-MoE block at a time.
+The default path remains unchanged when the variable is unset. MTP target
+exports use the same switch and keep the Qwen3-Next draft graph and metadata
+contract. Set `XH2MODELZOO_EXPORT_WORKERS` to control placeholder subgraph
+parallelism when the host has enough CPU, GPU, and memory capacity.
 
 For focused exporter experiments, the direct script also exposes
 `--fuse-gdr-ops`, `--fuse-gdr-block-recurrent-ops`,

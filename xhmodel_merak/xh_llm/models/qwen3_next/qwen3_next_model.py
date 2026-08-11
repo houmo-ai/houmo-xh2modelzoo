@@ -19,7 +19,7 @@ from ...base_model import get_model_param_buffer_size_gb
 from ...builder import register_llm_model
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import ExportData, LLMModelState, VLLMModelMeta
-from ...utils import get_cpu_memory_mb
+from ...utils import get_cpu_memory_mb, is_huge_model_export_enabled
 from ..qwen3_5.qwen3_5_llm_model import (
     Qwen3_5_ModelMeta,
     XHQwen3_5Model,
@@ -313,8 +313,57 @@ class XHQwen3NextModel(XHQwen3_5Model):
     def get_export_info(self, output_dir) -> ExportData:
         return BaseLLMModel.get_export_info(self, output_dir)
 
+    def _get_big_language_placeholder_export_components(self):
+        from ._model import register_wrap_modules
+        from ._qwen3_next_big_export import (
+            Qwen3NextBigHFModel,
+            register_runtime_wrap_modules,
+        )
+
+        register_wrap_modules()
+        register_runtime_wrap_modules()
+        return Qwen3NextBigHFModel, Qwen3NextBigHFModel.PLACEHOLDER_TYPES
+
+    def _check_big_language_placeholder_export_supported(self, empty_hf_model: Any) -> None:
+        hf_model_type = str(getattr(empty_hf_model.config, "model_type", "")).lower()
+        if hf_model_type != "qwen3_next":
+            raise NotImplementedError(
+                "Qwen3-Next big-model placeholder export requires a qwen3_next model."
+            )
+
+        language_model = self._get_language_model(empty_hf_model)
+        if not hasattr(language_model, "modules"):
+            raise NotImplementedError(
+                "Qwen3-Next big-model placeholder export requires an nn.Module language model."
+            )
+
+        found_types = {type(module).__name__ for module in language_model.modules()}
+        required_hf_types = {
+            "Qwen3NextAttention",
+            "Qwen3NextGatedDeltaNet",
+            "Qwen3NextSparseMoeBlock",
+        }
+        missing_types = sorted(required_hf_types - found_types)
+        if missing_types:
+            raise NotImplementedError(
+                "Qwen3-Next big-model placeholder export is missing required modules "
+                f"{missing_types}."
+            )
+
     def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
         """Export target graphs and, when requested, independent MTP graphs."""
+        exported_info = self.get_export_info(output_dir)
+        if is_huge_model_export_enabled():
+            return self._export_big_language_hmonnx(exported_info)
+        return self._export_language_hmonnx_impl(exported_info)
+
+    def _export_language_hmonnx_impl(
+        self,
+        exported_info: ExportData,
+        lora_adapters: Optional[list[Any]] = None,
+    ) -> VLLMModelMeta:
+        if lora_adapters:
+            raise NotImplementedError("Qwen3-Next LoRA export is not supported.")
         logger = get_xhquant_logger()
         if self._state != LLMModelState.QUANTED_ALIGNED:
             self.to_quanted_aligned()
@@ -330,7 +379,6 @@ class XHQwen3NextModel(XHQwen3_5Model):
         # [B, 1, H] prefill hidden output and left the draft cache uninitialized.
         self._configure_spec_decode_target_export()
 
-        exported_info = self.get_export_info(output_dir)
         self._export_hmonnx(exported_info)
         meta_info = cast(VLLMModelMeta, exported_info.meta)
 

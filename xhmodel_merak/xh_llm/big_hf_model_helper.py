@@ -184,14 +184,16 @@ class GPTQModelQuantizedModelPreprocessor:
         self,
         hf_model: PreTrainedModel,
         skip_module_prefixes: Optional[list[str]] = None,
+        convert_model_structure: bool = True,
     ) -> tuple[str, ...]:
         """Mutate an already-empty HF model into GPTQModel's meta module tree."""
         with torch.device("meta"):
-            self.model_definition.before_model_load(
-                self.model_definition,
-                load_quantized_model=True,
-            )
-            self._defuser.convert_model(hf_model, cleanup_original=True)
+            if convert_model_structure:
+                self.model_definition.before_model_load(
+                    self.model_definition,
+                    load_quantized_model=True,
+                )
+                self._defuser.convert_model(hf_model, cleanup_original=True)
             replaced = self._replace_quant_linears(hf_model, skip_module_prefixes=skip_module_prefixes)
 
         hf_model.config.quantization_config = self.quant_config

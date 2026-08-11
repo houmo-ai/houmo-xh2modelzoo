@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import struct
 from pathlib import Path
 
 from safetensors import safe_open
@@ -14,6 +15,30 @@ from safetensors.torch import save_file
 
 
 _LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+
+
+def _link_or_copy(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def _reduce_config_layers(config: dict, max_layers: int) -> None:
+    config["num_hidden_layers"] = max_layers
+    if "layer_types" in config:
+        config["layer_types"] = config["layer_types"][:max_layers]
+
+
+def _passthrough_shard_name(source_shard: str) -> str:
+    return f"mtp-{Path(source_shard).stem}.safetensors"
+
+
+def _safetensors_data_size(path: Path, names: list[str]) -> int:
+    with path.open("rb") as handle:
+        header_size = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_size))
+    return sum(header[name]["data_offsets"][1] - header[name]["data_offsets"][0] for name in names)
 
 
 def _keep(name: str, max_layers: int, include_mtp: bool) -> bool:
@@ -42,21 +67,23 @@ def reduce_checkpoint(source: Path, output: Path, max_layers: int, include_mtp: 
     total_size = 0
     target_shard_idx = 0
     for source_shard, names in sorted(by_shard.items()):
-        if all(name.startswith("mtp.") for name in names):
-            target_name = "missing_tensors_passthrough.safetensors"
+        source_path = source / source_shard
+        with safe_open(str(source_path), framework="pt", device="cpu") as handle:
+            source_names = set(handle.keys())
+
+        if source_names == set(names) and all(name.startswith("mtp.") for name in names):
+            target_name = _passthrough_shard_name(source_shard)
             target_path = output / target_name
             if target_path.exists():
                 target_path.unlink()
-            os.link(source / source_shard, target_path)
-            with safe_open(str(target_path), framework="pt") as handle:
-                for name in names:
-                    total_size += handle.get_slice(name).get_shape()[0] * 0  # size is optional metadata
+            _link_or_copy(source_path, target_path)
+            total_size += _safetensors_data_size(target_path, names)
             target_map.update({name: target_name for name in names})
             continue
 
         target_shard_idx += 1
         target_name = f"model-reduced-{target_shard_idx:05d}.safetensors"
-        with safe_open(str(source / source_shard), framework="pt") as handle:
+        with safe_open(str(source_path), framework="pt") as handle:
             tensors = {name: handle.get_tensor(name) for name in sorted(names)}
         save_file(tensors, output / target_name, metadata={"format": "pt"})
         total_size += sum(tensor.numel() * tensor.element_size() for tensor in tensors.values())
@@ -70,8 +97,7 @@ def reduce_checkpoint(source: Path, output: Path, max_layers: int, include_mtp: 
             shutil.copy2(path, output / path.name)
 
     config = json.loads((output / "config.json").read_text())
-    config["num_hidden_layers"] = max_layers
-    config["layer_types"] = config.get("layer_types", [])[:max_layers]
+    _reduce_config_layers(config, max_layers)
     dynamic = config.get("quantization_config", {}).get("dynamic", {})
     config.get("quantization_config", {})["dynamic"] = {
         pattern: value
