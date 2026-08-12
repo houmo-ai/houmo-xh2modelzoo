@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,12 @@ def export_torch_component(
         require_xh2a(target_device),
         build_quant_config(target_device, component_cfg),
     )
+    model.to("cpu")
+    del frontend_graph
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     ptq_quantize(
         quant_graph,
         [tensor_inputs],

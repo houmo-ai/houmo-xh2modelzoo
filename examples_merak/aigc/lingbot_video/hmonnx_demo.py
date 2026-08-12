@@ -10,23 +10,58 @@ from PIL import Image
 
 
 MODES = ("t2i", "t2v", "ti2v")
+_TORCHVISION_SCHEMA_LIBRARIES = []
+
+
+def _ensure_torchvision_nms_schema() -> None:
+    try:
+        import torchvision  # noqa: F401
+
+        return
+    except RuntimeError as error:
+        if "operator torchvision::nms does not exist" not in str(error):
+            raise
+
+    try:
+        torch._C._dispatch_has_kernel_for_dispatch_key("torchvision::nms", "Meta")
+    except RuntimeError:
+        library = torch.library.Library("torchvision", "DEF")
+        library.define("nms(Tensor dets, Tensor scores, float iou_threshold) -> Tensor")
+        _TORCHVISION_SCHEMA_LIBRARIES.append(library)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a LingBot Video HMONNX pipeline.")
     parser.add_argument("--mode", required=True, choices=MODES)
-    parser.add_argument("--export-dir", required=True)
+    parser.add_argument("--export-dir", help="Self-contained export directory containing all HMONNX components.")
+    parser.add_argument("--text-visual-export-dir", help="Export directory containing text_encoder and visual_encoder.")
+    parser.add_argument("--transformer-export-dir", help="Export directory containing transformer.")
+    parser.add_argument("--vae-export-dir", help="Export directory containing VAE encoder and decoder.")
     parser.add_argument("--prompt-json", required=True)
     parser.add_argument("--image", help="First frame for TI2V mode.")
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        help="Override the exported scheduler step count for short smoke tests.",
+    )
+    parser.add_argument(
         "--allow-duration-mismatch",
         action="store_true",
         help="Allow a video profile whose frame count differs from the prompt JSON duration.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    component_dirs = [args.text_visual_export_dir, args.transformer_export_dir, args.vae_export_dir]
+    if args.export_dir is None and not all(component_dirs):
+        raise ValueError(
+            "Provide --export-dir, or provide all of --text-visual-export-dir, "
+            "--transformer-export-dir, and --vae-export-dir."
+        )
+    if args.export_dir is not None and any(component_dirs):
+        raise ValueError("Use either --export-dir or the three component export dir arguments, not both.")
+    return args
 
 
 def _sample_from_json(path: Path) -> dict:
@@ -66,12 +101,20 @@ def _validate_prompt_duration(sample: dict, *, artifact_num_frames: int, fps: in
 
 
 def main() -> None:
+    _ensure_torchvision_nms_schema()
     args = parse_args()
-    export_dir = Path(args.export_dir).resolve()
+    export_dir = Path(args.export_dir).resolve() if args.export_dir is not None else None
+    text_visual_export_dir = (
+        Path(args.text_visual_export_dir).resolve() if args.text_visual_export_dir is not None else export_dir
+    )
+    transformer_export_dir = (
+        Path(args.transformer_export_dir).resolve() if args.transformer_export_dir is not None else export_dir
+    )
+    vae_export_dir = Path(args.vae_export_dir).resolve() if args.vae_export_dir is not None else export_dir
     prompt_json = Path(args.prompt_json).resolve()
     output_file = Path(args.output).resolve()
     device = torch.device(args.device)
-    root_meta = json.loads((export_dir / "export_meta_info.json").read_text(encoding="utf-8"))
+    root_meta = json.loads((transformer_export_dir / "export_meta_info.json").read_text(encoding="utf-8"))
     transformer_meta = root_meta["transformer"]
     num_frames = int(transformer_meta["num_frames"])
     artifact_mode = str(root_meta["geometry"].get("mode", ""))
@@ -101,6 +144,7 @@ def main() -> None:
 
     from xhmodel_merak.xh_other_model.models.lingbot_video.components_hmonnx import (
         build_hmonnx_pipeline_components,
+        build_hmonnx_pipeline_components_from_dirs,
         configure_pipeline_token_length,
         resolve_runtime_artifact,
     )
@@ -112,11 +156,21 @@ def main() -> None:
     else:
         pipeline_class = LingBotVideoPipeline
 
-    transformer, vae, text_encoder, processor = build_hmonnx_pipeline_components(
-        export_dir=export_dir,
-        device=device,
+    if export_dir is not None:
+        transformer, vae, text_encoder, processor = build_hmonnx_pipeline_components(
+            export_dir=export_dir,
+            device=device,
+        )
+    else:
+        transformer, vae, text_encoder, processor = build_hmonnx_pipeline_components_from_dirs(
+            text_visual_export_dir=text_visual_export_dir,
+            transformer_export_dir=transformer_export_dir,
+            vae_export_dir=vae_export_dir,
+            device=device,
+        )
+    scheduler = FlowUniPCMultistepScheduler.from_pretrained(
+        str(resolve_runtime_artifact(transformer_export_dir, "scheduler"))
     )
-    scheduler = FlowUniPCMultistepScheduler.from_pretrained(str(resolve_runtime_artifact(export_dir, "scheduler")))
     pipeline = pipeline_class(
         transformer=transformer,
         vae=vae,
@@ -132,7 +186,7 @@ def main() -> None:
         "height": int(transformer_meta["height"]),
         "width": int(transformer_meta["width"]),
         "num_frames": num_frames,
-        "num_inference_steps": int(transformer_meta["num_inference_steps"]),
+        "num_inference_steps": args.num_inference_steps or int(transformer_meta["num_inference_steps"]),
         "guidance_scale": float(root_meta["geometry"].get("guidance_scale", 3.0)),
         "shift": float(transformer_meta["shift"]),
         "generator": torch.Generator(device=device).manual_seed(int(root_meta["geometry"].get("seed", 42))),

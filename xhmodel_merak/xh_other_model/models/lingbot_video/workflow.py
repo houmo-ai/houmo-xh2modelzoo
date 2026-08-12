@@ -61,6 +61,7 @@ class LingBotVideoWorkflow(BaseOtherModelWorkflow):
         if not isinstance(components, Mapping):
             raise TypeError("export.components must be a mapping")
         self._validate_components(components)
+        enabled_components = _enabled_components(components)
         geometry = export_cfg.get("geometry") or {}
         if not isinstance(geometry, Mapping):
             raise TypeError("export.geometry must be a mapping")
@@ -79,53 +80,60 @@ class LingBotVideoWorkflow(BaseOtherModelWorkflow):
             "geometry": dict(geometry),
         }
 
-        from .text_encoder import build_text_encoder
+        if {"text_encoder", "visual_encoder"} & enabled_components:
+            if not {"text_encoder", "visual_encoder"}.issubset(enabled_components):
+                raise ValueError("text_encoder and visual_encoder must be exported together.")
+            from .text_encoder import build_text_encoder
 
-        qwen_output_dir = work_dir / "text_encoder"
-        visual_cfg = _visual_export_config(
-            model_dir=model_dir,
-            component_cfg=components["visual_encoder"],
-            geometry=geometry,
-        )
-        qwen_model = build_text_encoder(
-            model_dir=model_dir,
-            output_dir=qwen_output_dir,
-            target_device=target_device,
-            text_cfg=dict(components["text_encoder"]),
-            visual_cfg=visual_cfg,
-        )
-        qwen_model.to(torch.device(device), torch.float16)
-        meta["text_encoder"] = qwen_model.export_lingbot_hmonnx(qwen_output_dir)
-        meta["components"].extend(["text_encoder", "visual_encoder"])
-        del qwen_model
-        _release_memory()
+            qwen_output_dir = work_dir / "text_encoder"
+            visual_cfg = _visual_export_config(
+                model_dir=model_dir,
+                component_cfg=components["visual_encoder"],
+                geometry=geometry,
+            )
+            qwen_model = build_text_encoder(
+                model_dir=model_dir,
+                output_dir=qwen_output_dir,
+                target_device=target_device,
+                text_cfg=dict(components["text_encoder"]),
+                visual_cfg=visual_cfg,
+            )
+            qwen_model.to(torch.device(device), torch.float16)
+            meta["text_encoder"] = qwen_model.export_lingbot_hmonnx(qwen_output_dir)
+            meta["components"].extend(["text_encoder", "visual_encoder"])
+            del qwen_model
+            _release_memory()
 
-        from .transformer import export_transformer
+        if "transformer" in enabled_components:
+            from .transformer import export_transformer
 
-        meta["transformer"] = export_transformer(
-            model_dir=model_dir,
-            output_dir=work_dir / "transformer",
-            target_device=target_device,
-            component_cfg=dict(components["transformer"]),
-            geometry_cfg=dict(geometry),
-            exec_device=device,
-        )
-        meta["components"].append("transformer")
-        _release_memory()
+            meta["transformer"] = export_transformer(
+                model_dir=model_dir,
+                output_dir=work_dir / "transformer",
+                target_device=target_device,
+                component_cfg=dict(components["transformer"]),
+                geometry_cfg=dict(geometry),
+                exec_device=device,
+            )
+            meta["components"].append("transformer")
+            _release_memory()
 
-        from .vae import export_vae_components
+        if {"vae_encoder", "vae_decoder"} & enabled_components:
+            if not {"vae_encoder", "vae_decoder"}.issubset(enabled_components):
+                raise ValueError("vae_encoder and vae_decoder must be exported together.")
+            from .vae import export_vae_components
 
-        meta["vae"] = export_vae_components(
-            model_dir=model_dir,
-            output_dir=work_dir / "vae",
-            target_device=target_device,
-            encoder_cfg=dict(components["vae_encoder"]),
-            decoder_cfg=dict(components["vae_decoder"]),
-            geometry_cfg=dict(geometry),
-            exec_device=device,
-        )
-        meta["components"].extend(["vae_encoder", "vae_decoder"])
-        _release_memory()
+            meta["vae"] = export_vae_components(
+                model_dir=model_dir,
+                output_dir=work_dir / "vae",
+                target_device=target_device,
+                encoder_cfg=dict(components["vae_encoder"]),
+                decoder_cfg=dict(components["vae_decoder"]),
+                geometry_cfg=dict(geometry),
+                exec_device=device,
+            )
+            meta["components"].extend(["vae_encoder", "vae_decoder"])
+            _release_memory()
 
         meta_file = work_dir / "export_meta_info.json"
         meta_file.write_text(json.dumps(meta, indent=4), encoding="utf-8")
@@ -151,54 +159,58 @@ class LingBotVideoWorkflow(BaseOtherModelWorkflow):
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
         golden_root = work_dir / "golden"
 
-        text_meta = meta["text_encoder"]
-        _dump_one_golden(
-            runtime_cls=HMONNXGoldenInference,
-            hmonnx_file=work_dir / "text_encoder" / text_meta["language_hmonnx"],
-            inputs_file=work_dir / "text_encoder" / text_meta["language_calibration_inputs"],
-            golden_dir=golden_root / "text_encoder",
-            device=device,
-        )
-        visual_hmonnx = Path(text_meta["visual"]["hmonnx"])
-        if not visual_hmonnx.is_absolute():
-            visual_hmonnx = work_dir / "text_encoder" / visual_hmonnx
-        _dump_one_golden(
-            runtime_cls=HMONNXGoldenInference,
-            hmonnx_file=visual_hmonnx,
-            inputs_file=work_dir / "text_encoder" / text_meta["visual_calibration_inputs"],
-            golden_dir=golden_root / "visual_encoder",
-            device=device,
-        )
-
-        transformer_meta = meta["transformer"]
-        _dump_one_golden(
-            runtime_cls=HMONNXGoldenInference,
-            hmonnx_file=work_dir / "transformer" / transformer_meta["hmonnx_file"],
-            inputs_file=work_dir / "transformer" / transformer_meta["calibration_inputs"],
-            golden_dir=golden_root / "transformer",
-            device=device,
-        )
-
-        encoder_meta = meta["vae"]["encoder"]
-        _dump_one_golden(
-            runtime_cls=HMONNXGoldenInference,
-            hmonnx_file=work_dir / "vae" / encoder_meta["hmonnx_file"],
-            inputs_file=work_dir / "vae" / encoder_meta["calibration_inputs"],
-            golden_dir=golden_root / "vae_encoder",
-            device=device,
-        )
-        decoder_meta = meta["vae"]["decoder"]
-        for stage_name in ("first", "next"):
-            stage_meta = decoder_meta.get(stage_name)
-            if stage_meta is None:
-                continue
+        text_meta = meta.get("text_encoder")
+        if text_meta is not None:
             _dump_one_golden(
                 runtime_cls=HMONNXGoldenInference,
-                hmonnx_file=work_dir / "vae" / stage_meta["hmonnx_file"],
-                inputs_file=work_dir / "vae" / stage_meta["calibration_inputs"],
-                golden_dir=golden_root / f"vae_decoder_{stage_name}",
+                hmonnx_file=work_dir / "text_encoder" / text_meta["language_hmonnx"],
+                inputs_file=work_dir / "text_encoder" / text_meta["language_calibration_inputs"],
+                golden_dir=golden_root / "text_encoder",
                 device=device,
             )
+            visual_hmonnx = Path(text_meta["visual"]["hmonnx"])
+            if not visual_hmonnx.is_absolute():
+                visual_hmonnx = work_dir / "text_encoder" / visual_hmonnx
+            _dump_one_golden(
+                runtime_cls=HMONNXGoldenInference,
+                hmonnx_file=visual_hmonnx,
+                inputs_file=work_dir / "text_encoder" / text_meta["visual_calibration_inputs"],
+                golden_dir=golden_root / "visual_encoder",
+                device=device,
+            )
+
+        transformer_meta = meta.get("transformer")
+        if transformer_meta is not None:
+            _dump_one_golden(
+                runtime_cls=HMONNXGoldenInference,
+                hmonnx_file=work_dir / "transformer" / transformer_meta["hmonnx_file"],
+                inputs_file=work_dir / "transformer" / transformer_meta["calibration_inputs"],
+                golden_dir=golden_root / "transformer",
+                device=device,
+            )
+
+        vae_meta = meta.get("vae")
+        if vae_meta is not None:
+            encoder_meta = vae_meta["encoder"]
+            _dump_one_golden(
+                runtime_cls=HMONNXGoldenInference,
+                hmonnx_file=work_dir / "vae" / encoder_meta["hmonnx_file"],
+                inputs_file=work_dir / "vae" / encoder_meta["calibration_inputs"],
+                golden_dir=golden_root / "vae_encoder",
+                device=device,
+            )
+            decoder_meta = vae_meta["decoder"]
+            for stage_name in ("first", "next"):
+                stage_meta = decoder_meta.get(stage_name)
+                if stage_meta is None:
+                    continue
+                _dump_one_golden(
+                    runtime_cls=HMONNXGoldenInference,
+                    hmonnx_file=work_dir / "vae" / stage_meta["hmonnx_file"],
+                    inputs_file=work_dir / "vae" / stage_meta["calibration_inputs"],
+                    golden_dir=golden_root / f"vae_decoder_{stage_name}",
+                    device=device,
+                )
         return str(golden_root)
 
     @classmethod
@@ -209,16 +221,11 @@ class LingBotVideoWorkflow(BaseOtherModelWorkflow):
             raise ValueError(f"Missing LingBot Video components: {missing}")
         if unsupported:
             raise ValueError(f"Unsupported LingBot Video components: {unsupported}")
-        disabled = [
-            name
-            for name in cls.REQUIRED_COMPONENTS
-            if not isinstance(components[name], Mapping) or not bool(components[name].get("enabled", True))
-        ]
-        if disabled:
-            raise ValueError(
-                "The full-model workflow requires every neural component to be enabled; "
-                f"disabled/invalid: {sorted(disabled)}"
-            )
+        invalid = [name for name in cls.REQUIRED_COMPONENTS if not isinstance(components[name], Mapping)]
+        if invalid:
+            raise ValueError(f"Invalid LingBot Video component configs: {sorted(invalid)}")
+        if not _enabled_components(components):
+            raise ValueError("At least one LingBot Video component must be enabled.")
 
     @staticmethod
     def _validate_static_profile(components: Mapping[str, Any], geometry: Mapping[str, Any]) -> None:
@@ -391,6 +398,14 @@ def _dump_one_golden(
     golden_dir.mkdir(parents=True, exist_ok=True)
     session.golden_dir = str(golden_dir)
     session(*runtime_inputs)
+
+
+def _enabled_components(components: Mapping[str, Any]) -> set[str]:
+    return {
+        name
+        for name, component_cfg in components.items()
+        if isinstance(component_cfg, Mapping) and bool(component_cfg.get("enabled", True))
+    }
 
 
 def _release_memory() -> None:

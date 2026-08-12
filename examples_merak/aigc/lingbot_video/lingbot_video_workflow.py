@@ -15,6 +15,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config-path", default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--quant-output-dir", default="work_dirs/lingbot_video_quant")
     parser.add_argument("--export-output-dir", default="work_dirs/lingbot_video_w8a8")
+    parser.add_argument(
+        "--export-components",
+        nargs="+",
+        default=None,
+        choices=("text_encoder", "visual_encoder", "transformer", "vae_encoder", "vae_decoder"),
+        help="Export only the selected components instead of the full pipeline.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--quant-type", default=None)
     parser.add_argument("--mode", choices=("t2i", "t2v", "ti2v"), default=None)
@@ -78,6 +85,12 @@ def main() -> None:
         debug=args.debug,
     )
     overrides = _config_overrides(args)
+    if args.export_components is not None:
+        overrides["export.components.text_encoder.enabled"] = "text_encoder" in args.export_components
+        overrides["export.components.visual_encoder.enabled"] = "visual_encoder" in args.export_components
+        overrides["export.components.transformer.enabled"] = "transformer" in args.export_components
+        overrides["export.components.vae_encoder.enabled"] = "vae_encoder" in args.export_components
+        overrides["export.components.vae_decoder.enabled"] = "vae_decoder" in args.export_components
     quant_result = workflow.quant(
         output_dir=args.quant_output_dir,
         device=args.device,

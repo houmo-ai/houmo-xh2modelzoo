@@ -69,11 +69,13 @@ def export_transformer(
         device=device,
         dtype=dtype,
     )
-    rotary_cos, rotary_sin, current_input_length = LingBotVideoTransformerExportWrapper.build_rotary_inputs(
-        transformer,
-        hidden_states,
-        valid_text_length=text_sequence_length,
-        padded_text_length=text_sequence_length,
+    rotary_cos, rotary_sin, current_input_length, valid_token_mask = (
+        LingBotVideoTransformerExportWrapper.build_rotary_inputs(
+            transformer,
+            hidden_states,
+            valid_text_length=text_sequence_length,
+            padded_text_length=text_sequence_length,
+        )
     )
     install_export_geometry(
         transformer,
@@ -102,6 +104,7 @@ def export_transformer(
             rotary_cos,
             rotary_sin,
             current_input_length,
+            valid_token_mask,
         ),
         input_names=(
             "hidden_states",
@@ -110,6 +113,7 @@ def export_transformer(
             "rotary_cos",
             "rotary_sin",
             "current_input_length",
+            "valid_token_mask",
         ),
         output_names=("sample",),
         output_file=output_file,

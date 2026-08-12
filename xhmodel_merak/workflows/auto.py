@@ -20,6 +20,16 @@ class AutoWorkflow:
 
         model_cfg = cls._read_model_config(config_path)
         model_type = cls._read_model_type(model_cfg, config_path)
+        if model_cfg.get("type") == model_type and model_cfg.get("model_type") is None:
+            from xhmodel_merak.xh_other_model.workflows import AutoOtherModelWorkflow
+
+            return AutoOtherModelWorkflow.from_config(
+                model_dir=model_dir,
+                config_path=config_path,
+                seed=seed,
+                debug=debug,
+            )
+
         supported_families = cls._supported_workflow_families(model_type)
 
         if len(supported_families) == 1:

@@ -10,7 +10,7 @@ import torch.nn as nn
 from diffusers.models.autoencoders.vae import DecoderOutput, DiagonalGaussianDistribution
 from diffusers.models.modeling_outputs import AutoencoderKLOutput, Transformer2DModelOutput
 
-from xhquant.api import HMONNXGoldenInference
+from xhquant.api import HMONNXGoldenInference, PrecisionMode
 
 from .qwen3_vl_preprocess import (
     LingBotQwen3VLDataPreprocess,
@@ -41,11 +41,12 @@ def resolve_runtime_artifact(export_dir: Path, name: str) -> Path:
 
 
 class _LazyHMONNXRuntime:
-    def __init__(self, hmonnx_file: Path, device: torch.device):
+    def __init__(self, hmonnx_file: Path, device: torch.device, precision_mode: Optional[PrecisionMode] = None):
         self.hmonnx_file = Path(hmonnx_file)
         if not self.hmonnx_file.is_file():
             raise FileNotFoundError(f"Missing HMONNX file: {self.hmonnx_file}")
         self.device = torch.device(device)
+        self.precision_mode = precision_mode
         self._runtime: Optional[HMONNXGoldenInference] = None
 
     def to(self, device: torch.device) -> "_LazyHMONNXRuntime":
@@ -56,7 +57,9 @@ class _LazyHMONNXRuntime:
 
     def __call__(self, *inputs: torch.Tensor):
         if self._runtime is None:
-            self._runtime = HMONNXGoldenInference(str(self.hmonnx_file))
+            self._runtime = HMONNXGoldenInference(str(self.hmonnx_file), exec_device=self.device)
+            if self.precision_mode is not None:
+                self._runtime.set_precision_mode(self.precision_mode)
         self._runtime.exec_device = self.device
         with torch.autocast(device_type=self.device.type, enabled=False):
             return self._runtime(*inputs)
@@ -210,7 +213,7 @@ class LingBotVideoTransformerInference(nn.Module):
             torch.empty(0, device=self._device, dtype=torch.float16),
             requires_grad=False,
         )
-        self.runtime = _LazyHMONNXRuntime(export_root / meta["hmonnx_file"], self._device)
+        self.runtime = _LazyHMONNXRuntime(export_root / meta["hmonnx_file"], self._device, PrecisionMode.ALIGNED)
         self.config = SimpleNamespace(**transformer_config)
         self.config.patch_size = tuple(self.config.patch_size)
         self.rope = LingBotVideoRotaryEmbedding(
@@ -271,11 +274,13 @@ class LingBotVideoTransformerInference(nn.Module):
             )
         hidden_states = hidden_states.to(self._device, dtype=torch.float16)
         encoder_hidden_states = encoder_hidden_states.to(self._device, dtype=torch.float16)
-        rotary_cos, rotary_sin, current_input_length = LingBotVideoTransformerExportWrapper.build_rotary_inputs(
-            self,
-            hidden_states,
-            valid_text_length=valid_text_length,
-            padded_text_length=self.text_sequence_length,
+        rotary_cos, rotary_sin, current_input_length, valid_token_mask = (
+            LingBotVideoTransformerExportWrapper.build_rotary_inputs(
+                self,
+                hidden_states,
+                valid_text_length=valid_text_length,
+                padded_text_length=self.text_sequence_length,
+            )
         )
         timestep_index = (
             torch.argmin(torch.abs(self.timestep_values - timestep.detach().float().cpu()[0]))
@@ -289,6 +294,7 @@ class LingBotVideoTransformerInference(nn.Module):
             rotary_cos,
             rotary_sin,
             current_input_length,
+            valid_token_mask,
         )
         if isinstance(sample, tuple):
             sample = sample[0]
@@ -424,6 +430,35 @@ def build_hmonnx_pipeline_components(
         device=device,
     )
     processor = LingBotQwen3VLProcessor.from_pretrained(resolve_runtime_artifact(export_dir, "processor"))
+    return transformer, vae, text_encoder, processor
+
+
+def build_hmonnx_pipeline_components_from_dirs(
+    *,
+    text_visual_export_dir: Path,
+    transformer_export_dir: Path,
+    vae_export_dir: Path,
+    device: torch.device,
+) -> tuple[nn.Module, nn.Module, nn.Module, LingBotQwen3VLProcessor]:
+    text_visual_export_dir = Path(text_visual_export_dir).resolve()
+    transformer_export_dir = Path(transformer_export_dir).resolve()
+    vae_export_dir = Path(vae_export_dir).resolve()
+    text_encoder = LingBotQwen3VLTextEncoderInference(
+        export_root=text_visual_export_dir / "text_encoder",
+        config_file=resolve_runtime_artifact(text_visual_export_dir, "text_encoder_config"),
+        device=device,
+    )
+    transformer = LingBotVideoTransformerInference(
+        export_root=transformer_export_dir / "transformer",
+        config_file=resolve_runtime_artifact(transformer_export_dir, "transformer_config"),
+        device=device,
+    )
+    vae = LingBotWanVAEInference(
+        export_root=vae_export_dir / "vae",
+        config_file=resolve_runtime_artifact(vae_export_dir, "vae_config"),
+        device=device,
+    )
+    processor = LingBotQwen3VLProcessor.from_pretrained(resolve_runtime_artifact(text_visual_export_dir, "processor"))
     return transformer, vae, text_encoder, processor
 
 
