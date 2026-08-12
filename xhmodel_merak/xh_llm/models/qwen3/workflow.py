@@ -28,7 +28,7 @@ class XHQwen3HMONNXWorkflow(BaseLLMWorkflow):
         # step2 获取quant配置
         bits = workflow_config.quant["bits"]
         save_path = str(Path(output_dir) / f"{Path(self.model_dir).name}-gptqmodel-{bits}bit")
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
         calibration_dataset = [text for text in dataset["text"] if text.strip() and len(text.strip()) > 50][:128]
 
         # step3 执行量化
