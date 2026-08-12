@@ -26,6 +26,7 @@ from xhquant.api import (
     get_root_logger,
 )
 from .common import ensure_wan2_2_repo
+
 ensure_wan2_2_repo()
 
 from .dit_wrapper import Wan2_2DiTExportWrapper, build_wan_time_embeddings
@@ -38,7 +39,6 @@ from wan.configs import WAN_CONFIGS  # noqa: E402
 from wan.image2video import WanI2V  # noqa: E402
 from wan.modules.model import WanModel  # noqa: E402
 from wan.text2video import WanT2V  # noqa: E402
-
 
 WAN_EXPORT_COMPONENTS = ("t5", "vae_encode", "vae_decode", "low_noise_model", "high_noise_model")
 # WAN_EXPORT_COMPONENTS = ()
@@ -263,7 +263,9 @@ class Wan22Converter:
         pipe.vae.model = pipe.vae.model.to(cfg.param_dtype)
         device = torch.device(f"cuda:{device_id}")
         pipe.low_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
-        pipe.high_noise_model = self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+        pipe.high_noise_model = self._load_noise_model_from_path(
+            cfg, device=device, noise_model_name="high_noise_model"
+        )
 
     def build_float_pipeline(self, device_id: int = 0, rank: int = 0):
         cfg = WAN_CONFIGS[self.config.task]
@@ -327,8 +329,8 @@ class Wan22Converter:
         latent_t = (self.config.frame_num - 1) // pipe.vae_stride[0] + 1
         latent_h = height // pipe.vae_stride[1]
         latent_w = width // pipe.vae_stride[2]
-        latent_h = 60
-        latent_w = 104
+        # latent_h = 60
+        # latent_w = 104
         return pipe.vae.model.z_dim, latent_t, latent_h, latent_w
 
     def _build_seq_len(self, pipe, latent_shape: Tuple[int, int, int, int]) -> int:
@@ -440,7 +442,6 @@ class Wan22Converter:
         context_ref = context.to(self.device, dtype=validate_dtype)
         y_ref = y.to(self.device, dtype=validate_dtype) if y is not None else None
 
-        
         model.time_embedding = model.time_embedding.to(torch.float32)
         model.time_projection = model.time_projection.to(torch.float32)
 
@@ -534,7 +535,10 @@ class Wan22Converter:
             ),
             "input_names": export_meta["input_names"],
             "output_names": export_meta["output_names"],
-            "sample_input_shapes": {name: list(t.shape) if isinstance(t, torch.Tensor) else list(t[0].shape) for name, t in zip(input_names, inputs, strict=True)},
+            "sample_input_shapes": {
+                name: list(t.shape) if isinstance(t, torch.Tensor) else list(t[0].shape)
+                for name, t in zip(input_names, inputs, strict=True)
+            },
             "seq_len": int(seq_len),
             "sample_timestep": timestep.tolist(),
             "dtype": str(dit_dtype).replace("torch.", ""),

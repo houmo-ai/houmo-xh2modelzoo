@@ -94,7 +94,6 @@ conda run -n xhquant python examples_merak/aigc/wan2.2/wan2_2_workflow.py \
   --output-dir work_dirs/wan2_2_i2v-A14B_merak_lora \
   --task i2v-A14B \
   --components high_noise_model \
-  --quant-type w8a8_sefp \
   --torch-dtype float16 \
   --use-resolved-float-loader \
   --overwrite
@@ -114,9 +113,14 @@ export:
 configs_merak/workflows/xh2a/other_models/wan2_2/i2v_A14B/wan2_2_i2v_A14B.yaml
 ```
 
+各组件的量化类型只通过对应 YAML 中的 `export.wan2_2.quant_types`配置，命令行不再提供全局 `--quant-type`，避免覆盖不同组件的独立量化类型。
+
+`--task i2v-A14B` 和 `--task t2v-A14B` 会分别自动选择对应的 I2V/T2V YAML。如果显式传入 `--config-path`，则以指定 YAML 为准。
+
 ## 3. 不使用 LoRA 的普通量化导出
 
-如果只想用原始权重，保持 `use_resolved_float_loader: false`，或命令行不传 `--use-resolved-float-loader` 即可。
+当前组件级加载、merged/split safetensors 解析以及四组生命周期管理依赖
+`use_resolved_float_loader: true`，I2V/T2V 默认 YAML 已经启用该配置。
 
 ```bash
 conda run -n xhquant python examples_merak/aigc/wan2.2/wan2_2_workflow.py \
@@ -124,7 +128,6 @@ conda run -n xhquant python examples_merak/aigc/wan2.2/wan2_2_workflow.py \
   --output-dir work_dirs/wan2_2_i2v-A14B_merak \
   --task i2v-A14B \
   --components t5 \
-  --quant-type w8a8_sefp \
   --overwrite
 ```
 

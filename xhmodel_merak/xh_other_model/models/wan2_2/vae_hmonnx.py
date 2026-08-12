@@ -9,6 +9,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+
 from xhquant.api import HMONNXGoldenInference
 
 
@@ -81,7 +82,7 @@ class Wan22VAEDecoderInference(nn.Module):
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         outputs = self.runtime(latent.to(self.device, dtype=self._dtype))
         video = outputs[0] if isinstance(outputs, tuple) else outputs
-        return video.to(self.device, dtype=self._dtype)
+        return video.to(self.device, dtype=torch.float32).clamp_(-1, 1)
 
 
 Wan2_2VAEEncoderInference = Wan22VAEEncoderInference

@@ -61,6 +61,37 @@ class _Wan22HmonnxDiTProxy:
     def __getattr__(self, name):
         return getattr(self._runtime_model, name)
 
+    @staticmethod
+    def _as_single_tensor(value, name: str):
+        if isinstance(value, (list, tuple)):
+            if len(value) != 1:
+                raise ValueError(f"{name} expects one tensor for current Wan2.2 HMONNX runtime, got {len(value)}")
+            return value[0]
+        return value
+
+    def _prepare_latent(self, x, y):
+        latent = self._as_single_tensor(x, "latent")
+        if getattr(self._float_model, "model_type", None) != "i2v":
+            return latent.half()
+
+        cond = self._as_single_tensor(y, "y")
+        return torch.cat([latent, cond], dim=0).half()
+
+    def _prepare_context(self, context):
+        context_tensor = self._as_single_tensor(context, "context")
+        text_len = getattr(self._float_model, "text_len", None)
+        if text_len is not None and context_tensor.size(0) < text_len:
+            context_tensor = torch.cat(
+                [
+                    context_tensor,
+                    context_tensor.new_zeros(text_len - context_tensor.size(0), context_tensor.size(1)),
+                ],
+                dim=0,
+            )
+        if context_tensor.dim() == 2:
+            context_tensor = context_tensor.unsqueeze(0)
+        return context_tensor.half()
+
     def __call__(self, x, *args, **kwargs):
         if "t" not in kwargs:
             raise KeyError("Expected timestep 't' for Wan2.2 DiT runtime call")
@@ -77,20 +108,19 @@ class _Wan22HmonnxDiTProxy:
                 raise ValueError(f"Invalid conditional channel count inferred from model config: {cond_channels}")
             kwargs["y"] = [latent.new_zeros((cond_channels, *latent.shape[1:])) for latent in x]
             y = kwargs["y"]
-        latent = x[0] if isinstance(x, list) else x
-        e, e0 = build_wan_time_embeddings(self._float_model, t, seq_len, latent.dtype)
-        seq_lens = torch.tensor([seq_len], device=latent.device, dtype=torch.long)
-        context_tensor = context[0] if isinstance(context, list) else context
-        context_lens = torch.tensor([context_tensor.size(0)], device=context_tensor.device, dtype=torch.long)
-        return self._runtime_model(
-            x,
-            context=context,
-            seq_lens=seq_lens,
+        e, e0 = build_wan_time_embeddings(self._float_model, t, seq_len, torch.float16)
+        latent_tensor = self._prepare_latent(x, y)
+        context_tensor = self._prepare_context(context)
+
+        runtime_out = self._runtime_model(
+            latent_tensor,
+            context=context_tensor,
             e=e,
             e0=e0,
-            context_lens=context_lens,
-            y=y,
         )
+        if not isinstance(runtime_out, (list, tuple)):
+            runtime_out = (runtime_out,)
+        return runtime_out
 
 
 class _Wan22ModuleSwitchMixin:

@@ -46,7 +46,9 @@ def build_wan_time_embeddings(model: nn.Module, t: torch.Tensor, seq_len: int, o
 
     bt = t.size(0)
     t = t.flatten()
-    e = model.time_embedding(sinusoidal_embedding_1d(model.freq_dim, t).unflatten(0, (bt, seq_len)).half())
+    model.time_embedding = model.time_embedding.to(torch.float32)
+    model.time_projection = model.time_projection.to(torch.float32)
+    e = model.time_embedding(sinusoidal_embedding_1d(model.freq_dim, t).unflatten(0, (bt, seq_len)).float())
     e0 = model.time_projection(e).unflatten(2, (6, model.dim))
     if output_dtype == torch.float16:
         e = e.to(torch.float16)
@@ -165,17 +167,11 @@ class _WanModel(DynamicModule):
             ]
         )
 
-        context = self.text_embedding(
-            torch.concat(
-                [
-                    torch.cat(
-                        [u, torch.zeros(self.text_len - u.size(0), u.size(1), device=device, dtype=u.dtype)]
-                    ).unsqueeze(0)
-                    for u in context
-                ],
-                dim=0,
-            )
-        )
+        if isinstance(context, list):
+            context = torch.concat([u.unsqueeze(0) for u in context], dim=0)
+        context = self.text_embedding(context)
+        if context.dtype != torch.float16:
+            context = context.to(torch.float16)
 
         kwargs = dict(
             e=e0,
@@ -207,7 +203,11 @@ class _WanRMSNorm(DynamicModule):
 class _WanLayerNorm(DynamicModule):
     def _setup(self, *args, **kwargs):
         del args, kwargs
-        self.norm = nn.LayerNorm(self.normalized_shape, eps=self.eps, elementwise_affine=True).half().cuda()
+        self.norm = nn.LayerNorm(
+            self.normalized_shape,
+            eps=self.eps,
+            elementwise_affine=self.elementwise_affine,
+        ).half().cuda()
         if self.weight is not None:
             self.norm.weight = nn.Parameter(deepcopy(self.weight.data)).half()
         if self.bias is not None:
@@ -334,6 +334,8 @@ class Wan22DiTExportWrapper(nn.Module):
 
     def _prepare_latent(self, latent_model_input, y: Optional[torch.Tensor] = None):
         latent_arg = latent_model_input if isinstance(latent_model_input, list) else [latent_model_input]
+        if self.model.model_type == "i2v" and y is None:
+            raise ValueError("Wan2.2 i2v export requires conditional input y")
         if y is None:
             return latent_arg
 
@@ -367,8 +369,9 @@ class Wan22DiTExportWrapper(nn.Module):
         context,
         e: torch.Tensor,
         e0: torch.Tensor,
+        y: Optional[torch.Tensor] = None,
     ):
-        latent_arg = self._prepare_latent(latent_model_input)
+        latent_arg = self._prepare_latent(latent_model_input, y)
         context_arg = self._prepare_context(context)
         kwargs = {
             "context": context_arg,

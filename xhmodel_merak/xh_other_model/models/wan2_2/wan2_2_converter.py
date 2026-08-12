@@ -6,6 +6,7 @@
 # pyright: reportMissingImports=false
 
 import json
+import gc
 import math
 import time
 from dataclasses import dataclass, field
@@ -39,8 +40,8 @@ from wan.image2video import WanI2V  # noqa: E402
 from wan.modules.model import WanModel  # noqa: E402
 from wan.text2video import WanT2V  # noqa: E402
 
-
 WAN_EXPORT_COMPONENTS = ("t5", "vae_encode", "vae_decode", "low_noise_model", "high_noise_model")
+WAN_SHARED_VAE_COMPONENTS = ("vae_encode", "vae_decode")
 # WAN_EXPORT_COMPONENTS = ()
 
 
@@ -55,6 +56,7 @@ def load_safetensors(path: str) -> dict[str, torch.Tensor]:
 @dataclass
 class Wan22ConvertConfig:
     quant_scheme: QuantScheme = field(default_factory=QuantScheme)
+    quant_types: Dict[str, str] = field(default_factory=dict)
     task: str = "t2v-A14B"
     size: Tuple[int, int] = (832, 480)
     frame_num: int = 81
@@ -68,6 +70,7 @@ class Wan22ConvertConfig:
     torch_dtype: torch.dtype = torch.bfloat16
     base_seed: int = 0
     use_resolved_float_loader: bool = False
+    release_dit_fp16_weights: bool = True
 
 
 class Wan22Converter:
@@ -129,12 +132,28 @@ class Wan22Converter:
             subfolder = cfg.high_noise_checkpoint
             role = "high_noise"
 
+        task_name = self.config.task.split("-", maxsplit=1)[0].lower()
+
+        def checkpoint_task(path: Path) -> str | None:
+            name = path.name.lower()
+            # ``ti2v`` contains the ``i2v`` substring, so check it first.
+            if "ti2v" in name:
+                return "ti2v"
+            if "i2v" in name:
+                return "i2v"
+            if "t2v" in name:
+                return "t2v"
+            return None
+
         merged_dir = ckpt_dir / "merged"
         if merged_dir.is_dir():
             merged_candidates = sorted(
                 path
                 for path in merged_dir.iterdir()
-                if path.suffix == ".safetensors" and role in path.name and "merged" in path.name
+                if path.suffix == ".safetensors"
+                and role in path.name.lower()
+                and "merged" in path.name.lower()
+                and checkpoint_task(path) == task_name
             )
             if merged_candidates:
                 self.logger.info("Use merged Wan2.2 %s checkpoint: %s", noise_model_name, merged_candidates[0])
@@ -145,8 +164,28 @@ class Wan22Converter:
             split_candidates = sorted(
                 path for path in split_dir.iterdir() if path.suffix == ".safetensors" and role in path.name
             )
-            if split_candidates:
+            task_marker = f"_{task_name}_{role}_"
+            task_candidates = [path for path in split_candidates if task_marker in path.name.lower()]
+            if task_candidates:
+                self.logger.info(
+                    "Use Wan2.2 %s checkpoint for task %s: %s",
+                    noise_model_name,
+                    self.config.task,
+                    task_candidates[0],
+                )
+                return task_candidates[0]
+
+            official_path = ckpt_dir / subfolder
+            if official_path.exists():
+                return official_path
+            if len(split_candidates) == 1:
                 return split_candidates[0]
+            if split_candidates:
+                raise FileNotFoundError(
+                    f"Cannot unambiguously resolve {noise_model_name} checkpoint for task {self.config.task!r}; "
+                    f"expected a filename containing {task_marker!r}, candidates: "
+                    f"{[path.name for path in split_candidates]}"
+                )
 
         return ckpt_dir / subfolder
 
@@ -190,26 +229,42 @@ class Wan22Converter:
                 self.logger.warning("Unexpected keys when loading %s: %s", noise_model_name, unexpected_keys[:20])
         return self._configure_noise_model(model, device=device, param_dtype=cfg.param_dtype)
 
-    def _build_resolved_float_pipeline(self, cfg, device_id: int = 0, rank: int = 0):
+    def _build_resolved_float_pipeline(
+        self,
+        cfg,
+        device_id: int = 0,
+        rank: int = 0,
+        components: Sequence[str] | None = None,
+    ):
         device = torch.device(f"cuda:{device_id}")
-        text_encoder_path = self._resolve_text_encoder_path()
-        vae_path = self._resolve_vae_path()
-        text_encoder = LocalT5EncoderModel(
-            text_len=cfg.text_len,
-            dtype=cfg.t5_dtype,
-            device=torch.device("cpu"),
-            checkpoint_path=str(text_encoder_path),
-            tokenizer_path=str(self.pretrained_model_path / cfg.t5_tokenizer),
-            shard_fn=None,
-        )
-        vae = LocalWan2_1_VAE(
-            vae_pth=str(vae_path),
-            device=device,
-            dtype=cfg.param_dtype,
-        )
-        vae.model = vae.model.to(cfg.param_dtype)
-        need_low_noise = "low_noise_model" in self.export_components or "low_noise_model" in self.golden_components
-        need_high_noise = "high_noise_model" in self.export_components or "high_noise_model" in self.golden_components
+        requested_components = set(components or (*self.export_components, *self.golden_components))
+        need_low_noise = "low_noise_model" in requested_components
+        need_high_noise = "high_noise_model" in requested_components
+        need_dit = need_low_noise or need_high_noise
+        need_text_encoder = "t5" in requested_components or need_dit
+        need_vae = bool({"vae_encode", "vae_decode"} & requested_components) or need_dit
+
+        text_encoder = None
+        if need_text_encoder:
+            text_encoder_path = self._resolve_text_encoder_path()
+            text_encoder = LocalT5EncoderModel(
+                text_len=cfg.text_len,
+                dtype=cfg.t5_dtype,
+                device=torch.device("cpu"),
+                checkpoint_path=str(text_encoder_path),
+                tokenizer_path=str(self.pretrained_model_path / cfg.t5_tokenizer),
+                shard_fn=None,
+            )
+
+        vae = None
+        if need_vae:
+            vae_path = self._resolve_vae_path()
+            vae = LocalWan2_1_VAE(
+                vae_pth=str(vae_path),
+                device=device,
+                dtype=cfg.param_dtype,
+            )
+            vae.model = vae.model.to(cfg.param_dtype)
         low_noise_model = (
             self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
             if need_low_noise
@@ -240,12 +295,22 @@ class Wan22Converter:
             sample_neg_prompt=getattr(cfg, "sample_neg_prompt", ""),
         )
 
-    def build_float_pipeline(self, device_id: int = 0, rank: int = 0):
+    def build_float_pipeline(
+        self,
+        device_id: int = 0,
+        rank: int = 0,
+        components: Sequence[str] | None = None,
+    ):
         cfg = WAN_CONFIGS[self.config.task]
         cfg.param_dtype = torch.float16
         cfg.t5_dtype = torch.float16
         if self.config.use_resolved_float_loader:
-            return self._build_resolved_float_pipeline(cfg, device_id=device_id, rank=rank)
+            return self._build_resolved_float_pipeline(
+                cfg,
+                device_id=device_id,
+                rank=rank,
+                components=components,
+            )
         pipeline_cls = WanI2V if self.config.task.startswith("i2v") else WanT2V
         return pipeline_cls(
             cfg,
@@ -254,6 +319,24 @@ class Wan22Converter:
             rank=rank,
             convert_model_dtype=True,
         )
+
+    def _build_component_groups(self) -> list[tuple[str, ...]]:
+        """Group export components by shared weights and GPU lifecycle."""
+        shared_vae_group = tuple(
+            component for component in self.export_components if component in WAN_SHARED_VAE_COMPONENTS
+        )
+        component_groups: list[tuple[str, ...]] = []
+        shared_vae_group_added = False
+
+        for component in self.export_components:
+            if component in WAN_SHARED_VAE_COMPONENTS:
+                if not shared_vae_group_added:
+                    component_groups.append(shared_vae_group)
+                    shared_vae_group_added = True
+                continue
+            component_groups.append((component,))
+
+        return component_groups
 
     def _export_component(
         self,
@@ -264,8 +347,21 @@ class Wan22Converter:
         onnx_file: Path,
         golden_dir: Path,
         export_golden: bool,
+        release_fp16_weights: bool = False,
     ) -> Dict[str, Any]:
         quant_config = ConfigDict(create_quant_config(self.config.quant_scheme))
+        if release_fp16_weights:
+            # DiT weights are large. Disabling shape propagation during PTQ lets
+            # xhquant release each QModule's FP16 weights after static weight
+            # quantization and move export tensors back to CPU. This avoids
+            # keeping FP16 and W8 weights on the GPU at the same time.
+            quant_config.auto_release_unused_parameters = True
+            quant_config.infer_shape = False
+            self.logger.info(
+                "Enable per-module FP16 weight release for %s: "
+                "auto_release_unused_parameters=True, infer_shape=False",
+                onnx_file.name,
+            )
         quanted_model = convert_dynamo_model_to_quanted_model(
             model,
             list(inputs),
@@ -301,8 +397,8 @@ class Wan22Converter:
         latent_t = (self.config.frame_num - 1) // pipe.vae_stride[0] + 1
         latent_h = height // pipe.vae_stride[1]
         latent_w = width // pipe.vae_stride[2]
-        latent_h = 60
-        latent_w = 104
+        # latent_h = 60
+        # latent_w = 104
         return pipe.vae.model.z_dim, latent_t, latent_h, latent_w
 
     def _build_seq_len(self, pipe, latent_shape: Tuple[int, int, int, int]) -> int:
@@ -316,6 +412,21 @@ class Wan22Converter:
         pipe.text_encoder.model.to(self.device)
         return [u.to(self.device, dtype=self.config.torch_dtype) for u in pipe.text_encoder([prompt], self.device)]
 
+    @staticmethod
+    def _save_frontend_state(
+        path: Path,
+        modules: Dict[str, torch.nn.Module],
+    ) -> Path:
+        """Save the small PyTorch frontends that remain outside HMONNX."""
+        state = {
+            f"{prefix}.{name}" if prefix else name: tensor.detach().cpu()
+            for prefix, module in modules.items()
+            for name, tensor in module.state_dict().items()
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(state, path)
+        return path
+
     def _export_t5(self, pipe, work_dir: Path) -> Dict[str, Any]:
         component_dir = work_dir / "t5"
         component_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +438,10 @@ class Wan22Converter:
             )
             .to(self.device)
             .eval()
+        )
+        frontend_file = self._save_frontend_state(
+            component_dir / "token_embedding.pt",
+            {"": pipe.text_encoder.model.token_embedding},
         )
         ids, mask = pipe.text_encoder.tokenizer([self.config.prompt], return_mask=True, add_special_tokens=True)
         input_ids = ids.to(self.device, dtype=torch.int64)
@@ -356,6 +471,7 @@ class Wan22Converter:
             "checkpoint_dir": str(self.pretrained_model_path),
             "tokenizer_path": str(self.pretrained_model_path / WAN_CONFIGS[self.config.task].t5_tokenizer),
             "checkpoint_path": str(self.pretrained_model_path / WAN_CONFIGS[self.config.task].t5_checkpoint),
+            "frontend_file": str(frontend_file.relative_to(work_dir)),
             "max_sequence_length": int(pipe.text_encoder.text_len),
             "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(work_dir)),
             "golden_dir": (
@@ -433,7 +549,6 @@ class Wan22Converter:
                 context=context_arg,
                 e=e_ref,
                 e0=e0_ref,
-                context_lens=torch.tensor([512], device=self.device, dtype=torch.long),
             )[0]
 
         diff = (out_ref - out_wrap).abs()
@@ -461,10 +576,16 @@ class Wan22Converter:
         dit_dtype = self.config.torch_dtype
         wrapper = Wan2_2DiTExportWrapper(model).to(self.device).eval()
         model = wrapper.model.to(torch.float16).eval()
+        frontend_file = self._save_frontend_state(
+            component_dir / "timestep_embedding.pt",
+            {
+                "time_embedding": model.time_embedding,
+                "time_projection": model.time_projection,
+            },
+        )
         latent_arg = wrapper._prepare_latent(latent.to(torch.float16), y.to(torch.float16) if y is not None else None)
         context_arg = wrapper._prepare_context(context.to(torch.float16))
         e, e0 = build_wan_time_embeddings(model, timestep, seq_len, torch.float16)
-        context_lens = torch.tensor([context.size(0)], device=self.device, dtype=torch.long)
         prefix = (
             f"wan2_2_{noise_model_name}-{self.config.quant_scheme.target_device}-{self.config.quant_scheme.quant_type}"
         )
@@ -473,19 +594,20 @@ class Wan22Converter:
             context_arg,
             e,
             e0,
-            context_lens,
         ]
         input_names = [
             "latent",
             "context",
             "e",
             "e0",
-            "context_lens",
         ]
 
         def _to_fp16(value):
             if isinstance(value, list):
-                return [item.to(torch.float16) if isinstance(item, torch.Tensor) and item.dtype == torch.bfloat16 else item for item in value]
+                return [
+                    item.to(torch.float16) if isinstance(item, torch.Tensor) and item.dtype == torch.bfloat16 else item
+                    for item in value
+                ]
             if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16:
                 return value.to(torch.float16)
             return value
@@ -499,16 +621,19 @@ class Wan22Converter:
             onnx_file=component_dir / "hmonnx" / f"{prefix}.onnx",
             golden_dir=component_dir / "golden" / prefix,
             export_golden=noise_model_name in self.golden_components,
+            release_fp16_weights=self.config.release_dit_fp16_weights,
         )
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "task": self.config.task,
             "checkpoint_dir": str(self.pretrained_model_path),
+            "checkpoint_path": str(self._resolve_noise_model_path(noise_model_name)),
             "subfolder": (
                 WAN_CONFIGS[self.config.task].low_noise_checkpoint
                 if noise_model_name == "low_noise_model"
                 else WAN_CONFIGS[self.config.task].high_noise_checkpoint
             ),
+            "frontend_file": str(frontend_file.relative_to(work_dir)),
             "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(work_dir)),
             "golden_dir": (
                 str(Path(export_meta["golden_dir"]).relative_to(work_dir)) if export_meta["golden_dir"] else None
@@ -616,9 +741,9 @@ class Wan22Converter:
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "task": self.config.task,
-            "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(component_dir)),
+            "hmonnx_file": str(Path(export_meta["onnx"]).relative_to(work_dir)),
             "golden_dir": (
-                str(Path(export_meta["golden_dir"]).relative_to(component_dir)) if export_meta["golden_dir"] else None
+                str(Path(export_meta["golden_dir"]).relative_to(work_dir)) if export_meta["golden_dir"] else None
             ),
             "input_names": export_meta["input_names"],
             "output_names": export_meta["output_names"],
@@ -658,22 +783,64 @@ class Wan22Converter:
         json.dump(meta, open(work_dir / "vae_decode_meta.json", "w"), indent=2, ensure_ascii=False)
         return meta
 
-    def export(self, work_dir: str):
+    def export(self, work_dir: str, device: str | torch.device | None = None):
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        pipe = self.build_float_pipeline(device_id=0, rank=0)
-        component_meta: Dict[str, Any] = {}
-        if "t5" in self.export_components:
-            component_meta["t5"] = self._export_t5(pipe, work_dir)
-        if "low_noise_model" in self.export_components:
-            component_meta["low_noise_model"] = self._export_dit(pipe, work_dir, "low_noise_model")
-        if "high_noise_model" in self.export_components:
-            component_meta["high_noise_model"] = self._export_dit(pipe, work_dir, "high_noise_model")
-        if "vae_encode" in self.export_components:
-            component_meta["vae_encode"] = self._export_vae_encode(pipe, work_dir)
-        if "vae_decode" in self.export_components:
-            component_meta["vae_decode"] = self._export_vae_decode(pipe, work_dir)
+        self.device = (
+            torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        if self.device.type != "cuda":
+            raise ValueError(f"Wan2.2 quantization requires a CUDA device, got {self.device}")
+        device_id = self.device.index if self.device.index is not None else torch.cuda.current_device()
+        torch.cuda.set_device(device_id)
+        self.device = torch.device(f"cuda:{device_id}")
+        self.logger.info("Use CUDA device for Wan2.2 export: %s", self.device)
+        exported_components: list[str] = []
+        exporters = {
+            "t5": self._export_t5,
+            "low_noise_model": lambda pipe, output_dir: self._export_dit(
+                pipe,
+                output_dir,
+                "low_noise_model",
+            ),
+            "high_noise_model": lambda pipe, output_dir: self._export_dit(
+                pipe,
+                output_dir,
+                "high_noise_model",
+            ),
+            "vae_encode": self._export_vae_encode,
+            "vae_decode": self._export_vae_decode,
+        }
+
+        for component_group in self._build_component_groups():
+            # Load T5 independently and share one VAE instance between encode
+            # and decode. DiT export removes the text encoder and VAE and
+            # releases FP16 weights, so low- and high-noise models require
+            # separate pipelines.
+            self.logger.info("Build Wan2.2 pipeline for components: %s", list(component_group))
+            pipe = None
+            try:
+                pipe = self.build_float_pipeline(
+                    device_id=device_id,
+                    rank=0,
+                    components=component_group,
+                )
+                for component in component_group:
+                    quant_type = self.config.quant_types[component]
+                    self.config.quant_scheme.quant_type = quant_type
+                    self.logger.info(
+                        "Export Wan2.2 component %s with quant_type=%s",
+                        component,
+                        quant_type,
+                    )
+                    exporters[component](pipe, work_dir)
+                    exported_components.append(component)
+            finally:
+                if pipe is not None:
+                    del pipe
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -681,35 +848,35 @@ class Wan22Converter:
             "checkpoint_dir": str(self.pretrained_model_path),
             "export_components": list(self.export_components),
             "golden_components": list(self.golden_components),
-            "quant_scheme": self.config.quant_scheme.to_dict(),
+            "target_device": self.config.quant_scheme.target_device,
+            "quant_types": self.config.quant_types,
             "size": list(self.config.size),
             "frame_num": self.config.frame_num,
             "sample_steps": self.config.sample_steps,
             "sample_shift": self.config.sample_shift,
             "sample_guide_scale": self.config.sample_guide_scale,
             "prompt": self.config.prompt,
+            "base_seed": self.config.base_seed,
             "use_resolved_float_loader": self.config.use_resolved_float_loader,
+            "release_dit_fp16_weights": self.config.release_dit_fp16_weights,
             "status": "exported",
         }
-        if "t5" in component_meta:
-            meta["t5_meta"] = "t5_meta.json"
-        if "low_noise_model" in component_meta:
-            meta["low_noise_model_meta"] = "low_noise_model_meta.json"
-        if "high_noise_model" in component_meta:
-            meta["high_noise_model_meta"] = "high_noise_model_meta.json"
-        if "vae_encode" in component_meta:
-            meta["vae_encode_meta"] = "vae_encode_meta.json"
-        if "vae_decode" in component_meta:
-            meta["vae_decode_meta"] = "vae_decode_meta.json"
+        meta.update({f"{component}_meta": f"{component}_meta.json" for component in exported_components})
         meta_path = work_dir / "wan2_2_export_meta.json"
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
         self.logger.info("Created Wan2.2 export meta at %s", meta_path)
         return meta_path
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_path: str, convert_config: Wan22ConvertConfig, work_dir: str):
+    def from_pretrained(
+        cls,
+        pretrained_model_path: str,
+        convert_config: Wan22ConvertConfig,
+        work_dir: str,
+        device: str | torch.device | None = None,
+    ):
         converter = cls(pretrained_model_path, convert_config)
-        return converter.export(work_dir)
+        return converter.export(work_dir, device=device)
 
 
 Wan2_2ConvertConfig = Wan22ConvertConfig

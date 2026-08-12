@@ -5,18 +5,17 @@ export:
   model:
     type: XHWan22Model
   wan2_2:
-    task: i2v-A14B
+    task: t2v-A14B
     size: [480, 832]
     frame_num: 81
     sample_steps: 4
     sample_shift: 5.0
     sample_guide_scale: 5.0
-    prompt: A calm seaside scene with gentle waves.
+    prompt: Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.
     negative_prompt: ""
-    components: [t5, vae_encode, vae_decode, low_noise_model, high_noise_model]
+    components: [t5, vae_decode, low_noise_model, high_noise_model]
     quant_types:
       t5: w8a8_sefp
-      vae_encode: w8a8_sefp
       vae_decode: w8a8_sefp
       low_noise_model: w8a8_sefp
       high_noise_model: w8a8_ssfp
