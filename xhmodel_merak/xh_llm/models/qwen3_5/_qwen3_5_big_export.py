@@ -162,6 +162,7 @@ def _runtime_aliases(hf_model: Optional[torch.nn.Module], type_name: str) -> dic
 class Qwen3_5BigHFModel(BigHFModelExportHelper):  # noqa: N801
     PLACEHOLDER_TYPES = [
         "Qwen3_5Attention",
+        "Qwen3_5GatedDeltaNet",
         "Qwen3_5MLP",
     ]
 

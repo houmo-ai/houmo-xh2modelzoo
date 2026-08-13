@@ -194,7 +194,7 @@ class HybridTextModelMixin:
                     _past_conv_cache = None
                     _past_recurrent_state = None
             if layer_type == "linear_attention":
-                hidden_states, conv_cache_out, recurrent_state_out = decoder_layer(
+                layer_outputs = decoder_layer(
                     hidden_states,
                     past_seq_length=past_seq_length,
                     current_input_length=current_input_length,
@@ -205,6 +205,18 @@ class HybridTextModelMixin:
                     past_conv_cache=_past_conv_cache,
                     past_recurrent_state=_past_recurrent_state,
                 )
+                if split_conv_cache:
+                    hidden_states = layer_outputs[0]
+                    recurrent_state_out = layer_outputs[-1]
+                    conv_cache_out = layer_outputs[1:-1]
+                    if len(conv_cache_out) != 3:
+                        raise RuntimeError(
+                            "Split Qwen3.5 decoder must return q/k/v conv caches"
+                        )
+                else:
+                    hidden_states, conv_cache_out, recurrent_state_out = (
+                        layer_outputs
+                    )
                 if isinstance(conv_cache_out, (list, tuple)):
                     conv_cache_out_list.extend(conv_cache_out)
                 else:

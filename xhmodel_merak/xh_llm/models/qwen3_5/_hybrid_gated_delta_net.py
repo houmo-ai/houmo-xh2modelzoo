@@ -249,18 +249,39 @@ class HybridDecoderLayerMixin:
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        split_conv_cache_output = False
         if self.layer_type == "linear_attention":
-            hidden_states, conv_cache_out, recurrent_state_out = self.linear_attn(
+            linear_outputs = self.linear_attn(
                 hidden_states=hidden_states,
                 conv_cache=past_conv_cache,
                 recurrent_state=past_recurrent_state,
                 linear_attn_mask=linear_attn_mask,
                 current_input_length=current_input_length,
             )
+            split_conv_cache_output = bool(
+                getattr(self.linear_attn, "split_conv_cache", False)
+            )
+            if split_conv_cache_output:
+                hidden_states = linear_outputs[0]
+                recurrent_state_out = linear_outputs[-1]
+                if len(linear_outputs) == 3 and isinstance(
+                    linear_outputs[1],
+                    (list, tuple),
+                ):
+                    conv_cache_out = tuple(linear_outputs[1])
+                else:
+                    conv_cache_out = tuple(linear_outputs[1:-1])
+                if len(conv_cache_out) != 3:
+                    raise RuntimeError(
+                        "Split Qwen3.5 linear attention must return q/k/v conv caches"
+                    )
+            else:
+                hidden_states, conv_cache_out, recurrent_state_out = linear_outputs
         else:
             # for fx trace
-            cos, sin = position_embeddings
-            position_embeddings = (cos, sin)
+            if position_embeddings is not None:
+                cos, sin = position_embeddings
+                position_embeddings = (cos, sin)
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 past_seq_length=past_seq_length,
@@ -278,6 +299,8 @@ class HybridDecoderLayerMixin:
             hidden_states = hidden_states[0]
         hidden_states = residual + hidden_states
         if self.layer_type == "linear_attention":
+            if split_conv_cache_output:
+                return hidden_states, *conv_cache_out, recurrent_state_out
             return hidden_states, conv_cache_out, recurrent_state_out
         return hidden_states
 
