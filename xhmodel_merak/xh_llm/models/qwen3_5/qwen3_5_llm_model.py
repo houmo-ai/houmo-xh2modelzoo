@@ -515,6 +515,55 @@ class Qwen3_5_ModelMeta(VLLMModelMeta):  # noqa: N801
     KVCACHE_CONFOG_CLS = KVCacheWithLinearConfig
 
 
+def _ensure_gptq_desc_act_default(hf_config_dir: str | Path) -> None:
+    """Keep copied GPTQ metadata loadable by runtimes requiring ``desc_act``."""
+    config_path = Path(hf_config_dir) / "config.json"
+    if not config_path.is_file():
+        return
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    quantization_config = config.get("quantization_config")
+    if not isinstance(quantization_config, dict):
+        return
+    if str(quantization_config.get("quant_method", "")).lower() != "gptq":
+        return
+    if "desc_act" in quantization_config:
+        return
+
+    # Hugging Face/GPTQ treats an omitted desc_act as the non-act-order mode,
+    # while current vLLM requires the field to be explicit during validation.
+    quantization_config["desc_act"] = False
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _resolve_qwen_export_pad_token_id(hf_model_dir: str | Path) -> int | None:
+    """Resolve the Qwen padding id before low-memory wrapping starts.
+
+    Qwen target models use the language-model EOS id for graph padding in
+    ``_wraped_post``.  Huge-model export creates metadata before that hook, so
+    reproduce the same lookup directly from the source HF config.
+    """
+    config_path = Path(hf_model_dir) / "config.json"
+    if not config_path.is_file():
+        return None
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    text_config = config.get("text_config")
+    config_sections = (text_config, config) if isinstance(text_config, dict) else (config,)
+    for section in config_sections:
+        eos_token_id = section.get("eos_token_id")
+        if type(eos_token_id) is int:
+            return eos_token_id
+        if isinstance(eos_token_id, (list, tuple)):
+            for token_id in eos_token_id:
+                if type(token_id) is int:
+                    return token_id
+    return None
+
+
 @register_llm_model("Qwen3_5ForConditionalGeneration")
 class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     HF_MODEL_CLS = XHQwen3_5ForConditionalGeneration
@@ -548,6 +597,16 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         self._set_recurrent_state_output_contract(prefill=True)
         if self.config.spec_decode_mode == "dflash":
             self.wrap_cfg["output_hidden_state_indices"] = self._get_dflash_target_layer_ids()
+
+    def create_export_metadata(self, output_dir: str) -> VLLMModelMeta:
+        pad_token_id = _resolve_qwen_export_pad_token_id(self.hf_model_dir)
+        if pad_token_id is not None:
+            # Match _wraped_post even if tokenizer loading previously installed
+            # a different tokenizer-level padding id.
+            self.pad_token_id = pad_token_id
+        meta_info = super().create_export_metadata(output_dir)
+        _ensure_gptq_desc_act_default(Path(output_dir) / meta_info.hf_config)
+        return meta_info
 
     def _get_dflash_target_layer_ids(self) -> list[int]:
         dflash_config = self.config.dflash_config

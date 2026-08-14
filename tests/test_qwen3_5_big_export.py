@@ -1,4 +1,5 @@
 import inspect
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,14 +9,24 @@ import torch
 import torch.nn as nn
 
 from xhmodel_merak.xh_llm.models.qwen3_5 import _qwen3_5_big_export as big_export
-from xhmodel_merak.xh_llm.models.qwen3_5._llm_model_impl import _Qwen3_5TextAttention
+from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import (
+    _unpack_split_conv_cache_outputs,
+)
+from xhmodel_merak.xh_llm.models.qwen3_5._llm_model_impl import (
+    _Qwen3_5DecoderLayer,
+    _Qwen3_5TextAttention,
+)
 from xhmodel_merak.xh_llm.models.qwen3_5._qwen3_5_big_export import (
     Qwen3_5BigHFModel,
     _Qwen3_5Attention_PlaceHolder,
     _Qwen3_5GatedDeltaNet_PlaceHolder,
     _remove_registered_members,
 )
-from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
+    XHQwen3_5Model,
+    _ensure_gptq_desc_act_default,
+    _resolve_qwen_export_pad_token_id,
+)
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import _visual_simplified_onnx_needs_refresh
 from xhmodel_merak.xh_llm.models.qwen3_5_moe import _qwen3_5_moe_big_export as moe_big_export
 from xhmodel_merak.xh_llm.models.qwen3_5_moe._moe_model import (
@@ -29,7 +40,107 @@ from xhmodel_merak.xh_llm.models.qwen3_5_moe._qwen3_5_moe_big_export import (
 )
 from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import XHQwen3_5MoeModel
 from xhmodel_merak.xh_llm.types import ExportData, VisualModelMeta, VLLMModelMeta
+from xhmodel_merak.xh_llm.vision_llm_model import VisionLLMModel
 from xhquant.utils.registry import _DMRegistryCls
+
+
+def test_qwen_export_adds_missing_gptq_desc_act_default(tmp_path):
+    hf_config_dir = tmp_path / "hf_config"
+    hf_config_dir.mkdir()
+    config_path = hf_config_dir / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5_moe",
+                "quantization_config": {
+                    "quant_method": "gptq",
+                    "bits": 4,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _ensure_gptq_desc_act_default(hf_config_dir)
+
+    exported_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert exported_config["quantization_config"]["desc_act"] is False
+
+
+@pytest.mark.parametrize("explicit_value", [False, True])
+def test_qwen_export_preserves_explicit_gptq_desc_act(tmp_path, explicit_value):
+    hf_config_dir = tmp_path / "hf_config"
+    hf_config_dir.mkdir()
+    config_path = hf_config_dir / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "quantization_config": {
+                    "quant_method": "gptq",
+                    "desc_act": explicit_value,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _ensure_gptq_desc_act_default(hf_config_dir)
+
+    exported_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert exported_config["quantization_config"]["desc_act"] is explicit_value
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"model_type": "qwen3_next", "eos_token_id": 151645}, 151645),
+        (
+            {
+                "model_type": "qwen3_5_moe",
+                "eos_token_id": 999,
+                "text_config": {"eos_token_id": 248044},
+            },
+            248044,
+        ),
+        ({"model_type": "qwen", "eos_token_id": [11, 12]}, 11),
+        ({"model_type": "qwen"}, None),
+    ],
+)
+def test_qwen_export_resolves_pad_token_before_huge_model_wrap(
+    tmp_path, config, expected
+):
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    assert _resolve_qwen_export_pad_token_id(tmp_path) == expected
+
+
+def test_qwen_export_metadata_sets_pad_token_before_parent_metadata(
+    tmp_path, monkeypatch
+):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"text_config": {"eos_token_id": 248044}}),
+        encoding="utf-8",
+    )
+    model = object.__new__(XHQwen3_5Model)
+    model.hf_model_dir = str(model_dir)
+    model._default_pad_token_id = 123
+    observed_pad_token_ids = []
+
+    def fake_create_export_metadata(self, output_dir):
+        observed_pad_token_ids.append(self._default_pad_token_id)
+        return SimpleNamespace(hf_config="hf_config")
+
+    monkeypatch.setattr(
+        VisionLLMModel,
+        "create_export_metadata",
+        fake_create_export_metadata,
+    )
+
+    XHQwen3_5Model.create_export_metadata(model, str(tmp_path / "export"))
+
+    assert observed_pad_token_ids == [248044]
 
 
 def test_remove_registered_members_hides_modules_parameters_and_buffers_from_to():
@@ -496,6 +607,100 @@ def test_qwen3_5_moe_linear_attention_flattens_split_conv_cache_outputs():
     for actual, expected in zip(output[1:4], conv_caches, strict=True):
         torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(output[4], recurrent_state)
+
+
+def test_qwen3_5_split_conv_cache_accepts_fused_in_place_recurrent_state():
+    hidden_states = torch.ones(1, 2, 3)
+    conv_caches = tuple(torch.full((1, 1), value) for value in (1.0, 2.0, 3.0))
+
+    actual_hidden, actual_conv_caches, recurrent_state = (
+        _unpack_split_conv_cache_outputs(
+            (hidden_states, *conv_caches),
+            owner="Split Qwen3.5 linear attention",
+        )
+    )
+
+    torch.testing.assert_close(actual_hidden, hidden_states)
+    assert actual_conv_caches == conv_caches
+    assert recurrent_state is None
+
+
+def test_qwen3_5_split_conv_cache_accepts_speculative_verify_snapshots():
+    hidden_states = torch.ones(1, 2, 3)
+    conv_caches = tuple(torch.full((1, 1), float(value)) for value in range(1, 7))
+    recurrent_states = tuple(torch.full((1, 1), float(value)) for value in (7, 8))
+
+    actual_hidden, actual_conv_caches, actual_recurrent_states = (
+        _unpack_split_conv_cache_outputs(
+            (hidden_states, conv_caches, recurrent_states),
+            owner="Split Qwen3.5 linear attention",
+        )
+    )
+
+    torch.testing.assert_close(actual_hidden, hidden_states)
+    assert actual_conv_caches == conv_caches
+    assert actual_recurrent_states == recurrent_states
+
+
+@pytest.mark.parametrize("decoder_cls", [_Qwen3_5DecoderLayer, _Qwen3_5MoeDecoderLayer])
+def test_qwen3_5_linear_attention_preserves_fused_in_place_cache_abi(decoder_cls):
+    class FakeLinearAttention(nn.Module):
+        split_conv_cache = True
+
+        def forward(self, hidden_states, conv_cache, recurrent_state, **kwargs):
+            del recurrent_state, kwargs
+            return hidden_states * 2, *conv_cache
+
+    layer = object.__new__(decoder_cls)
+    nn.Module.__init__(layer)
+    layer.layer_type = "linear_attention"
+    layer.input_layernorm = nn.Identity()
+    layer.linear_attn = FakeLinearAttention()
+    layer.post_attention_layernorm = nn.Identity()
+    layer.mlp = nn.Identity()
+    hidden_states = torch.ones(1, 2, 3)
+    conv_caches = tuple(torch.full((1, 1), value) for value in (1.0, 2.0, 3.0))
+
+    output = layer(
+        hidden_states,
+        past_conv_cache=conv_caches,
+        past_recurrent_state=torch.full((1, 1), 4.0),
+    )
+
+    assert len(output) == 5
+    torch.testing.assert_close(output[0], torch.full_like(hidden_states, 6))
+    for actual, expected in zip(output[1:4], conv_caches, strict=True):
+        torch.testing.assert_close(actual, expected)
+    assert output[4] is None
+
+
+@pytest.mark.parametrize("decoder_cls", [_Qwen3_5DecoderLayer, _Qwen3_5MoeDecoderLayer])
+def test_qwen3_5_linear_attention_flattens_speculative_verify_cache_abi(decoder_cls):
+    conv_caches = tuple(torch.full((1, 1), float(value)) for value in range(1, 7))
+    recurrent_states = tuple(torch.full((1, 1), float(value)) for value in (7, 8))
+
+    class FakeLinearAttention(nn.Module):
+        split_conv_cache = True
+
+        def forward(self, hidden_states, **kwargs):
+            del kwargs
+            return hidden_states * 2, conv_caches, recurrent_states
+
+    layer = object.__new__(decoder_cls)
+    nn.Module.__init__(layer)
+    layer.layer_type = "linear_attention"
+    layer.input_layernorm = nn.Identity()
+    layer.linear_attn = FakeLinearAttention()
+    layer.post_attention_layernorm = nn.Identity()
+    layer.mlp = nn.Identity()
+    hidden_states = torch.ones(1, 2, 3)
+
+    output = layer(hidden_states)
+
+    assert len(output) == 8
+    torch.testing.assert_close(output[0], torch.full_like(hidden_states, 6))
+    assert output[1:7] == conv_caches
+    assert output[7] == recurrent_states
 
 
 def test_qwen3_5_moe_sparse_block_uses_single_tensor_contract():

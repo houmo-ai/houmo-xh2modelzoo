@@ -232,6 +232,32 @@ class HybridGatedAttentionMixin:
         return self
 
 
+def _unpack_split_conv_cache_outputs(linear_outputs, *, owner: str):
+    """Normalize split-cache outputs across eager and FX leaf-module ABIs.
+
+    Eager modules may return ``(hidden, (q, k, v), recurrent)`` while export
+    wrappers flatten that to ``(hidden, q, k, v, recurrent)``. Fused GDR
+    prefill updates its recurrent CacheTensor in place, so FX drops the
+    trailing ``None`` and exposes ``(hidden, q, k, v)``.
+    """
+    hidden_states = linear_outputs[0]
+    if len(linear_outputs) == 3 and isinstance(linear_outputs[1], (list, tuple)):
+        conv_cache_out = tuple(linear_outputs[1])
+        recurrent_state_out = linear_outputs[2]
+    elif len(linear_outputs) == 4:
+        conv_cache_out = tuple(linear_outputs[1:])
+        recurrent_state_out = None
+    else:
+        conv_cache_out = tuple(linear_outputs[1:-1])
+        recurrent_state_out = linear_outputs[-1]
+    if len(conv_cache_out) == 0 or len(conv_cache_out) % 3 != 0:
+        raise RuntimeError(
+            f"{owner} must return one or more complete q/k/v conv-cache groups; "
+            f"got {len(conv_cache_out)} outputs"
+        )
+    return hidden_states, conv_cache_out, recurrent_state_out
+
+
 class HybridDecoderLayerMixin:
     """Shared residual/cache dispatch for hybrid attention decoder layers."""
 
@@ -262,19 +288,12 @@ class HybridDecoderLayerMixin:
                 getattr(self.linear_attn, "split_conv_cache", False)
             )
             if split_conv_cache_output:
-                hidden_states = linear_outputs[0]
-                recurrent_state_out = linear_outputs[-1]
-                if len(linear_outputs) == 3 and isinstance(
-                    linear_outputs[1],
-                    (list, tuple),
-                ):
-                    conv_cache_out = tuple(linear_outputs[1])
-                else:
-                    conv_cache_out = tuple(linear_outputs[1:-1])
-                if len(conv_cache_out) != 3:
-                    raise RuntimeError(
-                        "Split Qwen3.5 linear attention must return q/k/v conv caches"
+                hidden_states, conv_cache_out, recurrent_state_out = (
+                    _unpack_split_conv_cache_outputs(
+                        linear_outputs,
+                        owner="Split Qwen3.5 linear attention",
                     )
+                )
             else:
                 hidden_states, conv_cache_out, recurrent_state_out = linear_outputs
         else:

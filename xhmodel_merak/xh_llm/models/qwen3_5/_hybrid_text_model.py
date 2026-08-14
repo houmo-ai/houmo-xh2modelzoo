@@ -10,7 +10,10 @@ from torch import Tensor
 
 from xhquant import nn as xhnn
 
-from ._hybrid_gated_delta_net import _prepare_linear_attn_mask_views
+from ._hybrid_gated_delta_net import (
+    _prepare_linear_attn_mask_views,
+    _unpack_split_conv_cache_outputs,
+)
 from .split_conv_cache_utils import (
     _flatten_merged_conv_cache_outputs,
     _flatten_split_conv_cache_outputs,
@@ -206,13 +209,12 @@ class HybridTextModelMixin:
                     past_recurrent_state=_past_recurrent_state,
                 )
                 if split_conv_cache:
-                    hidden_states = layer_outputs[0]
-                    recurrent_state_out = layer_outputs[-1]
-                    conv_cache_out = layer_outputs[1:-1]
-                    if len(conv_cache_out) != 3:
-                        raise RuntimeError(
-                            "Split Qwen3.5 decoder must return q/k/v conv caches"
+                    hidden_states, conv_cache_out, recurrent_state_out = (
+                        _unpack_split_conv_cache_outputs(
+                            layer_outputs,
+                            owner="Split Qwen3.5 decoder",
                         )
+                    )
                 else:
                     hidden_states, conv_cache_out, recurrent_state_out = (
                         layer_outputs
