@@ -310,6 +310,24 @@ def test_qwen35_workflow_parse_args_accepts_explicit_golden_device_map(
     assert args.golden_device_map == ["cuda:0", "cuda:1"]
 
 
+def test_qwen35_workflow_parse_args_accepts_resource_tight_mode(monkeypatch):
+    from examples_merak.llm.qwen3_5.qwen3_5_workflow import parse_args
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "qwen3_5_workflow.py",
+            "--model-dir",
+            "hf",
+            "--config-path",
+            "config.yaml",
+            "--resource-tight-mode",
+        ],
+    )
+
+    assert parse_args().resource_tight_mode is True
+
+
 def test_qwen35_workflow_dump_golden_auto_offloads_only_when_explicit(monkeypatch):
     import os
 
@@ -363,6 +381,7 @@ def test_qwen35_workflow_dump_golden_auto_offloads_only_when_explicit(monkeypatc
                 "logger": calls[0]["kwargs"]["logger"],
                 "auto_offload": True,
                 "device_map": [0, 1],
+                "resource_tight_mode": False,
             },
             "inference_v2": "1",
         }
@@ -394,6 +413,7 @@ def test_qwen35_workflow_dump_golden_keeps_default_single_device(monkeypatch):
     assert workflow.dump_golden(object(), "cuda", {}) == "root-meta"
     assert calls[0][3]["auto_offload"] is False
     assert calls[0][3]["device_map"] is None
+    assert calls[0][3]["resource_tight_mode"] is False
 
 
 def test_qwen35_workflow_spec_decode_golden_uses_real_generate_source(monkeypatch, tmp_path: Path):
@@ -446,6 +466,7 @@ def test_qwen35_workflow_spec_decode_golden_uses_real_generate_source(monkeypatc
     assert calls[0]["golden"] is True
     assert calls[0]["disable_auto_offload"] is True
     assert calls[0]["auto_offload_max_memory"] is None
+    assert calls[0]["resource_tight_mode"] is False
 
 
 def test_qwen35_workflow_mtp_spec_decode_golden_stays_minimal(monkeypatch, tmp_path: Path):
@@ -492,6 +513,56 @@ def test_qwen35_workflow_mtp_spec_decode_golden_stays_minimal(monkeypatch, tmp_p
     assert calls[0]["golden"] is True
     assert calls[0]["disable_auto_offload"] is True
     assert calls[0]["auto_offload_max_memory"] is None
+    assert calls[0]["resource_tight_mode"] is False
+
+
+def test_qwen35_workflow_spec_decode_golden_forwards_resource_tight_mode(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import json
+
+    from xhmodel_merak.xh_llm.models.qwen3_5 import hmonnx_validation
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
+
+    meta_file = tmp_path / "hmquant_fake" / "golden_meta_info.json"
+    meta_file.parent.mkdir()
+    meta_file.write_text(
+        json.dumps({"spec_decode": {"mode": "mtp", "num_draft_tokens": 4}}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_spec_decode_generate(**kwargs):
+        calls.append(kwargs)
+        return hmonnx_validation.HMONNXQuickTestResult(
+            meta_file=str(kwargs["meta_file"]),
+            output_text="ok",
+            output_tokens=2,
+            latency_s=1.0,
+            tokens_per_second=2.0,
+            spec_decode_mode="mtp",
+        )
+
+    class FakeLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(
+        hmonnx_validation,
+        "spec_decode_generate",
+        fake_spec_decode_generate,
+    )
+    workflow = Qwen35Workflow.__new__(Qwen35Workflow)
+    workflow._dump_spec_decode_golden(
+        str(meta_file),
+        "cuda:0",
+        [{"role": "user", "content": "hello"}],
+        logger=FakeLogger(),
+        resource_tight_mode=True,
+    )
+
+    assert calls[0]["resource_tight_mode"] is True
 
 
 def test_qwen35_spec_golden_restricts_explicit_auto_offload_devices(

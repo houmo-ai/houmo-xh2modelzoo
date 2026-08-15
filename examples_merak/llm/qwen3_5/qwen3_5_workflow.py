@@ -138,6 +138,14 @@ def parse_args() -> argparse.Namespace:
         help="Run quick HMONNX test after export.",
     )
     parser.add_argument(
+        "--resource-tight-mode",
+        action="store_true",
+        help=(
+            "Release the speculative prefill runtime before allocating decode "
+            "caches. Use this for single-GPU MTP/DFlash validation with long contexts."
+        ),
+    )
+    parser.add_argument(
         "--export-from-quanted-model",
         action="store_true",
         help="if --model-dir is a quanted model, set this param to True",
@@ -210,6 +218,11 @@ def main() -> None:
         model_dir=args.model_dir,
         config_path=args.config_path,
     )
+    if args.resource_tight_mode and not _config_path_exists(
+        workflow.workflow_config.data,
+        "export.model.spec_decode_mode",
+    ):
+        raise ValueError("--resource-tight-mode requires an MTP or DFlash workflow config")
 
     # quant
     if args.export_from_quanted_model:
@@ -278,6 +291,7 @@ def main() -> None:
                 "image": "data/images/qwen2_vl_demo.jpeg",
             },
             device_map=args.golden_device_map,
+            resource_tight_mode=args.resource_tight_mode,
         )
 
     # test hmonnx generation
@@ -287,12 +301,19 @@ def main() -> None:
             quick_test_hmonnx,
         )
 
+        quick_test_kwargs = {}
+        if args.resource_tight_mode:
+            quick_test_kwargs.update(
+                resource_tight_mode=True,
+                disable_auto_offload=True,
+            )
         quick_result = quick_test_hmonnx(
             export_result,
-            prompt="用中文简单介绍 Qwen3.5。",
+            prompt="用中文简单说明这个模型可以做什么。",
             device=args.device,
             max_new_tokens=64,
             do_sample=False,
+            **quick_test_kwargs,
         )
         print_quick_test_result(quick_result)
 

@@ -1,0 +1,38 @@
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  rotation: false
+  calibration:
+    dataset: NeelNanda/pile-10k
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    trust_remote_code: true
+    low_gpu_mem_usage: true
+  seed: 42
+  quant_nontext_module: false
+  sym: true
+  iters: 200
+  format: auto_gptq
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Qwen3_5ForConditionalGeneration_visual
+    hf_model: null
+    model_name: qwen3_8_27b_visual_token_gears
+    max_size_w: 448
+    max_size_h: 448
+    visual_input_mode: patches
+    image_token_gears: [96, 196, 384, 704, 1536]
+    image_token_capacity: 1536
+    spatial_merge_size: 2
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    fuse_gdr_ops: false
+    fuse_gdr_block_recurrent_ops: false

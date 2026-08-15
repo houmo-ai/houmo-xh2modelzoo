@@ -44,6 +44,19 @@ WORKFLOW_27B_VISUAL_896 = (
     REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_896.yaml"
 )
 WORKFLOW_27B_MTP = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_mtp.yaml"
+WORKFLOW_38_27B_FULL = (
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full.yaml"
+)
+WORKFLOW_38_27B_MTP = (
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full_mtp.yaml"
+)
+WORKFLOW_38_27B_VISUAL_GEARS = (
+    REPO_ROOT
+    / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b"
+    / "qwen3_8_27b_visual_only_token_gears_99p_candidate.yaml"
+)
 
 
 def _install_stub_modules(monkeypatch):
@@ -136,6 +149,36 @@ def test_workflow_config_paths_cover_requested_models():
     assert _load_yaml(WORKFLOW_MOE_FULL)["export"]["model"]["hf_model"] is None
     assert _load_yaml(WORKFLOW_27B_VISUAL_448)["export"]["model"]["hf_model"] is None
     assert _load_yaml(WORKFLOW_27B_VISUAL_896)["export"]["model"]["hf_model"] is None
+    assert _load_yaml(WORKFLOW_38_27B_FULL)["export"]["model"]["hf_model"] is None
+    assert _load_yaml(WORKFLOW_38_27B_MTP)["export"]["model"]["hf_model"] is None
+    assert (
+        _load_yaml(WORKFLOW_38_27B_VISUAL_GEARS)["export"]["model"]["hf_model"]
+        is None
+    )
+
+
+def test_qwen38_workflows_reuse_qwen35_family_contract():
+    base = _load_yaml(WORKFLOW_38_27B_FULL)["export"]["model"]
+    mtp = _load_yaml(WORKFLOW_38_27B_MTP)["export"]["model"]
+    visual = _load_yaml(WORKFLOW_38_27B_VISUAL_GEARS)["export"]["model"]
+
+    for model in (base, mtp):
+        assert model["model_type"] == "Qwen3_5ForConditionalGeneration"
+        assert model["model_name"] == "qwen3_8_27b"
+        assert model["context_max_length"] == 2048
+        assert model["fuse_gdr_ops"] is False
+        assert model["fuse_gdr_block_recurrent_ops"] is False
+
+    assert mtp["spec_decode_mode"] == "mtp"
+    assert mtp["num_draft_tokens"] == 4
+    assert mtp["mtp_config"]["hidden_size"] == 5120
+    assert mtp["mtp_config"]["num_key_value_heads"] == 4
+    assert mtp["mtp_config"]["head_dim"] == 256
+
+    assert visual["model_type"] == "Qwen3_5ForConditionalGeneration_visual"
+    assert visual["model_name"] == "qwen3_8_27b_visual_token_gears"
+    assert visual["image_token_gears"] == [96, 196, 384, 704, 1536]
+    assert visual["image_token_capacity"] == 1536
 
 
 def test_workflow_yamls_keep_autoround_llm_only_quant_contract():
@@ -225,28 +268,19 @@ def test_spec_decode_workflow_yamls_are_file_based():
     assert mtp_9b["spec_decode_mode"] == "mtp"
     assert mtp_9b["hf_model"] is None
     assert dflash_9b["dflash_config"]["hf_model"] == "weights/Qwen3.5-9B-DFlash"
-    assert dflash_9b["output_hidden_state_indices"] == [1, 8, 15, 22, 29]
+    assert "output_hidden_state_indices" not in dflash_9b
 
     assert mtp_moe["spec_decode_mode"] == "mtp"
     assert mtp_moe["hf_model"] is None
     assert dflash_moe["dflash_config"]["hf_model"] == "weights/Qwen3.6-35B-A3B-DFlash"
-    assert dflash_moe["output_hidden_state_indices"] == [1, 10, 19, 28, 37]
+    assert "output_hidden_state_indices" not in dflash_moe
 
     assert dflash_122b["dflash_config"]["hf_model"] == (
         "weights/Qwen3.5-122B-A10B-DFlash"
     )
-    assert dflash_122b["output_hidden_state_indices"] == [
-        1,
-        7,
-        14,
-        20,
-        26,
-        32,
-        39,
-        45,
-    ]
-    assert dflash_122b["dflash_config"]["num_hidden_layers"] == 6
-    assert dflash_122b["dflash_config"]["num_target_layers"] == 8
+    assert "output_hidden_state_indices" not in dflash_122b
+    assert "num_hidden_layers" not in dflash_122b["dflash_config"]
+    assert "num_target_layers" not in dflash_122b["dflash_config"]
 
 
 def test_mtp_workflow_yamls_match_qwen35_hf_attention_shapes():
@@ -257,6 +291,11 @@ def test_mtp_workflow_yamls_match_qwen35_hf_attention_shapes():
             "head_dim": 256,
         },
         WORKFLOW_27B_MTP: {
+            "hidden_size": 5120,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        },
+        WORKFLOW_38_27B_MTP: {
             "hidden_size": 5120,
             "num_key_value_heads": 4,
             "head_dim": 256,

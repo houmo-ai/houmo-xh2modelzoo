@@ -1,6 +1,6 @@
-# Qwen3.5 / Qwen3.6 Merak Workflow 使用说明
+# Qwen3.5 / Qwen3.6 / Qwen3.8 Merak Workflow 使用说明
 
-本文说明 Qwen3.5、Qwen3.6 dense、Qwen3.6 MoE 在 Merak workflow 下的推荐用法。统一入口是：
+本文说明 Qwen3.5、Qwen3.6、Qwen3.8 dense 和 Qwen3.6 MoE 在 Merak workflow 下的推荐用法。统一入口是：
 
 ```python
 from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
@@ -36,7 +36,7 @@ quant -> export -> dump_golden -> quick_test_hmonnx
 conda activate xh2modelzoo
 ```
 
-Qwen3.5/Qwen3.6 Merak 路径已验证可使用 Transformers 5.13；共享仓库仍保留
+Qwen3.5/Qwen3.6/Qwen3.8 Merak 路径已验证可使用 Transformers 5.13；共享仓库仍保留
 4.57 全局约束，推荐用独立环境。版本矩阵和升级边界见
 [Merak Transformers 5.13 兼容性结论](../../../docs/merak_transformers_5_13_compatibility_20260727.md)。
 
@@ -71,7 +71,129 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/
 | --------------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
 | Qwen3.5-9B      | `qwen3_5/9b/qwen3_5_9b_full.yaml`               | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
 | Qwen3.6-27B     | `qwen3_5/27b/qwen3_6_27b_full.yaml`             | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.8-27B     | `qwen3_5/27b/qwen3_8_27b_full.yaml`             | `qwen3_8_27b_full_mtp`、`qwen3_8_27b_visual_only_token_gears_99p_candidate` |
 | Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+
+## Qwen3.8-27B 发布 Demo
+
+以下命令假设 AutoRound W4G64 checkpoint 已位于 `QUANT_DIR`。四个 LLM
+导出都必须显式开启两项 GDR fuse，并执行 golden、HMONNX quick test 和
+覆盖导出；256K 版本额外开启 FlashAttention。建议每个命令通过
+`CUDA_VISIBLE_DEVICES` 独占一张 GPU。
+
+```bash
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate xhquant_55
+
+export QUANT_DIR=work_dirs/qwen3_8_27b_release/autoround_quant
+export RELEASE_DIR=work_dirs/qwen3_8_27b_release
+
+# Base, 2K context.
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "$QUANT_DIR" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir "$RELEASE_DIR/base_gdr" \
+  --device cuda:0 \
+  --context-max-length 2048 \
+  --disable-flash-attention \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+
+# Base, 256K context.
+CUDA_VISIBLE_DEVICES=1 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "$QUANT_DIR" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full.yaml \
+  --export-from-quanted-model \
+  --export-output-dir "$RELEASE_DIR/base_256k_flash_gdr" \
+  --device cuda:0 \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+
+# MTP (K=4), 2K context.
+CUDA_VISIBLE_DEVICES=2 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "$QUANT_DIR" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full_mtp.yaml \
+  --export-from-quanted-model \
+  --export-output-dir "$RELEASE_DIR/mtp_gdr" \
+  --device cuda:0 \
+  --context-max-length 2048 \
+  --disable-flash-attention \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --overwrite
+
+# MTP (K=4), 256K context.
+# The long-context speculative validator releases prefill before allocating
+# the 256K decode caches so the full golden/quick path fits on one 80-GiB GPU.
+CUDA_VISIBLE_DEVICES=3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "$QUANT_DIR" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full_mtp.yaml \
+  --export-from-quanted-model \
+  --export-output-dir "$RELEASE_DIR/mtp_256k_flash_gdr" \
+  --device cuda:0 \
+  --context-max-length 262144 \
+  --enable-flash-attention \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --quick-test \
+  --resource-tight-mode \
+  --overwrite
+```
+
+多尺寸 visual tower 使用静态 token gears `96/196/384/704/1536`，运行时按
+`smallest_fit` 选择最小可容纳图。先导出五档共享权重图，再把它叠加到已验证的
+256K base 模型：
+
+```bash
+CUDA_VISIBLE_DEVICES=4 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir "$QUANT_DIR" \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_visual_only_token_gears_99p_candidate.yaml \
+  --export-from-quanted-model \
+  --export-output-dir "$RELEASE_DIR/visual_token_gears" \
+  --device cuda:0 \
+  --overwrite
+
+python tools/qwen35_build_visual_gear_overlay.py \
+  --fixed-model-dir "$RELEASE_DIR/base_256k_flash_gdr/hmquant_xh2_qwen3_8_27b_w4a8_256_256k_mpe256k_448x448_<date>" \
+  --visual-gear-dir "$RELEASE_DIR/visual_token_gears" \
+  --output-dir "$RELEASE_DIR/base_256k_visual_gears_overlay"
+```
+
+MTP 的 vLLM Merak 服务必须使用自定义 proposer，并让服务端
+`num_speculative_tokens=4` 与导出 YAML 的 `num_draft_tokens=4` 保持一致：
+
+```bash
+export VLLM_MERAK_SPEC_DRAFT_CONTEXT_CUDA_GRAPH=0
+export VLLM_MERAK_SPEC_DRAFT_CUDA_GRAPH=1
+
+python examples/vllm_chat_server.py \
+  --model /path/to/qwen3_8_27b_mtp_256k \
+  --config-format merak_llm \
+  --load-format merak_llm \
+  --use-v2 \
+  --auto-offload \
+  --cuda-graph \
+  --enforce-eager \
+  --max-model-len 262144 \
+  --max-num-batched-tokens 256 \
+  --max-num-seqs 1 \
+  --no-async-scheduling \
+  --no-enable-prefix-caching \
+  --speculative-config \
+    '{"method":"custom_class","model":"vllm_merak.spec_decode.proposer.HMONNXSpecDecodeProposer","num_speculative_tokens":4}'
+```
 
 ## Qwen3.6-35B-A3B 动态剪枝 Workflow
 

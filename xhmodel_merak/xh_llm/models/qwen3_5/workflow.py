@@ -194,6 +194,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         auto_offload: bool | None = None,
         device_map: list[Any] | None = None,
         use_v2: bool | None = None,
+        resource_tight_mode: bool = False,
     ) -> str:
         from xhquant.api import get_xhquant_logger
 
@@ -228,6 +229,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
                         logger=logger,
                         auto_offload=auto_offload,
                         device_map=resolved_device_map,
+                        resource_tight_mode=resource_tight_mode,
                     )
                 finally:
                     # Collect after the per-model call frame has unwound.  Its
@@ -247,6 +249,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         logger: Any,
         auto_offload: bool = False,
         device_map: list[Any] | None = None,
+        resource_tight_mode: bool = False,
     ) -> None:
         from transformers import TextStreamer
 
@@ -339,6 +342,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
             logger=logger,
             auto_offload=auto_offload,
             device_map=device_map,
+            resource_tight_mode=resource_tight_mode,
         )
 
     @staticmethod
@@ -515,6 +519,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         logger: Any,
         auto_offload: bool = False,
         device_map: list[Any] | None = None,
+        resource_tight_mode: bool = False,
     ) -> None:
         mode = self._spec_decode_mode(meta_file)
         if mode not in {"mtp", "dflash"}:
@@ -539,6 +544,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
             golden=True,
             disable_auto_offload=not auto_offload,
             auto_offload_max_memory=auto_offload_max_memory,
+            resource_tight_mode=resource_tight_mode,
         )
         logger.info(f"{'-' * 20} Spec draft golden output {'-' * 20}")
         logger.info(result.output_text)

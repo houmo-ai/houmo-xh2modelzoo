@@ -26,6 +26,8 @@ QWEN_CONFIGS = (
     "qwen3_5/27b/qwen3_6_27b_full_mtp_gptq.yaml",
     "qwen3_5/27b/qwen3_6_27b_full_dflash.yaml",
     "qwen3_5/27b/qwen3_6_27b_full_dflash_gptq.yaml",
+    "qwen3_5/27b/qwen3_8_27b_full.yaml",
+    "qwen3_5/27b/qwen3_8_27b_full_mtp.yaml",
     "qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml",
     "qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_gptq.yaml",
     "qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml",
