@@ -43,7 +43,13 @@ from xhquant.xhonnxruntime import AutoOffloadGraphModel
 from ._dequant_converter import autoround_torch_qlinear_converter, restore_autoround_qwen3_5_moe_sparse_block
 from .device_mixin import DeviceMixin
 from .types import LLMModelMeta, LLMModelState, ModelMeta, ModelSwitcher
-from .utils import get_cpu_memory_mb, get_model_param_buffer_size_gb, hf_auto_offload, unfold_args
+from .utils import (
+    get_cpu_memory_mb,
+    get_model_param_buffer_size_gb,
+    hf_auto_offload,
+    resolve_model_dtype,
+    unfold_args,
+)
 from .wrap_model import wrap_llm_model
 
 
@@ -78,7 +84,7 @@ class XHBaseModel(DeviceMixin):
         self.hf_compatible_model: nn.Module | None = None
         self.enable_hf_compatible: bool = False
         self.interactive_mode = False
-        self._dtype = torch.float16
+        self._dtype = resolve_model_dtype(config.get("dtype", "float16"))
         self._device = "cpu"
         self._data_processor = None
         wrap_cfg = self.config.to_dict()
@@ -437,6 +443,10 @@ class XHBaseModel(DeviceMixin):
     def init_wrap_model(self, hf_model: Any) -> Any:
         if hf_model is None:
             hf_model = self.get_native_model()
+        # Dtype-sensitive constants (for example KDA decay and absorbed MLA
+        # scales) are created while wrapping.  Enforce the xh model dtype
+        # before that work rather than casting only the finished wrap model.
+        hf_model.to(dtype=self._dtype)
         self._wraped_pre(hf_model)
         self._wrap_model = wrap_llm_model(hf_model, self.get_wrap_cfg())  # id(model) == id(wrap_model)
 
@@ -456,7 +466,6 @@ class XHBaseModel(DeviceMixin):
         check_wraped(self._wrap_model)
         self._wraped_post(hf_model)
         self._trim_cpu_allocator()
-        hf_model.to(self._dtype)
         return self._wrap_model
 
     @classmethod
@@ -511,7 +520,10 @@ class XHBaseModel(DeviceMixin):
         auto_model_cls = cls.get_hf_auto_model_cls()
 
         model_dtype = cls.get_hf_model_dtype()
-        if "dtype" not in kwargs:
+        if "dtype" not in kwargs and "torch_dtype" not in kwargs:
+            # Keep the legacy default keyword for model families that still
+            # support older Transformers releases. Instance-driven export
+            # paths pass the resolved xh dtype explicitly via ``dtype``.
             kwargs["torch_dtype"] = model_dtype
         native_model = auto_model_cls.from_pretrained(hf_model_dir, **kwargs)
         native_model = cls.untied_weights(native_model)
@@ -626,6 +638,13 @@ class XHBaseModel(DeviceMixin):
 
         trust_remote_code = bool(kwargs.pop("trust_remote_code", True))
         backend = kwargs.pop("backend", "torch")
+        # ``offload_to_disk`` is a quantization-loop option. Older and
+        # third-party quantized checkpoints often omit it, and GPTQModel's
+        # legacy default is True. Never let an inference/export load silently
+        # inherit that default; callers that intentionally need it can still
+        # opt in explicitly.
+        kwargs.setdefault("offload_to_disk", False)
+        kwargs.setdefault("offload_to_disk_path", None)
         if "dtype" not in kwargs:
             kwargs["dtype"] = cls.get_hf_model_dtype()
         valid_string_device_maps = {
@@ -1249,7 +1268,12 @@ class XHBaseModel(DeviceMixin):
             kwargs["device_map"] = "auto"
         else:
             kwargs["device_map"] = "cpu"
-        native_hf_model = self.get_hf_model(self.hf_model_dir, quant_weight=resume_from, **kwargs)
+        native_hf_model = self.get_hf_model(
+            self.hf_model_dir,
+            quant_weight=resume_from,
+            dtype=self.dtype,
+            **kwargs,
+        )
         hf_model_cls = self.get_hf_model_cls()
         assert isinstance(native_hf_model, hf_model_cls), (
             f"The model is not {hf_model_cls.__name__}, but {type(native_hf_model)}"
@@ -1292,7 +1316,7 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     def get_empty_native_model(self):
-        native_hf_model = self.get_empty_hf_model(self.hf_model_dir)
+        native_hf_model = self.get_empty_hf_model(self.hf_model_dir, dtype=self.dtype)
         hf_model_cls = self.get_hf_model_cls()
         assert isinstance(native_hf_model, hf_model_cls), (
             f"The model is not {hf_model_cls.__name__}, but {type(native_hf_model)}"
@@ -1304,7 +1328,7 @@ class XHBaseModel(DeviceMixin):
         return cls.get_empty_hf_model(hf_model_dir, **kwargs)
 
     def get_compatible_native_model(self):
-        return self.get_compatible_model(self.hf_model_dir)
+        return self.get_compatible_model(self.hf_model_dir, dtype=self.dtype)
 
     ### 模型推理
     def _set_inference_model(self):
@@ -1322,7 +1346,7 @@ class XHBaseModel(DeviceMixin):
         enable_auto_offload = self.config.enable_auto_offload
         if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
             if self.config.enable_auto_offload:
-                hf_auto_offload(inference_model)
+                hf_auto_offload(inference_model, dtype=self.dtype)
         elif self._state in [
             LLMModelState.FRONTED,
             LLMModelState.QUANTED_DISABLE,
@@ -1354,7 +1378,7 @@ class XHBaseModel(DeviceMixin):
             return
         if self._state in [LLMModelState.EAGER_ALIGNED, LLMModelState.EAGER_FAST, LLMModelState.WRAP]:
             if self.config.enable_auto_offload:
-                hf_auto_offload(inference_model)
+                hf_auto_offload(inference_model, dtype=self.dtype)
         elif self._state in [
             LLMModelState.FRONTED,
             LLMModelState.QUANTED_DISABLE,
@@ -1412,7 +1436,10 @@ class XHBaseModel(DeviceMixin):
         )
         if self.enable_hf_compatible:
             if self.hf_compatible_model is None:
-                hf_model = self.get_empty_hf_model(self.hf_model_dir)
+                hf_model = self.get_empty_hf_model(
+                    self.hf_model_dir,
+                    dtype=self.dtype,
+                )
                 # 从类中直接获取函数，避免自动绑定 self
                 hf_compatible_model = type(self).build_hf_compatible_model(hf_model, self)
                 assert isinstance(hf_compatible_model, self.get_hf_model_cls())
@@ -1495,7 +1522,7 @@ class XHBaseModel(DeviceMixin):
     def _set_dtype(self, dtype: torch.dtype | str | None):
         if dtype is None:
             return
-        self._dtype = dtype
+        self._dtype = resolve_model_dtype(dtype)
         inference_model = self.get_inference_model()
         if inference_model is None:
             return
@@ -1505,9 +1532,9 @@ class XHBaseModel(DeviceMixin):
             LLMModelState.EAGER_ALIGNED,
         ]:
             if not self.config.enable_auto_offload:
-                inference_model = inference_model.to(dtype)
+                inference_model = inference_model.to(self._dtype)
         else:
-            inference_model = inference_model.to(dtype)
+            inference_model = inference_model.to(self._dtype)
 
     # 模型导出
     @classmethod
@@ -1567,5 +1594,5 @@ class XHSubModel(XHBaseModel):
         # 单独调试辅助子模型时，不能加载空模型
         hf_model = super().get_native_model()
         if self.config.enable_auto_offload:
-            hf_auto_offload(hf_model)
+            hf_auto_offload(hf_model, dtype=self.dtype)
         return hf_model

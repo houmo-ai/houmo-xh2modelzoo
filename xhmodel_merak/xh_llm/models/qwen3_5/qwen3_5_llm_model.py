@@ -46,6 +46,7 @@ from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import _DMRegistryCls
 
 from ...builder import register_llm_model
+from ...hmonnx.deterministic_export import canonicalize_hmonnx_artifact
 from ...kv_cache_mixin import KVCacheWithLinearMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import (
@@ -1361,9 +1362,19 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         logger = get_xhquant_logger()
         big_hf_model_cls, placeholder_types = self._get_big_language_placeholder_export_components()
+        # Keep the in-process exporter on the same registration lifecycle as
+        # isolated placeholder workers.  This is essential for trusted remote
+        # code models whose concrete Python classes do not exist until model
+        # construction.  If registration first happens inside
+        # ``traceable_module_placeholder_context``, that context deliberately
+        # restores its earlier registry snapshot on exit and the standalone
+        # placeholder graph later falls through into the original (often
+        # data-dependent) Python forward.
+        big_hf_model_cls.initialize_process_worker()
         # 主图模型保持 placeholder 子树为 meta tensor，仅加载 embedding、norm、
         # lm_head 等非 placeholder 权重，避免一次性物化完整语言模型。
-        empty_hf_model = self.get_empty_hf_model(self.hf_model_dir)
+        empty_hf_model = self.get_empty_hf_model(self.hf_model_dir, dtype=self.dtype)
+        big_hf_model_cls.initialize_process_worker_after_model_load(empty_hf_model)
         empty_hf_model.model.visual = None
         self._check_big_language_placeholder_export_supported(empty_hf_model)
         main_placeholder_prefixes = big_hf_model_cls.resolve_placeholder_prefixes(
@@ -1379,11 +1390,15 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             empty_hf_model_for_placeholder,
             self.hf_model_dir,
         )
+        big_hf_model_cls.initialize_process_worker_after_quantized_preprocess(
+            empty_hf_model_for_placeholder
+        )
         big_hf_model_cls._preprocess_quantized_hf_model(
             empty_hf_model,
             self.hf_model_dir,
             skip_module_prefixes=main_placeholder_prefixes,
         )
+        big_hf_model_cls.initialize_process_worker_after_quantized_preprocess(empty_hf_model)
 
         big_hf_model = big_hf_model_cls(self.hf_model_dir, empty_hf_model, placeholder_types)
         big_hf_model.replace_runtime_placeholder_modules(empty_hf_model)
@@ -1435,7 +1450,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             quant_cfg,
             prefill_placeholder_exported_dir,
             decode_placeholder_exported_dir,
-            empty_hf_model_factory=type(self).get_empty_hf_model,
+            empty_hf_model_factory=partial(type(self).get_empty_hf_model, dtype=self.dtype),
         )
 
         # 导出包含 PlaceHolder 节点的整体 prefill/decode 主图。主图量化阶段不会再次
@@ -1487,7 +1502,33 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         else:
             self.to_wrap()
             meta_info = self._export_language_hmonnx_impl(exported_info, lora_adapters=lora_adapters)
+        self._finalize_deterministic_language_hmonnx(exported_info, meta_info)
         return meta_info
+
+    @staticmethod
+    def _finalize_deterministic_language_hmonnx(
+        exported_info: ExportData,
+        meta_info: VLLMModelMeta,
+    ) -> None:
+        """Give regular and low-memory exports one production serialization."""
+
+        logger = get_xhquant_logger()
+        exported_dir = Path(exported_info.exported_dir)
+        for path_field, md5_field in (
+            ("prefill_hmonnx", "prefill_hmonnx_md5"),
+            ("decode_hmonnx", "decode_hmonnx_md5"),
+        ):
+            hmonnx_path = Path(getattr(meta_info, path_field))
+            if not hmonnx_path.is_absolute():
+                hmonnx_path = exported_dir / hmonnx_path
+            canonicalize_hmonnx_artifact(hmonnx_path, logger=logger)
+            setattr(meta_info, md5_field, calculate_file_md5(str(hmonnx_path)))
+
+        json.dump(
+            meta_info.to_dict(),
+            open(str(exported_dir / "golden_meta_info.json"), "w"),
+            indent=4,
+        )
 
     def _export_language_hmonnx_impl(
         self,

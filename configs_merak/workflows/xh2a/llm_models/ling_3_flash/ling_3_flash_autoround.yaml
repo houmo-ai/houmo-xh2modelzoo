@@ -1,0 +1,63 @@
+export:
+  model:
+    chip_arch: XH2a
+    dtype: float16
+    hf_model: null
+    batch_size: 1
+    moe_batch_size: null
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_chunk_size: 64
+    split_conv_cache: true
+    normalize_force_fp32: false
+    use_manual_depthwise_conv1d: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null
+    model_type: BailingMoeV3ForCausalLM
+    model_name: ling_3_flash
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    flash_attention:
+      enable: false
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
+
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 8
+  group_size: 64
+  sym: true
+  iters: 200
+  calibration:
+    jsonl: data/calib_data/NeelNanda-pile-10k.jsonl
+    text_key: text
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 1
+    device: cuda:0
+    device_map: '0'
+    offload_dir: work_dirs/ling_3_flash_autoround_offload
+    dry_run: false
+  seed: 42
+  moe:
+    attention_bits: 8
+    dense_mlp_bits: 8
+    expert_bits: 4
+    shared_expert_bits: 8

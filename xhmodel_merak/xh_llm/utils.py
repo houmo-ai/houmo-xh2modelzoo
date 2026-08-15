@@ -31,6 +31,47 @@ from xhquant.utils.registry import DynamicModule
 
 
 HUGE_MODEL_EXPORT_ENABLED_ENV = "HUGE_MODEL_EXPORT_ENABLED"
+HMONNX_V2_ENABLED_ENV = "ENABLE_HMINFERENCE_V2"
+PACKED_W4_ENABLED_ENV = "XHQUANT_PACKED_W4"
+
+
+def resolve_model_dtype(dtype: str | torch.dtype | None = None) -> torch.dtype:
+    """Resolve the xh2modelzoo model/export dtype.
+
+    XH model configs default to FP16.  Accept common aliases so YAML, CLI and
+    programmatic callers all select exactly the same torch dtype before HF
+    model construction and wrapping.
+    """
+    if isinstance(dtype, torch.dtype):
+        resolved = dtype
+    else:
+        name = str(dtype or "float16").strip().lower().removeprefix("torch.")
+        aliases = {
+            "fp16": "float16",
+            "half": "float16",
+            "bf16": "bfloat16",
+            "fp32": "float32",
+            "single": "float32",
+        }
+        name = aliases.get(name, name)
+        supported = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        try:
+            resolved = supported[name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported model dtype {dtype!r}; expected one of "
+                f"{sorted(supported)} (or fp16/bf16/fp32 aliases)."
+            ) from exc
+
+    if resolved not in {torch.float16, torch.bfloat16, torch.float32}:
+        raise ValueError(
+            f"Unsupported model dtype {dtype!r}; expected float16, bfloat16 or float32."
+        )
+    return resolved
 
 
 def is_huge_model_export_enabled(value: str | None = None) -> bool:
@@ -42,6 +83,28 @@ def is_huge_model_export_enabled(value: str | None = None) -> bool:
     if value is None:
         value = os.environ.get(HUGE_MODEL_EXPORT_ENABLED_ENV, "")
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configure_huge_model_export(enabled: bool | None) -> bool:
+    """Apply an explicit huge-model export choice and return the effective state.
+
+    ``None`` deliberately preserves a value inherited from the parent process.
+    Explicit ``False`` writes ``0`` so a caller can override an inherited
+    low-memory setting without mutating unrelated process state.
+    """
+    if enabled is not None:
+        os.environ[HUGE_MODEL_EXPORT_ENABLED_ENV] = "1" if enabled else "0"
+    return is_huge_model_export_enabled()
+
+
+def configure_hmonnx_validation_runtime(
+    *,
+    use_v2: bool = True,
+    pack_w4: bool = True,
+) -> None:
+    """Configure the common HMONNX validation runtime contract explicitly."""
+    os.environ[HMONNX_V2_ENABLED_ENV] = "1" if use_v2 else "0"
+    os.environ[PACKED_W4_ENABLED_ENV] = "1" if pack_w4 else "0"
 
 
 def get_module_device(module: nn.Module, default: str | torch.device = "cpu") -> torch.device:
@@ -192,7 +255,12 @@ def _wrap_no_split_modules(self, device_map: str):
     return list(_no_split_modules)
 
 
-def hf_auto_offload(hf_model, device_map="auto", max_memory=None):
+def hf_auto_offload(
+    hf_model,
+    device_map="auto",
+    max_memory=None,
+    dtype: str | torch.dtype | None = None,
+):
     from transformers.modeling_utils import _get_device_map
 
     if hasattr(hf_model, "_xh_auto_offload") and hf_model._xh_auto_offload:
@@ -203,7 +271,7 @@ def hf_auto_offload(hf_model, device_map="auto", max_memory=None):
 
     max_memory = None
     hf_quantizer = None
-    dtype = torch.float16
+    dtype = resolve_model_dtype(dtype)
     keep_in_fp32_regex = None
     _wrap_no_split_modules(hf_model, device_map)
     import inspect

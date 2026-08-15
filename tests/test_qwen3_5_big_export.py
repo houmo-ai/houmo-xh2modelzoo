@@ -456,6 +456,18 @@ def test_qwen3_5_big_export_preprocesses_both_empty_models_before_constructor(mo
     class FakeBigHFModel:
         PLACEHOLDER_TYPES = ["FakePlaceholder"]
 
+        @classmethod
+        def initialize_process_worker(cls):
+            events.append(("worker_init", cls))
+
+        @classmethod
+        def initialize_process_worker_after_model_load(cls, hf_model):
+            events.append(("after_load", hf_model))
+
+        @classmethod
+        def initialize_process_worker_after_quantized_preprocess(cls, hf_model):
+            events.append(("after_quant", hf_model))
+
         @staticmethod
         def resolve_placeholder_prefixes(hf_model, placeholder_types):
             events.append(("resolve", hf_model, placeholder_types))
@@ -477,6 +489,7 @@ def test_qwen3_5_big_export_preprocesses_both_empty_models_before_constructor(mo
 
         @classmethod
         def get_empty_hf_model(cls, hf_model_dir, **kwargs):
+            events.append(("empty", kwargs.get("dtype")))
             model = nn.Module()
             model.config = SimpleNamespace(model_type="qwen3_5")
             model.model = nn.Module()
@@ -489,15 +502,30 @@ def test_qwen3_5_big_export_preprocesses_both_empty_models_before_constructor(mo
 
     model = FakeQwen35Model.__new__(FakeQwen35Model)
     model.hf_model_dir = "/tmp/qwen3_5"
+    model._dtype = torch.float16
 
     with pytest.raises(StopAfterBigHFModelError):
         model._export_big_language_hmonnx(SimpleNamespace(exported_dir="/tmp/out"))
 
-    assert [event[0] for event in events] == ["resolve", "preprocess", "preprocess", "init"]
-    assert events[1][1] is not events[2][1]
-    assert events[1][3] is None
-    assert events[2][3] == ["model.language_model.layers"]
+    assert [event[0] for event in events] == [
+        "worker_init",
+        "empty",
+        "after_load",
+        "resolve",
+        "preprocess",
+        "after_quant",
+        "preprocess",
+        "after_quant",
+        "init",
+    ]
+    assert events[1][1] is torch.float16
     assert events[2][1] is events[3][1]
+    assert events[4][1] is not events[6][1]
+    assert events[4][3] is None
+    assert events[6][3] == ["model.language_model.layers"]
+    assert events[4][1] is events[5][1]
+    assert events[6][1] is events[7][1]
+    assert events[6][1] is events[8][1]
 
 
 def test_qwen3_5_big_export_support_check_accepts_dense_components():

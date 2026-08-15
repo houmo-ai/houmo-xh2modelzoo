@@ -39,7 +39,16 @@ class XHQwen3NextHMONNXModel(TextLLMHMONNXModel):
             return
         cache_shape = self.kvcache_config.kv_cache_shape
         cache_axis = self.kvcache_config.cache_axis
-        context_length = int(cache_shape[cache_axis])
+        if isinstance(cache_shape[0], list):
+            key_cache_shape = cache_shape[0]
+            value_cache_shape = cache_shape[1]
+        else:
+            key_cache_shape = value_cache_shape = cache_shape
+        context_length = int(key_cache_shape[cache_axis])
+        if int(value_cache_shape[cache_axis]) != context_length:
+            raise ValueError("PageAttention K/V caches must share context capacity")
+        if int(value_cache_shape[1]) != int(key_cache_shape[1]):
+            raise ValueError("PageAttention K/V caches must share num_kv_heads")
         past_seq_length = int(past_seq_length)
         current_input_length = int(current_input_length)
         graph_length = int(self.get_input_sequence_length())
@@ -63,8 +72,9 @@ class XHQwen3NextHMONNXModel(TextLLMHMONNXModel):
                 allocate_hmfp_paged_kv_cache(
                     num_blocks=num_blocks,
                     block_size=block_size,
-                    num_kv_heads=int(cache_shape[1]),
-                    head_size=int(cache_shape[-1]),
+                    num_kv_heads=int(key_cache_shape[1]),
+                    head_size=int(key_cache_shape[-1]),
+                    head_size_v=int(value_cache_shape[-1]),
                     device=device,
                 )
                 for _ in range(self.kvcache_config.num_layers)

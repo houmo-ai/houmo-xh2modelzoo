@@ -1550,6 +1550,7 @@ def test_get_native_model_uses_cpu_device_map_when_auto_offload_disabled(monkeyp
     model = DummyModel.__new__(DummyModel)
     model.config = type("Config", (), {"quant_weight": None, "enable_auto_offload": False})()
     model.hf_model_dir = "weights/Qwen3.5-9B"
+    model._dtype = torch.float16
 
     captured = {}
 
@@ -1563,6 +1564,7 @@ def test_get_native_model_uses_cpu_device_map_when_auto_offload_disabled(monkeyp
 
     assert isinstance(out, DummyHFModel)
     assert captured["device_map"] == "cpu"
+    assert captured["dtype"] is torch.float16
 
 
 def test_get_native_model_uses_auto_device_map_when_auto_offload_enabled(monkeypatch):
@@ -1575,6 +1577,7 @@ def test_get_native_model_uses_auto_device_map_when_auto_offload_enabled(monkeyp
     model = DummyModel.__new__(DummyModel)
     model.config = type("Config", (), {"quant_weight": "/tmp/quant_weight.pt", "enable_auto_offload": True})()
     model.hf_model_dir = "weights/Qwen3.5-9B"
+    model._dtype = torch.float16
 
     captured = {}
 
@@ -1592,6 +1595,7 @@ def test_get_native_model_uses_auto_device_map_when_auto_offload_enabled(monkeyp
     assert captured["hf_model_dir"] == "weights/Qwen3.5-9B"
     assert captured["quant_weight"] == "/tmp/quant_weight.pt"
     assert captured["device_map"] == "auto"
+    assert captured["dtype"] is torch.float16
 
 
 def test_cache_list_to_supports_dtype_only_conversion():

@@ -1,5 +1,8 @@
 """Regression tests for the current big-model HMONNX helper."""
 
+import base64
+import json
+import operator
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -14,15 +17,22 @@ from xhmodel_merak.xh_llm.base_model import XHBaseModel
 from xhmodel_merak.xh_llm.big_hf_model_helper import (
     BigHFModelExportHelper,
     WeightMapping,
+    _canonicalize_merged_hmonnx_model,
+    _captured_placeholder_args_template,
     _cleanup_big_model_export_temporary_files,
     _make_flattened_input_adapter,
     _merge_external_data,
     _merge_opset_imports,
     _module_name_to_filename,
+    _placeholder_input_fake_tensors,
     _placeholder_output_meta,
     _serializable_meta_template,
     _validate_exported_placeholder_hmonnx,
     replace_placeholder_node,
+)
+from xhmodel_merak.xh_llm.hmonnx.deterministic_export import (
+    _canonical_node_names,
+    canonicalize_hmonnx_artifact,
 )
 
 
@@ -55,6 +65,108 @@ class TinyTiedModel(nn.Module):
         self.output_embedding.weight = self.input_embedding.weight
 
 
+def test_placeholder_contract_falls_back_to_tensor_meta_without_leaking_parent_fx_nodes():
+    graph = torch.fx.Graph()
+    hidden_node = graph.placeholder("hidden_states")
+    input_ids_node = graph.placeholder("input_ids")
+    hidden_node.meta["tensor_meta"] = SimpleNamespace(
+        shape=torch.Size((1, 256, 4096)),
+        dtype=torch.float16,
+    )
+    input_ids_node.meta["tensor_meta"] = SimpleNamespace(
+        shape=torch.Size((1, 256)),
+        dtype=torch.int64,
+    )
+
+    contract = _placeholder_input_fake_tensors((hidden_node, input_ids_node))
+
+    assert [(tuple(item.shape), item.dtype) for item in contract] == [
+        ((1, 256, 4096), torch.float16),
+        ((1, 256), torch.int64),
+    ]
+
+    class TwoInputModule(nn.Module):
+        def forward(self, hidden_states, input_ids):
+            return hidden_states + input_ids.unsqueeze(-1)
+
+    adapter = _make_flattened_input_adapter(
+        TwoInputModule(),
+        (hidden_node, input_ids_node),
+        expected_outputs=1,
+    )
+    hidden = torch.zeros(1, 256, 4096)
+    input_ids = torch.ones(1, 256, dtype=torch.int64)
+    assert torch.equal(adapter(hidden, input_ids), torch.ones_like(hidden))
+
+
+def test_placeholder_subgraph_uses_contract_captured_before_parent_graph_rewrites():
+    captured = (
+        torch.empty(1, 256, 4096, device="meta", dtype=torch.float16),
+        torch.empty(1, 256, device="meta", dtype=torch.int64),
+    )
+    placeholder = nn.Module()
+    placeholder.__dict__["input_args_template"] = captured
+    # Simulate a later frontend transform dropping the hidden-state metadata
+    # from the current parent node.  The immutable captured contract must win.
+    rewritten_node = SimpleNamespace(
+        args=(torch.empty(1, 256, dtype=torch.int64),),
+        kwargs={},
+    )
+
+    result = _captured_placeholder_args_template(placeholder, rewritten_node)
+
+    assert result is captured
+    assert [(tuple(item.shape), item.dtype) for item in _placeholder_input_fake_tensors(result)] == [
+        ((1, 256, 4096), torch.float16),
+        ((1, 256), torch.int64),
+    ]
+
+
+def test_post_ptq_placeholder_contract_refreshes_the_complete_main_graph(tmp_path):
+    from xhquant import nn as xhnn
+
+    root = nn.Module()
+    root.mlp = xhnn.PlaceHolderModule(
+        output_shapes=[[1, 4]],
+        output_dtypes=[torch.float32],
+        num_outputs=1,
+        content="mlp",
+    )
+    graph = torch.fx.Graph()
+    graph_input = graph.placeholder("hidden_states")
+    graph_input.meta["val"] = torch.empty(1, 4, device="meta", dtype=torch.float32)
+    placeholder = graph.call_module("mlp", args=(graph_input,))
+    placeholder.meta["val"] = [torch.empty(1, 4, device="meta", dtype=torch.float32)]
+    getitem = graph.call_function(operator.getitem, args=(placeholder, 0))
+    getitem.meta["val"] = torch.empty(1, 4, device="meta", dtype=torch.float32)
+    downstream = graph.call_function(torch.neg, args=(getitem,))
+    downstream.meta["val"] = torch.empty(1, 4, device="meta", dtype=torch.float32)
+    graph.output(downstream)
+    main_graph = torch.fx.GraphModule(root, graph)
+
+    subgraph_file = tmp_path / f"{_module_name_to_filename('mlp')}.onnx"
+    subgraph_input = onnx.helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1, 4])
+    subgraph_output = onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT16, [1, 4])
+    cast = onnx.helper.make_node("Cast", ["input"], ["output"], to=onnx.TensorProto.FLOAT16)
+    onnx.save(
+        onnx.helper.make_model(
+            onnx.helper.make_graph([cast], "post_ptq_subgraph", [subgraph_input], [subgraph_output]),
+            opset_imports=[onnx.helper.make_opsetid("", 18)],
+        ),
+        subgraph_file,
+    )
+
+    helper = BigHFModelExportHelper.__new__(BigHFModelExportHelper)
+    synchronized = helper.synchronize_placeholder_output_contracts(main_graph, tmp_path)
+
+    assert synchronized == 1
+    assert root.mlp.output_shapes == "[[1, 4]]"
+    assert root.mlp.output_dtypes == '["float16"]'
+    assert placeholder.meta["val"][0].dtype == torch.float16
+    assert getitem.meta["val"].dtype == torch.float16
+    assert downstream.meta["val"].dtype == torch.float16
+
+
 def test_big_model_export_temporary_files_are_cleaned_by_default(monkeypatch):
     monkeypatch.delenv("XH2MODELZOO_KEEP_EXPORT_TMP", raising=False)
 
@@ -72,6 +184,55 @@ def test_placeholder_export_worker_count_uses_export_workers_environment(monkeyp
     monkeypatch.setenv("XH2MODELZOO_EXPORT_WORKERS", "3")
 
     assert big_hf_model_helper._placeholder_export_worker_count() == 3
+
+
+def test_spawn_worker_refreshes_registrations_after_dynamic_model_load(monkeypatch):
+    events = []
+    runtime_state = {"model_loaded": False}
+
+    class DynamicModelBigExport(BigHFModelExportHelper):
+        @classmethod
+        def initialize_process_worker(cls):
+            events.append(("register", runtime_state["model_loaded"]))
+
+        @classmethod
+        def _preprocess_quantized_hf_model(cls, model, hf_model_dir=None, **kwargs):
+            del cls, model, hf_model_dir, kwargs
+            events.append(("preprocess", runtime_state["model_loaded"]))
+
+        def _read_weight_map(self):
+            events.append(("read_weight_map", runtime_state["model_loaded"]))
+            return {}
+
+    def load_dynamic_model(_hf_model_dir):
+        events.append(("load_model", runtime_state["model_loaded"]))
+        runtime_state["model_loaded"] = True
+        model = nn.Module()
+        model.config = SimpleNamespace()
+        return model
+
+    monkeypatch.setattr(big_hf_model_helper, "_PROCESS_EMPTY_HF_MODEL", None)
+    monkeypatch.setattr(big_hf_model_helper, "_PROCESS_PLACEHOLDER_EXPORTER", None)
+
+    big_hf_model_helper._init_placeholder_export_process(
+        DynamicModelBigExport,
+        "/tmp/dynamic-model",
+        load_dynamic_model,
+    )
+
+    assert events == [
+        ("register", False),
+        ("load_model", False),
+        ("register", True),
+        ("preprocess", True),
+        ("register", True),
+        ("read_weight_map", True),
+    ]
+    assert big_hf_model_helper._PROCESS_EMPTY_HF_MODEL is not None
+    assert isinstance(
+        big_hf_model_helper._PROCESS_PLACEHOLDER_EXPORTER,
+        DynamicModelBigExport,
+    )
 
 
 @pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
@@ -116,12 +277,13 @@ def test_preprocess_quantized_hf_model_creates_quantizer_buffers_on_meta(monkeyp
     assert model.packed_weight.is_meta
 
 
-def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monkeypatch):
+@pytest.mark.parametrize("model_dtype", [torch.float16, torch.bfloat16])
+def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monkeypatch, model_dtype):
     calls = []
 
     class FakeGPTQModelPreprocessor:
-        def __init__(self, model_dir):
-            calls.append(("init", model_dir))
+        def __init__(self, model_dir, *, dtype):
+            calls.append(("init", model_dir, dtype))
 
         def preprocess(self, model, skip_module_prefixes=None):
             calls.append(("preprocess", model, skip_module_prefixes))
@@ -129,6 +291,10 @@ def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monke
             return ("layer",)
 
     model = nn.Module()
+    model.register_parameter(
+        "floating_weight",
+        nn.Parameter(torch.empty(1, dtype=model_dtype, device="meta")),
+    )
     model.config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
     model.to_empty = lambda *args, **kwargs: pytest.fail("GPTQ preprocessing must preserve its meta skeleton")
     monkeypatch.setattr(
@@ -145,8 +311,57 @@ def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monke
 
     BigHFModelExportHelper._preprocess_quantized_hf_model(model, "/tmp/gptq-model")
 
-    assert calls == [("init", "/tmp/gptq-model"), ("preprocess", model, None)]
+    assert calls == [("init", "/tmp/gptq-model", model_dtype), ("preprocess", model, None)]
     assert model.qweight.is_meta
+
+
+def test_gptqmodel_load_disables_quantization_disk_offload_by_default(monkeypatch):
+    calls = []
+    loaded_model = SimpleNamespace(
+        config=SimpleNamespace(quantization_config=None),
+    )
+
+    class FakeGPTQModel:
+        @staticmethod
+        def load(model_dir, **kwargs):
+            calls.append((model_dir, kwargs))
+            return SimpleNamespace(model=loaded_model)
+
+    fake_module = ModuleType("gptqmodel")
+    fake_module.GPTQModel = FakeGPTQModel
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_module)
+
+    result = XHBaseModel._load_gptqmodel("/tmp/packed-model", device_map="cpu")
+
+    assert result is loaded_model
+    assert calls[0][0] == "/tmp/packed-model"
+    assert calls[0][1]["offload_to_disk"] is False
+    assert calls[0][1]["offload_to_disk_path"] is None
+
+
+def test_gptqmodel_load_preserves_explicit_disk_offload_choice(monkeypatch):
+    calls = []
+    loaded_model = SimpleNamespace(
+        config=SimpleNamespace(quantization_config=None),
+    )
+
+    class FakeGPTQModel:
+        @staticmethod
+        def load(model_dir, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(model=loaded_model)
+
+    fake_module = ModuleType("gptqmodel")
+    fake_module.GPTQModel = FakeGPTQModel
+    monkeypatch.setitem(sys.modules, "gptqmodel", fake_module)
+
+    XHBaseModel._load_gptqmodel(
+        "/tmp/packed-model",
+        device_map="cpu",
+        offload_to_disk=True,
+    )
+
+    assert calls[0]["offload_to_disk"] is True
 
 
 def test_prepare_loaded_gptq_module_matches_checkpoint_level_bits(monkeypatch):
@@ -191,6 +406,41 @@ def test_prepare_loaded_gptq_module_matches_checkpoint_level_bits(monkeypatch):
 
     assert converted == 1
     assert calls == [(quant_linear, 4, torch.int32)]
+
+
+def test_new_gptq_quant_linear_uses_requested_floating_dtype():
+    class FakeQuantLinear(nn.Module):
+        def __init__(self, *, in_features, out_features, **kwargs):
+            del kwargs
+            super().__init__()
+            self.register_buffer(
+                "scales",
+                torch.zeros(in_features, out_features, dtype=torch.float16),
+            )
+            self.register_buffer("qweight", torch.zeros(in_features, out_features, dtype=torch.int32))
+
+    preprocessor = object.__new__(big_hf_model_helper.GPTQModelQuantizedModelPreprocessor)
+    preprocessor.dtype = torch.bfloat16
+    preprocessor.quant_config = SimpleNamespace(adapter=None)
+    preprocessor.model_definition = SimpleNamespace(lm_head="lm_head")
+    preprocessor._backend = SimpleNamespace(AUTO="auto")
+    preprocessor._effective_quant_config = lambda module_name: {
+        "bits": 4,
+        "group_size": 64,
+        "desc_act": False,
+        "sym": True,
+        "pack_dtype": torch.int32,
+    }
+    preprocessor._quant_linear_class = lambda module_name, linear, effective: FakeQuantLinear
+    linear = nn.Linear(4, 8, bias=False, dtype=torch.bfloat16, device="meta")
+
+    with torch.device("meta"):
+        quant_linear = preprocessor._new_quant_linear("model.layers.0.q_proj", linear)
+
+    assert quant_linear.scales.is_meta
+    assert quant_linear.scales.dtype == torch.bfloat16
+    assert quant_linear.qweight.is_meta
+    assert quant_linear.qweight.dtype == torch.int32
 
 
 def test_prepare_loaded_gptq_module_skips_placeholder_prefixes(monkeypatch):
@@ -443,6 +693,8 @@ def test_parallel_placeholder_export_raises_child_process_failure(monkeypatch, t
             return FakeFuture(RuntimeError("CUDA out of memory"))
 
     class FakeTqdm:
+        descriptions = []
+
         def __init__(self, iterable, **kwargs):
             self.iterable = iterable
 
@@ -451,6 +703,7 @@ def test_parallel_placeholder_export_raises_child_process_failure(monkeypatch, t
 
         def set_description(self, value):
             self.description = value
+            self.descriptions.append(value)
 
     helper = BigHFModelExportHelper.__new__(BigHFModelExportHelper)
     helper._hf_model_dir = str(tmp_path)
@@ -505,6 +758,7 @@ def test_parallel_placeholder_export_raises_child_process_failure(monkeypatch, t
         )
 
     assert [task["execution_device"] for task in FakeExecutor.submitted_tasks] == ["cuda:0", "cuda:1"]
+    assert not any(description.startswith("exported ") for description in FakeTqdm.descriptions)
 
 
 def test_placeholder_export_execution_devices_fall_back_to_cpu(monkeypatch):
@@ -736,6 +990,422 @@ def test_replace_hmonnx_placeholders_with_subgraphs_rewires_graph(tmp_path):
     assert "only_handle_old_cache" not in attrs
 
 
+def test_regular_and_placeholder_exports_finalize_to_identical_artifacts(tmp_path):
+    """Names, debug metadata, quant metadata and external layout all converge."""
+
+    def external_tensor(name, location, offset, payload):
+        tensor = onnx.TensorProto(name=name, data_type=onnx.TensorProto.FLOAT, dims=[1])
+        tensor.data_location = onnx.TensorProto.EXTERNAL
+        for key, value in (
+            ("location", location),
+            ("offset", str(offset)),
+            ("length", str(len(payload))),
+        ):
+            entry = tensor.external_data.add()
+            entry.key = key
+            entry.value = value
+        return tensor
+
+    def attach_quant_metadata(model, quant_model):
+        encoded = base64.b64encode(
+            quant_model.SerializeToString(deterministic=True)
+        ).decode("ascii")
+        graph_meta = model.metadata_props.add()
+        graph_meta.key = "graph_meta"
+        graph_meta.value = json.dumps(
+            {"quant_meta": {"quanted_info_onnx": encoded}},
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        version = model.metadata_props.add()
+        version.key = "hmquant_version"
+        version.value = "test"
+
+    def add_debug_metadata(proto, value):
+        metadata = proto.metadata_props.add()
+        metadata.key = "pkg.torch.onnx.original_node_name"
+        metadata.value = value
+
+    tensor_type = onnx.TensorProto.FLOAT
+    weight_0 = b"\x00\x00\x80?"
+    weight_1 = b"\x00\x00\x00@"
+    full_dir = tmp_path / "full"
+    low_dir = tmp_path / "low"
+    full_dir.mkdir()
+    low_dir.mkdir()
+    external_location = "model_external_data"
+
+    full_input = onnx.helper.make_tensor_value_info("main_input", tensor_type, [1])
+    full_output = onnx.helper.make_tensor_value_info("main_output", tensor_type, [1])
+    module_target = "model.layers.0.mlp"
+    full_weight_0 = external_tensor(f"{module_target}.weight_0", external_location, 0, weight_0)
+    full_weight_1 = external_tensor(f"{module_target}.weight_1", external_location, 4, weight_1)
+    full_nodes = [
+        onnx.helper.make_node(
+            "Add",
+            ["main_input", f"{module_target}.weight_0"],
+            [f"{module_target}.hidden"],
+            name="node_add",
+        ),
+        onnx.helper.make_node(
+            "Add",
+            [f"{module_target}.hidden", f"{module_target}.weight_1"],
+            ["module_output"],
+            name="node_add_1",
+        ),
+        onnx.helper.make_node(
+            "Identity",
+            ["module_output"],
+            ["main_output"],
+            name="node_identity",
+        ),
+    ]
+    add_debug_metadata(full_nodes[0], "full_fx_node")
+    full_value_info = onnx.helper.make_tensor_value_info(f"{module_target}.hidden", tensor_type, [1])
+    add_debug_metadata(full_value_info, "full_hidden")
+    full_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            full_nodes,
+            "model",
+            [full_input],
+            [full_output],
+            [full_weight_0, full_weight_1],
+            value_info=[full_value_info],
+        ),
+        opset_imports=[
+            onnx.helper.make_opsetid("", 18),
+            onnx.helper.make_opsetid("ai.houmo.xh2a", 1),
+        ],
+    )
+    full_quant_nodes = [
+        onnx.helper.make_node(
+            "XH2aQuantQAdd",
+            ["main_input", "full_export_capture"],
+            ["model_layers_0_mlp_add_0"],
+            name="model_layers_0_mlp_add_0",
+        ),
+        onnx.helper.make_node(
+            "XH2aQuantQAdd",
+            ["model_layers_0_mlp_add_0"],
+            ["quant_module_output"],
+            name="model_layers_0_mlp_add_1",
+        ),
+        onnx.helper.make_node(
+            "XH2aQuantQIdentity",
+            ["quant_module_output"],
+            ["main_output"],
+            name="quant_identity",
+        ),
+        # The regular and low-memory exporters are allowed to schedule this
+        # independent node on opposite sides of the module subgraph.
+        onnx.helper.make_node(
+            "XH2aQuantQInputStub",
+            ["main_input"],
+            ["unused_input_stub"],
+            name="late_input_stub",
+        ),
+    ]
+    full_quant_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            full_quant_nodes,
+            "QuantedInfo",
+            [onnx.helper.make_tensor_value_info("main_input", tensor_type, [1])],
+            [onnx.helper.make_tensor_value_info("main_output", tensor_type, [1])],
+        )
+    )
+    attach_quant_metadata(full_model, full_quant_model)
+    full_file = full_dir / "model.onnx"
+    onnx.save(full_model, full_file)
+    (full_dir / external_location).write_bytes(weight_0 + weight_1)
+
+    placeholder = onnx.helper.make_node(
+        "PlaceHolder",
+        ["main_input"],
+        ["placeholder_tuple"],
+        name="runtime_placeholder",
+        domain="ai.houmo.xh2a",
+        content=module_target,
+    )
+    tuple_getitem = onnx.helper.make_node(
+        "TupleGetItem",
+        ["placeholder_tuple"],
+        ["module_output"],
+        name="runtime_getitem",
+        domain="ai.houmo.xh2a",
+        index=0,
+    )
+    runtime_identity = onnx.helper.make_node(
+        "Identity",
+        ["module_output"],
+        ["main_output"],
+        name="node_identity",
+    )
+    low_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [placeholder, tuple_getitem, runtime_identity],
+            "model",
+            [onnx.helper.make_tensor_value_info("main_input", tensor_type, [1])],
+            [onnx.helper.make_tensor_value_info("main_output", tensor_type, [1])],
+        ),
+        opset_imports=[
+            onnx.helper.make_opsetid("", 18),
+            onnx.helper.make_opsetid("ai.houmo.xh2a", 1),
+        ],
+    )
+    low_quant_input_stub = onnx.helper.make_node(
+        "XH2aQuantQInputStub",
+        ["main_input"],
+        ["unused_input_stub"],
+        name="early_input_stub",
+    )
+    low_quant_placeholder = onnx.helper.make_node(
+        "XH2aQuantQPlaceHolderModule",
+        ["main_input"],
+        ["quant_module_output"],
+        name="model_layers_0_mlp",
+    )
+    low_quant_identity = onnx.helper.make_node(
+        "XH2aQuantQIdentity",
+        ["quant_module_output"],
+        ["main_output"],
+        name="quant_identity",
+    )
+    low_quant_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [low_quant_input_stub, low_quant_placeholder, low_quant_identity],
+            "QuantedInfo",
+            [onnx.helper.make_tensor_value_info("main_input", tensor_type, [1])],
+            [onnx.helper.make_tensor_value_info("main_output", tensor_type, [1])],
+        )
+    )
+    attach_quant_metadata(low_model, low_quant_model)
+
+    sub_input = onnx.helper.make_tensor_value_info("arg0", tensor_type, [1])
+    sub_output = onnx.helper.make_tensor_value_info("sub_output", tensor_type, [1])
+    sub_weight_1 = external_tensor("module.weight_1", "sub.data", 0, weight_1)
+    sub_weight_0 = external_tensor("module.weight_0", "sub.data", 4, weight_0)
+    sub_nodes = [
+        onnx.helper.make_node(
+            "Add",
+            ["arg0", "module.weight_0"],
+            ["local_hidden"],
+            name="node_add",
+        ),
+        onnx.helper.make_node(
+            "Add",
+            ["local_hidden", "module.weight_1"],
+            ["sub_output"],
+            name="node_add_1",
+        ),
+    ]
+    add_debug_metadata(sub_nodes[0], "standalone_fx_node")
+    sub_value_info = onnx.helper.make_tensor_value_info("local_hidden", tensor_type, [1])
+    add_debug_metadata(sub_value_info, "standalone_hidden")
+    sub_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            sub_nodes,
+            "subgraph",
+            [sub_input],
+            [sub_output],
+            [sub_weight_1, sub_weight_0],
+            value_info=[sub_value_info],
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 18)],
+    )
+    sub_quant_nodes = [
+        onnx.helper.make_node(
+            "XH2aQuantQInputStub",
+            ["arg0"],
+            ["arg0_quant_stub"],
+            name="arg0_quant_stub",
+        ),
+        onnx.helper.make_node(
+            "XH2aQuantQAdd",
+            ["arg0_quant_stub", "module_capture"],
+            ["module_add_0"],
+            name="module_add_0",
+        ),
+        onnx.helper.make_node(
+            "XH2aQuantQAdd",
+            ["module_add_0"],
+            ["module_add_1"],
+            name="module_add_1",
+        ),
+        onnx.helper.make_node(
+            "XH2aQuantQOutput",
+            ["module_add_1"],
+            ["module_output_stub"],
+            name="module_output_stub",
+        ),
+    ]
+    sub_quant_model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            sub_quant_nodes,
+            "QuantedInfo",
+            [onnx.helper.make_tensor_value_info("arg0", tensor_type, [1])],
+            [onnx.helper.make_tensor_value_info("module_output_stub", tensor_type, [1])],
+        )
+    )
+    attach_quant_metadata(sub_model, sub_quant_model)
+    sub_file = low_dir / f"{_module_name_to_filename(module_target)}.onnx"
+    onnx.save(sub_model, sub_file)
+    (low_dir / "sub.data").write_bytes(weight_1 + weight_0)
+
+    replace_placeholder_node(
+        low_model.graph.node[0],
+        low_model,
+        sub_file,
+        external_location,
+        low_dir / external_location,
+    )
+    low_file = low_dir / "model.onnx"
+    onnx.save(low_model, low_file)
+
+    full_stats = canonicalize_hmonnx_artifact(full_file)
+    low_stats = canonicalize_hmonnx_artifact(low_file)
+    full_bytes = full_file.read_bytes()
+    full_external_bytes = (full_dir / external_location).read_bytes()
+    repeated_stats = canonicalize_hmonnx_artifact(full_file)
+
+    assert full_bytes == low_file.read_bytes()
+    assert full_external_bytes == (
+        low_dir / external_location
+    ).read_bytes()
+    assert full_stats["model_sha256"] == low_stats["model_sha256"]
+    assert repeated_stats["already_canonical"] is True
+    assert full_file.read_bytes() == full_bytes
+    assert (full_dir / external_location).read_bytes() == full_external_bytes
+
+    # Simulate a deterministic-export version migration. Re-running the full
+    # canonicalizer (rather than taking its version fast path) must still be
+    # byte-idempotent, including topology-scoped node names and quant metadata.
+    migration_model = onnx.load(full_file, load_external_data=False)
+    retained_metadata = [
+        (item.key, item.value)
+        for item in migration_model.metadata_props
+        if item.key != "hmonnx.deterministic_export.version"
+    ]
+    del migration_model.metadata_props[:]
+    for key, value in retained_metadata:
+        item = migration_model.metadata_props.add()
+        item.key = key
+        item.value = value
+    onnx.save(migration_model, full_file)
+    migrated_stats = canonicalize_hmonnx_artifact(full_file)
+    assert migrated_stats.get("already_canonical", False) is False
+    assert full_file.read_bytes() == full_bytes
+    assert (full_dir / external_location).read_bytes() == full_external_bytes
+
+    finalized = onnx.load(low_file, load_external_data=False)
+    assert [node.name for node in finalized.graph.node] == [
+        "node_000000_add",
+        "node_000001_add",
+        "node_000002_identity",
+    ]
+    assert all(not node.metadata_props for node in finalized.graph.node)
+    assert all(not value.metadata_props for value in finalized.graph.value_info)
+    graph_meta = json.loads(
+        {item.key: item.value for item in finalized.metadata_props}["graph_meta"]
+    )
+    quant_model = onnx.ModelProto()
+    quant_model.ParseFromString(
+        base64.b64decode(graph_meta["quant_meta"]["quanted_info_onnx"])
+    )
+    assert sorted(node.op_type for node in quant_model.graph.node) == sorted(
+        [
+            "XH2aQuantQAdd",
+            "XH2aQuantQAdd",
+            "XH2aQuantQIdentity",
+            "XH2aQuantQInputStub",
+        ]
+    )
+    produced = {
+        output
+        for node in quant_model.graph.node
+        for output in node.output
+        if output
+    }
+    graph_inputs = {value.name for value in quant_model.graph.input}
+    captures = {
+        input_name
+        for node in quant_model.graph.node
+        for input_name in node.input
+        if input_name and input_name not in produced and input_name not in graph_inputs
+    }
+    assert captures == {"capture_0"}
+
+
+def test_canonical_node_names_ignore_exporter_local_paths_and_counters():
+    def external_weight(name):
+        tensor = onnx.TensorProto(name=name, data_type=onnx.TensorProto.FLOAT, dims=[1])
+        tensor.data_location = onnx.TensorProto.EXTERNAL
+        for key, value in (("location", "weights.bin"), ("offset", "0"), ("length", "4")):
+            entry = tensor.external_data.add()
+            entry.key = key
+            entry.value = value
+        return tensor
+
+    def graph(mode):
+        input_info = onnx.helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])
+        output_info = onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])
+        weight = external_weight("model.layers.7.mlp.proj.weight")
+        nodes = []
+        source = "input"
+        nodes.extend(
+            [
+                onnx.helper.make_node(
+                    "Linear",
+                    [source, weight.name],
+                    ["projected"],
+                    name=(
+                        "model_layers_7_mlp_deadbeef00/node_linear"
+                        if mode == "low_memory"
+                        else "node_linear_401"
+                    ),
+                ),
+                onnx.helper.make_node(
+                    "Sigmoid",
+                    ["projected"],
+                    ["gated"],
+                    name=(
+                        "model_layers_7_mlp_deadbeef00/node_sigmoid"
+                        if mode == "low_memory"
+                        else "node_sigmoid_77"
+                    ),
+                ),
+                onnx.helper.make_node(
+                    "Identity",
+                    ["gated"],
+                    ["output"],
+                    name=(
+                        "model_layers_7_mlp_deadbeef00/node_identity"
+                        if mode == "low_memory"
+                        else "node_identity_44"
+                    ),
+                ),
+            ]
+        )
+        return onnx.helper.make_graph(nodes, mode, [input_info], [output_info], [weight])
+
+    regular = graph("regular")
+    low_memory = graph("low_memory")
+    regular_names = _canonical_node_names(
+        regular,
+        {item.name: item for item in regular.initializer},
+    )
+    low_memory_names = _canonical_node_names(
+        low_memory,
+        {item.name: item for item in low_memory.initializer},
+    )
+
+    assert regular_names == low_memory_names
+    assert regular_names == [
+        "node_000000_linear",
+        "node_000001_sigmoid",
+        "node_000002_identity",
+    ]
+
+
 def test_replace_placeholder_allows_unconsumed_subgraph_outputs(tmp_path):
     tensor_type = onnx.TensorProto.FLOAT
     input_info = onnx.helper.make_tensor_value_info("main_input", tensor_type, [1])
@@ -790,6 +1460,90 @@ def test_replace_placeholder_allows_unconsumed_subgraph_outputs(tmp_path):
         ("Identity", ["main_input"], ["subgraph/sub_output_1"]),
     ]
     onnx.checker.check_model(main_model)
+
+
+def test_post_inline_canonicalization_restores_whole_graph_deduplication():
+    input_info = onnx.helper.make_tensor_value_info("input", onnx.TensorProto.INT64, [1, 4])
+    output_info = onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT16, [2, 1, 4])
+    axes_0 = onnx.helper.make_tensor("axes_0", onnx.TensorProto.INT64, [1], [0])
+    axes_1 = onnx.helper.make_tensor("axes_1", onnx.TensorProto.INT64, [1], [0])
+    unused = onnx.helper.make_tensor("unused", onnx.TensorProto.INT64, [], [1])
+    nodes = [
+        onnx.helper.make_node("Cast", ["input"], ["cast_0"], name="cast_0", to=onnx.TensorProto.FLOAT16),
+        onnx.helper.make_node("Unsqueeze", ["cast_0", "axes_0"], ["unsqueeze_0"], name="unsqueeze_0"),
+        onnx.helper.make_node("Cast", ["input"], ["cast_1"], name="cast_1", to=onnx.TensorProto.FLOAT16),
+        onnx.helper.make_node("Unsqueeze", ["cast_1", "axes_1"], ["unsqueeze_1"], name="unsqueeze_1"),
+        onnx.helper.make_node("Concat", ["unsqueeze_0", "unsqueeze_1"], ["output"], name="concat", axis=0),
+    ]
+    value_info = [
+        onnx.helper.make_tensor_value_info("axes_1", onnx.TensorProto.INT64, [1]),
+        onnx.helper.make_tensor_value_info("unused", onnx.TensorProto.INT64, []),
+        onnx.helper.make_tensor_value_info("cast_1", onnx.TensorProto.FLOAT16, [1, 4]),
+        onnx.helper.make_tensor_value_info("unsqueeze_1", onnx.TensorProto.FLOAT16, [1, 1, 4]),
+    ]
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            nodes,
+            "merged",
+            [input_info],
+            [output_info],
+            [axes_0, axes_1, unused],
+            value_info=value_info,
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 18)],
+    )
+
+    stats = _canonicalize_merged_hmonnx_model(model)
+
+    assert stats == {
+        "deduplicated_inline_initializers": 1,
+        "deduplicated_pure_nodes": 2,
+        "removed_unreferenced_inline_initializers": 0,
+    }
+    assert [initializer.name for initializer in model.graph.initializer] == ["axes_0", "unused"]
+    assert [(node.op_type, list(node.input), list(node.output)) for node in model.graph.node] == [
+        ("Cast", ["input"], ["cast_0"]),
+        ("Unsqueeze", ["cast_0", "axes_0"], ["unsqueeze_0"]),
+        ("Concat", ["unsqueeze_0", "unsqueeze_0"], ["output"]),
+    ]
+    assert {value.name for value in model.graph.value_info}.isdisjoint({"axes_1", "cast_1", "unsqueeze_1"})
+    assert "unused" in {value.name for value in model.graph.value_info}
+    onnx.checker.check_model(model)
+
+
+def test_post_inline_canonicalization_never_deduplicates_external_weights_by_metadata():
+    input_info = onnx.helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])
+    output_info = onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])
+    weights = []
+    for index in range(2):
+        weight = onnx.TensorProto(name=f"weight_{index}", data_type=onnx.TensorProto.FLOAT, dims=[1])
+        weight.data_location = onnx.TensorProto.EXTERNAL
+        for key, value in {
+            "location": "weights.bin",
+            "offset": str(index * 4),
+            "length": "4",
+        }.items():
+            entry = weight.external_data.add()
+            entry.key = key
+            entry.value = value
+        weights.append(weight)
+    nodes = [
+        onnx.helper.make_node("Add", ["input", "weight_0"], ["sum_0"]),
+        onnx.helper.make_node("Add", ["sum_0", "weight_1"], ["output"]),
+    ]
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(nodes, "external", [input_info], [output_info], weights),
+        opset_imports=[onnx.helper.make_opsetid("", 18)],
+    )
+
+    stats = _canonicalize_merged_hmonnx_model(model)
+
+    assert stats == {
+        "deduplicated_inline_initializers": 0,
+        "deduplicated_pure_nodes": 0,
+        "removed_unreferenced_inline_initializers": 0,
+    }
+    assert [initializer.name for initializer in model.graph.initializer] == ["weight_0", "weight_1"]
 
 
 @pytest.mark.parametrize("cleanup_temporary_files", [False, True])

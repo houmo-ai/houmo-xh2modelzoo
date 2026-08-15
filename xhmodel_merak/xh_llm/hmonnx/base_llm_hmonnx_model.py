@@ -369,7 +369,11 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         block_table_capacity: int,
         capture_cache_variant: object | None = None,
     ) -> bool:
-        active_model = self.prefill_model if self._llm_prefill else self.decode_model
+        active_model = getattr(
+            self,
+            "prefill_model" if self._llm_prefill else "decode_model",
+            None,
+        )
         session = getattr(active_model, "hmonnx_session", None)
         interpreter = getattr(session, "interpreter", None)
         select_capture = getattr(interpreter, "set_capture_cache_key", None)
@@ -383,7 +387,11 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
 
     def _clear_active_page_attention_cuda_graph(self) -> None:
         """Clear only the prefill/decode HMONNX graph whose metadata pointer changed."""
-        active_model = self.prefill_model if self._llm_prefill else self.decode_model
+        active_model = getattr(
+            self,
+            "prefill_model" if self._llm_prefill else "decode_model",
+            None,
+        )
         session = getattr(active_model, "hmonnx_session", None)
         interpreter = getattr(session, "interpreter", None)
         clear = getattr(interpreter, "clear", None)
@@ -504,6 +512,12 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
 
     def get_tokenizer(self, **kwargs):
         assert self.hf_model_dir is not None
+        # Exported HMONNX packages may carry the checkpoint's tokenizer code
+        # in ``hf_config``.  Model config loading already trusts that packaged
+        # code; keep tokenizer loading consistent so non-interactive inference
+        # does not block on a Transformers confirmation prompt.  Callers can
+        # still opt out explicitly with ``trust_remote_code=False``.
+        kwargs.setdefault("trust_remote_code", True)
         tokenizer = AutoTokenizer.from_pretrained(self.hf_model_dir, **kwargs)
         return tokenizer
 

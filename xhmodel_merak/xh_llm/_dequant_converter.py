@@ -170,6 +170,7 @@ def ensure_gptqmodel_unpack_buffers(module: nn.Module) -> None:
 def gptqmodel_torch_qlinear_converter(self: nn.Module):
     import torch as t  # conflict with torch.py
 
+    ensure_gptqmodel_unpack_buffers(self)
     if self.bits in [2, 4, 8]:
         zeros = t.bitwise_right_shift(
             t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),

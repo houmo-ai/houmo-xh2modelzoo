@@ -45,6 +45,7 @@ from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ._dequant_converter import ensure_gptqmodel_unpack_buffers
 from .base_model import XHBaseModel
+from .hmonnx.deterministic_export import merge_placeholder_quant_metadata
 from .wrap_model import wrap_llm_model
 
 
@@ -138,6 +139,32 @@ class WeightMapping:
     tensor_id_to_param_names: dict[int, str]
 
 
+def _model_floating_dtype(
+    model: nn.Module,
+    *,
+    fallback: torch.dtype = torch.float16,
+) -> torch.dtype:
+    """Return the floating dtype that an empty model was constructed with.
+
+    Meta parameters still retain their dtype, so they are the authoritative
+    source for streamed loading. Config is only a fallback for unusual models
+    without floating parameters or buffers.
+    """
+    for values in (model.parameters(), model.buffers()):
+        for value in values:
+            if value.dtype.is_floating_point:
+                return value.dtype
+
+    config = getattr(model, "config", None)
+    for attribute in ("dtype", "torch_dtype"):
+        dtype = getattr(config, attribute, None)
+        if isinstance(dtype, str):
+            dtype = getattr(torch, dtype.removeprefix("torch."), None)
+        if isinstance(dtype, torch.dtype) and dtype.is_floating_point:
+            return dtype
+    return fallback
+
+
 class GPTQModelQuantizedModelPreprocessor:
     """Apply GPTQModel's quantized module layout to an existing meta HF model.
 
@@ -172,7 +199,15 @@ class GPTQModelQuantizedModelPreprocessor:
         self._backend = BACKEND
         self._dynamic_get = dynamic_get
         self._select_quant_linear = select_quant_linear
-        self.quant_config = QuantizeConfig.from_pretrained(self.model_dir)
+        # Streamed export only consumes the packed checkpoint layout. Disk
+        # offload belongs to the quantization loop and must not fall back to
+        # GPTQModel's legacy True default when an external checkpoint omitted
+        # the field from config.json.
+        self.quant_config = QuantizeConfig.from_pretrained(
+            self.model_dir,
+            offload_to_disk=False,
+            offload_to_disk_path=None,
+        )
         self.model_definition = check_and_get_model_definition(
             self.model_dir,
             trust_remote_code=True,
@@ -334,6 +369,12 @@ class GPTQModelQuantizedModelPreprocessor:
             register_buffers=True,
             adapter=self.quant_config.adapter,
         )
+        # GPTQModel's regular loader applies the requested model dtype after
+        # constructing QuantLinear shells. The shell constructors themselves
+        # allocate floating scales/biases as FP16, so the streamed path must
+        # mirror that cast before checkpoint tensors are materialized. Without
+        # it, BF16 models dequantize through FP16 only in low-memory mode.
+        quant_linear.to(dtype=self.dtype)
         quant_linear.device = torch.device("meta")
         return quant_linear
 
@@ -475,10 +516,20 @@ def _flatten_tensor_meta_values(value: Any) -> list[Any]:
 
 
 def _node_arg_meta_value(value: Any) -> Any:
-    """将 FX Node 参数解引用为其 ``meta['val']``，普通值保持不变。"""
+    """Resolve an FX argument to its tensor-like tracing metadata.
+
+    The frontend does not guarantee that every producer retains ``meta['val']``
+    after normalization.  ``meta['tensor_meta']`` is the authoritative fallback
+    for shape/dtype-only placeholder contracts.  Returning the original FX Node
+    here is unsafe: it can then leak from the parent graph into a standalone
+    subgraph and be mistaken for a runtime tensor.
+    """
     meta = getattr(value, "meta", None)
-    if isinstance(meta, dict) and "val" in meta:
-        return meta["val"]
+    if isinstance(meta, dict):
+        if meta.get("val") is not None:
+            return meta["val"]
+        if meta.get("tensor_meta") is not None:
+            return meta["tensor_meta"]
     return value
 
 
@@ -511,6 +562,27 @@ def _placeholder_input_fake_tensors(args: Any) -> list[Any]:
     tuple 则对应位置参数集合，需要递归重建其中的每个参数。
     """
     return _flatten_input_fake_tensor_values(args)
+
+
+def _captured_placeholder_args_template(placeholder_module: nn.Module, node) -> Any:
+    """Return the immutable input contract captured before frontend rewrites.
+
+    Fusion, dead-code elimination, and metadata propagation are allowed to
+    rewrite the parent graph after a placeholder is installed.  Re-reading
+    ``node.args`` at subgraph-export time therefore cannot be the source of
+    truth.  Older placeholder graphs without a captured contract retain the
+    legacy fallback for compatibility.
+    """
+
+    captured = placeholder_module.__dict__.get("input_args_template")
+    if captured is not None:
+        return captured
+    merged_args = _merge_call_args_kwargs_as_args(
+        placeholder_module,
+        node.args,
+        node.kwargs,
+    )
+    return _serializable_meta_template(merged_args)
 
 
 def _rebuild_value_from_flat_inputs(template: Any, flat_inputs: tuple[Any, ...], cursor: list[int]) -> Any:
@@ -700,12 +772,26 @@ def _init_placeholder_export_process(
     """Initialize one spawn worker with an isolated meta model and exporter."""
     global _PROCESS_EMPTY_HF_MODEL, _PROCESS_PLACEHOLDER_EXPORTER
 
+    # The pre-load phase lets a model family install compatibility patches
+    # needed by trusted remote code while it is imported.
     big_hf_model_cls.initialize_process_worker()
     empty_hf_model = empty_hf_model_factory(hf_model_dir)
+    # A fresh spawn interpreter may not know checkpoint-defined classes until
+    # the factory above imports them. Refresh model-family registrations after
+    # that import so TorchFX never falls through into data-dependent Python
+    # implementations merely because their runtime class was unavailable in
+    # the pre-load phase.
+    big_hf_model_cls.initialize_process_worker_after_model_load(empty_hf_model)
     model_root = getattr(empty_hf_model, "model", None)
     if model_root is not None and hasattr(model_root, "visual"):
         model_root.visual = None
     big_hf_model_cls._preprocess_quantized_hf_model(empty_hf_model, hf_model_dir)
+    # Quantizer preprocessors can replace original modules with fused runtime
+    # classes of their own. Give every model family one final idempotent
+    # registration refresh before any materialized placeholder is traced.
+    big_hf_model_cls.initialize_process_worker_after_quantized_preprocess(
+        empty_hf_model
+    )
 
     exporter = big_hf_model_cls.__new__(big_hf_model_cls)
     exporter._hf_model_dir = hf_model_dir
@@ -777,6 +863,70 @@ def _placeholder_output_meta(value: Any) -> tuple[list[list[int]], list[str], in
     output_shapes = [list(tensor_value.shape) for tensor_value in tensor_values]
     output_dtypes = [str(tensor_value.dtype).removeprefix("torch.") for tensor_value in tensor_values]
     return output_shapes, output_dtypes, len(tensor_values)
+
+
+_ONNX_TO_TORCH_DTYPE = {
+    onnx.TensorProto.FLOAT: torch.float32,
+    onnx.TensorProto.FLOAT16: torch.float16,
+    onnx.TensorProto.BFLOAT16: torch.bfloat16,
+    onnx.TensorProto.DOUBLE: torch.float64,
+    onnx.TensorProto.INT64: torch.int64,
+    onnx.TensorProto.INT32: torch.int32,
+    onnx.TensorProto.INT16: torch.int16,
+    onnx.TensorProto.INT8: torch.int8,
+    onnx.TensorProto.UINT8: torch.uint8,
+    onnx.TensorProto.BOOL: torch.bool,
+}
+
+
+def _static_hmonnx_output_contract(
+    hmonnx_file: str | Path,
+) -> tuple[list[list[int]], list[torch.dtype]]:
+    """Read the post-quantization static output contract of one HMONNX graph.
+
+    Placeholder modules are installed before PTQ, while a quantized subgraph can
+    legitimately change its output dtype (for example FP32 HF MoE to FP16
+    ``MoeBlock``).  The independently exported HMONNX is therefore the source of
+    truth for the main graph boundary.
+    """
+    model = onnx.load(str(hmonnx_file), load_external_data=False)
+    shapes: list[list[int]] = []
+    dtypes: list[torch.dtype] = []
+    for output in model.graph.output:
+        if not output.type.HasField("tensor_type"):
+            raise RuntimeError(f"Placeholder HMONNX output {output.name!r} is not a tensor: {hmonnx_file}")
+        tensor_type = output.type.tensor_type
+        dtype = _ONNX_TO_TORCH_DTYPE.get(int(tensor_type.elem_type))
+        if dtype is None:
+            raise RuntimeError(
+                f"Unsupported placeholder HMONNX output dtype {tensor_type.elem_type} "
+                f"for {output.name!r}: {hmonnx_file}"
+            )
+        shape = []
+        for dim in tensor_type.shape.dim:
+            if dim.WhichOneof("value") != "dim_value":
+                raise RuntimeError(
+                    f"Placeholder HMONNX output {output.name!r} is not static: {hmonnx_file}"
+                )
+            shape.append(int(dim.dim_value))
+        shapes.append(shape)
+        dtypes.append(dtype)
+    if not shapes:
+        raise RuntimeError(f"Placeholder HMONNX has no tensor outputs: {hmonnx_file}")
+    return shapes, dtypes
+
+
+def _frontend_graph_example_inputs(fronted_graph_module: FrontendGraph) -> list[Any]:
+    """Rebuild static example inputs from a frontend graph's input metadata."""
+    inputs = []
+    for node in fronted_graph_module.graph.nodes:
+        if node.op != "placeholder":
+            continue
+        value = _node_arg_meta_value(node)
+        if value is node or value is None:
+            raise RuntimeError(f"Frontend graph input {node.name!r} has no tensor metadata")
+        inputs.append(_serializable_meta_template(value))
+    return inputs
 
 
 def _append_call_arg(args: list[Any], value: Any) -> None:
@@ -1083,6 +1233,203 @@ def _merge_opset_imports(main_model: onnx.ModelProto, subgraph_model: onnx.Model
             )
 
 
+_POST_INLINE_CSE_OPS = frozenset(
+    {
+        ("", "Cast"),
+        ("", "Unsqueeze"),
+    }
+)
+
+
+def _inline_initializer_signature(initializer: onnx.TensorProto) -> tuple[Any, ...] | None:
+    """Return an exact value signature for an inline initializer.
+
+    External tensors deliberately return ``None``. Equal shape/location metadata
+    does not imply equal bytes, and loading multi-gigabyte weights would defeat
+    the memory guarantee of this export path.
+    """
+    if initializer.data_location == onnx.TensorProto.EXTERNAL or initializer.external_data:
+        return None
+    segment = (
+        initializer.segment.SerializeToString(deterministic=True)
+        if initializer.HasField("segment")
+        else b""
+    )
+    return (
+        int(initializer.data_type),
+        tuple(initializer.dims),
+        bytes(initializer.raw_data),
+        tuple(initializer.float_data),
+        tuple(initializer.int32_data),
+        tuple(initializer.string_data),
+        tuple(initializer.int64_data),
+        tuple(initializer.double_data),
+        tuple(initializer.uint64_data),
+        segment,
+    )
+
+
+def _nested_graph_tensor_references(graph: onnx.GraphProto) -> set[str]:
+    """Collect names mentioned inside nested graph attributes.
+
+    Nested ONNX graphs can capture values from an outer scope. The post-inline
+    canonicalizer does not rewrite lexical scopes, so any possibly captured
+    name is protected from top-level deduplication.
+    """
+    references: set[str] = set()
+    for node in graph.node:
+        for attribute in node.attribute:
+            nested_graphs = []
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                nested_graphs.append(attribute.g)
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                nested_graphs.extend(attribute.graphs)
+            for nested_graph in nested_graphs:
+                references.update(name for nested_node in nested_graph.node for name in nested_node.input if name)
+                references.update(_nested_graph_tensor_references(nested_graph))
+    return references
+
+
+def _quantization_annotation_names(graph: onnx.GraphProto) -> set[str]:
+    names: set[str] = set()
+    for annotation in graph.quantization_annotation:
+        if annotation.tensor_name:
+            names.add(annotation.tensor_name)
+        names.update(name for name in annotation.quant_parameter_tensor_names.values() if name)
+    return names
+
+
+def _resolve_tensor_alias(name: str, aliases: dict[str, str]) -> str:
+    seen = set()
+    while name in aliases:
+        if name in seen:
+            raise RuntimeError(f"Tensor alias cycle detected while canonicalizing HMONNX: {name!r}")
+        seen.add(name)
+        name = aliases[name]
+    return name
+
+
+def _replace_node_inputs(node: onnx.NodeProto, aliases: dict[str, str]) -> None:
+    for index, name in enumerate(node.input):
+        if name:
+            node.input[index] = _resolve_tensor_alias(name, aliases)
+
+
+def _replace_top_level_node_inputs(graph: onnx.GraphProto, aliases: dict[str, str]) -> None:
+    for node in graph.node:
+        _replace_node_inputs(node, aliases)
+
+
+def _drop_aliased_value_info(graph: onnx.GraphProto, aliases: dict[str, str]) -> None:
+    retained = [value for value in graph.value_info if value.name not in aliases]
+    del graph.value_info[:]
+    graph.value_info.extend(retained)
+
+
+def _deduplicate_inline_initializers(graph: onnx.GraphProto) -> int:
+    """Deduplicate byte-identical small constants after all subgraphs are merged."""
+    protected = (
+        {value.name for value in graph.input}
+        | {value.name for value in graph.output}
+        | _nested_graph_tensor_references(graph)
+        | _quantization_annotation_names(graph)
+    )
+    groups: dict[tuple[Any, ...], list[onnx.TensorProto]] = defaultdict(list)
+    for initializer in graph.initializer:
+        signature = _inline_initializer_signature(initializer)
+        if signature is not None:
+            groups[signature].append(initializer)
+
+    aliases: dict[str, str] = {}
+    for initializers in groups.values():
+        if len(initializers) < 2:
+            continue
+        canonical = next((item for item in initializers if item.name in protected), initializers[0])
+        for initializer in initializers:
+            if initializer is canonical or initializer.name in protected:
+                continue
+            aliases[initializer.name] = canonical.name
+
+    if not aliases:
+        return 0
+    _replace_top_level_node_inputs(graph, aliases)
+    retained = [initializer for initializer in graph.initializer if initializer.name not in aliases]
+    del graph.initializer[:]
+    graph.initializer.extend(retained)
+    _drop_aliased_value_info(graph, aliases)
+    return len(aliases)
+
+
+def _node_cse_key(node: onnx.NodeProto) -> tuple[Any, ...]:
+    attributes = tuple(
+        sorted(
+            (attribute.name, attribute.SerializeToString(deterministic=True))
+            for attribute in node.attribute
+        )
+    )
+    return node.domain, node.op_type, tuple(node.input), attributes
+
+
+def _deduplicate_post_inline_pure_nodes(graph: onnx.GraphProto) -> int:
+    """Run conservative CSE for boundary artifacts known to be pure.
+
+    The allowlist is intentionally narrow. Custom HMONNX operators may carry
+    cache/state semantics even when their protobufs look identical and must
+    never be merged by this generic finalizer.
+    """
+    protected_outputs = (
+        {value.name for value in graph.output}
+        | _nested_graph_tensor_references(graph)
+        | _quantization_annotation_names(graph)
+    )
+    aliases: dict[str, str] = {}
+    canonical_outputs: dict[tuple[Any, ...], str] = {}
+    retained = []
+    for node in graph.node:
+        _replace_node_inputs(node, aliases)
+        eligible = (
+            (node.domain, node.op_type) in _POST_INLINE_CSE_OPS
+            and len(node.output) == 1
+            and bool(node.output[0])
+            and node.output[0] not in protected_outputs
+        )
+        if not eligible:
+            retained.append(node)
+            continue
+        key = _node_cse_key(node)
+        canonical_output = canonical_outputs.get(key)
+        if canonical_output is None:
+            canonical_outputs[key] = node.output[0]
+            retained.append(node)
+            continue
+        aliases[node.output[0]] = canonical_output
+
+    if not aliases:
+        return 0
+    del graph.node[:]
+    graph.node.extend(retained)
+    _replace_top_level_node_inputs(graph, aliases)
+    _drop_aliased_value_info(graph, aliases)
+    return len(aliases)
+
+
+def _canonicalize_merged_hmonnx_model(model: onnx.ModelProto) -> dict[str, int]:
+    """Restore whole-graph optimizations lost at placeholder boundaries."""
+    graph = model.graph
+    deduplicated_initializers = _deduplicate_inline_initializers(graph)
+    deduplicated_nodes = _deduplicate_post_inline_pure_nodes(graph)
+    stats = {
+        "deduplicated_inline_initializers": deduplicated_initializers,
+        "deduplicated_pure_nodes": deduplicated_nodes,
+        # The monolithic exporter retains its pre-existing dead inline
+        # constants. Removing only constants introduced by placeholder
+        # subgraphs makes low-memory structure mode-dependent, so canonicalize
+        # by value/CSE only and preserve the same lifecycle as the full graph.
+        "removed_unreferenced_inline_initializers": 0,
+    }
+    return stats
+
+
 def _check_name_conflicts(
     main_graph: onnx.GraphProto,
     placeholder: onnx.NodeProto,
@@ -1172,6 +1519,20 @@ def replace_placeholder_node(
         raise RuntimeError(
             f"TupleGetItem indices for {placeholder.name} must be unique valid subgraph output indices; "
             f"duplicates={sorted(duplicate_indices)}, unexpected={sorted(unexpected_indices)}"
+        )
+
+    module_target = _node_attr(placeholder, "content", "")
+    if isinstance(module_target, bytes):
+        module_target = module_target.decode("utf-8")
+    if module_target:
+        merge_placeholder_quant_metadata(
+            main_model,
+            subgraph_model,
+            module_target,
+            {
+                output_index: tuple_getitem.output[0]
+                for output_index, tuple_getitem in tuple_getitems
+            },
         )
 
     replacements = {value.name: placeholder.input[index] for index, value in enumerate(subgraph.input)}
@@ -1271,6 +1632,11 @@ def replace_placeholders_with_subgraphs(
         remaining = [node.name for node in model.graph.node if node.op_type == "PlaceHolder"]
         if remaining:
             raise RuntimeError(f"Graph still has PlaceHolder nodes: {remaining[:10]}")
+        canonicalization_stats = _canonicalize_merged_hmonnx_model(model)
+        logger.info(
+            "Canonicalized merged HMONNX after placeholder replacement: %s",
+            canonicalization_stats,
+        )
         onnx.save(model, str(model_path))
         onnx.checker.check_model(str(model_path))
     except Exception as exc:
@@ -1326,7 +1692,29 @@ class BigHFModelExportHelper:
 
     @classmethod
     def initialize_process_worker(cls) -> None:
-        """Register model-specific wrappers in a fresh spawn interpreter."""
+        """Run pre-model-load setup in a fresh spawn interpreter.
+
+        Implementations must be idempotent: the common post-load hook reruns
+        this method after trusted remote code has created its runtime classes.
+        """
+
+    @classmethod
+    def initialize_process_worker_after_model_load(
+        cls,
+        hf_model: PreTrainedModel,
+    ) -> None:
+        """Refresh registrations after checkpoint-defined classes are loaded."""
+        del hf_model
+        cls.initialize_process_worker()
+
+    @classmethod
+    def initialize_process_worker_after_quantized_preprocess(
+        cls,
+        hf_model: PreTrainedModel,
+    ) -> None:
+        """Refresh registrations after quantizers may have replaced classes."""
+        del hf_model
+        cls.initialize_process_worker()
 
     def __init__(
         self,
@@ -1364,11 +1752,29 @@ class BigHFModelExportHelper:
             # export_decoder_layers 中逐层进行；这里先把 placeholder 子树临时从模块树
             # 摘除，避免 dequantize_hf_model 触碰仍为 meta 的 placeholder QuantLinear。
             with self._detach_placeholder_modules(hf_model):
-                XHBaseModel.dequantize_hf_model(hf_model, quantization_config)
+                self.prepare_materialized_non_placeholder_model(
+                    hf_model,
+                    quantization_config,
+                )
 
     @classmethod
     def register_placeholder(cls, registry: _DMRegistryCls, hf_model: Optional[torch.nn.Module] = None):
         pass
+
+    def prepare_materialized_non_placeholder_model(
+        self,
+        hf_model: PreTrainedModel,
+        quantization_config: Any,
+    ) -> None:
+        """Prepare checkpoint-backed main-graph weights after streaming load.
+
+        The default keeps the established Qwen/Ling behavior and dequantizes
+        packed modules. Models whose compiler path consumes packed integers
+        directly can override this hook without reimplementing the complete
+        placeholder loader.
+        """
+
+        XHBaseModel.dequantize_hf_model(hf_model, quantization_config)
 
     # 初始化与权重物化
 
@@ -1393,7 +1799,10 @@ class BigHFModelExportHelper:
             model_dir = hf_model_dir or getattr(config, "_name_or_path", None)
             if not model_dir:
                 raise ValueError("hf_model_dir is required to preprocess a GPTQModel empty model.")
-            preprocessor = GPTQModelQuantizedModelPreprocessor(model_dir)
+            preprocessor = GPTQModelQuantizedModelPreprocessor(
+                model_dir,
+                dtype=_model_floating_dtype(hf_model),
+            )
             replaced = preprocessor.preprocess(hf_model, skip_module_prefixes=skip_module_prefixes)
             get_xhquant_logger().info(
                 "Replaced %d checkpoint-backed Linear modules using GPTQModel rules.",
@@ -1947,7 +2356,20 @@ class BigHFModelExportHelper:
                         content=node.target,
                     )
                     place_holder_m.__dict__["owner"] = m
-                    place_holder_m.__dict__["input_fake_tensors"] = _flatten_input_fake_tensor_values(node.args)
+                    input_args_template = _serializable_meta_template(node.args)
+                    input_contract = _placeholder_input_fake_tensors(input_args_template)
+                    if not input_contract:
+                        raise RuntimeError(
+                            f"Placeholder {node.target} has no tensor input contract before frontend rewrites."
+                        )
+                    place_holder_m.__dict__["input_args_template"] = input_args_template
+                    # Retained for callers that only need the flattened view.
+                    place_holder_m.__dict__["input_fake_tensors"] = input_contract
+                    get_xhquant_logger().info(
+                        "Captured placeholder %s input contract before frontend rewrites: %s",
+                        node.target,
+                        _fake_tensor_shape_summary(input_contract),
+                    )
                     fronted_graph_module.set_submodule(node.target, place_holder_m)
                     if num_outputs == 1:
                         # PlaceHolderModule 统一返回 list；单输出原模块的下游仍期望 tensor，
@@ -1961,6 +2383,80 @@ class BigHFModelExportHelper:
 
         fronted_graph_module.graph.lint()
         fronted_graph_module.recompile()
+
+    def synchronize_placeholder_output_contracts(
+        self,
+        fronted_graph_module: FrontendGraph,
+        placeholder_output_dir: str | Path,
+    ) -> int:
+        """Apply post-PTQ subgraph output contracts to the placeholder main graph.
+
+        The frontend placeholder initially mirrors the floating-point HF module.
+        Quantization can change that boundary dtype, so retaining the original
+        metadata makes every downstream layer trace with the wrong dtype and
+        inserts mode-dependent Cast nodes.  Synchronize from the exported
+        subgraphs, then re-run global metadata propagation before quantizing the
+        main graph.
+        """
+        import xhquant.nn as xhnn
+        from xhquant.core.graph.fake_tensor_prop import MetaInfoPro
+
+        output_dir = Path(placeholder_output_dir)
+        synchronized = 0
+        changes = []
+        for node in fronted_graph_module.graph.nodes:
+            if node.op != "call_module":
+                continue
+            module = fronted_graph_module.get_submodule(str(node.target))
+            if not isinstance(module, xhnn.PlaceHolderModule):
+                continue
+            subgraph_file = output_dir / f"{_module_name_to_filename(str(node.target))}.onnx"
+            if not subgraph_file.is_file():
+                raise FileNotFoundError(
+                    f"Cannot synchronize placeholder {node.target!s}; "
+                    f"subgraph HMONNX does not exist: {subgraph_file}"
+                )
+            output_shapes, output_dtypes = _static_hmonnx_output_contract(subgraph_file)
+            expected_outputs = int(module.num_outputs)
+            if expected_outputs >= 0 and len(output_shapes) != expected_outputs:
+                raise RuntimeError(
+                    f"Placeholder {node.target!s} output count changed after PTQ: "
+                    f"frontend={expected_outputs}, hmonnx={len(output_shapes)}"
+                )
+
+            previous_dtypes = module.output_dtypes
+            previous_shapes = module.output_shapes
+            module.output_shapes = module._serialize_output_shapes(output_shapes)
+            module.output_dtypes = module._serialize_output_dtypes(output_dtypes)
+            module.num_outputs = len(output_shapes)
+            synchronized += 1
+            if previous_dtypes != module.output_dtypes or previous_shapes != module.output_shapes:
+                changes.append(
+                    {
+                        "target": str(node.target),
+                        "shapes": output_shapes,
+                        "dtypes": [str(dtype).removeprefix("torch.") for dtype in output_dtypes],
+                    }
+                )
+
+        if synchronized == 0:
+            raise RuntimeError(
+                f"No PlaceHolderModule was found while synchronizing contracts from {output_dir}"
+            )
+
+        # Refresh the complete graph, not just the placeholder/getitem pair.
+        # Quantization and torch.export both consume downstream metadata, so a
+        # local patch would leave later layers with the stale pre-PTQ dtype.
+        example_inputs = _frontend_graph_example_inputs(fronted_graph_module)
+        MetaInfoPro(fronted_graph_module).propagate(*example_inputs)
+        fronted_graph_module.graph.lint()
+        fronted_graph_module.recompile()
+        get_xhquant_logger().info(
+            "Synchronized %d placeholder output contract(s) from post-PTQ HMONNX; changed=%s",
+            synchronized,
+            changes,
+        )
+        return synchronized
 
     # Placeholder 子图加载、量化与导出
 
@@ -2110,12 +2606,11 @@ class BigHFModelExportHelper:
         """使用指定模式的输入契约量化并导出一个已加载 placeholder 模块。"""
         # 节点 meta 记录了主图 tracing 时的真实 shape/dtype，是构造子图 dummy 输入的
         # 唯一依据；这里同时统一 kwargs，确保导出端口顺序稳定。
-        node.args = _merge_call_args_kwargs_as_args(m, node.args, node.kwargs)
-        node.kwargs = {}
+        args_template = _captured_placeholder_args_template(m, node)
         self._export_loaded_place_holder_layer_from_template(
             str(node.target),
             loaded_placeholder_m,
-            node.args,
+            args_template,
             target_device,
             wrap_cfg,
             quant_cfg,
@@ -2260,6 +2755,16 @@ class BigHFModelExportHelper:
 
         logger = get_xhquant_logger()
         placeholder_export_workers = _placeholder_export_worker_count(placeholder_export_workers)
+        shared_targets = prefill_modules_by_target.keys() & decode_modules_by_target.keys()
+        logger.info(
+            "Collected %d prefill and %d decode PlaceHolder module(s): "
+            "%d shared, %d prefill-only, %d decode-only",
+            len(prefill_modules_by_target),
+            len(decode_modules_by_target),
+            len(shared_targets),
+            len(prefill_modules_by_target.keys() - decode_modules_by_target.keys()),
+            len(decode_modules_by_target.keys() - prefill_modules_by_target.keys()),
+        )
         logger.info("Export prefill/decode PlaceHolder layers with %d worker(s)", placeholder_export_workers)
         reuse_existing = os.environ.get("XH2MODELZOO_REUSE_BIG_MODEL_PLACEHOLDERS", "").lower() in {
             "1",
@@ -2353,8 +2858,10 @@ class BigHFModelExportHelper:
                 if not should_export or module_entry is None:
                     continue
                 node, placeholder_module = module_entry
-                merged_args = _merge_call_args_kwargs_as_args(placeholder_module, node.args, node.kwargs)
-                args_template = _serializable_meta_template(merged_args)
+                args_template = _captured_placeholder_args_template(
+                    placeholder_module,
+                    node,
+                )
                 expected_outputs = getattr(placeholder_module, "num_outputs", None)
                 if expected_outputs is not None and int(expected_outputs) < 0:
                     expected_outputs = None
@@ -2411,7 +2918,7 @@ class BigHFModelExportHelper:
                 pbar = tqdm(as_completed(futures), total=len(futures), desc="Export prefill/decode PlaceHolder layers")
                 for future in pbar:
                     module_target = futures[future]
-                    pbar.set_description(f"exported {module_target} as PlaceHolder")
+                    pbar.set_description(f"validating {module_target} PlaceHolder export")
                     try:
                         result = future.result()
                     except Exception as exc:
@@ -2424,6 +2931,20 @@ class BigHFModelExportHelper:
                             "Placeholder worker returned target "
                             f"{result['module_target']!r}, expected {module_target!r}."
                         )
+                    pbar.set_description(f"exported {module_target} as PlaceHolder")
+
+        # A placeholder is registered from the pre-quantized HF graph, but its
+        # independently quantized subgraph may expose a different dtype.  Feed
+        # the post-PTQ contracts back into both main graphs before their PTQ and
+        # export stages, otherwise low-memory and monolithic HMONNX diverge.
+        self.synchronize_placeholder_output_contracts(
+            prefill_fronted_graph_module,
+            prefill_output_dir,
+        )
+        self.synchronize_placeholder_output_contracts(
+            decode_fronted_graph_module,
+            decode_output_dir,
+        )
 
     # HMONNX 主图与子图组装
 

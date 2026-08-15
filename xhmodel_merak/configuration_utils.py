@@ -68,6 +68,7 @@ class BaseModelConfig(BaseConfig):
         model_name: str,
         chip_arch: str = "XH2a",
         model_type: str | None = None,
+        dtype: str = "float16",
         quant_scheme: dict | QuantScheme | None = None,
         quant_weight: Optional[str] = None,
         enable: bool = True,
@@ -77,6 +78,7 @@ class BaseModelConfig(BaseConfig):
         self.model_name = model_name
         self.chip_arch = chip_arch
         self.model_type = model_type
+        self.dtype = dtype
         self._work_dir: str = None
         self.quant_scheme = quant_scheme
         self.enable_auto_offload = False

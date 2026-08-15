@@ -729,6 +729,14 @@ class BaseLLMModel(XHBaseModel):
             meta_info.prefill_hmonnx_md5 = calculate_file_md5(prefill_hmonnx_file)
             meta_info.prefill_hmonnx = str(Path(prefill_hmonnx_file).relative_to(output_dir_path))
 
+            # The serialized prefill ExportedProgram is no longer needed.
+            # Releasing it before tracing decode is important for large MoE
+            # models: otherwise both programs can retain initializer-sized
+            # tensor views at the same time even though the HMONNX file has
+            # already been written.
+            del prefill_exported_model, inputs, dummy_input, data_processor
+            self._trim_cpu_allocator()
+
             logger.info(f"Exporting Decode for {model_name} model .........")
             self.set_decode()
             data_processor = self.get_data_preprocessor()
