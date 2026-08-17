@@ -6,12 +6,14 @@ import torch
 from xhmodel_merak.xh_llm.models.ling_3_flash._kda_rule import (
     chunk_kda,
     recurrent_kda_reference,
+    recurrent_kda_with_gdr_scan,
 )
+from xhmodel_merak.xh_llm.models.qwen3_5._gdr_ops import LegacyGDRRecurrentScan
 from xhquant.backend.xh2a.functions.gdr_chunk_scan import gdr_chunk_scan_xh2a_default
 from xhquant.backend.xh2a.ir import generate_exp_lut_table
 from xhquant.core.cache_tensor import CacheTensor
 from xhquant.lib import hsum
-from xhquant.nn.modules import GDRChunkScan
+from xhquant.nn.modules import GDRChunkScan, GDRRecurrentScan
 from xhquant.ops.xh.gdr_chunk_scan import gdr_chunk_scan_default
 from xhquant.quantization.xh2a.qmodules._gdr_reference import (
     reference_gdr_chunk_scan_chain,
@@ -316,3 +318,47 @@ def test_chunk_kda_shared_scan_matches_token_recurrence_with_distinct_k_v_dims()
     assert returned_state is cache
     torch.testing.assert_close(actual_output, expected_output, atol=2e-6, rtol=2e-6)
     torch.testing.assert_close(cache, expected_state, atol=2e-6, rtol=2e-6)
+
+
+@pytest.mark.parametrize("scan_kind", ["fused", "unfused", "legacy"])
+def test_recurrent_kda_paths_match_per_channel_reference(scan_kind):
+    torch.manual_seed(31)
+    batch, sequence, heads, key_dim, value_dim = 1, 3, 2, 4, 5
+    query = torch.randn(batch, sequence, heads, key_dim)
+    key = torch.randn_like(query)
+    value = torch.randn(batch, sequence, heads, value_dim)
+    log_decay = -torch.rand_like(query) * 0.5
+    beta = torch.rand(batch, sequence, heads)
+    initial_state = torch.randn(batch, heads, key_dim, value_dim) * 0.1
+
+    expected_output, expected_state = recurrent_kda_reference(
+        query,
+        key,
+        value,
+        log_decay,
+        beta,
+        initial_state,
+    )
+    if scan_kind == "fused":
+        scan = GDRRecurrentScan(1, False)
+    elif scan_kind == "legacy":
+        scan = LegacyGDRRecurrentScan(1, False)
+    else:
+        scan = None
+    actual_output, actual_state = recurrent_kda_with_gdr_scan(
+        query,
+        key,
+        value,
+        log_decay,
+        beta,
+        initial_state,
+        recurrent_scan_op=scan,
+        batch_size=batch,
+        sequence_length=sequence,
+        num_heads=heads,
+        key_dim=key_dim,
+        value_dim=value_dim,
+    )
+
+    torch.testing.assert_close(actual_output, expected_output, atol=0, rtol=0)
+    torch.testing.assert_close(actual_state, expected_state, atol=0, rtol=0)

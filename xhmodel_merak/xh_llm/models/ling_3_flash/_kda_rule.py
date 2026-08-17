@@ -16,7 +16,6 @@ from torch import Tensor, nn
 from torch.fx import Proxy
 
 from xhquant.core.cache_tensor import CacheTensor
-from xhquant.nn.modules import GDRRecurrentScan
 
 
 def kda_log_decay(
@@ -126,13 +125,7 @@ def recurrent_kda_with_gdr_scan(
     key_dim: int | None = None,
     value_dim: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    """Execute exact KDA decode while reusing ``GDRRecurrentScan``.
-
-    KDA first scales every state row by its own decay.  Once that operation is
-    applied outside the fused op, the remaining delta update is exactly GDR
-    with a zero scalar log gate.  This transformation is exact, not an
-    approximation, and retains the existing GDR recurrent custom-op ABI.
-    """
+    """Execute exact KDA decode with a per-key-channel recurrent gate."""
 
     query = _l2_normalize(query)
     key = _l2_normalize(key)
@@ -154,21 +147,22 @@ def recurrent_kda_with_gdr_scan(
         if initial_state is None
         else initial_state.to(value)
     )
-    scan = recurrent_scan_op or GDRRecurrentScan(sequence_length=1, output_all_states=False)
     outputs = []
     for token_idx in range(sequence_length):
-        # Per-row KDA decay.  The fused GDR op receives a zero scalar gate and
-        # therefore performs only the shared delta-rule update.
-        state = state * decay_h[:, :, token_idx].exp().unsqueeze(-1)
         q_t = query_h[:, :, token_idx : token_idx + 1]
-        state = scan(
-            q_t,
-            key_h[:, :, token_idx : token_idx + 1],
-            value_h[:, :, token_idx : token_idx + 1],
-            torch.zeros_like(beta_h[:, :, token_idx : token_idx + 1]),
-            beta_h[:, :, token_idx : token_idx + 1],
-            state,
-        )
+        k_t = key_h[:, :, token_idx : token_idx + 1]
+        v_t = value_h[:, :, token_idx : token_idx + 1]
+        decay_t = decay_h[:, :, token_idx : token_idx + 1]
+        beta_t = beta_h[:, :, token_idx : token_idx + 1]
+        if recurrent_scan_op is None:
+            state = state * decay_t[:, :, 0].exp().unsqueeze(-1)
+            k_row = k_t[:, :, 0]
+            memory = (state * k_row.unsqueeze(-1)).sum(dim=-2)
+            delta = (v_t[:, :, 0] - memory) * beta_t[:, :, 0].unsqueeze(-1)
+            state = state + k_row.unsqueeze(-1) * delta.unsqueeze(-2)
+        else:
+            result = recurrent_scan_op(q_t, k_t, v_t, decay_t, beta_t, state)
+            state = result if bool(getattr(recurrent_scan_op, "returns_state", False)) else result[1]
         outputs.append((state * q_t[:, :, 0].unsqueeze(-1)).sum(dim=-2))
     return torch.stack(outputs, dim=2).transpose(1, 2).contiguous(), state
 

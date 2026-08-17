@@ -284,7 +284,19 @@ class LegacyGDRRecurrentScan(nn.Module):
             q_t = query[:, :, i]
             k_t = key[:, :, i]
             v_t = value[:, :, i]
-            g_t = g[:, :, i].exp().unsqueeze(-1).unsqueeze(-1)
+            g_t = g[:, :, i].exp()
+            if g_t.ndim == 2:
+                g_t = g_t.unsqueeze(-1).unsqueeze(-1)
+            elif g_t.ndim == 3:
+                if g_t.shape[-1] != last_recurrent_state.shape[-2]:
+                    raise ValueError(
+                        "Per-channel GDRRecurrentScan gate must match the recurrent state's key dimension"
+                    )
+                g_t = g_t.unsqueeze(-1)
+            else:
+                raise ValueError(
+                    "GDRRecurrentScan gate must have shape [B,H,T] or [B,H,T,K]"
+                )
             beta_t = beta[:, :, i].unsqueeze(-1)
 
             last_recurrent_state = last_recurrent_state * g_t
