@@ -16,6 +16,7 @@ import xhmodel_merak.xh_llm.big_hf_model_helper as big_hf_model_helper
 from xhmodel_merak.xh_llm.base_model import XHBaseModel
 from xhmodel_merak.xh_llm.big_hf_model_helper import (
     BigHFModelExportHelper,
+    GPTQModelQuantizedModelPreprocessor,
     WeightMapping,
     _canonicalize_merged_hmonnx_model,
     _captured_placeholder_args_template,
@@ -63,6 +64,74 @@ class TinyTiedModel(nn.Module):
 
     def tie_weights(self):
         self.output_embedding.weight = self.input_embedding.weight
+
+
+def test_gptq_preprocessor_defuses_numbered_checkpoint_experts_on_registry_miss():
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([nn.Module()])
+    model.model.layers[0].mlp = nn.Module()
+    model.model.layers[0].mlp.experts = nn.Module()
+
+    preprocessor = GPTQModelQuantizedModelPreprocessor.__new__(GPTQModelQuantizedModelPreprocessor)
+    preprocessor._checkpoint_quantized_modules = lambda: {
+        "model.layers.0.mlp.experts.0.gate_proj",
+        "model.layers.0.mlp.experts.0.up_proj",
+        "model.layers.0.mlp.experts.0.down_proj",
+        "model.layers.0.mlp.shared_experts.gate_proj",
+    }
+    calls = []
+
+    def fake_prepare(target):
+        calls.append(target)
+        expert = nn.Module()
+        expert.gate_proj = nn.Linear(4, 8, bias=False, device="meta")
+        expert.up_proj = nn.Linear(4, 8, bias=False, device="meta")
+        expert.down_proj = nn.Linear(8, 4, bias=False, device="meta")
+        target.model.layers[0].mlp.experts.add_module("0", expert)
+        return ["model.layers.0.mlp.experts"]
+
+    preprocessor._prepare_numbered_expert_modules = fake_prepare
+
+    unfused = preprocessor._defuse_numbered_checkpoint_experts(model)
+
+    assert unfused == ("model.layers.0.mlp.experts",)
+    assert calls == [model]
+    assert isinstance(
+        model.get_submodule("model.layers.0.mlp.experts.0.gate_proj"),
+        nn.Linear,
+    )
+
+
+def test_gptq_preprocessor_include_then_skip_scope_matches_first_six_inventory():
+    checkpoint_modules = set()
+    for layer in range(43):
+        checkpoint_modules.update(f"model.layers.{layer}.self_attn.quant_linear_{index}" for index in range(4))
+        checkpoint_modules.update(f"model.layers.{layer}.mlp.experts.{index}.gate_proj" for index in range(771))
+
+    preprocessor = GPTQModelQuantizedModelPreprocessor.__new__(GPTQModelQuantizedModelPreprocessor)
+    preprocessor._checkpoint_quantized_modules = lambda: checkpoint_modules
+    active_layers = [f"model.layers.{layer}" for layer in range(6)]
+    active_moes = [f"model.layers.{layer}.mlp" for layer in range(6)]
+
+    placeholder_template = preprocessor._scoped_checkpoint_quantized_modules(
+        include_module_prefixes=active_moes,
+    )
+    main_graph = preprocessor._scoped_checkpoint_quantized_modules(
+        include_module_prefixes=active_layers,
+        skip_module_prefixes=active_moes,
+    )
+    full_model = preprocessor._scoped_checkpoint_quantized_modules()
+
+    assert len(placeholder_template) == 4626
+    assert len(main_graph) == 24
+    assert len(full_model) == 33325
+    assert all(".mlp." in name for name in placeholder_template)
+    assert all(".mlp." not in name for name in main_graph)
+    assert all(
+        not name.startswith(tuple(f"model.layers.{layer}." for layer in range(6, 43)))
+        for name in placeholder_template | main_graph
+    )
 
 
 def test_placeholder_contract_falls_back_to_tensor_meta_without_leaking_parent_fx_nodes():
@@ -285,8 +354,20 @@ def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monke
         def __init__(self, model_dir, *, dtype):
             calls.append(("init", model_dir, dtype))
 
-        def preprocess(self, model, skip_module_prefixes=None):
-            calls.append(("preprocess", model, skip_module_prefixes))
+        def preprocess(
+            self,
+            model,
+            include_module_prefixes=None,
+            skip_module_prefixes=None,
+        ):
+            calls.append(
+                (
+                    "preprocess",
+                    model,
+                    include_module_prefixes,
+                    skip_module_prefixes,
+                )
+            )
             model.register_buffer("qweight", torch.zeros(4, dtype=torch.int32, device="meta"))
             return ("layer",)
 
@@ -311,7 +392,10 @@ def test_preprocess_gptq_uses_custom_preprocessor_for_existing_empty_model(monke
 
     BigHFModelExportHelper._preprocess_quantized_hf_model(model, "/tmp/gptq-model")
 
-    assert calls == [("init", "/tmp/gptq-model", model_dtype), ("preprocess", model, None)]
+    assert calls == [
+        ("init", "/tmp/gptq-model", model_dtype),
+        ("preprocess", model, None, None),
+    ]
     assert model.qweight.is_meta
 
 
@@ -364,7 +448,7 @@ def test_gptqmodel_load_preserves_explicit_disk_offload_choice(monkeypatch):
     assert calls[0]["offload_to_disk"] is True
 
 
-def test_prepare_loaded_gptq_module_matches_checkpoint_level_bits(monkeypatch):
+def test_prepare_loaded_gptq_module_uses_physical_dynamic_layout(monkeypatch):
     calls = []
 
     class FakeBaseQuantLinear(nn.Module):
@@ -373,6 +457,7 @@ def test_prepare_loaded_gptq_module_matches_checkpoint_level_bits(monkeypatch):
         def __init__(self, device="cpu"):
             super().__init__()
             self.bits = 8
+            self.pack_dtype = torch.int16
             self._qzero_format = 1
             self.register_buffer("qzeros", torch.zeros(1, dtype=torch.int32, device=device))
 
@@ -405,7 +490,55 @@ def test_prepare_loaded_gptq_module_matches_checkpoint_level_bits(monkeypatch):
     )
 
     assert converted == 1
-    assert calls == [(quant_linear, 4, torch.int32)]
+    assert calls == [(quant_linear, 8, torch.int16)]
+
+
+def test_prepare_loaded_gptq_v2_module_marks_loaded_qzeros_without_mutation(monkeypatch):
+    class FakeBaseQuantLinear(nn.Module):
+        REQUIRES_FORMAT_V2 = True
+
+        def __init__(self, device="cpu"):
+            super().__init__()
+            self._qzero_format = 1
+            self.register_buffer(
+                "qzeros",
+                torch.full((1,), 123, dtype=torch.int32, device=device),
+            )
+
+        def qzero_format(self, format=None):
+            if format is not None:
+                self._qzero_format = int(format)
+            return self._qzero_format
+
+    class FakeFormat:
+        GPTQ = SimpleNamespace(value="gptq")
+        GPTQ_V2 = SimpleNamespace(value="gptq_v2")
+
+    qlinear_module = ModuleType("gptqmodel.nn_modules.qlinear")
+    qlinear_module.BaseQuantLinear = FakeBaseQuantLinear
+    config_module = ModuleType("gptqmodel.quantization.config")
+    config_module.FORMAT = FakeFormat
+    model_module = ModuleType("gptqmodel.utils.model")
+    model_module.convert_gptq_v1_to_v2_format_module = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("v2 checkpoint qzeros must not be offset again")
+    )
+    monkeypatch.setitem(sys.modules, "gptqmodel.nn_modules.qlinear", qlinear_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.quantization.config", config_module)
+    monkeypatch.setitem(sys.modules, "gptqmodel.utils.model", model_module)
+
+    loaded = FakeBaseQuantLinear()
+    unloaded = FakeBaseQuantLinear(device="meta")
+    before = loaded.qzeros.clone()
+
+    marked = big_hf_model_helper.GPTQModelQuantizedModelPreprocessor.prepare_loaded_module(
+        nn.Sequential(loaded, unloaded),
+        SimpleNamespace(format="gptq_v2"),
+    )
+
+    assert marked == 1
+    assert loaded.qzero_format() == 2
+    assert unloaded.qzero_format() == 1
+    torch.testing.assert_close(loaded.qzeros, before)
 
 
 def test_new_gptq_quant_linear_uses_requested_floating_dtype():

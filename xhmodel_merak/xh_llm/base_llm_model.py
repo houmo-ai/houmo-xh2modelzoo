@@ -676,6 +676,11 @@ class BaseLLMModel(XHBaseModel):
                         input_names[idx] = "model_layers_{}_self_attn_vcache_input".format(vcache_idx)
         return input_names
 
+    def _release_prefill_quanted_model_after_export(self) -> bool:
+        """Whether the completed prefill graph may be discarded before decode export."""
+
+        return False
+
     @log_function_call()
     def _export_hmonnx(self, exported_info: ExportData):
         meta_info = exported_info.meta
@@ -735,10 +740,21 @@ class BaseLLMModel(XHBaseModel):
             # tensor views at the same time even though the HMONNX file has
             # already been written.
             del prefill_exported_model, inputs, dummy_input, data_processor
+            release_prefill_model = (
+                isinstance(self._quanted_model, ModelSwitcher)
+                and self._release_prefill_quanted_model_after_export()
+            )
+            if release_prefill_model:
+                # A ModelSwitcher also holds the active model separately.
+                # Activate decode before removing the completed stage.
+                self.set_decode()
+                del self._quanted_model["prefill"]
+                del prefill_quanted_model
             self._trim_cpu_allocator()
 
             logger.info(f"Exporting Decode for {model_name} model .........")
-            self.set_decode()
+            if not release_prefill_model:
+                self.set_decode()
             data_processor = self.get_data_preprocessor()
             for k, v in getattr(self, "_decode_wrap_cfg_overrides", {}).items():
                 self.wrap_cfg[k] = v

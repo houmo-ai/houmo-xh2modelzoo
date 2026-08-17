@@ -220,6 +220,8 @@ class GPTQModelQuantizedModelPreprocessor:
         hf_model: PreTrainedModel,
         skip_module_prefixes: Optional[list[str]] = None,
         convert_model_structure: bool = True,
+        *,
+        include_module_prefixes: Optional[list[str]] = None,
     ) -> tuple[str, ...]:
         """Mutate an already-empty HF model into GPTQModel's meta module tree."""
         with torch.device("meta"):
@@ -229,13 +231,74 @@ class GPTQModelQuantizedModelPreprocessor:
                     load_quantized_model=True,
                 )
                 self._defuser.convert_model(hf_model, cleanup_original=True)
-            replaced = self._replace_quant_linears(hf_model, skip_module_prefixes=skip_module_prefixes)
+                self._defuse_numbered_checkpoint_experts(
+                    hf_model,
+                    include_module_prefixes=include_module_prefixes,
+                    skip_module_prefixes=skip_module_prefixes,
+                )
+            replaced = self._replace_quant_linears(
+                hf_model,
+                include_module_prefixes=include_module_prefixes,
+                skip_module_prefixes=skip_module_prefixes,
+            )
 
         hf_model.config.quantization_config = self.quant_config
         setattr(hf_model.config, self.CONFIG_MARKER, True)
         hf_model._meta_quantized_module_count = len(replaced)
         hf_model._meta_quantized_module_names = tuple(replaced)
         return tuple(replaced)
+
+    @staticmethod
+    def _prepare_numbered_expert_modules(hf_model: PreTrainedModel) -> tuple[str, ...]:
+        """Use Defuser's public fallback only for an unsupported fused MoE."""
+
+        from defuser.modeling.moe_experts_interface import (
+            prepare_model_for_moe_quantization,
+        )
+
+        return tuple(prepare_model_for_moe_quantization(hf_model))
+
+    def _defuse_numbered_checkpoint_experts(
+        self,
+        hf_model: PreTrainedModel,
+        include_module_prefixes: Optional[list[str]] = None,
+        skip_module_prefixes: Optional[list[str]] = None,
+    ) -> tuple[str, ...]:
+        """Expose per-expert Linear shells when the checkpoint stores them.
+
+        Transformers 5.x can represent MoE experts as fused 3-D parameters,
+        while GPTQModel checkpoints retain one QuantLinear per expert.  Defuser
+        normally reconciles the two layouts, but ``convert_model`` is a no-op
+        for a newly introduced model type until that type reaches Defuser's
+        registry.  Detect the mismatch from the checkpoint itself and use
+        Defuser's public experts-interface fallback instead of maintaining a
+        model-specific tensor splitter here.
+        """
+
+        checkpoint_experts = self._scoped_checkpoint_quantized_modules(
+            include_module_prefixes=include_module_prefixes,
+            skip_module_prefixes=skip_module_prefixes,
+        )
+        checkpoint_experts = {name for name in checkpoint_experts if re.search(r"(?:^|\.)experts\.\d+\.", name)}
+        if not checkpoint_experts:
+            return ()
+
+        available_modules = {name for name, _ in hf_model.named_modules()}
+        if checkpoint_experts <= available_modules:
+            return ()
+
+        unfused = tuple(self._prepare_numbered_expert_modules(hf_model))
+        available_modules = {name for name, _ in hf_model.named_modules()}
+        missing = sorted(checkpoint_experts - available_modules)
+        if missing:
+            raise RuntimeError(
+                f"Defuser did not expose the checkpoint's numbered expert Linear modules: missing={missing[:20]}"
+            )
+        get_xhquant_logger().info(
+            "Defused %d fused expert container(s) to match numbered GPTQModel checkpoint modules.",
+            len(unfused),
+        )
+        return unfused
 
     def _checkpoint_quantized_modules(self) -> set[str]:
         index_path = Path(self.model_dir) / "model.safetensors.index.json"
@@ -387,20 +450,69 @@ class GPTQModelQuantizedModelPreprocessor:
                 return True
         return False
 
+    @classmethod
+    def _module_is_in_scope(
+        cls,
+        module_name: str,
+        *,
+        include_module_prefixes: Optional[list[str]] = None,
+        skip_module_prefixes: Optional[list[str]] = None,
+    ) -> bool:
+        """Return whether one checkpoint module belongs to the requested slice.
+
+        ``include`` first narrows a full checkpoint to the model subtree being
+        exported; ``skip`` then removes streamed placeholder subtrees from
+        that slice.  Keeping this ordering in one helper prevents the defuser
+        and QuantLinear replacement passes from disagreeing about scope.
+        """
+
+        include_prefixes = tuple(include_module_prefixes or [])
+        skip_prefixes = tuple(skip_module_prefixes or [])
+        if include_prefixes and not cls._is_within_module_prefix(
+            module_name,
+            include_prefixes,
+        ):
+            return False
+        if skip_prefixes and cls._is_within_module_prefix(
+            module_name,
+            skip_prefixes,
+        ):
+            return False
+        return True
+
+    def _scoped_checkpoint_quantized_modules(
+        self,
+        *,
+        include_module_prefixes: Optional[list[str]] = None,
+        skip_module_prefixes: Optional[list[str]] = None,
+    ) -> set[str]:
+        """Read checkpoint QuantLinear names and apply the shared scope."""
+
+        return {
+            module_name
+            for module_name in self._checkpoint_quantized_modules()
+            if self._module_is_in_scope(
+                module_name,
+                include_module_prefixes=include_module_prefixes,
+                skip_module_prefixes=skip_module_prefixes,
+            )
+        }
+
     def _replace_quant_linears(
         self,
         hf_model: PreTrainedModel,
+        include_module_prefixes: Optional[list[str]] = None,
         skip_module_prefixes: Optional[list[str]] = None,
     ) -> list[str]:
-        checkpoint_modules = self._checkpoint_quantized_modules()
+        checkpoint_modules = self._scoped_checkpoint_quantized_modules(
+            include_module_prefixes=include_module_prefixes,
+            skip_module_prefixes=skip_module_prefixes,
+        )
         allowed_modules = self._allowed_modules(hf_model)
-        skip_prefixes = tuple(skip_module_prefixes or [])
         invalid: list[str] = []
         replaced: list[str] = []
 
         for module_name in sorted(checkpoint_modules):
-            if skip_prefixes and self._is_within_module_prefix(module_name, skip_prefixes):
-                continue
             if module_name not in allowed_modules:
                 invalid.append(f"{module_name} (excluded by module_tree)")
                 continue
@@ -433,7 +545,7 @@ class GPTQModelQuantizedModelPreprocessor:
         quant_config: Any,
         skip_module_prefixes: Optional[list[str]] = None,
     ) -> int:
-        """Convert loaded GPTQ v1 qzeros to the runtime v2 representation."""
+        """Canonicalize loaded qzero metadata, converting v1 words when needed."""
         try:
             from gptqmodel.nn_modules.qlinear import BaseQuantLinear
             from gptqmodel.quantization.config import FORMAT
@@ -443,10 +555,29 @@ class GPTQModelQuantizedModelPreprocessor:
 
         checkpoint_format = getattr(quant_config, "format", None)
         checkpoint_format = getattr(checkpoint_format, "value", checkpoint_format)
-        if str(checkpoint_format).lower() != str(FORMAT.GPTQ.value).lower():
+        normalized_format = str(checkpoint_format).lower()
+        gptq_v2_format = getattr(FORMAT, "GPTQ_V2", None)
+        skip_prefixes = tuple(skip_module_prefixes or [])
+        if gptq_v2_format is not None and normalized_format == str(gptq_v2_format.value).lower():
+            marked = 0
+            for module_name, submodule in module.named_modules():
+                if skip_prefixes and cls._is_within_module_prefix(
+                    module_name,
+                    skip_prefixes,
+                ):
+                    continue
+                qzeros = getattr(submodule, "qzeros", None)
+                if (
+                    isinstance(submodule, BaseQuantLinear)
+                    and qzeros is not None
+                    and not getattr(qzeros, "is_meta", False)
+                ):
+                    submodule.qzero_format(format=2)
+                    marked += 1
+            return marked
+        if normalized_format != str(FORMAT.GPTQ.value).lower():
             return 0
 
-        skip_prefixes = tuple(skip_module_prefixes or [])
         converted = 0
         for module_name, submodule in module.named_modules():
             if skip_prefixes and cls._is_within_module_prefix(module_name, skip_prefixes):
@@ -461,16 +592,17 @@ class GPTQModelQuantizedModelPreprocessor:
                 continue
             if not submodule.REQUIRES_FORMAT_V2 or submodule.qzero_format() == 2:
                 continue
-            # Keep this identical to GPTQModel.load(): its checkpoint-level
-            # v1 -> v2 conversion uses QuantizeConfig.bits for every dynamic
-            # QuantLinear, rather than the per-layer override.  Using the
-            # module's effective bits here changes every dynamic qzeros buffer
-            # and makes the streamed model differ from GPTQModel's runtime
-            # representation.
+            # The v1 qzero offset is one packed unit per quantized value.  Mixed
+            # checkpoints therefore have to use the physical module's effective
+            # bit width and pack dtype: applying a global W8 offset to a W4
+            # expert increments only every other nibble (for example
+            # 0x77777777 -> 0x78787878), which leaves half of its zero-points in
+            # v1 format and can decode a signed +8.  This mirrors current
+            # GPTQModel.load() and its dynamic-module conversion exactly.
             convert_gptq_v1_to_v2_format_module(
                 module=submodule,
-                bits=int(quant_config.bits),
-                pack_dtype=quant_config.pack_dtype,
+                bits=int(getattr(submodule, "bits", quant_config.bits)),
+                pack_dtype=getattr(submodule, "pack_dtype", quant_config.pack_dtype),
             )
             converted += 1
         return converted
@@ -1782,6 +1914,7 @@ class BigHFModelExportHelper:
     def _preprocess_quantized_hf_model(
         hf_model: PreTrainedModel,
         hf_model_dir: str | Path | None = None,
+        include_module_prefixes: Optional[list[str]] = None,
         skip_module_prefixes: Optional[list[str]] = None,
     ) -> None:
         """Preprocess a pre-quantized empty model with the matching loader.
@@ -1803,7 +1936,11 @@ class BigHFModelExportHelper:
                 model_dir,
                 dtype=_model_floating_dtype(hf_model),
             )
-            replaced = preprocessor.preprocess(hf_model, skip_module_prefixes=skip_module_prefixes)
+            replaced = preprocessor.preprocess(
+                hf_model,
+                include_module_prefixes=include_module_prefixes,
+                skip_module_prefixes=skip_module_prefixes,
+            )
             get_xhquant_logger().info(
                 "Replaced %d checkpoint-backed Linear modules using GPTQModel rules.",
                 len(replaced),

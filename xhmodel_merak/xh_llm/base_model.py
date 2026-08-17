@@ -18,7 +18,10 @@ from transformers import AutoConfig, GenerationConfig
 from transformers.utils.quantization_config import QuantizationMethod
 
 from xhmodel_merak.configuration_utils import BaseAttrDict, BaseModelConfig
-from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm._dequant_converter import (
+    gptqmodel_torch_qlinear_converter,
+    replace_gptqmodel_quant_linears_with_packed,
+)
 from xhmodel_merak.xh_llm.infer_mixin import SwitchFXInterpreter
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.register import XHLLM_TRACEABLE_MODULES
@@ -726,6 +729,18 @@ class XHBaseModel(DeviceMixin):
         return native_hf_model
 
     @classmethod
+    def _retain_gptqmodel_packed_hf_model(cls, native_hf_model: nn.Module) -> nn.Module:
+        """Transfer GPTQ packed buffers into generic xhquant wrappers."""
+
+        logger = get_xhquant_logger()
+        converted = replace_gptqmodel_quant_linears_with_packed(native_hf_model)
+        logger.info(
+            "Retained %d GPTQModel linears in packed form (dense dequantization skipped)",
+            len(converted),
+        )
+        return native_hf_model
+
+    @classmethod
     def _dequantize_awq_hf_model(cls, native_hf_model: nn.Module):
         assert native_hf_model.config.quantization_config.quant_method == QuantizationMethod.AWQ
         hf_model = native_hf_model
@@ -1215,6 +1230,7 @@ class XHBaseModel(DeviceMixin):
 
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
+        gptq_weight_mode = kwargs.pop("gptq_weight_mode", "dequantize")
         config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
         quantization_config = (
             config.get("quantization_config", None)
@@ -1245,7 +1261,15 @@ class XHBaseModel(DeviceMixin):
             实现自己的_postprocess_gptqmodel_structure函数，覆盖基类行为
             """
             hf_model = cls._load_gptqmodel(hf_model_dir, **kwargs)
-            hf_model = cls._dequantize_gptqmodel_hf_model(hf_model)
+            if gptq_weight_mode == "dequantize":
+                hf_model = cls._dequantize_gptqmodel_hf_model(hf_model)
+            elif gptq_weight_mode == "packed":
+                hf_model = cls._retain_gptqmodel_packed_hf_model(hf_model)
+            else:
+                raise ValueError(
+                    "gptq_weight_mode must be 'dequantize' or 'packed', "
+                    f"got {gptq_weight_mode!r}"
+                )
             hf_model = cls._postprocess_gptqmodel_structure(hf_model, **kwargs)
         elif quant_method == "compressed-tensors":
             """

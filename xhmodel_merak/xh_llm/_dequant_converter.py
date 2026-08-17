@@ -228,6 +228,77 @@ def gptqmodel_torch_qlinear_converter(self: nn.Module):
     self.__class__ = nn.Linear
 
 
+def gptqmodel_torch_qlinear_packed_converter(module: nn.Module) -> nn.Module:
+    """Adopt one canonical GPTQ QuantLinear without unpacking or copying it.
+
+    The returned xhquant wrapper keeps GPTQ's int32 words as its sole weight
+    representation.  Its XH2 QModule performs the W4/W8 -> HM signed-int8
+    layout conversion later, when quantization reaches this module.
+    """
+
+    from xhquant.nn import GPTQPackedLinear, GPTQPackedWeight
+
+    adapter = getattr(module, "adapter", None)
+    if adapter is not None:
+        raise NotImplementedError("GPTQ packed XH2 conversion does not support adapters")
+
+    required = ("qweight", "qzeros", "scales", "g_idx")
+    missing = [name for name in required if not torch.is_tensor(getattr(module, name, None))]
+    if missing:
+        raise RuntimeError(f"GPTQ packed Linear is missing tensors: {missing}")
+
+    qzero_format_getter = getattr(module, "qzero_format", None)
+    qzero_format = int(qzero_format_getter()) if callable(qzero_format_getter) else 1
+    if qzero_format != 2:
+        raise ValueError(
+            "GPTQ qzeros must be converted to canonical v2 before ownership transfer; "
+            f"got v{qzero_format}"
+        )
+
+    devices = {getattr(module, name).device for name in required}
+    bias = getattr(module, "bias", None)
+    if torch.is_tensor(bias):
+        devices.add(bias.device)
+    if len(devices) != 1:
+        raise ValueError(f"GPTQ packed tensors must be on one device, got {sorted(map(str, devices))}")
+
+    packed_weight = GPTQPackedWeight(
+        qweight=module.qweight,
+        qzeros=module.qzeros,
+        scales=module.scales,
+        g_idx=module.g_idx,
+        bits=int(module.bits),
+        group_size=int(module.group_size),
+        in_features=int(module.in_features),
+        out_features=int(module.out_features),
+        pack_dtype_bits=int(module.pack_dtype_bits),
+        qzero_format=qzero_format,
+        sym=bool(module.sym),
+        desc_act=bool(module.desc_act),
+    )
+    packed_linear = GPTQPackedLinear(packed_weight, bias=bias)
+    packed_linear.train(module.training)
+    return packed_linear
+
+
+def replace_gptqmodel_quant_linears_with_packed(model: nn.Module) -> tuple[str, ...]:
+    """Replace every GPTQModel QuantLinear with an ownership-preserving wrapper."""
+
+    from gptqmodel.nn_modules.qlinear import PackableQuantLinear
+
+    module_names = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, PackableQuantLinear)
+    ]
+    for name in module_names:
+        if not name:
+            raise ValueError("the model root cannot itself be a GPTQ QuantLinear")
+        module = model.get_submodule(name)
+        model.set_submodule(name, gptqmodel_torch_qlinear_packed_converter(module))
+    return tuple(module_names)
+
+
 @FX_LEAF_MODULES.register_module()
 class DequantLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True):
