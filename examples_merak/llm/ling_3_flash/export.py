@@ -57,6 +57,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-layers", type=int)
     parser.add_argument("--only-first-block", action="store_true")
     parser.add_argument("--flash-attention", action="store_true")
+    parser.add_argument(
+        "--dump-golden",
+        action="store_true",
+        help="Generate aligned prefill/decode golden data after export",
+    )
+    parser.add_argument(
+        "--golden-device-map",
+        nargs="+",
+        default=None,
+        help=(
+            "Explicit HMONNX device map used only by --dump-golden. More "
+            "than one CUDA entry enables HMONNXInferenceV2 auto-offload."
+        ),
+    )
+    parser.add_argument(
+        "--golden-prompt",
+        default="请用一句话介绍你自己。",
+        help="Text prompt used to generate prefill/decode golden data",
+    )
     low_memory_group = parser.add_mutually_exclusive_group()
     low_memory_group.add_argument(
         "--low-memory",
@@ -159,6 +178,17 @@ def main() -> None:
         device=args.device,
         config_overrides=overrides,
     )
+    if args.dump_golden:
+        from xhmodel_merak.xh_llm.utils import configure_hmonnx_validation_runtime
+
+        configure_hmonnx_validation_runtime(use_v2=True, pack_w4=True)
+        workflow.dump_golden(
+            export_result=result,
+            device=args.device,
+            input_messages=args.golden_prompt,
+            device_map=args.golden_device_map,
+            use_v2=True,
+        )
     print(f"export_dir={result.work_dir}")
     print(f"workflow_config={result.config_file}")
 

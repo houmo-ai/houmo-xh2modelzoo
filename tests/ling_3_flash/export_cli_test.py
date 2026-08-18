@@ -106,3 +106,30 @@ def test_export_cli_accepts_explicit_fp16_dtype(monkeypatch):
     )
 
     assert module.parse_args().dtype == "fp16"
+
+
+def test_export_cli_accepts_golden_options(monkeypatch):
+    module = _load_export_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export.py",
+            "--model",
+            "/tmp/model",
+            "--output",
+            "/tmp/output",
+            "--dump-golden",
+            "--golden-device-map",
+            "cuda:0",
+            "cuda:1",
+            "--golden-prompt",
+            "测试提示词",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.dump_golden is True
+    assert args.golden_device_map == ["cuda:0", "cuda:1"]
+    assert args.golden_prompt == "测试提示词"
