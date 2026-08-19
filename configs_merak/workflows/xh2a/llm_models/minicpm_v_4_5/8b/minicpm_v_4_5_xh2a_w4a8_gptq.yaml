@@ -1,0 +1,67 @@
+quant:
+  algorithm: gptqmodel
+  bits: 4
+  group_size: 64
+  nsamples: 64
+  sampling_seed: 0
+  seqlen: 2048
+  damp_percent: 0.01
+  # 从 QwenVL 风格的 295 条混合池中固定抽取 64 条。
+  calibration_jsonl: xh2modelzoo://data/calib_data/minicpm_v_4_5_qwen_mixed_295.jsonl
+  # gptqmodel_source: /path/to/gptqmodel   # 可选：源码路径，或设置环境变量 GPTQMODEL_SOURCE
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMV45ForConditionalGeneration
+    hf_model: null
+    # modelcope 名（发布前缀 <modelcope_name>，小写）
+    model_name: minicpm_v_4_5
+    context_max_length: 8192
+    prefill_chunk_length: 256
+    max_pe_length: 40960
+    use_cache: true
+    num_logits_to_keep: 1
+    # LLM 量化方案的唯一来源。
+    quant_scheme:
+      quant_type: w4a8h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    # GPTQ 只量化 LLM 骨干；Vision 和 VisionVideo 共用该方案。
+    visual_config:
+      max_size_w: 448
+      max_size_h: 448
+      max_size_t: 6
+      patch_size: 14
+      patch_capacity: 1600
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops:
+          MatMul:
+            act_scheme:
+              bits: 16
+              fp_mode: sefp
+            act_schema_2:
+              bits: 16
+              fp_mode: sefp
+    only_first_block: false
+
+  components:
+    vision:
+      enabled: true
+      validation_target: [32, 32]
+    vision_video:
+      enabled: true
+      validation_target: [32, 32]
+      validation_frames: 3
+    llm:
+      enabled: true

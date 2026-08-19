@@ -1,0 +1,57 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMV45ForConditionalGeneration
+    hf_model: null
+    # modelcope 名（发布前缀 <modelcope_name>，小写）
+    model_name: minicpm_v_4_5
+    context_max_length: 8192
+    prefill_chunk_length: 256
+    max_pe_length: 40960
+    use_cache: true
+    num_logits_to_keep: 1
+    # LLM 量化方案的唯一来源。
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    # Vision 和 VisionVideo 共用该量化方案。
+    visual_config:
+      max_size_w: 448
+      max_size_h: 448
+      max_size_t: 6
+      patch_size: 14
+      patch_capacity: 1600
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops:
+          MatMul:
+            act_scheme:
+              bits: 16
+              fp_mode: sefp
+            act_schema_2:
+              bits: 16
+              fp_mode: sefp
+    only_first_block: false
+
+  components:
+    vision:
+      enabled: true
+      validation_target: [32, 32]
+    vision_video:
+      enabled: true
+      validation_target: [32, 32]
+      validation_frames: 3
+    llm:
+      enabled: true
