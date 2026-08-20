@@ -210,8 +210,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
                 continue
 
             main_shape = (batch_size, 1, attention.cache_capacity, attention.head_dim)
-            main_k = torch.zeros(main_shape, device=device, dtype=cache_dtype)
-            main_v = torch.zeros(main_shape, device=device, dtype=cache_dtype)
+            main = torch.zeros(main_shape, device=device, dtype=cache_dtype)
             states = attention.initial_state(batch_size, device=device, dtype=state_dtype)
             if layer_type == "compressed_sparse_attention":
                 index_shape = (
@@ -224,8 +223,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     CSACacheInputs(
                         swa_k,
                         swa_v,
-                        main_k,
-                        main_v,
+                        main,
                         torch.zeros(index_shape, device=device, dtype=cache_dtype),
                         *states,
                     )
@@ -235,8 +233,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     HCACacheInputs(
                         swa_k,
                         swa_v,
-                        main_k,
-                        main_v,
+                        main,
                         *states,
                     )
                 )
@@ -370,16 +367,15 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     cache[1],
                     cache[2],
                     cache[3],
-                    cache[4],
                     csa_write_start,
                     csa_compressor_validity,
                     csa_compressor_new_count,
                     csa_compressor_offset,
                     csa_compressor_phase_indices,
+                    cache[4],
                     cache[5],
                     cache[6],
                     cache[7],
-                    cache[8],
                     compress_cos,
                     compress_sin,
                     csa_compressed_cos,
@@ -398,14 +394,13 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     cache[0],
                     cache[1],
                     cache[2],
-                    cache[3],
                     hca_write_start,
                     hca_compressor_validity,
                     hca_compressor_new_count,
                     hca_compressor_offset,
                     hca_compressor_phase_indices,
+                    cache[3],
                     cache[4],
-                    cache[5],
                     compress_cos,
                     compress_sin,
                     hca_compressed_cos,

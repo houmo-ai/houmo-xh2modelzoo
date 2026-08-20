@@ -20,8 +20,7 @@ _GRAPH_CACHE_FIELDS = {
     CSA: (
         "swa_k",
         "swa_v",
-        "main_k",
-        "main_v",
+        "main",
         "index_k",
         "main_kv_state",
         "main_score_state",
@@ -31,8 +30,7 @@ _GRAPH_CACHE_FIELDS = {
     HCA: (
         "swa_k",
         "swa_v",
-        "main_k",
-        "main_v",
+        "main",
         "main_kv_state",
         "main_score_state",
     ),
@@ -47,8 +45,7 @@ class SWACacheInputs(NamedTuple):
 class CSACacheInputs(NamedTuple):
     swa_k: Tensor
     swa_v: Tensor
-    main_k: Tensor
-    main_v: Tensor
+    main: Tensor
     index_k: Tensor
     main_kv_state: Tensor
     main_score_state: Tensor
@@ -59,8 +56,7 @@ class CSACacheInputs(NamedTuple):
 class HCACacheInputs(NamedTuple):
     swa_k: Tensor
     swa_v: Tensor
-    main_k: Tensor
-    main_v: Tensor
+    main: Tensor
     main_kv_state: Tensor
     main_score_state: Tensor
 

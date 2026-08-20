@@ -308,5 +308,8 @@ def test_compressors_and_indexer_export_as_static_graphs() -> None:
     )
 
     assert any(node.target == torch.ops.xh.DynamicSlice.default for node in overlap_graph.graph.nodes)
-    assert sum(node.target == torch.ops.aten.matmul.default for node in indexer_graph.graph.nodes) == 1
+    assert sum(node.target == torch.ops.aten.matmul.default for node in indexer_graph.graph.nodes) == 2
+    # The remaining ReduceSum belongs to the C4 compressor pooling. The
+    # indexer head weighting itself is the second MatMul above.
+    assert sum(node.target == torch.ops.aten.sum.dim_IntList for node in indexer_graph.graph.nodes) == 1
     assert sum(node.target == torch.ops.aten.topk.default for node in indexer_graph.graph.nodes) == 1

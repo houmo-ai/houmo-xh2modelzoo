@@ -135,7 +135,6 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                         swa_k,
                         swa_v,
                         self._cache(main_shape, device=next(device_iter), dtype=dtype),
-                        self._cache(main_shape, device=next(device_iter), dtype=dtype),
                         self._cache(index_shape, device=next(device_iter), dtype=dtype),
                         self._state(shapes["csa_main_kv_state"], score=False, device=next(device_iter), dtype=dtype),
                         self._state(shapes["csa_main_score_state"], score=True, device=next(device_iter), dtype=dtype),
@@ -151,7 +150,6 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                     swa_k,
                     swa_v,
                     self._cache(main_shape, device=next(device_iter), dtype=dtype),
-                    self._cache(main_shape, device=next(device_iter), dtype=dtype),
                     self._state(shapes["hca_main_kv_state"], score=False, device=next(device_iter), dtype=dtype),
                     self._state(shapes["hca_main_score_state"], score=True, device=next(device_iter), dtype=dtype),
                 )
@@ -159,10 +157,37 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
         self._cache_initialized = True
 
     def clear_kv_cache(self) -> None:
+        if self.layer_caches and not any(
+            tensor.device.type == "meta" for cache in self.layer_caches for tensor in cache
+        ):
+            self.reset_kv_cache()
+            return
         self.layer_caches.clear()
         self.past_key_caches.clear()
         self.past_value_caches.clear()
         self._cache_initialized = False
+
+    def reset_kv_cache(self) -> None:
+        """Zero request state in place while preserving CUDA Graph addresses."""
+
+        for layer_type, cache in zip(self.abi.layer_types, self.layer_caches, strict=True):
+            swa_k = cache.k if isinstance(cache, SWACacheInputs) else cache.swa_k
+            swa_v = cache.v if isinstance(cache, SWACacheInputs) else cache.swa_v
+            swa_k.zero_()
+            swa_v.zero_()
+            swa_k.cache_valid_len_tensor.zero_()
+            swa_v.cache_valid_len_tensor.zero_()
+            if layer_type == CSA:
+                cache.main.zero_()
+                cache.index_k.zero_()
+                cache.main_kv_state.zero_()
+                cache.main_score_state.fill_(-65504.0)
+                cache.index_kv_state.zero_()
+                cache.index_score_state.fill_(-65504.0)
+            elif layer_type != SLIDING:
+                cache.main.zero_()
+                cache.main_kv_state.zero_()
+                cache.main_score_state.fill_(-65504.0)
 
     def cache_inputs(self) -> tuple[LayerCacheInputs, ...]:
         if not self._cache_initialized:
@@ -249,8 +274,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                     CSACacheInputs(
                         cache.swa_k,
                         cache.swa_v,
-                        cache.main_k,
-                        cache.main_v,
+                        cache.main,
                         cache.index_k,
                         cache.main_kv_state,
                         cache.main_score_state,
@@ -268,8 +292,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                     HCACacheInputs(
                         cache.swa_k,
                         cache.swa_v,
-                        cache.main_k,
-                        cache.main_v,
+                        cache.main,
                         cache.main_kv_state,
                         cache.main_score_state,
                     )

@@ -28,3 +28,4 @@ def test_export_cli_exposes_formal_golden_controls() -> None:
     assert args.dump_golden is True
     assert args.golden_device_map == ["cuda:1", "2"]
     assert args.golden_prompt == "17乘以3等于多少？只回答结果。"
+    assert args.quant_type == "w8a8h1_sefp"

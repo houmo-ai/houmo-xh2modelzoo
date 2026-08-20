@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 
@@ -105,6 +106,27 @@ def render_prompt(tokenizer, user_content: str, *, raw_prompt: bool) -> str:
     )
 
 
+class TimingStreamer:
+    """Record generated-token timestamps while optionally streaming text."""
+
+    def __init__(self, delegate=None) -> None:
+        self.delegate = delegate
+        self.seen_prompt = False
+        self.token_times: list[float] = []
+
+    def put(self, value) -> None:
+        if self.seen_prompt:
+            self.token_times.append(time.perf_counter())
+        else:
+            self.seen_prompt = True
+        if self.delegate is not None:
+            self.delegate.put(value)
+
+    def end(self) -> None:
+        if self.delegate is not None:
+            self.delegate.end()
+
+
 def run(args: argparse.Namespace) -> None:
     import torch
     from transformers import TextStreamer
@@ -118,11 +140,10 @@ def run(args: argparse.Namespace) -> None:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     devices = parse_devices(args.device)
     auto_offload = len(devices) > 1
-    if auto_offload and args.cuda_graph:
-        raise ValueError("CUDA Graph is not supported with multi-device auto-offload")
 
     configure_hmonnx_validation_runtime(use_v2=True, pack_w4=args.pack_w4)
     xhquant_init(args.log_file, args.debug)
+    load_start = time.perf_counter()
     model = AutoLLMHONNXModel.from_pretrained(
         str(meta_path),
         device_map=devices,
@@ -130,6 +151,7 @@ def run(args: argparse.Namespace) -> None:
         enable_cuda_graph=args.cuda_graph,
         enable_golden=args.golden,
     )
+    load_seconds = time.perf_counter() - load_start
     if not isinstance(model, XHDeepSeekV4HMONNXModel):
         raise TypeError(f"expected XHDeepSeekV4HMONNXModel, got {type(model).__name__}")
     if args.pack_w4:
@@ -162,43 +184,86 @@ def run(args: argparse.Namespace) -> None:
         return
 
     tokenizer = model.get_tokenizer()
-    user_content = build_user_content(args.prompt, args.context_file)
-    text = render_prompt(tokenizer, user_content, raw_prompt=args.raw_prompt)
-    inputs = tokenizer([text], return_tensors="pt")
-    prompt_tokens = int(inputs.input_ids.shape[1])
     context_limit = int(meta["model_config"]["context_max_length"])
-    if prompt_tokens + args.max_new_tokens > context_limit:
-        raise ValueError(
-            "prompt and continuation exceed the exported context: "
-            f"{prompt_tokens} + {args.max_new_tokens} > {context_limit}"
-        )
-
     runtime_device = torch.device(model.device)
-    inputs = inputs.to(runtime_device)
     model.to(runtime_device)
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id
     if pad_token_id is None:
         pad_token_id = model.pad_token_id
-    streamer = TextStreamer(tokenizer, skip_prompt=True) if args.stream else None
+    context_files = args.context_file or [None]
+    results = []
     with LLMInferenceContextManager(model, devices=model._valid_devices):
-        generated = model.generate(
-            **inputs,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-            pad_token_id=int(pad_token_id),
-            streamer=streamer,
+        for index, context_file in enumerate(context_files):
+            if index:
+                model._kvcache_mixin.reset_kv_cache()
+            user_content = build_user_content(args.prompt, context_file)
+            text = render_prompt(tokenizer, user_content, raw_prompt=args.raw_prompt)
+            inputs = tokenizer([text], return_tensors="pt")
+            prompt_tokens = int(inputs.input_ids.shape[1])
+            if prompt_tokens + args.max_new_tokens > context_limit:
+                raise ValueError(
+                    "prompt and continuation exceed the exported context: "
+                    f"{prompt_tokens} + {args.max_new_tokens} > {context_limit}"
+                )
+            inputs = inputs.to(runtime_device)
+            text_streamer = TextStreamer(tokenizer, skip_prompt=True) if args.stream else None
+            streamer = TimingStreamer(text_streamer)
+            generation_start = time.perf_counter()
+            generated = model.generate(
+                **inputs,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=False,
+                pad_token_id=int(pad_token_id),
+                streamer=streamer,
+            )
+            generation_seconds = time.perf_counter() - generation_start
+            continuation = generated[:, prompt_tokens:]
+            generated_tokens = int(continuation.shape[1])
+            first_token_seconds = (
+                streamer.token_times[0] - generation_start if streamer.token_times else generation_seconds
+            )
+            decode_intervals = max(len(streamer.token_times) - 1, 0)
+            decode_seconds = streamer.token_times[-1] - streamer.token_times[0] if decode_intervals else 0.0
+            results.append(
+                {
+                    "context_file": str(Path(context_file).resolve()) if context_file else None,
+                    "prompt_tokens": prompt_tokens,
+                    "generation_seconds": round(generation_seconds, 3),
+                    "first_token_seconds": round(first_token_seconds, 3),
+                    "decode_seconds": round(decode_seconds, 3),
+                    "generated_tokens": generated_tokens,
+                    "decode_tokens_per_second": round(
+                        decode_intervals / decode_seconds if decode_seconds else 0.0,
+                        3,
+                    ),
+                    "text": tokenizer.batch_decode(continuation, skip_special_tokens=True)[0],
+                }
+            )
+    print(
+        json.dumps(
+            {
+                "load_seconds": round(load_seconds, 3),
+                "cuda_graph_requested": bool(args.cuda_graph),
+                "auto_offload": auto_offload,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
         )
-    continuation = generated[:, prompt_tokens:]
-    print(tokenizer.batch_decode(continuation, skip_special_tokens=True)[0])
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="golden_meta_info.json or export directory")
     parser.add_argument("--prompt", default="请简要解释为什么天空看起来是蓝色的。")
-    parser.add_argument("--context-file", help="optional UTF-8 long context placed before the question")
+    parser.add_argument(
+        "--context-file",
+        action="append",
+        help="repeatable UTF-8 long context placed before the question",
+    )
     parser.add_argument("--raw-prompt", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--device", default="0,1,2,3")

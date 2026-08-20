@@ -19,7 +19,7 @@ from .compressor import (
 )
 from .indexer import StaticCSAIndexer
 from .projection import BoundGroupedOutputProjection, DeepSeekV4QKVProjection
-from .static_cache import FixedCapacityCacheWriter, SeparateKVGather
+from .static_cache import FixedCapacityCacheWriter, LatentCacheGather
 from .swa import StaticSWAOutput, StaticSWAUpdate
 
 
@@ -33,8 +33,7 @@ class StaticCSAAttentionOutput(NamedTuple):
     output: Tensor
     swa_k_context: Tensor
     swa_v_context: Tensor
-    main_k_cache: Tensor
-    main_v_cache: Tensor
+    main_cache: Tensor
     index_k_cache: Tensor
     main_next_kv_state: Tensor
     main_next_score_state: Tensor
@@ -47,8 +46,7 @@ class StaticHCAAttentionOutput(NamedTuple):
     output: Tensor
     swa_k_context: Tensor
     swa_v_context: Tensor
-    main_k_cache: Tensor
-    main_v_cache: Tensor
+    main_cache: Tensor
     main_next_kv_state: Tensor
     main_next_score_state: Tensor
 
@@ -232,9 +230,8 @@ class StaticCSAAttention(_StaticAttentionBase):
             rms_norm_eps=kwargs["rms_norm_eps"],
             rope_dim=self.rope_dim,
         )
-        self.main_k_writer = FixedCapacityCacheWriter()
-        self.main_v_writer = FixedCapacityCacheWriter()
-        self.kv_gather = SeparateKVGather(feature_dim=self.head_dim)
+        self.main_writer = FixedCapacityCacheWriter()
+        self.latent_gather = LatentCacheGather(feature_dim=self.head_dim)
         self.attention = CSALatentAttention(
             head_dim=self.head_dim,
             num_heads=self.num_heads,
@@ -309,8 +306,7 @@ class StaticCSAAttention(_StaticAttentionBase):
         csa_attention_mask: Tensor,
         past_swa_k_cache: Tensor,
         past_swa_v_cache: Tensor,
-        past_main_k_cache: Tensor,
-        past_main_v_cache: Tensor,
+        past_main_cache: Tensor,
         past_index_k_cache: Tensor,
         compressed_write_start: Tensor,
         compressor_validity: Tensor,
@@ -347,14 +343,8 @@ class StaticCSAAttention(_StaticAttentionBase):
             compressed_cos,
             compressed_sin,
         )
-        main_k_cache = self.main_k_writer(
-            past_main_k_cache,
-            compressed.compressed,
-            compressed_write_start,
-            compressed.new_count,
-        )
-        main_v_cache = self.main_v_writer(
-            past_main_v_cache,
+        main_cache = self.main_writer(
+            past_main_cache,
             compressed.compressed,
             compressed_write_start,
             compressed.new_count,
@@ -377,15 +367,13 @@ class StaticCSAAttention(_StaticAttentionBase):
             compressed_cos,
             compressed_sin,
         )
-        selected_k, selected_v = self.kv_gather(
-            main_k_cache,
-            main_v_cache,
+        selected_kv = self.latent_gather(
+            main_cache,
             index.topk_indices,
         )
         latent_output = self.attention(
             query,
-            selected_k,
-            selected_v,
+            selected_kv,
             swa.physical_k,
             swa.physical_v,
             csa_attention_mask,
@@ -396,8 +384,7 @@ class StaticCSAAttention(_StaticAttentionBase):
             output,
             swa.physical_k,
             swa.physical_v,
-            main_k_cache,
-            main_v_cache,
+            main_cache,
             index.updated_key_cache,
             compressed.next_kv_state,
             compressed.next_score_state,
@@ -428,8 +415,7 @@ class StaticHCAAttention(_StaticAttentionBase):
             rms_norm_eps=kwargs["rms_norm_eps"],
             rope_dim=self.rope_dim,
         )
-        self.main_k_writer = FixedCapacityCacheWriter()
-        self.main_v_writer = FixedCapacityCacheWriter()
+        self.main_writer = FixedCapacityCacheWriter()
         self.attention = HCALatentAttention(
             head_dim=self.head_dim,
             num_heads=self.num_heads,
@@ -489,8 +475,7 @@ class StaticHCAAttention(_StaticAttentionBase):
         hca_attention_mask: Tensor,
         past_swa_k_cache: Tensor,
         past_swa_v_cache: Tensor,
-        past_main_k_cache: Tensor,
-        past_main_v_cache: Tensor,
+        past_main_cache: Tensor,
         compressed_write_start: Tensor,
         compressor_validity: Tensor,
         compressor_new_count: Tensor,
@@ -524,14 +509,8 @@ class StaticHCAAttention(_StaticAttentionBase):
             compressed_cos,
             compressed_sin,
         )
-        main_k_cache = self.main_k_writer(
-            past_main_k_cache,
-            compressed.compressed,
-            compressed_write_start,
-            compressed.new_count,
-        )
-        main_v_cache = self.main_v_writer(
-            past_main_v_cache,
+        main_cache = self.main_writer(
+            past_main_cache,
             compressed.compressed,
             compressed_write_start,
             compressed.new_count,
@@ -539,8 +518,7 @@ class StaticHCAAttention(_StaticAttentionBase):
 
         latent_output = self.attention(
             query,
-            main_k_cache,
-            main_v_cache,
+            main_cache,
             swa.physical_k,
             swa.physical_v,
             hca_attention_mask,
@@ -551,8 +529,7 @@ class StaticHCAAttention(_StaticAttentionBase):
             output,
             swa.physical_k,
             swa.physical_v,
-            main_k_cache,
-            main_v_cache,
+            main_cache,
             compressed.next_kv_state,
             compressed.next_score_state,
         )

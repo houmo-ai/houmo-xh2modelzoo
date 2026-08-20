@@ -119,6 +119,7 @@ def build_deepseek_v4_hf_compatible_model(
 class XHDeepSeekV4Model(TextLLMModel):
     """Fixed prefill-256/decode-1 DeepSeek-V4 Flash exporter."""
 
+    WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.deepseek_v4.workflow:DeepSeekV4Workflow"
     transformers_min_version = "5.13.0"
     HF_MODEL_CLS = DeepseekV4ForCausalLM
     HF_AUTO_MODEL_CLS = AutoModelForCausalLM
@@ -470,8 +471,7 @@ class XHDeepSeekV4Model(TextLLMModel):
             return (
                 "swa_k",
                 "swa_v",
-                "main_k",
-                "main_v",
+                "main",
                 "index_k",
                 "main_kv_state",
                 "main_score_state",
@@ -481,8 +481,7 @@ class XHDeepSeekV4Model(TextLLMModel):
         return (
             "swa_k",
             "swa_v",
-            "main_k",
-            "main_v",
+            "main",
             "main_kv_state",
             "main_score_state",
         )

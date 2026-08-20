@@ -73,8 +73,7 @@ def test_graph_cache_input_order_matches_each_layer_type() -> None:
     assert names[2] == (
         "layer_2_swa_k_input",
         "layer_2_swa_v_input",
-        "layer_2_main_k_input",
-        "layer_2_main_v_input",
+        "layer_2_main_input",
         "layer_2_index_k_input",
         "layer_2_main_kv_state_input",
         "layer_2_main_score_state_input",

@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional diagnostic prefix; omit to export all 43 blocks.",
     )
-    parser.add_argument("--quant-type", default="w8a16h1_sefp")
+    parser.add_argument("--quant-type", default="w8a8h1_sefp")
     parser.add_argument(
         "--quant-weight",
         default=None,

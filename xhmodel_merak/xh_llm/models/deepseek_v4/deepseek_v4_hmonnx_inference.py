@@ -93,6 +93,25 @@ class XHDeepSeekV4HMONNXModel(TextLLMHMONNXModel):
         )
         self._kvcache_mixin.to(device=self.device, dtype=self.dtype)
         self._data_processor = None
+        expected_inplace_updates = 2 * len(self.cache_abi.csa_layers) + len(self.cache_abi.hca_layers)
+        for graph_model in (self.prefill_model, self.decode_model):
+            session = graph_model.hmonnx_session
+            enable_inplace_updates = getattr(session, "enable_inplace_cache_updates", None)
+            if callable(enable_inplace_updates):
+                enabled = int(enable_inplace_updates())
+                if enabled != expected_inplace_updates:
+                    raise RuntimeError(
+                        "DeepSeek-V4 non-sliding cache writer count mismatch: "
+                        f"expected={expected_inplace_updates}, enabled={enabled}"
+                    )
+            if self.enable_cuda_graph and not enable_auto_offload:
+                enable_borrowed_outputs = getattr(session, "enable_borrowed_cuda_graph_outputs", None)
+                if callable(enable_borrowed_outputs):
+                    state_outputs = [
+                        name for name in session.get_output_names() if str(name).endswith("_state_output")
+                    ]
+                    if state_outputs:
+                        enable_borrowed_outputs(state_outputs)
 
     def _get_data_preprocessor(self) -> DeepSeekV4DataPreprocess:
         return DeepSeekV4DataPreprocess(

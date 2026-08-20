@@ -101,7 +101,6 @@ def test_complete_csa_attention_updates_three_long_caches_and_exports() -> None:
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 16, 8, dtype=torch.float16),
         torch.zeros(1, 1, 16, 8, dtype=torch.float16),
-        torch.zeros(1, 1, 16, 8, dtype=torch.float16),
         torch.tensor([0]),
         masks.csa_compressor_validity,
         masks.csa_compressor_new_count,
@@ -124,10 +123,9 @@ def test_complete_csa_attention_updates_three_long_caches_and_exports() -> None:
     assert output.topk_indices.shape == (1, 8, 4)
     assert masks.csa_index_validity.sum(dim=-1)[0].tolist() == [0, 0, 0, 1, 1, 1, 1, 0]
     torch.testing.assert_close(output.output[:, 7], torch.zeros_like(output.output[:, 7]))
-    assert torch.count_nonzero(output.main_k_cache[:, :1]) > 0
-    assert torch.count_nonzero(output.main_v_cache[:, :1]) > 0
+    assert torch.count_nonzero(output.main_cache[:, :1]) > 0
     assert torch.count_nonzero(output.index_k_cache[:, :1]) > 0
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 5
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 4
     # The enclosing attention owns additional projection/attention MatMuls;
     # the indexer-specific unit test proves its exact three-MatMul inventory.
     assert sum(node.target == torch.ops.aten.matmul.default for node in graph.graph.nodes) >= 3
@@ -152,7 +150,6 @@ def test_complete_hca_attention_updates_dense_compressed_history_and_exports() -
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 8, 8, dtype=torch.float16),
-        torch.zeros(1, 1, 8, 8, dtype=torch.float16),
         torch.tensor([0]),
         masks.hca_compressor_validity,
         masks.hca_compressor_new_count,
@@ -173,7 +170,6 @@ def test_complete_hca_attention_updates_dense_compressed_history_and_exports() -
     compressed_valid = masks.hca_attention_mask[:, :, :, :8] == 0
     assert compressed_valid[0, 0].sum(dim=-1).tolist() == [0, 0, 0, 1, 1, 1, 1, 0]
     torch.testing.assert_close(output.output[:, 7], torch.zeros_like(output.output[:, 7]))
-    assert torch.count_nonzero(output.main_k_cache[:, :1]) > 0
-    assert torch.count_nonzero(output.main_v_cache[:, :1]) > 0
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 4
+    assert torch.count_nonzero(output.main_cache[:, :1]) > 0
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 3
     assert any(node.target == torch.ops.xh.SinksSoftmax.default for node in graph.graph.nodes)

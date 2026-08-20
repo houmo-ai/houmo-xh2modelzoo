@@ -97,12 +97,11 @@ def test_host_swa_mask_uses_last_128_rows_at_long_context() -> None:
     assert not valid[0, 0, 55:].any()
 
 
-def test_csa_attention_matches_explicit_reference_with_separate_kv() -> None:
+def test_csa_attention_matches_explicit_reference_with_shared_latent_kv() -> None:
     generator = torch.Generator().manual_seed(41)
     batch, query_count, heads, dim = 1, 3, 4, 8
     query = torch.randn(batch, query_count, heads, dim, generator=generator)
-    compressed_k = torch.randn(batch, query_count, 3, dim, generator=generator)
-    compressed_v = torch.randn(batch, query_count, 3, dim, generator=generator)
+    compressed_kv = torch.randn(batch, query_count, 3, dim, generator=generator)
     swa_k = torch.randn(batch, 2, dim, generator=generator)
     swa_v = torch.randn(batch, 2, dim, generator=generator)
     compressed_valid = torch.tensor([[[1, 0, 0], [1, 1, 0], [1, 1, 1]]], dtype=torch.bool)
@@ -112,8 +111,7 @@ def test_csa_attention_matches_explicit_reference_with_separate_kv() -> None:
 
     actual = module(
         query,
-        compressed_k,
-        compressed_v,
+        compressed_kv,
         swa_k,
         swa_v,
         _additive(torch.cat((compressed_valid, swa_valid), dim=2)),
@@ -121,21 +119,19 @@ def test_csa_attention_matches_explicit_reference_with_separate_kv() -> None:
     )
     expanded_swa_k = swa_k.unsqueeze(1).expand(-1, query_count, -1, -1)
     expanded_swa_v = swa_v.unsqueeze(1).expand(-1, query_count, -1, -1)
-    key = torch.cat((compressed_k, expanded_swa_k), dim=2)
-    value = torch.cat((compressed_v, expanded_swa_v), dim=2)
+    key = torch.cat((compressed_kv, expanded_swa_k), dim=2)
+    value = torch.cat((compressed_kv, expanded_swa_v), dim=2)
     valid = torch.cat((compressed_valid, swa_valid), dim=2)
     expected = _reference_attention(query, key, value, valid, sinks)
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-    assert not torch.equal(compressed_k, compressed_v)
 
 
 def test_hca_attention_matches_expanded_reference_without_expanding_in_module() -> None:
     generator = torch.Generator().manual_seed(43)
     batch, query_count, heads, dim = 1, 3, 4, 8
     query = torch.randn(batch, query_count, heads, dim, generator=generator)
-    compressed_k = torch.randn(batch, 5, dim, generator=generator)
-    compressed_v = torch.randn(batch, 5, dim, generator=generator)
+    compressed_kv = torch.randn(batch, 5, dim, generator=generator)
     swa_k = torch.randn(batch, 2, dim, generator=generator)
     swa_v = torch.randn(batch, 2, dim, generator=generator)
     compressed_valid = torch.tensor(
@@ -148,19 +144,17 @@ def test_hca_attention_matches_expanded_reference_without_expanding_in_module() 
 
     actual = module(
         query,
-        compressed_k,
-        compressed_v,
+        compressed_kv,
         swa_k,
         swa_v,
         _additive(torch.cat((compressed_valid, swa_valid), dim=2)),
         sinks,
     )
-    expanded_k = compressed_k.unsqueeze(1).expand(-1, query_count, -1, -1)
-    expanded_v = compressed_v.unsqueeze(1).expand(-1, query_count, -1, -1)
+    expanded_kv = compressed_kv.unsqueeze(1).expand(-1, query_count, -1, -1)
     expanded_swa_k = swa_k.unsqueeze(1).expand(-1, query_count, -1, -1)
     expanded_swa_v = swa_v.unsqueeze(1).expand(-1, query_count, -1, -1)
-    key = torch.cat((expanded_k, expanded_swa_k), dim=2)
-    value = torch.cat((expanded_v, expanded_swa_v), dim=2)
+    key = torch.cat((expanded_kv, expanded_swa_k), dim=2)
+    value = torch.cat((expanded_kv, expanded_swa_v), dim=2)
     valid = torch.cat((compressed_valid, swa_valid), dim=2)
     expected = _reference_attention(query, key, value, valid, sinks)
 
@@ -219,8 +213,7 @@ def test_plain_grouped_output_projection_has_finite_neutral_weights() -> None:
 def test_csa_attention_export_consumes_host_mask_without_graph_comparisons() -> None:
     attention = CSALatentAttention(head_dim=8, num_heads=4).eval()
     query = torch.randn(1, 8, 4, 8)
-    compressed_k = torch.randn(1, 8, 3, 8)
-    compressed_v = torch.randn_like(compressed_k)
+    compressed_kv = torch.randn(1, 8, 3, 8)
     compressed_valid = torch.ones(1, 8, 3, dtype=torch.bool)
     swa_k = torch.randn(1, 4, 8)
     swa_v = torch.randn_like(swa_k)
@@ -229,8 +222,7 @@ def test_csa_attention_export_consumes_host_mask_without_graph_comparisons() -> 
         attention,
         (
             query,
-            compressed_k,
-            compressed_v,
+            compressed_kv,
             swa_k,
             swa_v,
             _additive(torch.cat((compressed_valid, swa_valid), dim=2)),

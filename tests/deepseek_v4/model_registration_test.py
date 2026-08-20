@@ -58,7 +58,9 @@ def test_first_six_export_names_flatten_every_cache_and_state() -> None:
     assert "layer_5_main_score_state_output" in export["output_names"]
     assert all("offset_output" not in name for name in export["output_names"])
     assert all("new_count_output" not in name for name in export["output_names"])
-    assert len(export["input_names"]) == 19 + 2 * 2 + 2 * 9 + 2 * 6
+    assert "layer_2_main_input" in export["input_names"]
+    assert all("main_k_input" not in name and "main_v_input" not in name for name in export["input_names"])
+    assert len(export["input_names"]) == 19 + 2 * 2 + 2 * 8 + 2 * 5
     assert len(export["output_names"]) == 1 + 2 * 4 + 2 * 2
 
 
@@ -93,7 +95,7 @@ def test_full43_export_abi_covers_every_released_layer() -> None:
     assert len(model.layer_types) == 43
     assert len(model.cache_abi.csa_layers) == 21
     assert len(model.cache_abi.hca_layers) == 20
-    assert len(export["input_names"]) == 19 + 2 * 2 + 21 * 9 + 20 * 6 == 332
+    assert len(export["input_names"]) == 19 + 2 * 2 + 21 * 8 + 20 * 5 == 291
     assert len(export["output_names"]) == 1 + 21 * 4 + 20 * 2 == 125
     assert "layer_42_index_k_input" in export["input_names"]
     assert "layer_42_index_score_state_output" in export["output_names"]

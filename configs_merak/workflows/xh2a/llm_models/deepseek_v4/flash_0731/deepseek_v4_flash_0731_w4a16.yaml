@@ -1,0 +1,23 @@
+quant: null
+runtime:
+  low_memory: true
+export:
+  model:
+    chip_arch: XH2a
+    model_type: DeepseekV4ForCausalLM
+    hf_model: null
+    model_name: deepseek_v4_flash_0731
+    context_max_length: 262144
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    max_layers: null
+    enable_auto_offload: false
+    packed_weight_only: true
+    quant_weight: null
+    quant_scheme:
+      # The W8E4 source keeps routed experts at W4; this selects A16 export.
+      quant_type: w8a16h1_sefp
+      ops: {}
+    only_first_block: false

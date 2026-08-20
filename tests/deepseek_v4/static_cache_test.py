@@ -9,9 +9,9 @@ from xhmodel_merak.xh_llm.models.deepseek_v4.static_cache import (
     CSAIndexerTopK,
     DeepSeekV4StaticCacheSpec,
     FixedCapacityCacheWriter,
+    LatentCacheGather,
     NonOverlappingCompressorStep,
     OverlappingCompressorStep,
-    SeparateKVGather,
     update_fixed_cache,
 )
 
@@ -73,7 +73,7 @@ def _offline_non_overlap(
     return torch.sum(kv * torch.softmax(score, dim=2), dim=2)
 
 
-def test_static_cache_spec_uses_384_swa_and_separate_kv() -> None:
+def test_static_cache_spec_uses_384_swa_and_unified_main_cache() -> None:
     spec = DeepSeekV4StaticCacheSpec()
     shapes = spec.tensor_shapes()
 
@@ -83,8 +83,11 @@ def test_static_cache_spec_uses_384_swa_and_separate_kv() -> None:
     assert spec.hca_capacity == 2048
     assert shapes["swa_k"] == (1, 1, 384, 512)
     assert shapes["swa_v"] == (1, 1, 384, 512)
-    assert shapes["csa_k"] == shapes["csa_v"] == (1, 1, 65536, 512)
+    assert shapes["csa_main"] == (1, 1, 65536, 512)
     assert shapes["csa_index_k"] == (1, 1, 65536, 128)
+    assert shapes["hca_main"] == (1, 1, 2048, 512)
+    assert "csa_k" not in shapes and "csa_v" not in shapes
+    assert "hca_k" not in shapes and "hca_v" not in shapes
     assert "csa_index_v" not in shapes
 
 
@@ -218,6 +221,15 @@ def test_csa_and_hca_steps_export_as_fixed_graphs() -> None:
             for node in graph.graph.nodes
         )
         assert not any(node.target == torch.ops.aten._to_copy.default for node in graph.graph.nodes)
+        # Fixed batch-1 pad buffers must be consumed directly; anchoring them
+        # through ``current[:, :1, :1] * 0 + pad`` adds two redundant chains
+        # for every compressor state in every layer.
+        assert not any(
+            node.target == torch.ops.aten.mul.Tensor
+            and len(node.args) == 2
+            and node.args[1] == 0.0
+            for node in graph.graph.nodes
+        )
 
 
 def test_csa_state_survives_78_then_256_then_decode_one() -> None:
@@ -398,7 +410,7 @@ def test_fixed_capacity_writer_matches_reference_and_exports_llm_cache() -> None
     assert any(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes)
 
 
-def test_direct_indexer_matches_full_topk_and_gathers_separate_kv() -> None:
+def test_direct_indexer_uses_matmul_for_weighted_head_reduction() -> None:
     generator = torch.Generator().manual_seed(17)
     batch, queries, heads, dim, capacity = 1, 3, 4, 8, 32
     query = torch.randn(batch, queries, heads, dim, generator=generator, dtype=torch.float16)
@@ -421,7 +433,7 @@ def test_direct_indexer_matches_full_topk_and_gathers_separate_kv() -> None:
         query,
         index_k.transpose(1, 2).unsqueeze(1),
     )
-    full_score = (
+    legacy_score = (
         torch.sum(
             torch.relu(full_per_head) * weights.unsqueeze(-1),
             dim=2,
@@ -429,12 +441,20 @@ def test_direct_indexer_matches_full_topk_and_gathers_separate_kv() -> None:
         * (dim**-0.5)
         * (heads**-0.5)
     )
+    full_score = torch.matmul(
+        weights.unsqueeze(-2),
+        torch.relu(full_per_head),
+    ).squeeze(-2) * (dim * heads) ** -0.5
     invalid_floor = torch.finfo(torch.float16).min
-    full_score = full_score * valid + invalid_floor * (1.0 - valid)
+    full_score = torch.where(valid.bool(), full_score, invalid_floor)
+    legacy_score = torch.where(valid.bool(), legacy_score, invalid_floor)
     full_values, full_indices = torch.topk(full_score, 4, dim=-1)
+    legacy_values, legacy_indices = torch.topk(legacy_score, 4, dim=-1)
 
     torch.testing.assert_close(direct_values, full_values)
     assert torch.equal(direct_indices, full_indices)
+    torch.testing.assert_close(direct_values, legacy_values, rtol=2e-3, atol=5e-4)
+    assert torch.equal(direct_indices, legacy_indices)
     mask_control_ops = {
         str(node.target)
         for node in graph.graph.nodes
@@ -443,27 +463,26 @@ def test_direct_indexer_matches_full_topk_and_gathers_separate_kv() -> None:
     assert not mask_control_ops
     assert torch.all(direct_values[0, 0, :3] > invalid_floor)
     assert direct_values[0, 0, 3].item() == invalid_floor
-    assert sum(node.target == torch.ops.aten.matmul.default for node in graph.graph.nodes) == 1
-    assert sum(node.target == torch.ops.aten.sum.dim_IntList for node in graph.graph.nodes) == 1
+    assert sum(node.target == torch.ops.aten.matmul.default for node in graph.graph.nodes) == 2
+    assert sum(node.target == torch.ops.aten.sum.dim_IntList for node in graph.graph.nodes) == 0
     assert sum(node.target == torch.ops.aten.topk.default for node in graph.graph.nodes) == 1
+    assert sum(node.target == torch.ops.aten.rsub.Scalar for node in graph.graph.nodes) == 1
     assert not any(
         node.target == torch.ops.aten._to_copy.default and node.kwargs.get("dtype") == torch.float32
         for node in graph.graph.nodes
     )
 
 
-def test_static_csa_kv_gather_does_not_expand_full_capacity_per_query() -> None:
-    module = SeparateKVGather(feature_dim=5)
-    key = torch.randn(1, 32, 5)
-    value = torch.randn(1, 32, 5)
+def test_static_csa_latent_gather_does_not_expand_full_capacity_per_query() -> None:
+    module = LatentCacheGather(feature_dim=5)
+    latent = torch.randn(1, 32, 5)
     indices = torch.randint(0, 32, (1, 3, 4), dtype=torch.int64)
 
-    selected_k, selected_v = module(key, value, indices)
-    graph = torch.export.export(module, (key, value, indices))
+    selected = module(latent, indices)
+    graph = torch.export.export(module, (latent, indices))
 
-    torch.testing.assert_close(selected_k, key[0][indices])
-    torch.testing.assert_close(selected_v, value[0][indices])
-    assert selected_k.shape == selected_v.shape == (1, 3, 4, 5)
+    torch.testing.assert_close(selected, latent[0][indices])
+    assert selected.shape == (1, 3, 4, 5)
     targets = [node.target for node in graph.graph.nodes]
-    assert targets.count(torch.ops.xh.Gather.default) == 2
+    assert targets.count(torch.ops.xh.Gather.default) == 1
     assert torch.ops.aten.expand.default not in targets

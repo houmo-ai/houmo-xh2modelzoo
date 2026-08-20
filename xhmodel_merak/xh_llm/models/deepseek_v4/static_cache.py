@@ -6,10 +6,9 @@ the second branch of the current group.  This module expresses the same state
 transition with fixed-shape tensors and ``DynamicSlice`` starts, so prefill and
 decode can be exported as static graphs.
 
-DeepSeek-V4 uses one latent vector as both K and V mathematically.  XH2 cache
-quantization does not: K-SEFP and V-SEFP reduce scales along different axes.
-Consequently the cache specification and update helpers deliberately expose
-separate physical K and V tensors.  The C4 Indexer remains key-only.
+DeepSeek-V4 uses one latent vector as both K and V. The main CSA/HCA cache stays
+FP16 because query-dependent TopK prevents pre-packing it as a V-SEFP cache, so
+one physical latent cache is shared by QK and PV. The C4 Indexer remains key-only.
 """
 
 from __future__ import annotations
@@ -90,7 +89,7 @@ class DeepSeekV4StaticCacheSpec:
         return self.max_context_length // self.hca_ratio
 
     def tensor_shapes(self, batch_size: int = 1) -> dict[str, tuple[int, ...]]:
-        """Return physical tensor shapes; K and V are never aliased."""
+        """Return physical tensor shapes for the unified latent-cache ABI."""
 
         batch_size = int(batch_size)
         if batch_size <= 0:
@@ -100,11 +99,9 @@ class DeepSeekV4StaticCacheSpec:
         return {
             "swa_k": (batch_size, 1, self.swa_physical_length, d),
             "swa_v": (batch_size, 1, self.swa_physical_length, d),
-            "csa_k": (batch_size, 1, self.csa_capacity, d),
-            "csa_v": (batch_size, 1, self.csa_capacity, d),
+            "csa_main": (batch_size, 1, self.csa_capacity, d),
             "csa_index_k": (batch_size, 1, self.csa_capacity, index_d),
-            "hca_k": (batch_size, 1, self.hca_capacity, d),
-            "hca_v": (batch_size, 1, self.hca_capacity, d),
+            "hca_main": (batch_size, 1, self.hca_capacity, d),
             "csa_main_kv_state": (
                 batch_size,
                 2 * self.csa_ratio,
@@ -288,17 +285,10 @@ class _CompressorStepBase(nn.Module):
         next_kv_state = self.tail_slice(raw_kv, current_length)
         next_score_state = self.tail_slice(raw_score, current_length)
 
-        # Decode=1 may not provide enough right-hand rows for a fixed candidate
-        # slice when no group completes.  Padding is never committed to state or
-        # cache; it only keeps the exported candidate tensor shape fixed.
-        # Anchor the static buffers to one scalar-shaped slice of the runtime
-        # input.  Broadcasting then supplies the (possibly symbolic) batch
-        # dimension without ``Tensor.expand(Proxy, ...)`` and without lowering
-        # dynamic ``new_zeros/new_full`` calls to ConstantOfShape.
-        kv_pad = self.kv_right_pad + current_kv[:, :1, :1] * 0.0
-        score_pad = self.score_right_pad + current_score[:, :1, :1] * 0.0
-        candidate_kv_source = torch.cat((raw_kv, kv_pad), dim=1)
-        candidate_score_source = torch.cat((raw_score, score_pad), dim=1)
+        # The DeepSeek-V4 export contract fixes batch size to one, so these
+        # registered buffers already have the exact runtime batch shape.
+        candidate_kv_source = torch.cat((raw_kv, self.kv_right_pad), dim=1)
+        candidate_score_source = torch.cat((raw_score, self.score_right_pad), dim=1)
 
         return (
             candidate_kv_source,
@@ -628,13 +618,11 @@ class CSAIndexerTopK(nn.Module):
             query,
             key_cache.transpose(1, 2).unsqueeze(1),
         )
-        score = (
-            torch.sum(
-                torch.relu(score_per_head) * index_weights.unsqueeze(-1),
-                dim=2,
-            )
-            * index_scale
-        )
+        score = torch.matmul(
+            index_weights.unsqueeze(-2),
+            torch.relu(score_per_head),
+        ).squeeze(-2)
+        score = score * index_scale
         # Host validity is normalized to floating 0/1. Pure arithmetic keeps
         # the graph free of Where/comparison control flow; -65504 is the finite
         # FP16 deployment sentinel and cannot introduce Inf/NaN constants.
@@ -644,42 +632,33 @@ class CSAIndexerTopK(nn.Module):
         return torch.topk(score, self.topk, dim=-1)
 
 
-class SeparateKVGather(nn.Module):
-    """Gather selected rows from physically distinct K and V caches."""
+class LatentCacheGather(nn.Module):
+    """Gather selected rows from the shared FP16 latent cache."""
 
     def __init__(self, *, feature_dim: int) -> None:
         super().__init__()
         self.feature_dim = int(feature_dim)
-        # The released static ABI has batch=1.  Gathering directly from the
+        # The static ABI has batch=1. Gathering directly from the
         # flattened [capacity, feature] cache avoids materializing the old
-        # [1, query, capacity, feature] expansion (16 GiB per K/V cache at
+        # [1, query, capacity, feature] expansion (16 GiB at
         # prefill=256, capacity=65536, feature=512).
-        self.gather_k = xhnn.Gather(axis=0)
-        self.gather_v = xhnn.Gather(axis=0)
+        self.gather = xhnn.Gather(axis=0)
 
     def forward(
         self,
-        key_cache: Tensor,
-        value_cache: Tensor,
+        latent_cache: Tensor,
         indices: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        if not is_fx_proxy(key_cache):
-            if key_cache.shape != value_cache.shape:
-                raise ValueError("logical K/V cache shapes must match")
-            if key_cache.ndim != 3 or indices.ndim != 3:
+    ) -> Tensor:
+        if not is_fx_proxy(latent_cache):
+            if latent_cache.ndim != 3 or indices.ndim != 3:
                 raise ValueError("cache must be [B,C,D] and indices [B,P,K]")
-            if key_cache.shape[0] != indices.shape[0]:
+            if latent_cache.shape[0] != indices.shape[0]:
                 raise ValueError("cache and indices batch dimensions must match")
-            if key_cache.shape[0] != 1:
-                raise ValueError("DeepSeek-V4 static SeparateKVGather requires batch=1")
-            if key_cache.shape[-1] != self.feature_dim:
-                raise ValueError(f"cache feature dimension {key_cache.shape[-1]} != {self.feature_dim}")
-        flat_k = key_cache.reshape(-1, self.feature_dim)
-        flat_v = value_cache.reshape(-1, self.feature_dim)
-        return (
-            self.gather_k(flat_k, indices),
-            self.gather_v(flat_v, indices),
-        )
+            if latent_cache.shape[0] != 1:
+                raise ValueError("DeepSeek-V4 static LatentCacheGather requires batch=1")
+            if latent_cache.shape[-1] != self.feature_dim:
+                raise ValueError(f"cache feature dimension {latent_cache.shape[-1]} != {self.feature_dim}")
+        return self.gather(latent_cache.reshape(-1, self.feature_dim), indices)
 
 
 __all__ = [
@@ -689,6 +668,6 @@ __all__ = [
     "FixedCapacityCacheWriter",
     "NonOverlappingCompressorStep",
     "OverlappingCompressorStep",
-    "SeparateKVGather",
+    "LatentCacheGather",
     "update_fixed_cache",
 ]

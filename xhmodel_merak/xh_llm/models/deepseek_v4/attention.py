@@ -213,8 +213,7 @@ class CSALatentAttention(_LatentAttentionBase):
     def forward(
         self,
         query: Tensor,
-        compressed_k: Tensor,
-        compressed_v: Tensor,
+        compressed_kv: Tensor,
         swa_k: Tensor,
         swa_v: Tensor,
         attention_mask: Tensor,
@@ -222,18 +221,18 @@ class CSALatentAttention(_LatentAttentionBase):
     ) -> Tensor:
         self._validate_query(query, sinks)
         if not is_fx_proxy(query):
-            if compressed_k.ndim != 4 or tuple(compressed_v.shape) != tuple(compressed_k.shape):
-                raise ValueError("compressed K/V must be [B,P,K,D]")
+            if compressed_kv.ndim != 4:
+                raise ValueError("compressed latent cache must be [B,P,K,D]")
             if swa_k.ndim != 3 or tuple(swa_v.shape) != tuple(swa_k.shape):
                 raise ValueError("SWA K/V must be [B,T,D]")
-            if compressed_k.shape[:2] != query.shape[:2] or swa_k.shape[0] != query.shape[0]:
+            if compressed_kv.shape[:2] != query.shape[:2] or swa_k.shape[0] != query.shape[0]:
                 raise ValueError("K/V batch and query dimensions must match query")
-            if compressed_k.shape[-1] != self.head_dim or swa_k.shape[-1] != self.head_dim:
+            if compressed_kv.shape[-1] != self.head_dim or swa_k.shape[-1] != self.head_dim:
                 raise ValueError("K/V latent width must match head_dim")
 
         compressed_scores = torch.matmul(
             query,
-            compressed_k.transpose(-1, -2),
+            compressed_kv.transpose(-1, -2),
         ).transpose(1, 2)
         swa_scores = torch.matmul(
             query.transpose(1, 2),
@@ -241,10 +240,10 @@ class CSALatentAttention(_LatentAttentionBase):
         )
         scores = torch.cat((compressed_scores, swa_scores), dim=-1)
         probs = self._probabilities(scores, attention_mask, sinks)
-        compressed_count = compressed_k.shape[2]
+        compressed_count = compressed_kv.shape[2]
         compressed_output = torch.matmul(
             probs[..., :compressed_count].transpose(1, 2),
-            compressed_v,
+            compressed_kv,
         )
         swa_output = torch.matmul(
             probs[..., compressed_count:],
@@ -259,8 +258,7 @@ class HCALatentAttention(_LatentAttentionBase):
     def forward(
         self,
         query: Tensor,
-        compressed_k: Tensor,
-        compressed_v: Tensor,
+        compressed_kv: Tensor,
         swa_k: Tensor,
         swa_v: Tensor,
         attention_mask: Tensor,
@@ -268,16 +266,16 @@ class HCALatentAttention(_LatentAttentionBase):
     ) -> Tensor:
         self._validate_query(query, sinks)
         if not is_fx_proxy(query):
-            if compressed_k.ndim != 3 or tuple(compressed_v.shape) != tuple(compressed_k.shape):
-                raise ValueError("HCA K/V must be [B,C,D]")
-            if compressed_k.shape[0] != query.shape[0] or compressed_k.shape[-1] != self.head_dim:
+            if compressed_kv.ndim != 3:
+                raise ValueError("HCA latent cache must be [B,C,D]")
+            if compressed_kv.shape[0] != query.shape[0] or compressed_kv.shape[-1] != self.head_dim:
                 raise ValueError("HCA K/V dimensions do not match query")
             if swa_k.ndim != 3 or tuple(swa_v.shape) != tuple(swa_k.shape):
                 raise ValueError("SWA K/V must be [B,T,D]")
 
         long_scores = torch.matmul(
             query.transpose(1, 2),
-            compressed_k.transpose(-1, -2).unsqueeze(1),
+            compressed_kv.transpose(-1, -2).unsqueeze(1),
         )
         swa_scores = torch.matmul(
             query.transpose(1, 2),
@@ -285,12 +283,12 @@ class HCALatentAttention(_LatentAttentionBase):
         )
         scores = torch.cat((long_scores, swa_scores), dim=-1)
         probs = self._probabilities(scores, attention_mask, sinks)
-        long_count = compressed_k.shape[1]
+        long_count = compressed_kv.shape[1]
         long_probs = probs[..., :long_count]
         swa_probs = probs[..., long_count:]
         long_output = torch.matmul(
             long_probs,
-            compressed_v.unsqueeze(1),
+            compressed_kv.unsqueeze(1),
         ).transpose(1, 2)
         swa_output = torch.matmul(
             swa_probs,
