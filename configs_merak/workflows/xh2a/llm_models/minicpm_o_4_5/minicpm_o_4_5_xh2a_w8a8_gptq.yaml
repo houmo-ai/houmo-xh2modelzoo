@@ -1,0 +1,235 @@
+quant:
+  algorithm: gptqmodel
+  bits: 8
+  group_size: 64
+  nsamples: 80
+  seqlen: 1024
+  calibration_jsonl: xh2modelzoo://data/calib_data/minicpm_o_4_5_qwen_vl_style_mix80.jsonl
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMO45Model
+    hf_model: null
+    model_name: minicpm_o_4_5
+    context_max_length: 32768
+    prefill_chunk_length: 512
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a8_sefp
+  components:
+    vision:
+      model_type: MiniCPMO45VisionModel
+      quant_type: w8a16_sefp
+      image_slice_max_size:
+      - 40
+      - 40
+      input_names:
+      - pixel_values
+      - position_ids
+      - attention_mask
+      - tgt_sizes
+      output_names:
+      - features
+    audio:
+      model_type: MiniCPMO45AudioModel
+      quant_type: w8a16_sefp
+      static_batch_size: 4
+      max_audio_frames: 3000
+      input_names:
+      - input_features
+      - audio_attention_mask
+      output_names:
+      - audio_embeddings
+      streaming:
+        enabled: true
+        first_chunk_ms: 1035
+        chunk_ms: 1000
+        cnn_redundancy_ms: 20
+        sample_rate: 16000
+        prefix_overlap_first: 0
+        prefix_overlap_later: 2
+        suffix_overlap: 2
+        session_frames: 100
+        cache_capacity: 1500
+    llm:
+      model_type: MiniCPMO45LLMModel
+      quant_type: w8a8_sefp
+      wrap_cfg:
+        max_sequence_length: 32768
+        input_sequence_length: 512
+        use_cache: true
+        num_logits_to_keep: 1
+        image_slice_max_size:
+        - 40
+        - 40
+        kv_cache:
+          cache_axis: 2
+      input_names:
+      - inputs_embeds
+      - past_seq_length
+      - current_input_length
+      output_names:
+      - logits
+      - hidden_states
+    tts:
+      model_type: MiniCPMO45TTSModel
+      quant_type: w8a8_sefp
+      wrap_cfg:
+        batch_size: 1
+        max_sequence_length: 2048
+        input_sequence_length: 12
+        use_cache: true
+        num_logits_to_keep: 1
+        image_slice_max_size:
+        - 40
+        - 40
+        kv_cache:
+          cache_axis: 2
+      input_names:
+      - inputs_embeds
+      - past_seq_length
+      - current_input_length
+      - attention_mask
+      output_names:
+      - logits
+    token2wav_flow_frontend:
+      quant_type: w8a16_sefp
+      token_capacity: 1024
+      mel_capacity: 2048
+      streaming:
+        prompt_token_capacity: 424
+        prompt_mel_capacity: 842
+        chunk_token_capacity: 28
+        pre_lookahead_len: 3
+        base_conformer_layers: 6
+        cache_alignment: right
+        base_cache_valid_length: 842
+        base_cache_shapes:
+          conformer_cnn_cache:
+          - 1
+          - 512
+          - 6
+          conformer_att_cache:
+          - 10
+          - 1
+          - 8
+          - 842
+          - 128
+          estimator_cnn_cache:
+          - 16
+          - 16
+          - 2
+          - 1024
+          - 2
+          estimator_att_cache:
+          - 16
+          - 16
+          - 2
+          - 8
+          - 842
+          - 128
+        cache_shapes:
+          conformer_cnn_cache:
+          - 1
+          - 512
+          - 6
+          conformer_att_cache:
+          - 10
+          - 1
+          - 8
+          - 942
+          - 128
+          estimator_cnn_cache:
+          - 16
+          - 16
+          - 2
+          - 1024
+          - 2
+          estimator_att_cache:
+          - 16
+          - 16
+          - 2
+          - 8
+          - 942
+          - 128
+        roles:
+          stream_flow_frontend:
+            output_mel_capacity: 50
+          stream_flow_frontend_final:
+            output_mel_capacity: 56
+        frontend_input_names:
+        - tokens
+        - token_valid_length
+        - embedding
+        - past_conformer_cnn_cache
+        - past_conformer_att_cache
+        - conformer_cache_valid_length
+        frontend_output_names:
+        - mu
+        - spks
+        - present_conformer_cnn_cache
+        - present_conformer_att_cache
+        - present_conformer_cache_valid_length
+    token2wav_flow_decoder:
+      quant_type: w8a16_sefp
+      mel_capacity: 2048
+      n_timesteps: 10
+      noise_seed: 20260821
+      streaming:
+        append_capacity: 56
+        base_cache_valid_length: 842
+        prompt_cache_policy:
+          recent_mel_frames: 100
+        host_timestep_cache_banks: 10
+        estimator_step_input_names:
+        - x_cfg
+        - mu_cfg
+        - t_cfg
+        - spks_cfg
+        - cond_cfg
+        - past_estimator_cnn_cache
+        - past_estimator_att_cache
+        - past_cache_valid_length
+        - current_frame_valid_length
+        estimator_step_output_names:
+        - derivative_cfg
+        - present_estimator_cnn_cache
+        - present_estimator_att_cache
+        estimator_step_cache_shapes:
+          frame_capacity: 56
+          input_cnn:
+          - 16
+          - 2
+          - 1024
+          - 2
+          input_att:
+          - 16
+          - 2
+          - 8
+          - 942
+          - 128
+          host_cnn_banks:
+          - 10
+          - 16
+          - 2
+          - 1024
+          - 2
+          output_att:
+          - 16
+          - 2
+          - 8
+          - 998
+          - 128
+    token2wav_hift:
+      quant_type: w8a16_sefp
+      frame_capacity: 1024
+      streaming:
+        frame_capacity: 56
+        mel_cache_length: 8
+        source_cache_length: 3840
+        speech_cache_length: 3840
+    speaker:
+      quant_type: w8a16_sefp
+      sequence_length: 1000
+      feats_length: 3000

@@ -1,0 +1,36 @@
+{
+  "format": "minicpm_o_4_5_text_calibration_v2",
+  "sampling_mode": "per_source_random",
+  "seed": 1024,
+  "total_samples": 80,
+  "source_counts": {
+    "CMMMU": 18,
+    "COCO": 18,
+    "DocVQA": 18,
+    "MMMU": 18,
+    "Wikitext": 8
+  },
+  "input_sources": [
+    {
+      "label": "CMMMU",
+      "records": 900
+    },
+    {
+      "label": "COCO",
+      "records": 5000
+    },
+    {
+      "label": "DocVQA",
+      "records": 5349
+    },
+    {
+      "label": "MMMU",
+      "records": 1050
+    },
+    {
+      "label": "Wikitext",
+      "records": 128
+    }
+  ],
+  "jsonl_sha256": "25e9295f604fe3fd5b1c48fc5e0d6d3672cf9f5087520d0ec61bd06a26b8db66"
+}
