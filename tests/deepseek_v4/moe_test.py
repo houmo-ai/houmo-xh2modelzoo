@@ -30,7 +30,7 @@ def test_score_router_matches_sqrt_softplus_topk_with_correction() -> None:
         scores + router.correction_bias,
         2,
         dim=-1,
-        sorted=False,
+        sorted=True,
     ).indices
 
     assert torch.equal(actual.indices, expected_indices)

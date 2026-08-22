@@ -44,8 +44,8 @@ def test_runtime_allocates_one_heterogeneous_request_state() -> None:
     caches = runtime.cache_inputs()
 
     assert len(caches) == 6
-    assert isinstance(caches[0].k, HybridCacheTensor)
-    assert caches[0].k.shape == (1, 1, 16, 8)
+    assert isinstance(caches[0].swa_kv, HybridCacheTensor)
+    assert caches[0].swa_kv.shape == (1, 1, 16, 8)
     assert isinstance(caches[2].main, CacheTensor)
     assert caches[2].main.shape == (1, 1, 4, 8)
     assert caches[2].index_k.shape == (1, 1, 4, 8)
@@ -61,7 +61,7 @@ def test_meta_export_keeps_only_persistent_caches_on_meta() -> None:
         runtime.prepare_kv_cache()
     caches = runtime.cache_inputs()
 
-    assert caches[0].k.device.type == "meta"
+    assert caches[0].swa_kv.device.type == "meta"
     assert caches[2].main.device.type == "meta"
     assert caches[2].index_k.device.type == "meta"
     assert caches[2].main_kv_state.device.type == "cpu"
@@ -80,15 +80,15 @@ def test_runtime_preserves_explicit_per_input_cache_ownership() -> None:
     summary = runtime.residency_summary()
 
     assert summary == {
-        "tensor_count": 30,
-        "devices": {"cpu": 30},
+        "tensor_count": 24,
+        "devices": {"cpu": 24},
         "mismatches": [],
     }
 
 
 def test_runtime_rejects_incomplete_cache_device_map() -> None:
     abi = _abi()
-    bad_devices = [("cpu",)] * len(abi.layer_types)
+    bad_devices = [()] * len(abi.layer_types)
 
     with pytest.raises(ValueError, match="layer 0 cache input devices"):
         DeepSeekV4CacheMixin(abi, input_devices=bad_devices)
@@ -98,9 +98,8 @@ def test_runtime_clear_resets_request_without_reallocating_cache() -> None:
     runtime = DeepSeekV4CacheMixin(_abi())
     caches = runtime.cache_inputs()
     pointers = tuple(tensor.data_ptr() for cache in caches for tensor in cache)
-    caches[0].k.fill_(1)
-    caches[0].v.fill_(2)
-    caches[0].k.cache_valid_len = 9
+    caches[0].swa_kv.fill_(1)
+    caches[0].swa_kv.cache_valid_len = 9
     caches[2].main.fill_(7)
     caches[2].index_k.fill_(6)
     caches[2].main_kv_state.fill_(3)
@@ -115,9 +114,8 @@ def test_runtime_clear_resets_request_without_reallocating_cache() -> None:
 
     reset_caches = runtime.cache_inputs()
     assert tuple(tensor.data_ptr() for cache in reset_caches for tensor in cache) == pointers
-    assert reset_caches[0].k.cache_valid_len == 0
-    assert torch.count_nonzero(reset_caches[0].k) == 0
-    assert torch.count_nonzero(reset_caches[0].v) == 0
+    assert reset_caches[0].swa_kv.cache_valid_len == 0
+    assert torch.count_nonzero(reset_caches[0].swa_kv) == 0
     assert torch.count_nonzero(reset_caches[2].main) == 0
     assert torch.count_nonzero(reset_caches[2].index_k) == 0
     assert torch.count_nonzero(reset_caches[2].main_kv_state) == 0
@@ -207,7 +205,7 @@ def test_processor_pads_hash_ids_and_builds_write_starts() -> None:
     assert processed[16].item() == 2
     assert processed[17].item() == 1
     assert processed[18].tolist() == [3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2]
-    assert len(processed[19]) == 30
+    assert len(processed[19]) == 24
 
 
 def test_explicit_compressor_outputs_are_fed_back_per_layer() -> None:

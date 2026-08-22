@@ -97,8 +97,7 @@ class DeepSeekV4StaticCacheSpec:
         d = self.latent_head_dim
         index_d = self.index_head_dim
         return {
-            "swa_k": (batch_size, 1, self.swa_physical_length, d),
-            "swa_v": (batch_size, 1, self.swa_physical_length, d),
+            "swa_kv": (batch_size, 1, self.swa_physical_length, d),
             "csa_main": (batch_size, 1, self.csa_capacity, d),
             "csa_index_k": (batch_size, 1, self.csa_capacity, index_d),
             "hca_main": (batch_size, 1, self.hca_capacity, d),
@@ -629,7 +628,7 @@ class CSAIndexerTopK(nn.Module):
         block_validity = validity
         invalid_floor = torch.finfo(torch.float16).min
         score = score * block_validity + invalid_floor * (1.0 - block_validity)
-        return torch.topk(score, self.topk, dim=-1)
+        return torch.topk(score, self.topk, dim=-1, sorted=True)
 
 
 class LatentCacheGather(nn.Module):

@@ -215,7 +215,7 @@ class DeepSeekV4Router(nn.Module):
                 scores + self.correction_bias,
                 self.top_k,
                 dim=-1,
-                sorted=False,
+                sorted=True,
             )[1]
         return RoutedTokens(scores, indices)
 

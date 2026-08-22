@@ -56,7 +56,6 @@ def _swa_inputs(module: StaticSWAAttention) -> tuple[torch.Tensor, ...]:
         torch.tensor([7]),
         masks.swa_attention_mask,
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
-        torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         angles.cos(),
         angles.sin(),
     )
@@ -70,11 +69,11 @@ def test_complete_swa_attention_keeps_shared_context_and_exports() -> None:
     graph = torch.export.export(module, inputs)
 
     assert output.output.shape == (1, 8, 6)
-    assert output.swa_k_context.shape == (1, 16, 8)
+    assert output.swa_kv_context.shape == (1, 16, 8)
     valid = _masks().swa_attention_mask == 0
     assert valid[0, 0].sum(dim=-1).tolist() == [1, 2, 3, 4, 4, 4, 4, 0]
     torch.testing.assert_close(output.output[:, 7], torch.zeros_like(output.output[:, 7]))
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 2
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 1
     assert any(node.target == torch.ops.xh.SinksSoftmax.default for node in graph.graph.nodes)
 
 
@@ -97,7 +96,6 @@ def test_complete_csa_attention_updates_three_long_caches_and_exports() -> None:
         torch.tensor([7]),
         masks.csa_index_validity,
         masks.csa_attention_mask,
-        torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 16, 8, dtype=torch.float16),
         torch.zeros(1, 1, 16, 8, dtype=torch.float16),
@@ -125,7 +123,7 @@ def test_complete_csa_attention_updates_three_long_caches_and_exports() -> None:
     torch.testing.assert_close(output.output[:, 7], torch.zeros_like(output.output[:, 7]))
     assert torch.count_nonzero(output.main_cache[:, :1]) > 0
     assert torch.count_nonzero(output.index_k_cache[:, :1]) > 0
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 4
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 3
     # The enclosing attention owns additional projection/attention MatMuls;
     # the indexer-specific unit test proves its exact three-MatMul inventory.
     assert sum(node.target == torch.ops.aten.matmul.default for node in graph.graph.nodes) >= 3
@@ -147,7 +145,6 @@ def test_complete_hca_attention_updates_dense_compressed_history_and_exports() -
         torch.tensor([0]),
         torch.tensor([7]),
         masks.hca_attention_mask,
-        torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, module.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 8, 8, dtype=torch.float16),
         torch.tensor([0]),
@@ -171,5 +168,5 @@ def test_complete_hca_attention_updates_dense_compressed_history_and_exports() -
     assert compressed_valid[0, 0].sum(dim=-1).tolist() == [0, 0, 0, 1, 1, 1, 1, 0]
     torch.testing.assert_close(output.output[:, 7], torch.zeros_like(output.output[:, 7]))
     assert torch.count_nonzero(output.main_cache[:, :1]) > 0
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 3
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 2
     assert any(node.target == torch.ops.xh.SinksSoftmax.default for node in graph.graph.nodes)

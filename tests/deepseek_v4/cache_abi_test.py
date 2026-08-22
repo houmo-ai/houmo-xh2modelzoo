@@ -69,10 +69,9 @@ def test_graph_cache_input_order_matches_each_layer_type() -> None:
     names = abi.graph_cache_input_names_by_layer()
 
     assert len(names) == 43
-    assert names[0] == ("layer_0_swa_k_input", "layer_0_swa_v_input")
+    assert names[0] == ("layer_0_swa_kv_input",)
     assert names[2] == (
-        "layer_2_swa_k_input",
-        "layer_2_swa_v_input",
+        "layer_2_swa_kv_input",
         "layer_2_main_input",
         "layer_2_index_k_input",
         "layer_2_main_kv_state_input",

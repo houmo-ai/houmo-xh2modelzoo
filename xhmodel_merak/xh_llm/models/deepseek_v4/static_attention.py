@@ -25,14 +25,12 @@ from .swa import StaticSWAOutput, StaticSWAUpdate
 
 class StaticSWAAttentionOutput(NamedTuple):
     output: Tensor
-    swa_k_context: Tensor
-    swa_v_context: Tensor
+    swa_kv_context: Tensor
 
 
 class StaticCSAAttentionOutput(NamedTuple):
     output: Tensor
-    swa_k_context: Tensor
-    swa_v_context: Tensor
+    swa_kv_context: Tensor
     main_cache: Tensor
     index_k_cache: Tensor
     main_next_kv_state: Tensor
@@ -44,8 +42,7 @@ class StaticCSAAttentionOutput(NamedTuple):
 
 class StaticHCAAttentionOutput(NamedTuple):
     output: Tensor
-    swa_k_context: Tensor
-    swa_v_context: Tensor
+    swa_kv_context: Tensor
     main_cache: Tensor
     main_next_kv_state: Tensor
     main_next_score_state: Tensor
@@ -110,16 +107,14 @@ class _StaticAttentionBase(nn.Module):
         query_sin: Tensor,
         past_length: Tensor,
         current_length: Tensor,
-        past_swa_k_cache: Tensor,
-        past_swa_v_cache: Tensor,
+        past_swa_kv_cache: Tensor,
     ) -> tuple[Tensor, Tensor, StaticSWAOutput]:
         projected = self.projection(hidden_states, query_cos, query_sin)
         swa = self.swa_update(
             projected.latent_kv,
             past_length,
             current_length,
-            past_swa_k_cache,
-            past_swa_v_cache,
+            past_swa_kv_cache,
         )
         return projected.q_residual, projected.query, swa
 
@@ -165,8 +160,7 @@ class StaticSWAAttention(_StaticAttentionBase):
         past_length: Tensor,
         current_length: Tensor,
         swa_attention_mask: Tensor,
-        past_swa_k_cache: Tensor,
-        past_swa_v_cache: Tensor,
+        past_swa_kv_cache: Tensor,
         query_cos: Tensor,
         query_sin: Tensor,
     ) -> StaticSWAAttentionOutput:
@@ -176,21 +170,19 @@ class StaticSWAAttention(_StaticAttentionBase):
             query_sin,
             past_length,
             current_length,
-            past_swa_k_cache,
-            past_swa_v_cache,
+            past_swa_kv_cache,
         )
         latent_output = self.attention(
             query,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
+            swa.physical_kv,
             swa_attention_mask,
             self.sinks,
         )
         output = self.output_projection(latent_output, query_cos, query_sin)
         return StaticSWAAttentionOutput(
             output,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
         )
 
 
@@ -304,8 +296,7 @@ class StaticCSAAttention(_StaticAttentionBase):
         current_length: Tensor,
         csa_index_validity: Tensor,
         csa_attention_mask: Tensor,
-        past_swa_k_cache: Tensor,
-        past_swa_v_cache: Tensor,
+        past_swa_kv_cache: Tensor,
         past_main_cache: Tensor,
         past_index_k_cache: Tensor,
         compressed_write_start: Tensor,
@@ -328,8 +319,7 @@ class StaticCSAAttention(_StaticAttentionBase):
             query_sin,
             past_length,
             current_length,
-            past_swa_k_cache,
-            past_swa_v_cache,
+            past_swa_kv_cache,
         )
         compressed = self.main_compressor(
             hidden_states,
@@ -374,16 +364,15 @@ class StaticCSAAttention(_StaticAttentionBase):
         latent_output = self.attention(
             query,
             selected_kv,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
+            swa.physical_kv,
             csa_attention_mask,
             self.sinks,
         )
         output = self.output_projection(latent_output, query_cos, query_sin)
         return StaticCSAAttentionOutput(
             output,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
             main_cache,
             index.updated_key_cache,
             compressed.next_kv_state,
@@ -473,8 +462,7 @@ class StaticHCAAttention(_StaticAttentionBase):
         past_length: Tensor,
         current_length: Tensor,
         hca_attention_mask: Tensor,
-        past_swa_k_cache: Tensor,
-        past_swa_v_cache: Tensor,
+        past_swa_kv_cache: Tensor,
         past_main_cache: Tensor,
         compressed_write_start: Tensor,
         compressor_validity: Tensor,
@@ -494,8 +482,7 @@ class StaticHCAAttention(_StaticAttentionBase):
             query_sin,
             past_length,
             current_length,
-            past_swa_k_cache,
-            past_swa_v_cache,
+            past_swa_kv_cache,
         )
         compressed = self.main_compressor(
             hidden_states,
@@ -519,16 +506,15 @@ class StaticHCAAttention(_StaticAttentionBase):
         latent_output = self.attention(
             query,
             main_cache,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
+            swa.physical_kv,
             hca_attention_mask,
             self.sinks,
         )
         output = self.output_projection(latent_output, query_cos, query_sin)
         return StaticHCAAttentionOutput(
             output,
-            swa.physical_k,
-            swa.physical_v,
+            swa.physical_kv,
             main_cache,
             compressed.next_kv_state,
             compressed.next_score_state,

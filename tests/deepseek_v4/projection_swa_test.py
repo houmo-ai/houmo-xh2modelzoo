@@ -115,28 +115,23 @@ def test_bound_output_projection_uses_grouped_modules_without_weight_expansion()
     torch.testing.assert_close(actual, expected)
 
 
-def test_swa_update_has_two_physical_caches_and_exact_per_query_windows() -> None:
+def test_swa_update_has_one_shared_latent_cache_and_exact_per_query_windows() -> None:
     module = StaticSWAUpdate(input_sequence_length=8, window_size=4)
     latent = torch.arange(16, dtype=torch.float32).reshape(1, 8, 2)
-    past_k = torch.zeros(1, 1, module.attention_length, 2)
-    past_v = torch.full_like(past_k, 1000.0)
+    past_kv = torch.zeros(1, 1, module.attention_length, 2)
 
     output = module(
         latent,
         torch.tensor([0]),
         torch.tensor([7]),
-        past_k,
-        past_v,
+        past_kv,
     )
 
-    assert output.physical_k.shape == (1, module.attention_length, 2)
-    assert output.physical_v.shape == output.physical_k.shape
+    assert output.physical_kv.shape == (1, module.attention_length, 2)
     valid = _tiny_masks(input_length=8, past=0, current=7).swa_attention_mask == 0
     assert valid.shape == (1, 1, 8, module.attention_length)
     assert valid[0, 0].sum(dim=-1).tolist() == [1, 2, 3, 4, 4, 4, 4, 0]
-    torch.testing.assert_close(output.physical_k[0, 3:7, 0], torch.tensor([6.0, 8.0, 10.0, 12.0]))
-    torch.testing.assert_close(output.physical_v, output.physical_k)
-    assert output.physical_k.data_ptr() != output.physical_v.data_ptr()
+    torch.testing.assert_close(output.physical_kv[0, 3:7, 0], torch.tensor([6.0, 8.0, 10.0, 12.0]))
 
 
 def test_prefill_256_swa_cache_is_384_and_decode_cache_is_128() -> None:
@@ -157,10 +152,8 @@ def test_prefill_256_swa_cache_is_384_and_decode_cache_is_128() -> None:
         torch.tensor([256]),
         torch.tensor([1]),
         torch.zeros(1, 1, 384, 2),
-        torch.zeros(1, 1, 384, 2),
     )
-    assert output.physical_k.shape == (1, 128, 2)
-    assert output.physical_v.shape == (1, 128, 2)
+    assert output.physical_kv.shape == (1, 128, 2)
 
 
 def test_swa_default_backing_is_window_plus_static_input() -> None:
@@ -177,7 +170,7 @@ def test_swa_default_backing_is_window_plus_static_input() -> None:
     assert module.backing_length == 32
 
 
-def test_swa_update_exports_two_llm_cache_nodes() -> None:
+def test_swa_update_exports_one_llm_cache_node() -> None:
     module = StaticSWAUpdate(input_sequence_length=8, window_size=4).eval()
     graph = torch.export.export(
         module,
@@ -186,11 +179,10 @@ def test_swa_update_exports_two_llm_cache_nodes() -> None:
             torch.tensor([9]),
             torch.tensor([7]),
             torch.randn(1, 1, module.attention_length, 2),
-            torch.randn(1, 1, module.attention_length, 2),
         ),
     )
 
-    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 2
+    assert sum(node.target == torch.ops.xh.LLMCache.default for node in graph.graph.nodes) == 1
     assert not any(
         node.target in {torch.ops.aten.clamp.default, torch.ops.aten.clamp.Tensor} for node in graph.graph.nodes
     )
@@ -203,32 +195,27 @@ def test_swa_hybrid_backing_rolls_across_prefill_and_repeated_decode() -> None:
         window_size=4,
         backing_length=prefill.backing_length,
     ).eval()
-    k_cache = HybridCacheTensor(torch.zeros(1, 1, prefill.backing_length, 1))
-    v_cache = HybridCacheTensor(torch.zeros(1, 1, prefill.backing_length, 1))
+    kv_cache = HybridCacheTensor(torch.zeros(1, 1, prefill.backing_length, 1))
 
     prefill(
         torch.arange(8, dtype=torch.float32).reshape(1, 8, 1),
         torch.tensor([0]),
         torch.tensor([8]),
-        k_cache,
-        v_cache,
+        kv_cache,
     )
-    assert k_cache.cache_valid_len == v_cache.cache_valid_len == 8
+    assert kv_cache.cache_valid_len == 8
 
     for step in range(6):
         output = decode(
             torch.tensor([[[100.0 + step]]]),
             torch.tensor([8 + step]),
             torch.tensor([1]),
-            k_cache,
-            v_cache,
+            kv_cache,
         )
-        assert k_cache.cache_valid_len == v_cache.cache_valid_len == 4
+        assert kv_cache.cache_valid_len == 4
         valid = _tiny_masks(input_length=1, past=8 + step, current=1).swa_attention_mask == 0
         assert valid.sum().item() == 4
-        torch.testing.assert_close(output.physical_k[:, :4], output.physical_v[:, :4])
-
     torch.testing.assert_close(
-        output.physical_k[0, :4, 0],
+        output.physical_kv[0, :4, 0],
         torch.tensor([102.0, 103.0, 104.0, 105.0]),
     )

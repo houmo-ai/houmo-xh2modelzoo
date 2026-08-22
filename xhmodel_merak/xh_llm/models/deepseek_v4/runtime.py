@@ -121,10 +121,9 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                 self.abi.persistent_swa_length,
                 spec.latent_head_dim,
             )
-            swa_k = self._swa_cache(swa_shape, device=next(device_iter), dtype=dtype)
-            swa_v = self._swa_cache(swa_shape, device=next(device_iter), dtype=dtype)
+            swa_kv = self._swa_cache(swa_shape, device=next(device_iter), dtype=dtype)
             if layer_type == SLIDING:
-                self.layer_caches.append(SWACacheInputs(swa_k, swa_v))
+                self.layer_caches.append(SWACacheInputs(swa_kv))
                 continue
 
             if layer_type == CSA:
@@ -132,8 +131,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                 index_shape = (self.abi.batch_size, 1, spec.csa_capacity, spec.index_head_dim)
                 self.layer_caches.append(
                     CSACacheInputs(
-                        swa_k,
-                        swa_v,
+                        swa_kv,
                         self._cache(main_shape, device=next(device_iter), dtype=dtype),
                         self._cache(index_shape, device=next(device_iter), dtype=dtype),
                         self._state(shapes["csa_main_kv_state"], score=False, device=next(device_iter), dtype=dtype),
@@ -147,8 +145,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
             main_shape = (self.abi.batch_size, 1, spec.hca_capacity, spec.latent_head_dim)
             self.layer_caches.append(
                 HCACacheInputs(
-                    swa_k,
-                    swa_v,
+                    swa_kv,
                     self._cache(main_shape, device=next(device_iter), dtype=dtype),
                     self._state(shapes["hca_main_kv_state"], score=False, device=next(device_iter), dtype=dtype),
                     self._state(shapes["hca_main_score_state"], score=True, device=next(device_iter), dtype=dtype),
@@ -171,12 +168,9 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
         """Zero request state in place while preserving CUDA Graph addresses."""
 
         for layer_type, cache in zip(self.abi.layer_types, self.layer_caches, strict=True):
-            swa_k = cache.k if isinstance(cache, SWACacheInputs) else cache.swa_k
-            swa_v = cache.v if isinstance(cache, SWACacheInputs) else cache.swa_v
-            swa_k.zero_()
-            swa_v.zero_()
-            swa_k.cache_valid_len_tensor.zero_()
-            swa_v.cache_valid_len_tensor.zero_()
+            swa_kv = cache.swa_kv
+            swa_kv.zero_()
+            swa_kv.cache_valid_len_tensor.zero_()
             if layer_type == CSA:
                 cache.main.zero_()
                 cache.index_k.zero_()
@@ -272,8 +266,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                 cache.index_score_state.copy_(state.index_score_state)
                 updated.append(
                     CSACacheInputs(
-                        cache.swa_k,
-                        cache.swa_v,
+                        cache.swa_kv,
                         cache.main,
                         cache.index_k,
                         cache.main_kv_state,
@@ -290,8 +283,7 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                 cache.main_score_state.copy_(state.main_score_state)
                 updated.append(
                     HCACacheInputs(
-                        cache.swa_k,
-                        cache.swa_v,
+                        cache.swa_kv,
                         cache.main,
                         cache.main_kv_state,
                         cache.main_score_state,

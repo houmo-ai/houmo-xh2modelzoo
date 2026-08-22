@@ -16,10 +16,9 @@ CSA = "compressed_sparse_attention"
 HCA = "heavily_compressed_attention"
 
 _GRAPH_CACHE_FIELDS = {
-    SLIDING: ("swa_k", "swa_v"),
+    SLIDING: ("swa_kv",),
     CSA: (
-        "swa_k",
-        "swa_v",
+        "swa_kv",
         "main",
         "index_k",
         "main_kv_state",
@@ -28,8 +27,7 @@ _GRAPH_CACHE_FIELDS = {
         "index_score_state",
     ),
     HCA: (
-        "swa_k",
-        "swa_v",
+        "swa_kv",
         "main",
         "main_kv_state",
         "main_score_state",
@@ -38,13 +36,11 @@ _GRAPH_CACHE_FIELDS = {
 
 
 class SWACacheInputs(NamedTuple):
-    k: Tensor
-    v: Tensor
+    swa_kv: Tensor
 
 
 class CSACacheInputs(NamedTuple):
-    swa_k: Tensor
-    swa_v: Tensor
+    swa_kv: Tensor
     main: Tensor
     index_k: Tensor
     main_kv_state: Tensor
@@ -54,8 +50,7 @@ class CSACacheInputs(NamedTuple):
 
 
 class HCACacheInputs(NamedTuple):
-    swa_k: Tensor
-    swa_v: Tensor
+    swa_kv: Tensor
     main: Tensor
     main_kv_state: Tensor
     main_score_state: Tensor

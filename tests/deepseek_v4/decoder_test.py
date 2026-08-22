@@ -130,7 +130,6 @@ def test_static_swa_decoder_matches_transformers_tiny_reference() -> None:
         torch.tensor([8]),
         masks.swa_attention_mask,
         torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
-        torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
         cos,
         sin,
     ).hidden_states
@@ -217,7 +216,6 @@ def test_static_csa_decoder_matches_transformers_tiny_reference() -> None:
         masks.csa_index_validity,
         masks.csa_attention_mask,
         torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
-        torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 4, 8, dtype=torch.float16),
         torch.zeros(1, 1, 4, 8, dtype=torch.float16),
         torch.tensor([0]),
@@ -272,7 +270,6 @@ def test_static_hca_decoder_matches_transformers_tiny_reference() -> None:
         torch.tensor([0]),
         torch.tensor([8]),
         masks.hca_attention_mask,
-        torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, module.attention.swa_update.backing_length, 8, dtype=torch.float16),
         torch.zeros(1, 1, 4, 8, dtype=torch.float16),
         torch.tensor([0]),

@@ -203,10 +203,9 @@ class StaticDeepSeekV4Blocks(nn.Module):
             attention = layer.attention
             swa_length = attention.swa_update.backing_length
             swa_shape = (batch_size, 1, swa_length, attention.head_dim)
-            swa_k = torch.zeros(swa_shape, device=device, dtype=cache_dtype)
-            swa_v = torch.zeros(swa_shape, device=device, dtype=cache_dtype)
+            swa_kv = torch.zeros(swa_shape, device=device, dtype=cache_dtype)
             if layer_type == "sliding_attention":
-                caches.append(SWACacheInputs(swa_k, swa_v))
+                caches.append(SWACacheInputs(swa_kv))
                 continue
 
             main_shape = (batch_size, 1, attention.cache_capacity, attention.head_dim)
@@ -221,8 +220,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
                 )
                 caches.append(
                     CSACacheInputs(
-                        swa_k,
-                        swa_v,
+                        swa_kv,
                         main,
                         torch.zeros(index_shape, device=device, dtype=cache_dtype),
                         *states,
@@ -231,8 +229,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
             else:
                 caches.append(
                     HCACacheInputs(
-                        swa_k,
-                        swa_v,
+                        swa_kv,
                         main,
                         *states,
                     )
@@ -349,7 +346,6 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     current_length,
                     swa_attention_mask,
                     cache[0],
-                    cache[1],
                     main_cos,
                     main_sin,
                 )
@@ -366,16 +362,15 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     cache[0],
                     cache[1],
                     cache[2],
-                    cache[3],
                     csa_write_start,
                     csa_compressor_validity,
                     csa_compressor_new_count,
                     csa_compressor_offset,
                     csa_compressor_phase_indices,
+                    cache[3],
                     cache[4],
                     cache[5],
                     cache[6],
-                    cache[7],
                     compress_cos,
                     compress_sin,
                     csa_compressed_cos,
@@ -393,14 +388,13 @@ class StaticDeepSeekV4Blocks(nn.Module):
                     hca_attention_mask,
                     cache[0],
                     cache[1],
-                    cache[2],
                     hca_write_start,
                     hca_compressor_validity,
                     hca_compressor_new_count,
                     hca_compressor_offset,
                     hca_compressor_phase_indices,
+                    cache[2],
                     cache[3],
-                    cache[4],
                     compress_cos,
                     compress_sin,
                     hca_compressed_cos,

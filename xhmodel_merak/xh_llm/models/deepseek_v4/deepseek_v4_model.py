@@ -466,11 +466,10 @@ class XHDeepSeekV4Model(TextLLMModel):
     @staticmethod
     def _cache_input_suffixes(layer_type: str) -> tuple[str, ...]:
         if layer_type == SLIDING:
-            return "swa_k", "swa_v"
+            return ("swa_kv",)
         if layer_type == CSA:
             return (
-                "swa_k",
-                "swa_v",
+                "swa_kv",
                 "main",
                 "index_k",
                 "main_kv_state",
@@ -479,8 +478,7 @@ class XHDeepSeekV4Model(TextLLMModel):
                 "index_score_state",
             )
         return (
-            "swa_k",
-            "swa_v",
+            "swa_kv",
             "main",
             "main_kv_state",
             "main_score_state",
@@ -700,8 +698,28 @@ class XHDeepSeekV4Model(TextLLMModel):
         meta_info.max_context_tokens = self.config.context_max_length
         meta_path = Path(exported_info.exported_dir) / "golden_meta_info.json"
         meta_path.write_text(json.dumps(meta_info.to_dict(), indent=4), encoding="utf-8")
+        self._write_merak_config(exported_info.exported_dir)
         logger.info(f"DeepSeek-V4 export completed: {exported_info.exported_dir}")
         return meta_info
+
+    @staticmethod
+    def _write_merak_config(exported_dir: str | Path) -> Path:
+        """Write the vLLM Merak package entrypoint beside the HMONNX metadata."""
+
+        config_path = Path(exported_dir) / "merak_config.json"
+        config = {
+            "architectures": ["MerakForCausalLM"],
+            "config_format": "merak_llm",
+            "load_format": "merak_llm",
+            "xh_model": {
+                "model_type": "hmonnx",
+                "meta_info": "golden_meta_info.json",
+            },
+            "enable_page_attention": False,
+            "model_type": "merak_llm",
+        }
+        config_path.write_text(json.dumps(config, indent=4) + "\n", encoding="utf-8")
+        return config_path
 
     @staticmethod
     def _finalize_deterministic_hmonnx(exported_info) -> None:

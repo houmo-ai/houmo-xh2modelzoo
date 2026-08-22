@@ -1,4 +1,4 @@
-"""Separate physical K/V sliding-cache update for DeepSeek-V4."""
+"""Shared latent sliding-cache update for DeepSeek-V4."""
 
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ from .swa_layout import aligned_swa_attention_length, aligned_swa_backing_length
 
 
 class StaticSWAOutput(NamedTuple):
-    physical_k: Tensor
-    physical_v: Tensor
+    physical_kv: Tensor
 
 
 class StaticSWAUpdate(nn.Module):
-    """Write one logical latent into distinct persistent K/V cache tensors.
+    """Write the shared latent used by both K and V into one persistent cache.
 
     The graph ABI keeps the singleton KV-head dimension, ``[B,1,C,D]``.
     Passing that object directly to ``xh.LLMCache`` is intentional: inserting
@@ -59,12 +58,7 @@ class StaticSWAUpdate(nn.Module):
                 "SWA backing_length must cover window + static input: "
                 f"backing={self.backing_length}, required={required_backing_length}"
             )
-        self.k_cache = xhnn.LLMCache(
-            axis=2,
-            attention_max_length=self.window_size,
-            inplace=True,
-        )
-        self.v_cache = xhnn.LLMCache(
+        self.kv_cache = xhnn.LLMCache(
             axis=2,
             attention_max_length=self.window_size,
             inplace=True,
@@ -107,8 +101,7 @@ class StaticSWAUpdate(nn.Module):
         latent_kv: Tensor,
         past_length: Tensor,
         current_length: Tensor,
-        past_k_cache: Tensor,
-        past_v_cache: Tensor,
+        past_kv_cache: Tensor,
     ) -> StaticSWAOutput:
         if not is_fx_proxy(latent_kv):
             expected = (
@@ -118,24 +111,14 @@ class StaticSWAUpdate(nn.Module):
             )
             if tuple(latent_kv.shape) != expected:
                 raise ValueError(f"latent_kv must have shape {expected}")
-        physical_k = self._update(
-            self.k_cache,
+        physical_kv = self._update(
+            self.kv_cache,
             latent_kv,
             past_length,
             current_length,
-            past_k_cache,
+            past_kv_cache,
         )
-        physical_v = self._update(
-            self.v_cache,
-            latent_kv,
-            past_length,
-            current_length,
-            past_v_cache,
-        )
-        return StaticSWAOutput(
-            physical_k,
-            physical_v,
-        )
+        return StaticSWAOutput(physical_kv)
 
 
 __all__ = ["StaticSWAOutput", "StaticSWAUpdate"]

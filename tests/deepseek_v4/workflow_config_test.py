@@ -28,6 +28,7 @@ def test_workflow_config_selects_expected_activation_precision(filename: str, qu
     assert config.data["runtime"]["low_memory"] is True
     assert config.export["model"]["packed_weight_only"] is True
     assert config.export["model"]["quant_scheme"]["quant_type"] == quant_type
+    assert config.export["model"]["quant_scheme"]["ops"] == {}
 
     workflow = AutoLLMWorkflow.from_config("/tmp/deepseek-v4", str(config_path))
     assert isinstance(workflow, DeepSeekV4Workflow)

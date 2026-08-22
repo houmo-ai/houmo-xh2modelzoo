@@ -81,8 +81,7 @@ def test_static_cache_spec_uses_384_swa_and_unified_main_cache() -> None:
     assert spec.swa_physical_length == 384
     assert spec.csa_capacity == 65536
     assert spec.hca_capacity == 2048
-    assert shapes["swa_k"] == (1, 1, 384, 512)
-    assert shapes["swa_v"] == (1, 1, 384, 512)
+    assert shapes["swa_kv"] == (1, 1, 384, 512)
     assert shapes["csa_main"] == (1, 1, 65536, 512)
     assert shapes["csa_index_k"] == (1, 1, 65536, 128)
     assert shapes["hca_main"] == (1, 1, 2048, 512)
