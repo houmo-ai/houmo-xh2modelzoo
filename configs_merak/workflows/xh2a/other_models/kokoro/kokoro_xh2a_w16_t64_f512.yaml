@@ -1,0 +1,43 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHKokoroModel
+  text_max_length: 64
+  frame_max_length: 512
+  lstm_chunk_length: 64
+  opset: 17
+  seed: 1234
+  simplify: true
+  validate_onnx: true
+  convert_hmonnx: true
+  components:
+    front_base:
+      quant_type: w16a16_sefp
+    duration_block0:
+      quant_type: w16a16_sefp
+    duration_block1:
+      quant_type: w16a16_sefp
+    duration_block2:
+      quant_type: w16a16_sefp
+    duration_predictor:
+      quant_type: w16a16_sefp
+    text_lstm:
+      quant_type: w16a16_sefp
+    align_core:
+      quant_type: w16a16_sefp
+    shared_fwd_lstm:
+      quant_type: w16a16_sefp
+    shared_bwd_lstm:
+      quant_type: w16a16_sefp
+    f0_branch:
+      quant_type: w16a16_sefp
+    noise_branch:
+      quant_type: w16a16_sefp
+    decoder:
+      quant_type: w16a16_sefp
+    source_merge:
+      quant_type: w16a16_sefp
+    generator:
+      quant_type: w16a16_sefp

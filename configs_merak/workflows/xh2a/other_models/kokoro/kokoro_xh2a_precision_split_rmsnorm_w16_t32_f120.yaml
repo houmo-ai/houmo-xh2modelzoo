@@ -1,0 +1,27 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHKokoroModel
+  graph_mode: precision_split
+  text_max_length: 32
+  frame_max_length: 120
+  opset: 17
+  seed: 1234
+  simplify: true
+  validate_onnx: true
+  stft_pad_mode: length_aware_reflect
+  stft_phase_mode: cordic
+
+  # Diagnostic only. The centered/masked RMSNorm rewrite is FP32-equivalent
+  # to AdaIN, but its W16A16 F0 error is larger than the production baseline.
+  f0_norm_mode: rmsnorm
+
+  convert_hmonnx: true
+  decompose_lstm: false
+  components:
+    acoustic:
+      quant_type: w16a16_sefp
+    generator_istft:
+      quant_type: w16a16_sefp

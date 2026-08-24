@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
     "SileroVADWorkflow": ("configs_merak/workflows/xh2a/other_models/silero_vad/silero_vad_xh2a_w16.yaml"),
     "MeloTTSWorkflow": ("configs_merak/workflows/xh2a/other_models/melotts/melotts_xh2a_w16_l32_t64.yaml"),
+    "KokoroWorkflow": ("configs_merak/workflows/xh2a/other_models/kokoro/kokoro_xh2a_bucketed_w16.yaml"),
     "StreamingZipformerWorkflow": ("configs_merak/workflows/xh2a/other_models/zipformer/zipformer_xh2a_w16.yaml"),
 }
 

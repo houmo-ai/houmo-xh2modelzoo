@@ -1197,6 +1197,31 @@ The following paths are used:
 Users are responsible for complying with the Apache License, Version 2.0.
 
 ----------------------------------------------------------------------
+Kokoro
+----------------------------------------------------------------------
+Component Name: Kokoro
+Version: commit dfb907a02bba8152ca444717ca5d78747ccb4bec
+Source:
+https://github.com/hexgrad/kokoro
+Copyright Statement:
+Copyright (c) Kokoro contributors
+License:
+Apache License, Version 2.0
+License Text:
+https://github.com/hexgrad/kokoro/blob/dfb907a02bba8152ca444717ca5d78747ccb4bec/LICENSE
+Kokoro provides text-to-speech model components adapted by the static
+Host/NPU wrappers in this project.
+Usage in this project:
+The following paths contain the adaptation and deployment tooling:
+    xhmodel_merak/xh_other_model/models/kokoro/
+    examples_merak/audio/kokoro/
+    configs_merak/workflows/xh2a/other_models/kokoro/
+The pretrained model, voice pack, and reference ONNX are not redistributed
+by this repository; users download them from their respective upstream
+model repositories.
+Users are responsible for complying with the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
 UI-TARS
 ----------------------------------------------------------------------
 Component Name: UI-TARS (uitars1_5)

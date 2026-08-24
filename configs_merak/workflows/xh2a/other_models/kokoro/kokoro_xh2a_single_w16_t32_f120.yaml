@@ -1,0 +1,23 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHKokoroModel
+  graph_mode: single_graph
+  text_max_length: 32
+  frame_max_length: 120
+  opset: 17
+  seed: 1234
+  simplify: true
+  validate_onnx: true
+  stft_pad_mode: length_aware_reflect
+  stft_phase_mode: cordic
+
+  # Preserve all recurrent blocks as opaque XH2a::LSTM nodes.  The xhquant
+  # frontend must not apply its legacy per-timestep LSTM transformer here.
+  convert_hmonnx: true
+  decompose_lstm: false
+  components:
+    end_to_end:
+      quant_type: w16a16_sefp

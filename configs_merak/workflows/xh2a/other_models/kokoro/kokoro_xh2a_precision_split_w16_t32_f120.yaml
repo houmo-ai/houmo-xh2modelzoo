@@ -1,0 +1,34 @@
+quant: null
+
+export:
+  target_device: XH2a
+  model:
+    type: XHKokoroModel
+  graph_mode: precision_split
+  text_max_length: 32
+  frame_max_length: 120
+  opset: 17
+  seed: 1234
+  simplify: true
+  validate_onnx: true
+  stft_pad_mode: length_aware_reflect
+
+  # CORDIC keeps the exported phase on the same principal branch.  Direct
+  # atan2 export can differ by +/-2*pi, which is complex-equivalent but not
+  # equivalent when the Generator consumes phase as an ordinary feature.
+  stft_phase_mode: cordic
+
+  # The native-RMSNorm equivalent rewrite is retained as a diagnostic mode,
+  # but W16A16 A/B shows higher F0 error than the original centered AdaIN.
+  f0_norm_mode: adain
+
+  # Keep the acoustic graph's recurrent blocks as native XH2a::LSTM nodes.
+  # The registered operator supports num_directions=1/2 and both valid-length
+  # and reverse-index valid-region contracts without timestep expansion.
+  convert_hmonnx: true
+  decompose_lstm: false
+  components:
+    acoustic:
+      quant_type: w16a16_sefp
+    generator_istft:
+      quant_type: w16a16_sefp
