@@ -1,0 +1,51 @@
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  bits: 4
+  group_size: 64
+  sym: true
+  desc_act: false
+  hessian_mse: true
+  damp_percent: 0.01
+  iters: 8
+  lr: 0.001
+  calibration:
+    # 可使用本仓库脚本(examples_merak/llm/minicpm5/build_calibration.py)或 GPTQModel 自带校准集生成 JSONL 文件。
+    # 将下面路径替换为实际文件路径。
+    jsonl: path-to-minicpm5-calibration-jsonl
+    text_key: text
+    nsamples: 8
+    seqlen: 256
+  runtime:
+    batch_size: 1
+    trust_remote_code: true
+  max_shard_size: 4GB
+  moe:
+    attn_bits: 8
+    shared_expert_bits: 8
+    expert_bits: 4
+    dense_mlp_bits: 8
+    routing: bypass
+    routing_batch_size: 48
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPM5MoEForCausalLM
+    # This field is filled from --model-dir by the workflow.
+    hf_model: null
+    model_name: minicpm5_15b_a2_5b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 524288
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      # MoE mixed weight bits are defined in quant.moe above.
+      quant_type: w4a8h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null

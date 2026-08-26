@@ -1,0 +1,19 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPM5MoEForCausalLM
+    # This field is filled from --model-dir by the workflow.
+    hf_model: null
+    model_name: minicpm5_15b_a2_5b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 524288
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null
