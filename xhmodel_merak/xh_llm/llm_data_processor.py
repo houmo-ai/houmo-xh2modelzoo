@@ -1,4 +1,7 @@
+from typing import Union, cast
+
 import torch
+from torch import Tensor
 
 from ..configuration_utils import BaseConfig
 from .types import CacheList
@@ -123,7 +126,6 @@ class BaseLLMInputProcessor:
             "KV cache should be of type CacheList."
         )
         return (
-            # position_ids.to(self.device),
             inputs_embeds,
             torch.tensor([past_seq_length], dtype=torch.int32, device=self._device),
             torch.tensor([seq_length], dtype=torch.int32, device=self._device),
@@ -152,3 +154,92 @@ class BaseVisualProcessor:
     def forward(self, data: dict) -> list[torch.Tensor]:
         assert isinstance(data, dict) and "image" in data, "Input data should be a dictionary with key 'image'."
         return (data["image"],)
+
+
+def _prepare_window_attention_mask(inputs_tensor: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    nq, nk = inputs_tensor.size(-2), inputs_tensor.size(-1)
+    attention_mask = torch.ones(
+        [1, nq, nk],
+        device=inputs_tensor.device,
+        dtype=torch.bool,
+    )
+    for i in range(1, len(cu_seqlens)):
+        attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+    return attention_mask
+
+
+def _gen_mask_v2(x: Tensor, valid_length: Union[int, Tensor], attention_max_length: int = -1):
+    if isinstance(valid_length, int):
+        valid_length: Tensor = torch.tensor(valid_length).to(x.device)
+    valid_length = valid_length.reshape(-1)
+    if x.shape[0] != valid_length.size().numel() or (valid_length[0].item() == 0 and valid_length.shape[0] == 2):
+        return _prepare_window_attention_mask(x, valid_length)
+    # assert (
+    #     x.shape[0] == valid_length.size().numel()
+    # ), f"x batch size = {x.shape[0]}, but valid_length size = {valid_length.size().numel()}"
+
+    bsz, nq, nk = x.size(0), x.size(-2), x.size(-1)
+    bsz_attention_mask = []
+    for i in range(bsz):
+        b_valid_length = int(valid_length[i].item())
+        if attention_max_length > 0:
+            b_valid_length = min(b_valid_length, attention_max_length - 1)
+        attention_mask = torch.tril(
+            torch.ones(nq, nk, dtype=torch.bool, device=x.device), diagonal=b_valid_length
+        ).logical_not()
+        if attention_max_length > 0:
+            sliding_window_mask = torch.tril(
+                torch.ones_like(attention_mask, dtype=torch.bool), diagonal=b_valid_length - attention_max_length
+            )
+            attention_mask = torch.where(sliding_window_mask, True, attention_mask)
+        bsz_attention_mask.append(attention_mask.unsqueeze(dim=0).unsqueeze(dim=0))
+
+    mask = torch.cat(bsz_attention_mask, dim=0)
+    return mask
+
+
+def aligned(size, align):
+    return ((size + align - 1) // align) * align
+
+
+class SlidingWindowInputProcessorConfig(BaseInputProcessorConfig):
+    def __init__(
+        self,
+        embed_tokens,
+        input_sequence_length: int = 2048,
+        past_key_caches=None,
+        past_value_caches=None,
+        sliding_window: int = -1,
+        **kwargs,
+    ):
+        super().__init__(embed_tokens, input_sequence_length, past_key_caches, past_value_caches, **kwargs)
+        self.sliding_window = sliding_window
+
+
+class SlidingWindowLLMInputProcessor(BaseLLMInputProcessor):
+    def __init__(self, config: SlidingWindowInputProcessorConfig):
+        super().__init__(config)
+
+    def prepare_casual_mask(self, x: Tensor, valid_length: int, attention_max_length: int):
+        mask = _gen_mask_v2(x, valid_length, attention_max_length)
+        attention_mask = torch.zeros_like(mask, dtype=x.dtype, device=x.device)
+
+        attention_mask = attention_mask.masked_fill(mask, torch.finfo(x.dtype).min)
+        return attention_mask
+
+    def forward(self, data: dict | tuple | list) -> list[torch.Tensor]:
+        inputs_embeds, past_seq_length, seq_length, past_key_caches, past_value_caches = super().forward(data)
+        bz, nq = inputs_embeds.shape[:2]
+        config = cast(SlidingWindowInputProcessorConfig, self.config)
+        local_attention_window_size = config.sliding_window + nq - 1
+        local_attention_window_size = aligned(local_attention_window_size, 16)
+        x = torch.empty((bz, nq, local_attention_window_size), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+        sliding_attention_mask = self.prepare_casual_mask(x, past_seq_length, config.sliding_window)
+        return (
+            inputs_embeds,
+            past_seq_length,
+            seq_length,
+            sliding_attention_mask,
+            past_key_caches,
+            past_value_caches,
+        )

@@ -276,9 +276,7 @@ class TextLLMHFCompatible(DynamicModule):  # noqa: N801
                 self._llm_model.set_input_sequence_length(seq_length)
         else:
             self._llm_model.set_decode()
-            self._llm_model.set_input_sequence_length(
-                self._llm_model.get_input_sequence_length()
-            )
+            self._llm_model.set_input_sequence_length(self._llm_model.get_input_sequence_length())
 
         out = self._xh_orig_forward(
             input_ids=input_ids,
@@ -348,5 +346,188 @@ def build_text_llm_hf_compatible(hf_model, text_llm_model) -> TextLLMHFCompatibl
                 hf_model_cls: hf_model_cls.__name__,
             },
             _TextLLMLegacyHFCompatible_,
+        )
+    return LLM_COMPATIBLE_MODULES.convert(hf_model, text_llm_model=text_llm_model)
+
+
+class _TextLLMWithLegacyHFCompatible_v1_(_TextLLMLegacyHFCompatible_):
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
+        if past_key_values is None:
+            pass
+
+        r"""
+                labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                    Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                    config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                    (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+    
+                logits_to_keep (`int` or `torch.Tensor`, *optional*):
+                    If an `int`, compute logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all
+                    `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
+                    token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
+                    If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
+                    This is useful when using packed tensor format (single dimension for batch and sequence length).
+    
+            Returns:
+    
+            Example:
+    
+            ```python
+            >>> from transformers import AutoTokenizer, Qwen3ForCausalLM
+    
+            >>> model = Qwen3ForCausalLM.from_pretrained("Qwen/Qwen3-8B")
+            >>> tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+    
+            >>> prompt = "Hey, are you conscious? Can you talk to me?"
+            >>> inputs = tokenizer(prompt, return_tensors="pt")
+    
+            >>> # Generate
+            >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+            >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+            ```"""
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
+        if not isinstance(past_key_values, (type(None), Cache)):
+            raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        past_seq_length = self._past_seq_length
+
+        # TODO: 需要根据attention mask计算seq_length
+        seq_length = None
+        if input_ids is not None:
+            seq_length = input_ids.shape[-1]
+        elif inputs_embeds is not None:
+            seq_length = inputs_embeds.shape[1]
+        assert seq_length is not None, (
+            "Failed to infer seq_length from inputs, please specify it explicitly if you are using dynamic input sequence length"
+        )
+        # assert inputs_embeds is not None, "inputs_embeds cannot be None"  # for mypy
+
+        data_preprocessor = self._llm_model.get_data_preprocessor()
+
+        past_key_caches = self._llm_model.past_key_caches
+        past_value_caches = self._llm_model.past_value_caches
+
+        if past_key_values is None or (hasattr(self, "use_cache") and not self.use_cache):
+            past_key_caches = [torch.tensor([])] * len(past_key_caches)
+            past_value_caches = [torch.tensor([])] * len(past_value_caches)
+
+        if self.is_support_dynamic_input:
+            self._llm_model.set_input_sequence_length(seq_length)
+
+        net_input_seq_len = self._llm_model.get_input_sequence_length()
+        steps = (seq_length + net_input_seq_len - 1) // net_input_seq_len
+
+        # TODO: 需要根据attention mask计算seq_length
+        num_logits_to_keep = self._llm_model.get_num_logits_to_keep()
+        extra_kwargs = {}
+        if "generation_steps" in kwargs:  # for qwen3-tts
+            extra_kwargs["generation_steps"] = kwargs["generation_steps"]
+        if steps > 1:
+            outputs_logits = []
+            for i in tqdm(range(steps)):
+                data_batch = {
+                    "input_ids": None,
+                    "inputs_embeds": None,
+                    "past_seq_length": None,
+                }
+
+                start = i * net_input_seq_len
+                end = (i + 1) * net_input_seq_len
+                if input_ids is not None:
+                    data_batch["input_ids"] = input_ids[:, start:end]
+                elif inputs_embeds is not None:
+                    data_batch["inputs_embeds"] = inputs_embeds[:, start:end, :]
+                data_batch["past_seq_length"] = past_seq_length + start
+                model_inputs = data_preprocessor(data_batch)
+                output = self._llm_model.forward(
+                    *model_inputs,
+                    **extra_kwargs,
+                )
+                if isinstance(output, torch.Tensor):
+                    logits = output
+                else:
+                    logits = output.logits
+                outputs_logits.append(logits)
+            if num_logits_to_keep != 0:
+                logits = outputs_logits[-1]
+            else:
+                logits = torch.cat(outputs_logits, dim=1)[:, :seq_length, :]
+        else:
+            data_batch = {
+                "input_ids": None,
+                "inputs_embeds": None,
+                "past_seq_length": None,
+            }
+            if input_ids is not None:
+                data_batch["input_ids"] = input_ids
+            elif inputs_embeds is not None:
+                data_batch["inputs_embeds"] = inputs_embeds
+            data_batch["past_seq_length"] = past_seq_length
+            model_inputs = data_preprocessor(data_batch)
+            outputs = self._llm_model.forward(*model_inputs, **extra_kwargs)
+            if isinstance(outputs, torch.Tensor):
+                logits = outputs
+            else:
+                logits = outputs["logits"]
+            if num_logits_to_keep == 0:
+                logits = logits[:, :seq_length, :]
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=past_key_values,
+        )
+
+
+def build_text_llm_with_hf_compatible_v1(hf_model, text_llm_model) -> TextLLMHFCompatible:
+    LLM_COMPATIBLE_MODULES = _DMRegistryCls("XHCompatible")  # noqa: N806
+    hf_model_cls = type(hf_model)
+    if hf_model_cls not in LLM_COMPATIBLE_MODULES:
+        LLM_COMPATIBLE_MODULES.register_module(
+            {
+                hf_model_cls: hf_model_cls.__name__,
+            },
+            _TextLLMWithLegacyHFCompatible_v1_,
         )
     return LLM_COMPATIBLE_MODULES.convert(hf_model, text_llm_model=text_llm_model)

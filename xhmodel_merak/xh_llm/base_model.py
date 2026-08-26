@@ -106,6 +106,8 @@ class XHBaseModel(DeviceMixin):
             wrap_config.max_layers = self.config.max_layers
         if os.environ.get("LAYER_TAG_ENABLE", "").strip().lower() in {"1", "true", "yes", "on"}:
             wrap_config.enable_layer_tag = True
+        if hasattr(self.config, "max_pe_length"):
+            self.wrap_cfg.max_position_embeddings = getattr(self.config, "max_pe_length", 32768)
         return wrap_config
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -530,6 +532,7 @@ class XHBaseModel(DeviceMixin):
             kwargs["torch_dtype"] = model_dtype
         native_model = auto_model_cls.from_pretrained(hf_model_dir, **kwargs)
         native_model = cls.untied_weights(native_model)
+        native_model.config.tie_word_embeddings = False
         # if native_model.config.tie_word_embeddings:  # type: ignore
         #     old_torchscript = native_model.config.torchscript  # type: ignore
         #     native_model.config.torchscript = True  # type: ignore
@@ -1266,10 +1269,7 @@ class XHBaseModel(DeviceMixin):
             elif gptq_weight_mode == "packed":
                 hf_model = cls._retain_gptqmodel_packed_hf_model(hf_model)
             else:
-                raise ValueError(
-                    "gptq_weight_mode must be 'dequantize' or 'packed', "
-                    f"got {gptq_weight_mode!r}"
-                )
+                raise ValueError(f"gptq_weight_mode must be 'dequantize' or 'packed', got {gptq_weight_mode!r}")
             hf_model = cls._postprocess_gptqmodel_structure(hf_model, **kwargs)
         elif quant_method == "compressed-tensors":
             """
