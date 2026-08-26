@@ -1,0 +1,25 @@
+quant: null
+
+export:
+  target_device: XH2a
+  context_length: 256
+  input_sequence_length: 256
+  components:
+    audio_tower:
+      enabled: true
+      quant_type: w8a8h1_sefp
+    audio_encoder:
+      enabled: true
+      quant_type: w8a8h1_sefp
+    qwen3:
+      enabled: true
+      quant_type: w8a8h1_sefp
+    audio_decoder:
+      enabled: true
+      quant_type: w8a8h1_sefp
+  runtime:
+    audio: null
+    system_prompt: "You are a helpful FunAudioChat assistant."
+  model:
+    type: XHFunAudioChatModel
+    hf_model: null
