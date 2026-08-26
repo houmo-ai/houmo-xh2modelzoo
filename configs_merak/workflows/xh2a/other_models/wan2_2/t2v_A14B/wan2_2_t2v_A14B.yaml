@@ -23,3 +23,4 @@ export:
     base_seed: 0
     use_resolved_float_loader: true
     release_dit_fp16_weights: true
+    normalize_force_fp32: false
