@@ -813,6 +813,107 @@ def test_qwen3_5_hmonnx_split_conv_cache_mixin_uses_flat_export_signature():
     assert len(_flatten_split_conv_cache_outputs(mixin.past_conv_caches)) == 6
 
 
+def test_qwen3_5_export_metadata_resolves_hybrid_cache_contract_from_hf_config(
+    tmp_path,
+):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
+        _populate_qwen_export_kv_cache_config,
+    )
+
+    hf_config = {
+        "text_config": {
+            "layer_types": [
+                "linear_attention",
+                "linear_attention",
+                "linear_attention",
+                "full_attention",
+            ]
+            * 2,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "linear_num_key_heads": 16,
+            "linear_key_head_dim": 128,
+            "linear_num_value_heads": 48,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+        }
+    }
+    (tmp_path / "config.json").write_text(json.dumps(hf_config), encoding="utf-8")
+    cache = KVCacheWithLinearConfig()
+
+    assert _populate_qwen_export_kv_cache_config(
+        tmp_path,
+        cache,
+        context_max_length=262144,
+    )
+    assert cache.num_layers == 2
+    assert cache.kv_cache_shape == [1, 4, 262144, 256]
+    assert cache.linear_kv_cache_config.num_layers == 6
+    assert cache.linear_kv_cache_config.conv_dim == 10240
+    assert cache.linear_kv_cache_config.conv_kernel_size == 4
+    assert cache.linear_kv_cache_config.num_v_heads == 48
+    assert cache.linear_kv_cache_config.head_k_dim == 128
+    assert cache.linear_kv_cache_config.head_v_dim == 128
+
+
+def test_qwen3_5_export_metadata_resolves_runtime_preprocessor_fields(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
+        _populate_qwen_export_runtime_model_config,
+    )
+
+    hf_config = {
+        "image_token_id": 101,
+        "video_token_id": 102,
+        "vision_start_token_id": 103,
+        "vision_end_token_id": 104,
+        "vision_config": {"spatial_merge_size": 2},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(hf_config), encoding="utf-8")
+    model_config = XHQwen3_5ModelConfig(model_name="qwen3_5")
+
+    assert _populate_qwen_export_runtime_model_config(tmp_path, model_config)
+    assert model_config.image_token_id == 101
+    assert model_config.video_token_id == 102
+    assert model_config.vision_start_token_id == 103
+    assert model_config.vision_end_token_id == 104
+    assert model_config.spatial_merge_size == 2
+
+
+def test_qwen3_5_export_metadata_cache_contract_honors_first_block(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
+        _populate_qwen_export_kv_cache_config,
+    )
+
+    hf_config = {
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+        "num_key_value_heads": 2,
+        "head_dim": 64,
+        "linear_num_key_heads": 2,
+        "linear_key_head_dim": 32,
+        "linear_num_value_heads": 4,
+        "linear_value_head_dim": 32,
+        "linear_conv_kernel_dim": 4,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(hf_config), encoding="utf-8")
+    cache = KVCacheWithLinearConfig()
+
+    assert _populate_qwen_export_kv_cache_config(
+        tmp_path,
+        cache,
+        context_max_length=8192,
+        only_first_block=True,
+    )
+    assert cache.num_layers == 1
+    assert cache.linear_kv_cache_config.num_layers == 3
+
+
 def test_qwen3_5_export_cfg_honors_split_conv_cache_even_when_mixin_was_stale():
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
 

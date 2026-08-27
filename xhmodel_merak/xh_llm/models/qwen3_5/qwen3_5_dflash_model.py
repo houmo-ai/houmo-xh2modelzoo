@@ -27,7 +27,16 @@ def _build_dflash_export_adapter(
     mode: str,
     num_hidden_layers: int,
     use_flash_attention: bool = False,
+    is_dflash2: bool = False,
 ) -> nn.Module:
+    if is_dflash2:
+        prepare_for_export = getattr(core_model, "prepare_for_export", None)
+        if not callable(prepare_for_export):
+            raise TypeError(
+                "DFlash2 export core must implement prepare_for_export()"
+            )
+        prepare_for_export()
+
     if mode == "context":
         arg_names = [
             "target_hidden",
@@ -42,15 +51,39 @@ def _build_dflash_export_adapter(
             "noise_embedding",
             "past_seq_length",
             "current_input_length",
-            *([] if use_flash_attention else ["attn_mask"]),
+            *(["anchor_token_id"] if is_dflash2 else []),
+            *(
+                ["query_kv_range_abs"]
+                if is_dflash2 and use_flash_attention
+                else ([] if use_flash_attention else ["attn_mask"])
+            ),
             *[f"past_key_cache_{idx}" for idx in range(num_hidden_layers)],
             *[f"past_value_cache_{idx}" for idx in range(num_hidden_layers)],
         ]
-        core_call = "self.core.forward_decode_flash" if use_flash_attention else "self.core.forward_decode"
+        cache_names = [
+            *[f"past_key_cache_{idx}" for idx in range(num_hidden_layers)],
+            *[f"past_value_cache_{idx}" for idx in range(num_hidden_layers)],
+        ]
+        call_args = [
+            "noise_embedding",
+            "past_seq_length",
+            "current_input_length",
+            ("None" if use_flash_attention else "attn_mask"),
+            ("anchor_token_id" if is_dflash2 else "None"),
+            (
+                "query_kv_range_abs"
+                if is_dflash2 and use_flash_attention
+                else "None"
+            ),
+            *cache_names,
+        ]
+        core_call = "self.core.forward_decode"
     else:
         raise ValueError(f"Unsupported DFlash mode: {mode}")
 
-    forward_src = f"def forward(self, {', '.join(arg_names)}):\n    return {core_call}({', '.join(arg_names)})\n"
+    if mode == "context":
+        call_args = arg_names
+    forward_src = f"def forward(self, {', '.join(arg_names)}):\n    return {core_call}({', '.join(call_args)})\n"
     namespace: dict[str, Any] = {}
     exec(forward_src, {}, namespace)
     forward_impl = namespace["forward"]
@@ -102,17 +135,19 @@ class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
             self.config.dflash_model_dir,
             self.config.target_model_dir,
             mode=self.config.mode,
-            dtype=torch.float16,
+            dtype=self.dtype,
             input_sequence_length=self.config.input_sequence_length,
             max_pe_length=self.config.max_pe_length,
             max_sequence_length=self.config.max_sequence_length,
             flash_attention=self.config.flash_attention,
+            activation_residual_scale=self.config.activation_residual_scale,
         )
         self._wrap_model = _build_dflash_export_adapter(
             core_model,
             mode=self.config.mode,
             num_hidden_layers=self.config.num_hidden_layers,
             use_flash_attention=self._uses_flash_attention(),
+            is_dflash2=core_model.is_dflash2,
         )
 
     def _uses_flash_attention(self) -> bool:
@@ -122,6 +157,14 @@ class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
         if hasattr(flash_attention, "get"):
             return bool(flash_attention.get("enable", False))
         return bool(getattr(flash_attention, "enable", False))
+
+    def _is_dflash2(self) -> bool:
+        architecture = getattr(self.config, "architecture", None)
+        if architecture is not None:
+            return architecture == "DFlash2DraftModel"
+        wrap_model = getattr(self, "_wrap_model", None)
+        core_model = getattr(wrap_model, "core", None)
+        return bool(getattr(core_model, "is_dflash2", False))
 
     def _to_fronted(self, wrap_model):
         logger = get_xhquant_logger()
@@ -162,38 +205,63 @@ class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
         head_dim = self.config.head_dim
         num_layers = self.config.num_hidden_layers
         cache_len = self.config.max_sequence_length
+        dtype = self.dtype
 
         cache_shape = (bsz, num_kv_heads, cache_len, head_dim)
 
         if self.config.mode == "context":
             num_target_layers = self._get_num_target_hidden_layers()
             inputs: dict[str, Any] = {
-                "target_hidden": torch.randn(bsz, seq_len, num_target_layers * hidden_size, dtype=torch.float16),
+                "target_hidden": torch.randn(
+                    bsz,
+                    seq_len,
+                    num_target_layers * hidden_size,
+                    dtype=dtype,
+                ),
                 "past_seq_length": torch.tensor([0], dtype=torch.int64),
                 "current_input_length": torch.tensor([seq_len], dtype=torch.int64),
             }
         else:
             inputs = {
-                "noise_embedding": torch.randn(bsz, seq_len, hidden_size, dtype=torch.float16),
+                "noise_embedding": torch.randn(
+                    bsz,
+                    seq_len,
+                    hidden_size,
+                    dtype=dtype,
+                ),
                 "past_seq_length": torch.tensor([0], dtype=torch.int64),
                 "current_input_length": torch.tensor([seq_len], dtype=torch.int64),
             }
-            if not self._uses_flash_attention():
+            if self._is_dflash2():
+                inputs["anchor_token_id"] = torch.zeros(
+                    bsz,
+                    dtype=torch.int64,
+                )
+            if self._is_dflash2() and self._uses_flash_attention():
+                query_kv_range_abs = torch.zeros(
+                    bsz,
+                    seq_len,
+                    2,
+                    dtype=torch.int32,
+                )
+                query_kv_range_abs[..., 1] = seq_len
+                inputs["query_kv_range_abs"] = query_kv_range_abs
+            elif not self._uses_flash_attention():
                 inputs["attn_mask"] = torch.zeros(
                     bsz,
-                    cache_len,
-                    dtype=torch.float16,
+                    *([seq_len, cache_len] if self._is_dflash2() else [cache_len]),
+                    dtype=dtype,
                 )
 
         for idx in range(num_layers):
             inputs[f"past_key_cache_{idx}"] = torch.zeros(
                 cache_shape,
-                dtype=torch.float16,
+                dtype=dtype,
             )
         for idx in range(num_layers):
             inputs[f"past_value_cache_{idx}"] = torch.zeros(
                 cache_shape,
-                dtype=torch.float16,
+                dtype=dtype,
             )
 
         return inputs
@@ -236,9 +304,21 @@ class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
                 "past_seq_length",
                 "current_input_length",
             ]
-            if not self._uses_flash_attention():
+            if self._is_dflash2():
+                input_names.append("anchor_token_id")
+            if self._is_dflash2() and self._uses_flash_attention():
+                input_names.append("query_kv_range_abs")
+            elif not self._uses_flash_attention():
                 input_names.append("attn_mask")
-            output_names = ["logits"]
+            output_names = (
+                [
+                    "candidate_ids",
+                    "selector_first_scores",
+                    "selector_transition_scores",
+                ]
+                if self._is_dflash2()
+                else ["logits"]
+            )
 
         # Context, context_decode, and draft_decode are three views over one
         # persistent draft KV cache.  Keep the cache ABI identical so the

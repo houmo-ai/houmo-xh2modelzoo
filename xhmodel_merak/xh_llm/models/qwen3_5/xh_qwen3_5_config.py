@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -166,6 +167,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         flash_attention: Mapping | None = None,
         draft_head_weight_bits: int = 4,
         noise_token_id: int | None = None,
+        activation_residual_scale: float | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -174,6 +176,34 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         if assistant_config_path.is_file():
             assistant_config = json.loads(assistant_config_path.read_text(encoding="utf-8"))
         dflash_hf_config = assistant_config.get("dflash_config") or {}
+        architectures = assistant_config.get("architectures") or [
+            "DFlashDraftModel"
+        ]
+        if len(architectures) != 1:
+            raise ValueError(
+                "Qwen3.5 DFlash assistant config must declare exactly one "
+                f"architecture, got {architectures!r}"
+            )
+        self.architecture = str(architectures[0])
+        self.is_dflash2 = self.architecture == "DFlash2DraftModel"
+        if activation_residual_scale is None:
+            activation_residual_scale = 128.0 if self.is_dflash2 else 1.0
+        self.activation_residual_scale = float(activation_residual_scale)
+        if (
+            not math.isfinite(self.activation_residual_scale)
+            or self.activation_residual_scale < 1.0
+            or math.frexp(self.activation_residual_scale)[0] != 0.5
+        ):
+            raise ValueError(
+                "Qwen3.5 DFlash activation_residual_scale must be a finite "
+                "power of two greater than or equal to 1, got "
+                f"{self.activation_residual_scale}"
+            )
+        if not self.is_dflash2 and self.activation_residual_scale != 1.0:
+            raise ValueError(
+                "Legacy Qwen3.5 DFlash does not support "
+                "activation_residual_scale != 1"
+            )
 
         def resolve_checkpoint_int(
             name: str,
@@ -251,6 +281,61 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.max_sequence_length = max_sequence_length
         self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
+        self.is_causal = bool(assistant_config.get("is_causal", False))
+        self.sliding_window = assistant_config.get("sliding_window")
+        self.conv_kernel_size = dflash_hf_config.get("conv_kernel_size")
+        self.conv_group_size = dflash_hf_config.get("conv_group_size")
+        self.selector_rank = dflash_hf_config.get("selector_rank")
+        self.selector_top_k = dflash_hf_config.get("selector_top_k")
+        self.input_embedding_scale = float(
+            dflash_hf_config.get(
+                "input_embedding_scale",
+                assistant_config.get("input_embedding_scale", 1.0),
+            )
+        )
+        self.output_multiplier = float(
+            dflash_hf_config.get(
+                "output_multiplier",
+                assistant_config.get("output_multiplier", 1.0),
+            )
+        )
+        self.final_logit_softcapping = dflash_hf_config.get(
+            "final_logit_softcapping",
+            assistant_config.get("final_logit_softcapping"),
+        )
+        if self.is_dflash2:
+            required_dflash2 = {
+                "conv_kernel_size": self.conv_kernel_size,
+                "conv_group_size": self.conv_group_size,
+                "selector_rank": self.selector_rank,
+                "selector_top_k": self.selector_top_k,
+                "sliding_window": self.sliding_window,
+            }
+            missing = [
+                name for name, value in required_dflash2.items() if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "Qwen3.5 DFlash2 assistant config is missing required fields: "
+                    + ", ".join(missing)
+                )
+            if self.is_causal:
+                raise ValueError(
+                    "Qwen3.5 DFlash2 currently requires checkpoint is_causal=false"
+                )
+            if int(self.conv_kernel_size) <= 0:
+                raise ValueError("Qwen3.5 DFlash2 conv_kernel_size must be positive")
+            if hidden_size % int(self.conv_group_size):
+                raise ValueError(
+                    "Qwen3.5 DFlash2 conv_group_size must divide hidden_size: "
+                    f"group={self.conv_group_size}, hidden={hidden_size}"
+                )
+            if int(self.selector_rank) <= 0 or int(self.selector_top_k) <= 0:
+                raise ValueError(
+                    "Qwen3.5 DFlash2 selector_rank and selector_top_k must be positive"
+                )
+            if int(self.sliding_window) <= 0:
+                raise ValueError("Qwen3.5 DFlash2 sliding_window must be positive")
         if noise_token_id is None:
             if not assistant_config_path.is_file():
                 raise ValueError(
@@ -360,6 +445,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             )
 
         self.spec_decode_mode = spec_decode_mode
+        default_num_draft_tokens = num_draft_tokens is None
         if num_draft_tokens is None:
             # MTP historically drafts four tokens. DFlash checkpoints are
             # trained/exported with nine draft tokens unless a workflow run
@@ -429,6 +515,18 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
                     self.num_draft_tokens + 1,
                 )
             )
+            if default_num_draft_tokens and bool(
+                getattr(self.dflash_config, "is_dflash2", False)
+            ):
+                self.num_draft_tokens = dflash_block_size - 1
+            if bool(getattr(self.dflash_config, "is_dflash2", False)) and (
+                self.num_draft_tokens + 1 != dflash_block_size
+            ):
+                raise ValueError(
+                    "Qwen3.5 DFlash2 export must retain the checkpoint's full "
+                    f"anchor+draft block: proposals={self.num_draft_tokens}, "
+                    f"block_size={dflash_block_size}"
+                )
             if self.num_draft_tokens + 1 > dflash_block_size:
                 raise ValueError(
                     "Qwen3.5 DFlash num_draft_tokens exceeds checkpoint "

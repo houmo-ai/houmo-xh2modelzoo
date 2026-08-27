@@ -167,6 +167,7 @@ def build_qwen35_spec_decode_contract(
             if hasattr(flash_attention, "get")
             else getattr(flash_attention, "enable", False)
         )
+        is_dflash2 = bool(getattr(draft_config, "is_dflash2", False))
         contract.update(
             draft_context_onnx=context_path,
             dflash_draft_context_onnx=context_path,
@@ -176,7 +177,19 @@ def build_qwen35_spec_decode_contract(
             dflash_draft_decode_onnx=decode_path,
         )
         contract["draft"] = {
-            "abi": ("qwen_dflash_paged_shared_v3" if flash_attention_enabled else "qwen_dflash_v1"),
+            "abi": (
+                (
+                    "qwen_dflash2_paged_shared_v1"
+                    if flash_attention_enabled
+                    else "qwen_dflash2_v1"
+                )
+                if is_dflash2
+                else (
+                    "qwen_dflash_paged_shared_v3"
+                    if flash_attention_enabled
+                    else "qwen_dflash_v1"
+                )
+            ),
             "context_hmonnx": context_path,
             "context_decode_hmonnx": context_decode_path,
             "decode_hmonnx": decode_path,
@@ -184,6 +197,29 @@ def build_qwen35_spec_decode_contract(
             "cache_binding": "private_draft",
             "noise_token_id": noise_token_id,
         }
+        if is_dflash2:
+            contract["draft"].update(
+                architecture="DFlash2DraftModel",
+                block_size=int(draft_config.block_size),
+                conv_kernel_size=int(draft_config.conv_kernel_size),
+                conv_group_size=int(draft_config.conv_group_size),
+                selector_rank=int(draft_config.selector_rank),
+                selector_top_k=int(draft_config.selector_top_k),
+                sliding_window=int(draft_config.sliding_window),
+                is_causal=bool(getattr(draft_config, "is_causal", False)),
+                input_embedding_scale=float(draft_config.input_embedding_scale),
+                output_multiplier=float(draft_config.output_multiplier),
+                final_logit_softcapping=draft_config.final_logit_softcapping,
+                activation_residual_scale=float(
+                    draft_config.activation_residual_scale
+                ),
+                selector_scheme="precomputed_kxk_v1",
+                decode_outputs=[
+                    "candidate_ids",
+                    "selector_first_scores",
+                    "selector_transition_scores",
+                ],
+            )
         if flash_attention_enabled:
             contract["draft"]["page_cache_block_size"] = 64
     return contract
@@ -565,6 +601,122 @@ def _resolve_qwen_export_pad_token_id(hf_model_dir: str | Path) -> int | None:
     return None
 
 
+def _populate_qwen_export_runtime_model_config(
+    hf_model_dir: str | Path,
+    model_config: Any,
+) -> bool:
+    """Resolve preprocessor fields that are normally assigned by wrap hooks."""
+
+    config_path = Path(hf_model_dir) / "config.json"
+    if not config_path.is_file():
+        return False
+    hf_config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    populated = False
+    for field in (
+        "image_token_id",
+        "video_token_id",
+        "vision_start_token_id",
+        "vision_end_token_id",
+    ):
+        value = hf_config.get(field)
+        if type(value) is int:
+            if isinstance(model_config, dict):
+                model_config[field] = value
+            else:
+                setattr(model_config, field, value)
+            populated = True
+
+    vision_config = hf_config.get("vision_config")
+    if isinstance(vision_config, dict):
+        spatial_merge_size = vision_config.get("spatial_merge_size")
+        if type(spatial_merge_size) is int and spatial_merge_size > 0:
+            if isinstance(model_config, dict):
+                model_config["spatial_merge_size"] = spatial_merge_size
+            else:
+                model_config.spatial_merge_size = spatial_merge_size
+            populated = True
+    return populated
+
+
+def _populate_qwen_export_kv_cache_config(
+    hf_model_dir: str | Path,
+    kv_cache_config: KVCacheWithLinearConfig,
+    *,
+    context_max_length: int,
+    only_first_block: bool = False,
+) -> bool:
+    """Populate the hybrid cache ABI before export metadata is snapshotted.
+
+    Qwen3.5 creates ``golden_meta_info.json`` before ``_wraped_post`` runs.
+    Leaving the constructor sentinels in that early snapshot makes the graph
+    loadable by the offline runner, but prevents vLLM-Merak from allocating and
+    validating the fused recurrent cache.  Every required dimension is already
+    part of the checkpoint's text config, so resolve the same contract without
+    loading model weights.
+    """
+
+    config_path = Path(hf_model_dir) / "config.json"
+    if not config_path.is_file():
+        return False
+
+    root_config = json.loads(config_path.read_text(encoding="utf-8"))
+    text_config = root_config.get("text_config", root_config)
+    if not isinstance(text_config, dict):
+        return False
+
+    raw_layer_types = text_config.get("layer_types")
+    if not isinstance(raw_layer_types, list) or not raw_layer_types:
+        return False
+    layer_types = list(raw_layer_types)
+    if only_first_block:
+        try:
+            first_full_attention = layer_types.index("full_attention")
+        except ValueError:
+            return False
+        layer_types = layer_types[: first_full_attention + 1]
+
+    full_attention_layers = layer_types.count("full_attention")
+    linear_attention_layers = layer_types.count("linear_attention")
+    if full_attention_layers <= 0 or linear_attention_layers <= 0:
+        return False
+
+    required_fields = (
+        "num_key_value_heads",
+        "head_dim",
+        "linear_num_key_heads",
+        "linear_key_head_dim",
+        "linear_num_value_heads",
+        "linear_value_head_dim",
+        "linear_conv_kernel_dim",
+    )
+    values: dict[str, int] = {}
+    for field in required_fields:
+        value = text_config.get(field)
+        if type(value) is not int or value <= 0:
+            return False
+        values[field] = value
+
+    kv_cache_config.num_layers = full_attention_layers
+    kv_cache_config.kv_cache_shape = [
+        1,
+        values["num_key_value_heads"],
+        int(context_max_length),
+        values["head_dim"],
+    ]
+
+    linear_config = kv_cache_config.linear_kv_cache_config
+    key_dim = values["linear_num_key_heads"] * values["linear_key_head_dim"]
+    value_dim = values["linear_num_value_heads"] * values["linear_value_head_dim"]
+    linear_config.conv_dim = key_dim * 2 + value_dim
+    linear_config.conv_kernel_size = values["linear_conv_kernel_dim"]
+    linear_config.num_v_heads = values["linear_num_value_heads"]
+    linear_config.head_k_dim = values["linear_key_head_dim"]
+    linear_config.head_v_dim = values["linear_value_head_dim"]
+    linear_config.num_layers = linear_attention_layers
+    return True
+
+
 @register_llm_model("Qwen3_5ForConditionalGeneration")
 class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
     HF_MODEL_CLS = XHQwen3_5ForConditionalGeneration
@@ -605,6 +757,16 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             # Match _wraped_post even if tokenizer loading previously installed
             # a different tokenizer-level padding id.
             self.pad_token_id = pad_token_id
+        _populate_qwen_export_runtime_model_config(
+            self.hf_model_dir,
+            self.config,
+        )
+        _populate_qwen_export_kv_cache_config(
+            self.hf_model_dir,
+            self.kvcache_config,
+            context_max_length=self.config.context_max_length,
+            only_first_block=bool(self.config.only_first_block),
+        )
         meta_info = super().create_export_metadata(output_dir)
         _ensure_gptq_desc_act_default(Path(output_dir) / meta_info.hf_config)
         return meta_info

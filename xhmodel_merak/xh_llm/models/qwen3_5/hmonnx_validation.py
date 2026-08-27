@@ -634,6 +634,13 @@ def _load_merak_spec_runtime(
         meta_info,
         spec_mode=spec_mode,
     )
+    spec_decode_contract = meta_info.get("spec_decode") or {}
+    draft_contract = spec_decode_contract.get("draft") or {}
+    dflash_sliding_window = (
+        draft_contract.get("sliding_window")
+        if spec_mode == "dflash"
+        else None
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(str(hf_model_config_dir))
     token_embedding = _load_token_embedding(token_embedding_file).to(dtype=_parse_dtype(dtype))
@@ -649,6 +656,7 @@ def _load_merak_spec_runtime(
         block_size=block_size,
         hidden_output_name=hidden_output_name,
         dflash_noise_token_id=dflash_noise_token_id,
+        dflash_sliding_window=dflash_sliding_window,
         max_context_tokens=_infer_max_context_tokens(meta_info),
         auto_offload=not disable_auto_offload,
         auto_offload_max_memory=_parse_auto_offload_max_memory(auto_offload_max_memory),

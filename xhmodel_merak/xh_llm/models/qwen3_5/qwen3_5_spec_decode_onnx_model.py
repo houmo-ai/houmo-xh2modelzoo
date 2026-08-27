@@ -76,6 +76,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         block_size: int = 4,
         hidden_output_name: str = "post_norm_hidden",
         dflash_noise_token_id: Optional[int] = None,
+        dflash_sliding_window: Optional[int] = None,
         max_context_tokens: Optional[int] = None,
         auto_offload: bool = True,
         auto_offload_max_memory: Optional[Dict[Union[int, str], Union[int, str]]] = None,
@@ -118,6 +119,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         self.spec_decode_mode = spec_decode_mode
         self.block_size = block_size
         self.hidden_output_name = hidden_output_name
+        self._dflash_sliding_window = (
+            int(dflash_sliding_window)
+            if dflash_sliding_window is not None
+            else None
+        )
         self._dflash_noise_mask_token_id: Optional[int] = None
         if self.spec_decode_mode == "dflash":
             if dflash_noise_token_id is None or isinstance(
@@ -145,6 +151,19 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         self.draft_context_decode_session: Optional[HMONNXSession] = None
         self.draft_decode_session: Optional[HMONNXSession] = None
         self._create_draft_sessions()
+        self._is_dflash2 = bool(
+            self.draft_decode_session is not None
+            and "candidate_ids"
+            in set(self.draft_decode_session.get_output_names())
+        )
+        if self._is_dflash2 and (
+            self._dflash_sliding_window is None
+            or self._dflash_sliding_window <= 0
+        ):
+            raise ValueError(
+                "Qwen3.5 DFlash2 runtime requires a positive "
+                "dflash_sliding_window from the exported assistant contract"
+            )
         self._mtp_cache_state: Optional[Dict[str, torch.Tensor]] = None
         self._dflash_cache_state: Optional[Dict[str, torch.Tensor]] = None
 
@@ -558,6 +577,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         noise_embedding: torch.Tensor,
         past_seq_len: int,
         cache_state: Dict[str, torch.Tensor],
+        anchor_token_id: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         if self.draft_decode_session is None:
             raise RuntimeError("DFlash decode session is not available.")
@@ -574,17 +594,6 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             dtype=torch.int32,
             device=self.device,
         )
-        attn_mask = torch.full(
-            (
-                batch_size,
-                next(iter(cache_state.values())).shape[2] if cache_state else self.max_context_tokens,
-            ),
-            _DFLASH_ATTN_MASK_FILL_VALUE,
-            dtype=self._dtype,
-            device=self.device,
-        )
-        draft_visible_length = min(attn_mask.shape[1], int(past_seq_len) + int(noise_embedding.shape[1]))
-        attn_mask[:, :draft_visible_length] = 0
         feed: Dict[str, torch.Tensor] = {}
         for name in self.draft_decode_session.get_input_names():
             if name == "noise_embedding":
@@ -593,8 +602,81 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                 feed[name] = past_seq_length
             elif name in ("current_input_length", "current_length"):
                 feed[name] = current_input_length
+            elif name == "anchor_token_id":
+                input_info = self.draft_decode_session.get_input(name)
+                feed[name] = anchor_token_id.reshape(batch_size).to(
+                    device=self.device,
+                    dtype=input_info.dtype,
+                )
             elif name == "attn_mask":
+                input_info = self.draft_decode_session.get_input(name)
+                mask_shape = tuple(int(dim) for dim in input_info.shape)
+                attn_mask = torch.full(
+                    mask_shape,
+                    _DFLASH_ATTN_MASK_FILL_VALUE,
+                    dtype=input_info.dtype,
+                    device=self.device,
+                )
+                valid_length = min(
+                    int(mask_shape[-1]),
+                    int(past_seq_len) + int(noise_embedding.shape[1]),
+                )
+                if len(mask_shape) == 2:
+                    attn_mask[:, :valid_length] = 0
+                elif len(mask_shape) == 3:
+                    window = int(self._dflash_sliding_window or 0)
+                    key_positions = torch.arange(
+                        mask_shape[-1],
+                        device=self.device,
+                    ).reshape(1, 1, -1)
+                    query_positions = (
+                        int(past_seq_len)
+                        + torch.arange(
+                            mask_shape[1],
+                            device=self.device,
+                        ).reshape(1, -1, 1)
+                    )
+                    visible = (
+                        (key_positions < valid_length)
+                        & (query_positions - key_positions < window)
+                        & (key_positions - query_positions < window)
+                    )
+                    attn_mask.masked_fill_(visible, 0)
+                else:
+                    raise RuntimeError(
+                        "DFlash attention mask input must be rank 2 or 3, "
+                        f"got shape={mask_shape}"
+                    )
                 feed[name] = attn_mask
+            elif name == "query_kv_range_abs":
+                input_info = self.draft_decode_session.get_input(name)
+                range_shape = tuple(int(dim) for dim in input_info.shape)
+                if len(range_shape) != 3 or range_shape[-1] != 2:
+                    raise RuntimeError(
+                        "DFlash2 query_kv_range_abs must have shape [B, Q, 2], "
+                        f"got {range_shape}"
+                    )
+                window = int(self._dflash_sliding_window or 0)
+                valid_length = min(
+                    next(iter(cache_state.values())).shape[2]
+                    if cache_state
+                    else int(self.max_context_tokens),
+                    int(past_seq_len) + int(noise_embedding.shape[1]),
+                )
+                query_positions = (
+                    int(past_seq_len)
+                    + torch.arange(
+                        range_shape[1],
+                        dtype=input_info.dtype,
+                        device=self.device,
+                    )
+                )
+                starts = torch.clamp(query_positions - window + 1, min=0)
+                ends = torch.clamp(
+                    query_positions + window,
+                    max=int(valid_length),
+                )
+                feed[name] = torch.stack((starts, ends), dim=-1).unsqueeze(0)
             elif name in cache_state:
                 feed[name] = cache_state[name]
             else:
@@ -624,8 +706,48 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         noise_embedding = self._embed_token_ids(block_ids)
         draft_output_map = self._run_draft_session(
             self.draft_decode_session,
-            self._build_dflash_decode_feed(noise_embedding, past_seq_len, cache_state),
+            self._build_dflash_decode_feed(
+                noise_embedding,
+                past_seq_len,
+                cache_state,
+                next_tok,
+            ),
         )
+        candidate_ids = draft_output_map.get("candidate_ids")
+        if candidate_ids is not None:
+            first_scores = draft_output_map.get("selector_first_scores")
+            transition_scores = draft_output_map.get(
+                "selector_transition_scores"
+            )
+            if first_scores is None or transition_scores is None:
+                raise RuntimeError(
+                    "DFlash2 decode graph must return candidate_ids, "
+                    "selector_first_scores, and selector_transition_scores"
+                )
+            selected_index = torch.argmax(first_scores.float(), dim=-1)
+            draft_tokens = [
+                candidate_ids[:, 0].gather(
+                    -1,
+                    selected_index.unsqueeze(-1),
+                )
+            ]
+            for step in range(transition_scores.shape[1]):
+                row = transition_scores[:, step].gather(
+                    1,
+                    selected_index.reshape(-1, 1, 1).expand(
+                        -1,
+                        1,
+                        transition_scores.shape[-1],
+                    ),
+                )[:, 0]
+                selected_index = torch.argmax(row.float(), dim=-1)
+                draft_tokens.append(
+                    candidate_ids[:, step + 1].gather(
+                        -1,
+                        selected_index.unsqueeze(-1),
+                    )
+                )
+            return draft_tokens[: self.block_size - 1]
         draft_logits = draft_output_map["logits"]
         draft_tokens = []
         max_positions = min(self.block_size + 1, draft_logits.shape[1])

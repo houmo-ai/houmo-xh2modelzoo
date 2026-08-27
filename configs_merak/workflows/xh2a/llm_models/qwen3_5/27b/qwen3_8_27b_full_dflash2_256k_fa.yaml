@@ -1,0 +1,74 @@
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  rotation: false
+  calibration:
+    dataset: NeelNanda/pile-10k
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    trust_remote_code: true
+    low_gpu_mem_usage: true
+  seed: 42
+  quant_nontext_module: false
+  sym: true
+  iters: 200
+  format: auto_gptq
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Qwen3_5ForConditionalGeneration
+    # Placeholder overridden with the pre-quantized AutoRound checkpoint.
+    hf_model: null
+    model_name: qwen3_8_27b
+    context_max_length: 262144
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_attention_mode: auto
+    linear_chunk_size: 64
+    flash_attention:
+      enable: true
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      s_bits: 8
+      p_bits: 8
+    split_conv_cache: true
+    normalize_force_fp32: false
+    use_manual_depthwise_conv1d: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      max_size_w: 448
+      max_size_h: 448
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false
+    spec_decode_mode: dflash
+    num_draft_tokens: 7
+    spec_draft_head_weight_bits: 4
+    dflash_config:
+      hf_model: weights/Qwen3.8-27B-DFlash2
+      # The assistant checkpoint is BF16-trained; FP16 overflows in its
+      # two-tap dynamic-convolution path.
+      dtype: bfloat16
+      # HMONNX graph inputs are FP16. Keep residuals divided by this exact
+      # power of two so the BF16-trained assistant remains finite after export.
+      activation_residual_scale: 128
+      # Architecture, block width, selector, conv, and target layers all
+      # come from the assistant checkpoint.

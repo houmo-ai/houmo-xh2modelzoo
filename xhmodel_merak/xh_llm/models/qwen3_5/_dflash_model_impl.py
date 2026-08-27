@@ -28,6 +28,7 @@ It operates in two modes:
 """
 
 import json
+import math
 from pathlib import Path
 from typing import List, Mapping, Tuple
 
@@ -76,6 +77,7 @@ class DFlashCrossAttention(nn.Module):
         rope_theta: float,
         use_cache: bool,
         flash_attention: Mapping | None = None,
+        query_dependent_mask: bool = False,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -83,6 +85,7 @@ class DFlashCrossAttention(nn.Module):
         self.head_dim = head_dim
         self.num_kv_groups = num_attention_heads // num_key_value_heads
         self.use_cache = use_cache
+        self.query_dependent_mask = query_dependent_mask
         flash_attention = flash_attention or {}
         self.use_flash_attention = bool(flash_attention.get("enable", False))
         if self.use_flash_attention:
@@ -165,6 +168,7 @@ class DFlashCrossAttention(nn.Module):
         target_key_cache: Tensor,
         target_value_cache: Tensor,
         attn_mask: Tensor | None,
+        query_kv_range_abs: Tensor | None = None,
     ) -> Tensor:
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_norm(
@@ -203,6 +207,7 @@ class DFlashCrossAttention(nn.Module):
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
                 kv_valid_length=past_seq_length + current_input_length,
+                query_kv_range_abs=query_kv_range_abs,
             )
         else:
             if attn_mask is None:
@@ -211,9 +216,14 @@ class DFlashCrossAttention(nn.Module):
             key_states = torch.repeat_interleave(combined_key_states.transpose(2, 3), self.num_kv_groups, dim=1)
             value_states = torch.repeat_interleave(combined_value_states, self.num_kv_groups, dim=1)
             attn_weights = torch.matmul(query_states, key_states)
+            expanded_attn_mask = (
+                attn_mask.unsqueeze(1)
+                if self.query_dependent_mask
+                else attn_mask.unsqueeze(1).unsqueeze(1)
+            )
             attn_weights = self.masked_add(
                 attn_weights,
-                attn_mask.unsqueeze(1).unsqueeze(1),
+                expanded_attn_mask,
             )
             attn_weights = F.softmax(
                 attn_weights,
@@ -225,15 +235,252 @@ class DFlashCrossAttention(nn.Module):
         return self.o_proj(attn_output)
 
 
+def _validate_activation_residual_scale(value: float) -> float:
+    """Validate the exact power-of-two scale used by the FP16 graph rewrite."""
+
+    value = float(value)
+    if (
+        not math.isfinite(value)
+        or value < 1.0
+        or math.frexp(value)[0] != 0.5
+    ):
+        raise ValueError(
+            "DFlash2 activation_residual_scale must be a finite power of two "
+            f"greater than or equal to 1, got {value}"
+        )
+    return value
+
+
 class DFlashMLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        *,
+        branch_output_scale: float = 1.0,
+    ):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.branch_output_scale_inverse = 1.0 / _validate_activation_residual_scale(
+            branch_output_scale
+        )
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        activation = F.silu(self.gate_proj(x)) * self.up_proj(x)
+        # DFlash2's first MLP down projection can exceed FP16's finite range.
+        # Scaling before the linear (and its following homogeneous convolution)
+        # is algebraically equivalent to scaling the completed branch, but
+        # prevents the intermediate accumulation from overflowing.
+        if self.branch_output_scale_inverse != 1.0:
+            activation = activation * self.branch_output_scale_inverse
+        return self.down_proj(activation)
+
+
+def _grouped_dynamic_convolve(
+    hidden_states: Tensor,
+    dynamic_kernel: Tensor,
+    base_kernel: Tensor | nn.ParameterList,
+    group_size: int,
+    num_groups: int,
+    kernel_size: int,
+) -> Tensor:
+    """Apply DFlash2's causal grouped depthwise convolution to a full block.
+
+    Position zero is the anchor row that is already present in
+    ``hidden_states``. Its missing predecessor is zero padded; position one
+    therefore consumes the anchor through tap one. This is the exact reference
+    boundary rule for ``[anchor, mask, ..., mask]`` and deliberately computes
+    all rows, including the anchor row.
+    """
+
+    batch_size = hidden_states.shape[0]
+    block_size = hidden_states.shape[1]
+    hidden_size = num_groups * group_size
+    grouped_hidden = hidden_states.reshape(
+        batch_size,
+        block_size,
+        num_groups,
+        group_size,
+    )
+    dynamic_kernel = dynamic_kernel.reshape(
+        batch_size,
+        block_size,
+        kernel_size,
+        num_groups,
+        1,
+    )
+    output = torch.zeros_like(grouped_hidden)
+    for tap in range(kernel_size):
+        if tap == 0:
+            shifted = grouped_hidden
+        else:
+            shifted = F.pad(
+                grouped_hidden[:, :-tap],
+                (0, 0, 0, 0, tap, 0),
+            )
+        base = base_kernel[tap]
+        if isinstance(base_kernel, Tensor):
+            base = base.reshape(
+                1,
+                1,
+                num_groups,
+                group_size,
+            )
+        output = output + (base + dynamic_kernel[:, :, tap]) * shifted
+    return output.reshape(batch_size, block_size, hidden_size)
+
+
+class GroupedDynamicCausalConv(nn.Module):
+    """Two-sided DFlash2 dynamic convolution around one transformer branch."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        kernel_size: int,
+        group_size: int,
+    ) -> None:
+        super().__init__()
+        if hidden_size % group_size:
+            raise ValueError(
+                f"DFlash2 conv_group_size={group_size} must divide hidden_size={hidden_size}"
+            )
+        self.kernel_size = kernel_size
+        self.group_size = group_size
+        self.hidden_size = hidden_size
+        self.num_groups = hidden_size // group_size
+        self.base_kernel = nn.Parameter(
+            torch.empty(2, kernel_size, hidden_size)
+        )
+        self.kernel_projection = nn.Linear(
+            hidden_size,
+            2 * kernel_size * self.num_groups,
+            bias=False,
+        )
+
+    def prepare_for_export(self) -> None:
+        """Store each fixed branch/tap kernel in its exported shape.
+
+        Checkpoints use one ``[2, K, H]`` parameter.  Keeping that layout
+        through checkpoint loading preserves the upstream state-dict ABI;
+        splitting it once while building the export wrapper makes every
+        fixed branch/tap a direct initializer and avoids exporting constant
+        Gather/Reshape chains.
+        """
+
+        if isinstance(self.base_kernel, nn.ModuleList):
+            return
+
+        source_kernel = self.base_kernel
+        prepared_kernel = nn.ModuleList(
+            [
+                nn.ParameterList(
+                    [
+                        nn.Parameter(
+                            source_kernel[branch, tap]
+                            .reshape(
+                                1,
+                                1,
+                                self.num_groups,
+                                self.group_size,
+                            )
+                            .detach()
+                            .clone(),
+                            requires_grad=source_kernel.requires_grad,
+                        )
+                        for tap in range(self.kernel_size)
+                    ]
+                )
+                for branch in range(2)
+            ]
+        )
+        del self.base_kernel
+        self.base_kernel = prepared_kernel
+
+    def prepare(self, hidden_states: Tensor) -> Tuple[Tensor, Tensor]:
+        dynamic_kernel = self.kernel_projection(hidden_states).reshape(
+            hidden_states.shape[0],
+            hidden_states.shape[1],
+            2,
+            self.kernel_size,
+            self.num_groups,
+        )
+        pre_branch = _grouped_dynamic_convolve(
+            hidden_states,
+            dynamic_kernel[..., 0, :, :],
+            self.base_kernel[0],
+            self.group_size,
+            self.num_groups,
+            self.kernel_size,
+        )
+        return pre_branch, dynamic_kernel[..., 1, :, :]
+
+    def finish(self, hidden_states: Tensor, dynamic_kernel: Tensor) -> Tensor:
+        return _grouped_dynamic_convolve(
+            hidden_states,
+            dynamic_kernel,
+            self.base_kernel[1],
+            self.group_size,
+            self.num_groups,
+            self.kernel_size,
+        )
+
+
+class DFlash2CandidateSelector(nn.Module):
+    """Precompute Scheme-B selector scores for a fixed-length path walk."""
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        vocab_size: int,
+        rank: int,
+        top_k: int,
+    ) -> None:
+        super().__init__()
+        self.top_k = top_k
+        self.predecessor_codebook = nn.Embedding(vocab_size, rank)
+        self.successor_codebook = nn.Embedding(vocab_size, rank)
+        self.hidden_projection = nn.Linear(hidden_size, rank, bias=False)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        logits: Tensor,
+        anchor_token_id: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        unary_logits, candidate_ids = torch.topk(
+            logits,
+            self.top_k,
+            dim=-1,
+            # XH2A's HMONNX TopK requires sorted=1. Sorting only applies the
+            # same per-position permutation to ids, unary scores, and both
+            # selector axes; Scheme B's token path and proposal distribution
+            # are therefore invariant to it.
+            sorted=True,
+        )
+        projected_hidden = self.hidden_projection(hidden_states)
+        predecessor = self.predecessor_codebook(candidate_ids)
+        successor = self.successor_codebook(candidate_ids)
+
+        anchor = self.predecessor_codebook(anchor_token_id)
+        first_pair_score = torch.sum(
+            (anchor * projected_hidden[:, 0]).unsqueeze(1) * successor[:, 0],
+            dim=-1,
+        )
+        first_score = unary_logits[:, 0] + first_pair_score
+
+        gated_predecessor = (
+            predecessor[:, :-1]
+            * projected_hidden[:, 1:].unsqueeze(2)
+        )
+        transition_score = torch.matmul(
+            gated_predecessor,
+            successor[:, 1:].transpose(-1, -2),
+        )
+        transition_score = transition_score + unary_logits[:, 1:].unsqueeze(2)
+        return candidate_ids, first_score, transition_score
 
 
 class DFlashDecoderLayer(nn.Module):
@@ -251,8 +498,22 @@ class DFlashDecoderLayer(nn.Module):
         rope_theta: float,
         use_cache: bool,
         flash_attention: Mapping | None = None,
+        conv_kernel_size: int | None = None,
+        conv_group_size: int | None = None,
+        input_residual_scale: float = 1.0,
+        output_residual_scale: float = 1.0,
     ):
         super().__init__()
+        input_residual_scale = _validate_activation_residual_scale(
+            input_residual_scale
+        )
+        output_residual_scale = _validate_activation_residual_scale(
+            output_residual_scale
+        )
+        # The tensor carried between layers represents h / residual_scale.
+        # RMSNorm is scale invariant apart from its negligible epsilon term.
+        self.attention_branch_scale = 1.0 / input_residual_scale
+        self.residual_rescale = input_residual_scale / output_residual_scale
         self.self_attn = DFlashCrossAttention(
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
@@ -264,10 +525,31 @@ class DFlashDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             use_cache=use_cache,
             flash_attention=flash_attention,
+            query_dependent_mask=conv_kernel_size is not None,
         )
         self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
-        self.mlp = DFlashMLP(hidden_size, intermediate_size)
+        self.mlp = DFlashMLP(
+            hidden_size,
+            intermediate_size,
+            branch_output_scale=output_residual_scale,
+        )
+        if conv_kernel_size is None:
+            self.attention_conv = None
+            self.mlp_conv = None
+        else:
+            if conv_group_size is None:
+                raise ValueError("DFlash2 conv_group_size is required with conv_kernel_size")
+            self.attention_conv = GroupedDynamicCausalConv(
+                hidden_size,
+                conv_kernel_size,
+                conv_group_size,
+            )
+            self.mlp_conv = GroupedDynamicCausalConv(
+                hidden_size,
+                conv_kernel_size,
+                conv_group_size,
+            )
 
     def forward_decode(
         self,
@@ -277,9 +559,15 @@ class DFlashDecoderLayer(nn.Module):
         target_key_cache: Tensor,
         target_value_cache: Tensor,
         attn_mask: Tensor | None,
+        query_kv_range_abs: Tensor | None = None,
     ) -> Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        attention_dynamic_kernel = None
+        if self.attention_conv is not None:
+            hidden_states, attention_dynamic_kernel = self.attention_conv.prepare(
+                hidden_states
+            )
         hidden_states = self.self_attn.forward_decode(
             hidden_states,
             past_seq_length=past_seq_length,
@@ -287,10 +575,29 @@ class DFlashDecoderLayer(nn.Module):
             target_key_cache=target_key_cache,
             target_value_cache=target_value_cache,
             attn_mask=attn_mask,
+            query_kv_range_abs=query_kv_range_abs,
         )
+        if self.attention_conv is not None:
+            hidden_states = self.attention_conv.finish(
+                hidden_states,
+                attention_dynamic_kernel,
+            )
+        if self.attention_branch_scale != 1.0:
+            hidden_states = hidden_states * self.attention_branch_scale
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states = self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        mlp_dynamic_kernel = None
+        if self.mlp_conv is not None:
+            hidden_states, mlp_dynamic_kernel = self.mlp_conv.prepare(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        if self.mlp_conv is not None:
+            hidden_states = self.mlp_conv.finish(
+                hidden_states,
+                mlp_dynamic_kernel,
+            )
+        if self.residual_rescale != 1.0:
+            residual = residual * self.residual_rescale
         return residual + hidden_states
 
 
@@ -316,6 +623,17 @@ class DFlashModel(nn.Module):
         max_sequence_length: int,
         rope_theta: float = 10_000_000.0,
         flash_attention: Mapping | None = None,
+        architecture: str = "DFlashDraftModel",
+        block_size: int = 16,
+        conv_kernel_size: int | None = None,
+        conv_group_size: int | None = None,
+        selector_rank: int | None = None,
+        selector_top_k: int | None = None,
+        sliding_window: int | None = None,
+        input_embedding_scale: float = 1.0,
+        output_multiplier: float = 1.0,
+        final_logit_softcapping: float | None = None,
+        activation_residual_scale: float | None = None,
     ):
         super().__init__()
         if mode not in {"context", "decode"}:
@@ -330,6 +648,44 @@ class DFlashModel(nn.Module):
         self.input_sequence_length = input_sequence_length
         self.max_sequence_length = max_sequence_length
         self.target_layer_ids = target_layer_ids
+        self.architecture = architecture
+        self.is_dflash2 = architecture == "DFlash2DraftModel"
+        if activation_residual_scale is None:
+            activation_residual_scale = 128.0 if self.is_dflash2 else 1.0
+        self.activation_residual_scale = _validate_activation_residual_scale(
+            activation_residual_scale
+        )
+        if not self.is_dflash2 and self.activation_residual_scale != 1.0:
+            raise ValueError(
+                "Legacy DFlash does not support activation_residual_scale != 1"
+            )
+        self.block_size = block_size
+        self.sliding_window = sliding_window
+        self.input_embedding_scale = input_embedding_scale
+        self.output_multiplier = output_multiplier
+        self.final_logit_softcapping = final_logit_softcapping
+
+        if self.is_dflash2:
+            if input_sequence_length != block_size and mode == "decode":
+                raise ValueError(
+                    "DFlash2 decode must retain the checkpoint's complete "
+                    f"block: input_sequence_length={input_sequence_length}, block_size={block_size}"
+                )
+            missing_dflash2 = {
+                "conv_kernel_size": conv_kernel_size,
+                "conv_group_size": conv_group_size,
+                "selector_rank": selector_rank,
+                "selector_top_k": selector_top_k,
+                "sliding_window": sliding_window,
+            }
+            missing_names = [
+                name for name, value in missing_dflash2.items() if value is None
+            ]
+            if missing_names:
+                raise ValueError(
+                    "DFlash2 checkpoint is missing required fields: "
+                    + ", ".join(missing_names)
+                )
 
         self.fc = nn.Linear(len(target_layer_ids) * hidden_size, hidden_size, bias=False)
         self.hidden_norm = RMSNorm(hidden_size, rms_norm_eps)
@@ -351,12 +707,34 @@ class DFlashModel(nn.Module):
                     # query K/V after the valid target prefix.
                     use_cache=True,
                     flash_attention=flash_attention,
+                    conv_kernel_size=(conv_kernel_size if self.is_dflash2 else None),
+                    conv_group_size=(conv_group_size if self.is_dflash2 else None),
+                    input_residual_scale=(
+                        1.0
+                        if not self.is_dflash2 or layer_idx == 0
+                        else self.activation_residual_scale
+                    ),
+                    output_residual_scale=(
+                        self.activation_residual_scale
+                        if self.is_dflash2
+                        else 1.0
+                    ),
                 )
-                for _ in range(num_hidden_layers)
+                for layer_idx in range(num_hidden_layers)
             ]
         )
         self.norm = RMSNorm(hidden_size, rms_norm_eps)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+        self.candidate_selector = (
+            DFlash2CandidateSelector(
+                hidden_size=hidden_size,
+                vocab_size=vocab_size,
+                rank=int(selector_rank),
+                top_k=int(selector_top_k),
+            )
+            if self.is_dflash2
+            else None
+        )
 
     def _split_cache_tensors(self, cache_tensors: Tuple[Tensor, ...]) -> Tuple[List[Tensor], List[Tensor]]:
         if len(cache_tensors) != self.num_hidden_layers * 2:
@@ -364,6 +742,19 @@ class DFlashModel(nn.Module):
         key_caches = list(cache_tensors[: self.num_hidden_layers])
         value_caches = list(cache_tensors[self.num_hidden_layers :])
         return key_caches, value_caches
+
+    def prepare_for_export(self) -> None:
+        """Materialize DFlash2-only static layouts before graph capture."""
+
+        if not self.is_dflash2:
+            return
+        for layer in self.layers:
+            if layer.attention_conv is None or layer.mlp_conv is None:
+                raise RuntimeError(
+                    "DFlash2 export requires both grouped convolution branches"
+                )
+            layer.attention_conv.prepare_for_export()
+            layer.mlp_conv.prepare_for_export()
 
     def forward_context(
         self,
@@ -394,10 +785,18 @@ class DFlashModel(nn.Module):
         past_seq_length: Tensor,
         current_input_length: Tensor,
         attn_mask: Tensor | None,
+        anchor_token_id: Tensor | None,
+        query_kv_range_abs: Tensor | None,
         *cache_tensors: Tensor,
-    ) -> Tensor:
+    ) -> Tensor | Tuple[Tensor, Tensor, Tensor]:
         past_key_caches, past_value_caches = self._split_cache_tensors(cache_tensors)
+        # DFlash checkpoints reuse the target token embedding table. Some
+        # checkpoints train the draft backbone with an explicit embedding
+        # scale, so bake that scale into the exported graph rather than making
+        # every runtime reproduce an otherwise-unadvertised preprocessing step.
         hidden_states = noise_embedding
+        if self.input_embedding_scale != 1.0:
+            hidden_states = hidden_states * self.input_embedding_scale
         for idx, layer in enumerate(self.layers):
             hidden_states = layer.forward_decode(
                 hidden_states,
@@ -406,24 +805,27 @@ class DFlashModel(nn.Module):
                 target_key_cache=past_key_caches[idx],
                 target_value_cache=past_value_caches[idx],
                 attn_mask=attn_mask,
+                query_kv_range_abs=query_kv_range_abs,
             )
-        return self.lm_head(self.norm(hidden_states))
-
-    def forward_decode_flash(
-        self,
-        noise_embedding: Tensor,
-        past_seq_length: Tensor,
-        current_input_length: Tensor,
-        *cache_tensors: Tensor,
-    ) -> Tensor:
-        """FlashAttention ABI without the legacy dense attention mask input."""
-
-        return self.forward_decode(
-            noise_embedding,
-            past_seq_length,
-            current_input_length,
-            None,
-            *cache_tensors,
+        normalized_hidden = self.norm(hidden_states)
+        if not self.is_dflash2:
+            return self.lm_head(normalized_hidden)
+        if anchor_token_id is None:
+            raise ValueError("DFlash2 decode requires anchor_token_id")
+        draft_hidden = normalized_hidden[:, 1:]
+        logits = self.lm_head(draft_hidden)
+        if self.output_multiplier != 1.0:
+            logits = logits * self.output_multiplier
+        if (
+            self.final_logit_softcapping is not None
+            and self.final_logit_softcapping > 0
+        ):
+            softcap = self.final_logit_softcapping
+            logits = torch.tanh(logits / softcap) * softcap
+        return self.candidate_selector(
+            draft_hidden,
+            logits,
+            anchor_token_id,
         )
 
     def forward(
@@ -470,6 +872,10 @@ class DFlashModel(nn.Module):
                 input19,
             )[: self.num_hidden_layers * 2]
             return self.forward_context(input0, input1, input2, *cache_inputs)
+        if self.is_dflash2:
+            raise RuntimeError(
+                "DFlash2 decode must be invoked through its named export adapter"
+            )
         if input3 is None:
             raise ValueError("DFlash decode requires attn_mask input.")
         cache_inputs = (
@@ -490,7 +896,15 @@ class DFlashModel(nn.Module):
             input18,
             input19,
         )[: self.num_hidden_layers * 2]
-        return self.forward_decode(input0, input1, input2, input3, *cache_inputs)
+        return self.forward_decode(
+            input0,
+            input1,
+            input2,
+            input3,
+            None,
+            None,
+            *cache_inputs,
+        )
 
     @staticmethod
     def from_pretrained(
@@ -503,15 +917,21 @@ class DFlashModel(nn.Module):
         max_pe_length: int,
         max_sequence_length: int,
         flash_attention: Mapping | None = None,
+        activation_residual_scale: float | None = None,
     ) -> "DFlashModel":
         from safetensors import safe_open
 
         with open(Path(dflash_model_dir) / "config.json", encoding="utf-8") as f:
             cfg = json.load(f)
 
-        target_layer_ids = cfg["dflash_config"]["target_layer_ids"]
+        draft_cfg = cfg["dflash_config"]
+        target_layer_ids = draft_cfg["target_layer_ids"]
         hidden_size = cfg["hidden_size"]
         head_dim = cfg.get("head_dim", hidden_size // cfg["num_attention_heads"])
+        architectures = cfg.get("architectures") or ["DFlashDraftModel"]
+        architecture = str(architectures[0])
+        is_dflash2 = architecture == "DFlash2DraftModel"
+        rope_parameters = cfg.get("rope_parameters") or {}
         model = DFlashModel(
             mode=mode,
             hidden_size=hidden_size,
@@ -527,12 +947,46 @@ class DFlashModel(nn.Module):
             input_sequence_length=input_sequence_length,
             max_pe_length=max_pe_length,
             max_sequence_length=max_sequence_length,
-            rope_theta=cfg.get("rope_theta", 10_000_000.0),
+            rope_theta=rope_parameters.get(
+                "rope_theta",
+                cfg.get("rope_theta", 10_000_000.0),
+            ),
             flash_attention=flash_attention,
+            architecture=architecture,
+            block_size=int(draft_cfg.get("block_size", cfg.get("block_size", 16))),
+            conv_kernel_size=(int(draft_cfg["conv_kernel_size"]) if is_dflash2 else None),
+            conv_group_size=(int(draft_cfg["conv_group_size"]) if is_dflash2 else None),
+            selector_rank=(int(draft_cfg["selector_rank"]) if is_dflash2 else None),
+            selector_top_k=(int(draft_cfg["selector_top_k"]) if is_dflash2 else None),
+            sliding_window=(int(cfg["sliding_window"]) if is_dflash2 else None),
+            input_embedding_scale=float(
+                draft_cfg.get(
+                    "input_embedding_scale",
+                    cfg.get("input_embedding_scale", 1.0),
+                )
+            ),
+            output_multiplier=float(
+                draft_cfg.get(
+                    "output_multiplier",
+                    cfg.get("output_multiplier", 1.0),
+                )
+            ),
+            final_logit_softcapping=draft_cfg.get(
+                "final_logit_softcapping",
+                cfg.get("final_logit_softcapping"),
+            ),
+            activation_residual_scale=activation_residual_scale,
         )
 
         with safe_open(str(Path(dflash_model_dir) / "model.safetensors"), framework="pt") as f:
             dflash_sd = {k: f.get_tensor(k).to(dtype) for k in f.keys()}
+        if is_dflash2:
+            for name in ("predecessor_codebook", "successor_codebook"):
+                checkpoint_name = f"candidate_selector.{name}"
+                if checkpoint_name in dflash_sd:
+                    dflash_sd[f"{checkpoint_name}.weight"] = dflash_sd.pop(
+                        checkpoint_name
+                    )
         missing, unexpected = model.load_state_dict(dflash_sd, strict=False)
         unexpected = [name for name in unexpected if not name.endswith(("cos_cached", "sin_cached"))]
         missing = [

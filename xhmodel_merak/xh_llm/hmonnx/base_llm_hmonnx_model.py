@@ -153,13 +153,31 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
         output_name = f"{input_path.stem}_page_attention_{digest}{input_path.suffix}"
         output_path = input_path.with_name(output_name)
+
+        def materialize_atomically(destination: Path) -> str:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+            try:
+                convert_to_page_attention(
+                    input_path,
+                    temporary_path,
+                    convert_unfused_sliding_kv_cache=(
+                        convert_unfused_sliding_kv_cache
+                    ),
+                )
+                temporary_path.replace(destination)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            return str(destination)
+
         try:
-            convert_to_page_attention(
-                input_path,
-                output_path,
-                convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
-            )
-            return str(output_path)
+            return materialize_atomically(output_path)
         except PermissionError:
             logger = get_xhquant_logger()
             logger.warning(
@@ -167,12 +185,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             )
 
         output_path = Path(tempfile.gettempdir()) / "xhmodel_merak_page_attention" / digest / output_name
-        convert_to_page_attention(
-            input_path,
-            output_path,
-            convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
-        )
-        return str(output_path)
+        return materialize_atomically(output_path)
 
     def _get_page_attention_modules(self, hmonnx_model: HMONNXModel) -> list[PageAttention]:
         session = hmonnx_model.hmonnx_session
