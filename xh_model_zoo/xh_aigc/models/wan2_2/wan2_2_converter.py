@@ -190,7 +190,13 @@ class Wan22Converter:
 
         return self._configure_noise_model(model, device=device, param_dtype=cfg.param_dtype)
 
-    def _build_resolved_float_pipeline(self, cfg, device_id: int = 0, rank: int = 0):
+    def _build_resolved_float_pipeline(
+        self,
+        cfg,
+        device_id: int = 0,
+        rank: int = 0,
+        load_all_models: bool = False,
+    ):
         device = torch.device(f"cuda:{device_id}")
         text_encoder_path = self._resolve_text_encoder_path()
         vae_path = self._resolve_vae_path()
@@ -210,15 +216,24 @@ class Wan22Converter:
         )
         vae.model = vae.model.to(cfg.param_dtype)
 
-        need_low_noise = "low_noise_model" in self.export_components or "low_noise_model" in self.golden_components
-        need_high_noise = "high_noise_model" in self.export_components or "high_noise_model" in self.golden_components
+        need_low_noise = (
+            load_all_models
+            or "low_noise_model" in self.export_components
+            or "low_noise_model" in self.golden_components
+        )
+        need_high_noise = (
+            load_all_models
+            or "high_noise_model" in self.export_components
+            or "high_noise_model" in self.golden_components
+        )
+        noise_model_device = torch.device("cpu") if load_all_models else device
         low_noise_model = (
-            self._load_noise_model_from_path(cfg, device=device, noise_model_name="low_noise_model")
+            self._load_noise_model_from_path(cfg, device=noise_model_device, noise_model_name="low_noise_model")
             if need_low_noise
             else None
         )
         high_noise_model = (
-            self._load_noise_model_from_path(cfg, device=device, noise_model_name="high_noise_model")
+            self._load_noise_model_from_path(cfg, device=noise_model_device, noise_model_name="high_noise_model")
             if need_high_noise
             else None
         )
@@ -282,6 +297,30 @@ class Wan22Converter:
             convert_model_dtype=True,
         )
         return pipe
+
+    def build_float_generation_pipeline(self, device_id: int = 0, rank: int = 0):
+        cfg = WAN_CONFIGS[self.config.task]
+        cfg.param_dtype = torch.float16
+        cfg.t5_dtype = torch.float16
+        if self.config.use_resolved_float_loader:
+            components = self._build_resolved_float_pipeline(
+                cfg,
+                device_id=device_id,
+                rank=rank,
+                load_all_models=True,
+            )
+            pipeline_cls = WanI2V if self.config.task.startswith("i2v") else WanT2V
+            pipe = pipeline_cls.__new__(pipeline_cls)
+            pipe.__dict__.update(vars(components))
+            return pipe
+        pipeline_cls = WanI2V if self.config.task.startswith("i2v") else WanT2V
+        return pipeline_cls(
+            cfg,
+            str(self.pretrained_model_path),
+            device_id=device_id,
+            rank=rank,
+            convert_model_dtype=True,
+        )
 
     def _export_component(
         self,

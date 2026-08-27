@@ -369,7 +369,6 @@ class Wan22DiTExportWrapper(nn.Module):
         context,
         e: torch.Tensor,
         e0: torch.Tensor,
-        y: Optional[torch.Tensor] = None,
     ):
         latent_arg = self._prepare_latent(latent_model_input, y)
         context_arg = self._prepare_context(context)

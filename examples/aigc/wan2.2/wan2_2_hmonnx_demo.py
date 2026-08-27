@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 from xh_model_zoo.xh_aigc.models.wan2_2 import (
     Wan2_2DiTExportWrapper,
     Wan2_2DiTInference,
+    Wan2_2T5EncoderExportWrapper,
     Wan2_2T5EncoderInference,
     Wan2_2VAEDecoderInference,
     Wan2_2VAEEncoderInference,
@@ -43,7 +44,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="/data01/home/xuchen/Wan2.2-main/ckpt/Wan_2.2")
     parser.add_argument("--task", type=str, default="i2v-A14B")
     parser.add_argument("--meta-dir", type=str, required=True)
-    parser.add_argument("--components", nargs="+", default=["high_noise_model"]) #  ，"t5","vae_encode", "low_noise_model", "vae_decode"
+    parser.add_argument("--components", nargs="+", default=["high_noise_model","t5","vae_encode", "low_noise_model", "vae_decode"]) #  ，"t5","vae_encode", "low_noise_model", "vae_decode"
     parser.add_argument("--prompt", type=str, default="A calm seaside scene with gentle waves.")
     parser.add_argument("--negative-prompt", type=str, default="")
     parser.add_argument("--output", type=str, default="outputs/wan2_2_hmonnx_demo.mp4")
@@ -226,37 +227,68 @@ def _validate_t5(pipe, hmonnx_t5, prompt: str, atol: float, rtol: float):
         hmonnx_context = hmonnx_t5([prompt], device)
     pipe.text_encoder.model.cpu()
 
-    if len(float_context) != len(hmonnx_context):
+    warp = Wan2_2T5EncoderExportWrapper(
+        deepcopy(pipe.text_encoder.model),
+        max_sequence_length=int(pipe.text_encoder.text_len),
+    ).to(device).eval()
+    with torch.no_grad():
+        warp_context = warp.encode_texts(pipe.text_encoder.tokenizer, [prompt], device)
+    del warp
+    torch.cuda.empty_cache()
+
+    if len(float_context) != len(hmonnx_context) or len(float_context) != len(warp_context):
         raise AssertionError(
-            f"T5 output batch size mismatch: float={len(float_context)} vs hmonnx={len(hmonnx_context)}"
+            "T5 output batch size mismatch: "
+            f"float={len(float_context)} vs warp={len(warp_context)} vs hmonnx={len(hmonnx_context)}"
         )
 
     metrics = []
-    for idx, (float_item, hmonnx_item) in enumerate(zip(float_context, hmonnx_context, strict=True)):
+    for idx, (float_item, warp_item, hmonnx_item) in enumerate(
+        zip(float_context, warp_context, hmonnx_context, strict=True)
+    ):
         float_item = float_item.detach().float().cpu()
+        warp_item = warp_item.detach().float().cpu()
         hmonnx_item = hmonnx_item.detach().float().cpu()
-        if float_item.shape != hmonnx_item.shape:
+        warp_item = warp_item[:123]
+        if float_item.shape != warp_item.shape or float_item.shape != hmonnx_item.shape:
             raise AssertionError(
                 "T5 output shape mismatch at batch "
-                f"{idx}: float={tuple(float_item.shape)} vs hmonnx={tuple(hmonnx_item.shape)}"
+                f"{idx}: float={tuple(float_item.shape)} vs warp={tuple(warp_item.shape)} "
+                f"vs hmonnx={tuple(hmonnx_item.shape)}"
             )
-        diff = (float_item - hmonnx_item).abs()
-        max_abs = diff.max().item()
-        mean_abs = diff.mean().item()
-        is_close = torch.allclose(float_item, hmonnx_item, atol=atol, rtol=rtol)
+        float_warp_diff = (float_item - warp_item).abs()
+        float_hmonnx_diff = (float_item - hmonnx_item).abs()
+        warp_hmonnx_diff = (warp_item - hmonnx_item).abs()
+        float_warp_max_abs = float_warp_diff.max().item()
+        float_warp_mean_abs = float_warp_diff.mean().item()
+        float_hmonnx_max_abs = float_hmonnx_diff.max().item()
+        float_hmonnx_mean_abs = float_hmonnx_diff.mean().item()
+        warp_hmonnx_max_abs = warp_hmonnx_diff.max().item()
+        warp_hmonnx_mean_abs = warp_hmonnx_diff.mean().item()
+        float_warp_close = torch.allclose(float_item, warp_item, atol=atol, rtol=rtol)
+        float_hmonnx_close = torch.allclose(float_item, hmonnx_item, atol=atol, rtol=rtol)
         metrics.append(
             {
                 "batch": idx,
                 "shape": tuple(float_item.shape),
-                "max_abs": max_abs,
-                "mean_abs": mean_abs,
-                "allclose": is_close,
+                "float_warp_max_abs": float_warp_max_abs,
+                "float_warp_mean_abs": float_warp_mean_abs,
+                "float_warp_allclose": float_warp_close,
+                "float_hmonnx_max_abs": float_hmonnx_max_abs,
+                "float_hmonnx_mean_abs": float_hmonnx_mean_abs,
+                "float_hmonnx_allclose": float_hmonnx_close,
+                "warp_hmonnx_max_abs": warp_hmonnx_max_abs,
+                "warp_hmonnx_mean_abs": warp_hmonnx_mean_abs,
+                "warp_hmonnx_allclose": torch.allclose(warp_item, hmonnx_item, atol=atol, rtol=rtol),
             }
         )
-        if not is_close:
+        if not float_warp_close or not float_hmonnx_close:
             raise AssertionError(
                 "T5 correctness check failed at batch "
-                f"{idx}: max_abs={max_abs:.6f}, mean_abs={mean_abs:.6f}, "
+                f"{idx}: float-vs-warp max_abs={float_warp_max_abs:.6f}, "
+                f"mean_abs={float_warp_mean_abs:.6f}; "
+                f"float-vs-hmonnx max_abs={float_hmonnx_max_abs:.6f}, "
+                f"mean_abs={float_hmonnx_mean_abs:.6f}, "
                 f"atol={atol}, rtol={rtol}"
             )
     return metrics
@@ -312,7 +344,11 @@ def main(args):
             print(
                 "  "
                 f"batch={metric['batch']} shape={metric['shape']} "
-                f"max_abs={metric['max_abs']:.6f} mean_abs={metric['mean_abs']:.6f}"
+                f"float-vs-warp(max={metric['float_warp_max_abs']:.6f}, mean={metric['float_warp_mean_abs']:.6f}) "
+                f"float-vs-hmonnx(max={metric['float_hmonnx_max_abs']:.6f}, "
+                f"mean={metric['float_hmonnx_mean_abs']:.6f}) "
+                f"warp-vs-hmonnx(max={metric['warp_hmonnx_max_abs']:.6f}, "
+                f"mean={metric['warp_hmonnx_mean_abs']:.6f})"
             )
 
     if not args.skip_generate:

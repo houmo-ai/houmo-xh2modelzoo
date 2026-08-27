@@ -6,6 +6,7 @@
 # pyright: reportMissingImports=false
 
 from copy import deepcopy
+import logging
 from typing import Sequence
 
 import accelerate
@@ -25,6 +26,12 @@ from wan.modules.t5 import (  # noqa: E402
     T5RelativeEmbedding,
     T5SelfAttention,
 )
+
+def fp16_clamp(x):
+    # if x.dtype == torch.float16 and torch.isinf(x).any():
+    clamp = torch.finfo(x.dtype).max - 1000
+    x = torch.clamp(x, min=-clamp, max=clamp)
+    return x
 
 
 class _WanT5LayerNorm(DynamicModule):
@@ -86,7 +93,7 @@ class _WanT5Attention(DynamicModule):
         self.maskedadd = xhnn.MaskedAdd()
         return self
 
-    def forward(self, x, context=None, attn_bias=None):
+    def forward(self, x, context=None, attn_bias=None, pos_bias=None):
         context = x if context is None else context
         b, n, c = x.size(0), self.num_heads, self.head_dim
 
@@ -95,6 +102,7 @@ class _WanT5Attention(DynamicModule):
         v = self.v(context).reshape(b, -1, n, c).permute(0, 2, 1, 3)
 
         attn = torch.matmul(q, k.transpose(-1, -2))
+        attn = attn + pos_bias
         if attn_bias is not None:
             # attn = attn + attn_bias
             attn = self.maskedadd(attn, attn_bias)
@@ -112,9 +120,11 @@ class _WanT5SelfAttention(DynamicModule):
         return self
 
     def forward(self, x, attn_bias=None, pos_bias=None):
-        bias = pos_bias if attn_bias is None else attn_bias + pos_bias
-        x = x + self.attn(self.norm1(x), attn_bias=bias)
-        x = x + self.ffn(self.norm2(x))
+        # bias = pos_bias if attn_bias is None else attn_bias + pos_bias
+        # if torch.any(torch.isnan(bias)):
+        #     raise ValueError("bias contains NaN values")
+        x = fp16_clamp(x + self.attn(self.norm1(x), attn_bias=attn_bias, pos_bias=pos_bias))
+        x = fp16_clamp(x + self.ffn(self.norm2(x)))
         return x
 
 
@@ -132,6 +142,8 @@ class _WanT5CrossAttention(DynamicModule):
         pos_bias=None,
     ):
         self_bias = pos_bias if self_attn_bias is None else self_attn_bias + pos_bias
+        if torch.any(torch.isnan(self_bias)):
+            raise ValueError("self_bias contains NaN values")
         x = x + self.self_attn(self.norm1(x), attn_bias=self_bias)
         x = x + self.cross_attn(
             self.norm2(x),
@@ -185,26 +197,17 @@ class Wan22T5EncoderExportWrapper(nn.Module):
         self.blocks = _WanT5Blocks(self.text_encoder_model.blocks)
         self._cached_pos_bias_names: list[str] = []
 
-        per_block_bias = []
-        for block in blocks:
-            if getattr(block, "shared_pos", False):
-                per_block_bias.append(None)
-            else:
-                per_block_bias.append(block.pos_embedding(max_sequence_length, max_sequence_length).detach())
-
-        if per_block_bias and all(bias is not None for bias in per_block_bias):
-            first_bias = per_block_bias[0]
-            can_share = all(torch.equal(first_bias, bias) for bias in per_block_bias[1:])
-        else:
-            can_share = False
-
-        if can_share:
-            self.register_buffer("cached_pos_bias_shared", per_block_bias[0], persistent=False)
+        if self.text_encoder_model.shared_pos:
+            pos_bias = self.text_encoder_model.pos_embedding(
+                max_sequence_length, max_sequence_length
+            ).detach()
+            self.register_buffer("cached_pos_bias_shared", pos_bias, persistent=False)
             self._cached_pos_bias_names = ["cached_pos_bias_shared"] * len(blocks)
         else:
-            for idx, bias in enumerate(per_block_bias):
+            for idx, block in enumerate(blocks):
+                pos_bias = block.pos_embedding(max_sequence_length, max_sequence_length).detach()
                 buffer_name = f"cached_pos_bias_{idx}"
-                self.register_buffer(buffer_name, bias, persistent=False)
+                self.register_buffer(buffer_name, pos_bias, persistent=False)
                 self._cached_pos_bias_names.append(buffer_name)
 
     def forward(self, inputs_embeds: torch.Tensor, mask_bias: torch.Tensor) -> torch.Tensor:
@@ -226,7 +229,15 @@ class Wan22T5EncoderExportWrapper(nn.Module):
             device=device,
             dtype=inputs_embeds.dtype,
         ).masked_fill(mask_4d == 0, -65504.0)
+        original_pos_biases = {
+            buffer_name: getattr(self, buffer_name) for buffer_name in set(self._cached_pos_bias_names)
+        }
+
+        for buffer_name, pos_bias in original_pos_biases.items():
+            setattr(self, buffer_name, pos_bias.masked_fill(mask_4d == 0, 0))
         return self.forward(inputs_embeds, mask_bias)
+
+
 
 
 Wan2_2T5EncoderExportWrapper = Wan22T5EncoderExportWrapper
