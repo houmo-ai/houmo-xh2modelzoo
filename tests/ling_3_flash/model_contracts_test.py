@@ -316,6 +316,22 @@ def _ling_group_limited_topk(choice: torch.Tensor) -> torch.Tensor:
     return choice.masked_fill(~expert_mask.bool(), -32768.0).topk(8, dim=-1).indices
 
 
+def test_moe_group_scatter_updates_match_topk_indices_shape():
+    group_scores = torch.randn(256, 8, dtype=torch.float16)
+
+    selected_group_scores, group_indices = torch.topk(group_scores, 4, dim=-1)
+    group_updates = selected_group_scores * 0 + 1
+
+    assert group_indices.shape == group_updates.shape == (256, 4)
+    assert group_updates.dtype == group_scores.dtype
+    group_mask = torch.zeros_like(group_scores).scatter(
+        1,
+        group_indices,
+        group_updates,
+    )
+    assert torch.equal(group_mask.sum(dim=-1), torch.full((256,), 4.0, dtype=torch.float16))
+
+
 def test_moe_selection_score_shift_is_fp32_equivalent():
     module = object.__new__(_LingSparseMoeBlock)
     nn.Module.__init__(module)

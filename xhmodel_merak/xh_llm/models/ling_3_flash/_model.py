@@ -626,9 +626,9 @@ class _LingSparseMoeBlock(DynamicModule):
         choice = self._selection_scores(logits)
         grouped = choice.view(batch * sequence, self.n_group, self.experts_per_group)
         group_scores = self.group_top2(grouped)[0].sum(dim=-1)
-        group_indices = self.group_topk(group_scores)[1]
+        selected_group_scores, group_indices = self.group_topk(group_scores)
         group_mask = group_scores * 0
-        group_updates = group_scores * 0 + 1
+        group_updates = selected_group_scores * 0 + 1
         group_mask = self.scatter_group_mask(group_mask, group_indices, group_updates)
         expert_mask = group_mask.unsqueeze(-1).expand(
             batch * sequence,
