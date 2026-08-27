@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os.path as osp
 import sys
@@ -62,7 +63,9 @@ from xhquant.api import (  # isort:skip
 from xhquant.core.cache_tensor import CacheTensor
 
 
-def build_kv_caches(qwen_model, max_sequence_length: int) -> tuple[list[CacheTensor], list[CacheTensor]]:
+def build_kv_caches(
+    qwen_model, max_sequence_length: int, device: torch.device | str | None = None
+) -> tuple[list[CacheTensor], list[CacheTensor]]:
     if hasattr(qwen_model, "layers"):
         num_decoder_layers = len(qwen_model.layers)
         num_key_value_heads = qwen_model.layers[0].self_attn.config.num_key_value_heads
@@ -73,12 +76,13 @@ def build_kv_caches(qwen_model, max_sequence_length: int) -> tuple[list[CacheTen
         head_dim = qwen_model.model.layers[0].self_attn.head_dim
 
     kv_cache_shape = [1, num_key_value_heads, max_sequence_length, head_dim]
+    cache_device = device if device is not None else next(qwen_model.parameters()).device
 
     past_key_caches = []
     past_value_caches = []
     for _ in range(num_decoder_layers):
-        past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
-        past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+        past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=cache_device)))
+        past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=cache_device)))
     return past_key_caches, past_value_caches
 
 
@@ -330,14 +334,18 @@ def preprocess_static_inputs(model, model_inputs: Dict[str, torch.Tensor]) -> Di
     audio_token_positions = (model_inputs["input_ids"][0] == model.config.audio_token_index).nonzero(as_tuple=False).squeeze(-1).to(torch.int64)
 
     input_ids = model_inputs["input_ids"].to(torch.int32)
-    inputs_embeds = model.get_input_embeddings()(input_ids).to(torch.float16)
+    input_embedding = model.get_input_embeddings()
+    input_embedding_device = input_embedding.weight.device
+    input_ids = model_inputs["input_ids"].to(device=input_embedding_device, dtype=torch.int32)
+    inputs_embeds = input_embedding(input_ids).to(torch.float16)
     audio_inputs_embeds = model.audio_tower.embed_tokens(speech_ids.to(torch.long)).to(torch.float16)
     if text_ids is not None and text_attention_mask is not None:
         text_ids = text_ids.clone()
         text_ids[text_ids == model.config.text_config.eos_token_id] = model.config.text_config.sil_index
         if model.config.text_config.pad_token_id is not None:
             text_ids[text_ids == model.config.text_config.pad_token_id] = model.config.text_config.sil_index
-        text_features = model.get_input_embeddings()(text_ids).to(torch.float16)
+        text_ids = text_ids.to(device=input_embedding_device)
+        text_features = input_embedding(text_ids).to(torch.float16)
         text_mix_mask = text_attention_mask[:, :, None].to(torch.float16)
         text_features = text_features * text_mix_mask
     else:
@@ -385,6 +393,7 @@ def build_dummy_inputs(model, processor, audio_path: str, prompt: str) -> Tuple[
     ]
     text = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     model_inputs = processor(text=text, audio=audio, return_tensors="pt", return_token_type_ids=False)
+    model_inputs = model_inputs.to(model.device)
 
     required = preprocess_static_inputs(model, model_inputs)
     return required, {"chat_text": text}
@@ -485,7 +494,7 @@ def export_audio_encoder(model, processor, args, work_dir: Path, logger) -> Path
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.audio_quant_type)
     quant_config = ConfigDict(create_quant_config(quant_scheme))
     quanted_model = convert_fx_model_to_quanted_model(
-        export_model,
+        copy.deepcopy(export_model),
         input_args,
         DeviceType.XH2a,
         quant_config=quant_config,
@@ -516,6 +525,7 @@ def export_audio_encoder(model, processor, args, work_dir: Path, logger) -> Path
 def export_audio_tower(model, args, work_dir: Path, logger) -> Path:
     export_model = FunAudioChatStaticAudioTowerWarp(model).eval()
     group_size = int(model.audio_tower.group_size)
+    torch.save(model.audio_tower.embed_tokens.state_dict(), work_dir / "quant_audio_embedding.pt")
     speech_ids = torch.full(
         (1, group_size),
         int(model.config.audio_config.pad_token_id),
@@ -528,7 +538,7 @@ def export_audio_tower(model, args, work_dir: Path, logger) -> Path:
     quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.audio_quant_type)
     quant_config = ConfigDict(create_quant_config(quant_scheme))
     quanted_model = convert_fx_model_to_quanted_model(
-        export_model,
+        copy.deepcopy(export_model),
         input_args,
         DeviceType.XH2a,
         quant_config=quant_config,
@@ -569,6 +579,8 @@ def export_decoder(model, processor, args, work_dir: Path, logger) -> Path:
     del processor
 
     decoder = model.audio_invert_tower
+    decoder_device = decoder.pre_matching.weight.device
+    torch.save(decoder.pre_matching.state_dict(), work_dir / "audio_decoder_pre_matching.pt")
     decoder_group_size = int(decoder.group_size)
     decoder_input_sequence_length = int(args.input_sequence_length)
     decoder_total_length = decoder_input_sequence_length * decoder_group_size
@@ -578,6 +590,7 @@ def export_decoder(model, processor, args, work_dir: Path, logger) -> Path:
         speech_inputs_embeds = torch.zeros(
             (1, decoder_input_sequence_length, int(decoder.hidden_size)),
             dtype=torch.float16,
+            device=decoder_device,
         )
         decoder_prefill_inputs_embeds = decoder.pre_matching(speech_inputs_embeds)
         decoder_prefill_hidden_states = decoder_prefill_inputs_embeds.reshape(
@@ -608,6 +621,7 @@ def export_decoder(model, processor, args, work_dir: Path, logger) -> Path:
     prefill_past_key_caches, prefill_past_value_caches = build_kv_caches(
         decoder.crq_transformer,
         crq_max_sequence_length,
+        device=decoder_device,
     )
 
     prefill_input_args = (

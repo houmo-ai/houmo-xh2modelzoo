@@ -7,6 +7,7 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 import json
+import copy
 import os
 import shutil
 import time
@@ -109,6 +110,7 @@ class Qwen3LegacyConverterXH2a(_BaseQwen3LegacyConverterXH2a):
             meta_info["hf_config"] = str(hf_config_dir.relative_to(work_dir))
 
         token_embedding = native_model.model.get_input_embeddings()
+        embedding_device = token_embedding.weight.device
 
         token_embedding_file = Path(work_dir) / "token_embedding.pt"
         torch.save(token_embedding.state_dict(), str(token_embedding_file))
@@ -150,24 +152,27 @@ class Qwen3LegacyConverterXH2a(_BaseQwen3LegacyConverterXH2a):
         past_key_caches = []
         past_value_caches = []
         for _ in range(num_decoder_layers):
-            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
-            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
+            past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=embedding_device)))
+            past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16, device=embedding_device)))
 
         input_ids = []
         current_input_length = []
         for _ in range(1):
-            input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long)
+            input_id = torch.randint(
+                0, 1000, (input_sequence_length,), dtype=torch.long, device=embedding_device
+            )
             seq_length = input_id.shape[0]
             current_input_length.append(seq_length)
             input_ids.append(input_id.unsqueeze(0))
 
-        input_ids_t = torch.cat(input_ids, dim=0)
+        input_ids_t = torch.cat(input_ids, dim=0).to(embedding_device)
         inputs_embeds = token_embedding(input_ids_t)
-        past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32)
+        past_seq_length_t = torch.tensor([0], dtype=torch.int32, device=embedding_device)
+        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32, device=embedding_device)
         attention_mask = torch.zeros(
             (1, 1, input_sequence_length, input_sequence_length),
             dtype=torch.float16,
+            device=embedding_device,
         )
 
         inputs = (
@@ -197,11 +202,14 @@ class Qwen3LegacyConverterXH2a(_BaseQwen3LegacyConverterXH2a):
 
         logger.info("********************* start export prefill model *********************")
 
-        if os.path.exists(prefill_onnx_file):
+        prefill_exists = os.path.exists(prefill_onnx_file)
+        decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
+        decode_exists = os.path.exists(decode_onnx_file)
+        if prefill_exists:
             logger.warning(f"{prefill_onnx_file} already exists, skip export")
-        else:
+        if not prefill_exists or not decode_exists:
             quanted_model = convert_fx_model_to_quanted_model(
-                wraped_qwen_model,
+                copy.deepcopy(wraped_qwen_model),
                 inputs,
                 target_device,
                 quant_config=quant_config,
@@ -226,8 +234,9 @@ class Qwen3LegacyConverterXH2a(_BaseQwen3LegacyConverterXH2a):
                 quanted_model.enable_aligned_precision_mode()
                 quanted_model = quanted_model.to("cpu")
             input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-            convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
-            logger.info(f"Export Prefill model to {prefill_onnx_file}")
+            if not prefill_exists:
+                convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
+                logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
         logger.info("********************* start export decode model *********************")
         decode_inputs = (
@@ -239,16 +248,15 @@ class Qwen3LegacyConverterXH2a(_BaseQwen3LegacyConverterXH2a):
             past_value_caches,
         )
 
-        wrap_cfg.input_sequence_length = 1
-        quanted_model.update_cfg(wrap_cfg)
-
         decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
         input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
-        if os.path.exists(decode_onnx_file):
+        if decode_exists:
             logger.warning(f"{decode_onnx_file} already exists, skip export")
         else:
+            wrap_cfg.input_sequence_length = 1
+            quanted_model.update_cfg(wrap_cfg)
             convert_quanted_model_to_hmonnx(
                 quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names
             )

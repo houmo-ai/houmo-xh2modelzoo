@@ -48,13 +48,30 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
         pooled_lengths: List[int],
     ):
         super().__init__()
-        self.model = model
         self.audio_encoder = model.continuous_audio_tower
         self.audio_tower = model.audio_tower
         self.speech_maxlen = int(speech_maxlen)
         self.group_size = int(model.config.audio_config.group_size)
         self.max_audio_tokens = len(pooled_lengths)
         self.avg_pool2d = nn.AvgPool2d(kernel_size=(2, 1), stride=(2, 1))
+        self.fixed_pooled_len = self.max_aftercnn_len if self.max_aftercnn_len < 2 else self.max_aftercnn_len // 2
+        self.total_pooled_length = sum(self.pooled_lengths)
+        self.num_chunks = len(self.aftercnn_split_lengths)
+        self.total_aftercnn_length = self.num_chunks * self.max_aftercnn_len
+        self.fixed_total_pooled_length = self.num_chunks * self.fixed_pooled_len
+        self.max_conv_output_len = (self.max_chunk_len - 1) // 2 + 1
+        cu_seqlens = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32),
+                torch.tensor(self.aftercnn_split_lengths, dtype=torch.int32).cumsum(0),
+            ]
+        )
+        self.register_buffer("cu_seqlens", cu_seqlens, persistent=False)
+        self.register_buffer(
+            "positional_embedding_cache",
+            self.audio_encoder.positional_embedding.positional_embedding[: self.max_conv_output_len, :].unsqueeze(0).to(torch.float16),
+            persistent=False,
+        )
 
         self.register_buffer("feature_lens", feature_lens.to(torch.int32), persistent=False)
         self.register_buffer("aftercnn_lens", aftercnn_lens.to(torch.int32), persistent=False)
@@ -111,24 +128,15 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
             )[0]
             hidden_states = hidden_states * flat_valid_mask
 
-        pooled_concat = self.avg_pool2d(
-            hidden_states.transpose(0, 1).unsqueeze(0).unsqueeze(-1),
-        ).squeeze(0).squeeze(-1).transpose(0, 1)        
-
-        # hidden_states = hidden_states.reshape(self.num_chunks, self.max_aftercnn_len, -1)
-
-        # pooled_list = []
-        # for chunk_idx in range(self.num_chunks):
-        #     each_audio_states = hidden_states[chunk_idx]
-        #     if self.fixed_pooled_len == self.max_aftercnn_len:
-        #         pooled = each_audio_states
-        #     else:
-        #         pooled = self.avg_pool2d(
-        #             each_audio_states.transpose(0, 1).unsqueeze(0).unsqueeze(-1),
-        #         ).squeeze(0).squeeze(-1).transpose(0, 1)
-        #     pooled_list.append(pooled)
-
-        # pooled_concat = torch.cat(pooled_list, dim=0)
+        if self.max_aftercnn_len < 2:
+            pooled_concat = hidden_states
+        else:
+            pooled_concat = hidden_states.reshape(self.num_chunks, self.max_aftercnn_len, -1)
+            pooled_concat = pooled_concat[:, : self.fixed_pooled_len * 2, :]
+            pooled_concat = pooled_concat.reshape(
+                self.num_chunks, self.fixed_pooled_len, 2, -1
+            ).mean(dim=2)
+            pooled_concat = pooled_concat.reshape(self.num_chunks * self.fixed_pooled_len, -1)
         processed_concat = self.audio_encoder.proj(self.audio_encoder.ln_post(pooled_concat))
         return processed_concat.unsqueeze(0)
 
@@ -155,7 +163,13 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
         # )
         # copy_length = min(self.fixed_total_pooled_length, processed_concat.shape[1], self.speech_maxlen)
         # continuous_audio_features[:, :copy_length, :] = processed_concat[:, :copy_length, :]
-        continuous_audio_features = processed_concat
+        copy_length = min(self.fixed_total_pooled_length, self.speech_maxlen)
+        continuous_audio_features = processed_concat[:, :copy_length, :]
+        if copy_length < self.speech_maxlen:
+            continuous_audio_features = F.pad(
+                continuous_audio_features,
+                (0, 0, 0, self.speech_maxlen - copy_length),
+            )
 
         # grouped_valid_mask = continuous_audio_valid_mask.reshape(1, -1, self.group_size, 1).to(processed_concat.dtype)
         # grouped_features = continuous_audio_features.reshape(1, -1, self.group_size, processed_concat.shape[-1])
