@@ -1,0 +1,200 @@
+schema_version: 2
+external:
+  model:
+    id: whisper
+    family: whisper
+    display_name: whisper
+  parameters:
+    total: 808878080
+    active: 808878080
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 128, 3000]
+    prefill: 2.296787
+    decode: 0.0003471
+    unit: TFLOPs
+    status: inferred
+    note: 依据 openai/whisper-large-v3-turbo 官方 config；Prefill 包含 1500-position 音频 Encoder、Cross-Attention KV 与 4-token Decoder prompt，Decode 为缓存后首个 token，MAC 按 2 FLOPs。
+  precision:
+    float_format: FP16
+    quantized_format: w8a8_sefp
+    comparisons:
+    - name: librispeech_english_200
+      dataset: LibriSpeech / English / 200 samples
+      metric: WER (%)
+      float: 4.06
+      quant: 3.38
+      delta: -0.68
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+    - name: librispeech_english_2000
+      dataset: LibriSpeech / English / 2000 samples
+      metric: WER (%)
+      float: 2.71
+      quant: 2.62
+      delta: -0.09
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+    - name: librispeech_english_2620
+      dataset: LibriSpeech / English / 2620 samples
+      metric: WER (%)
+      float: 2.65
+      quant: 2.56
+      delta: -0.09
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+    - name: aishell_chinese_200
+      dataset: AIShell-1 / Chinese / 200 samples
+      metric: CER (%)
+      float: 7.52
+      quant: 7.62
+      delta: 0.10
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+    - name: aishell_chinese_2000
+      dataset: AIShell-1 / Chinese / 2000 samples
+      metric: CER (%)
+      float: 9.45
+      quant: 9.39
+      delta: -0.06
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+    - name: aishell_chinese_5000
+      dataset: AIShell-1 / Chinese / 5000 samples
+      metric: CER (%)
+      float: 10.87
+      quant: 10.90
+      delta: 0.03
+      evidence: https://houmo.feishu.cn/wiki/AK3pwy0lKiHepQkJILtciTywnyc
+      status: verified
+  owner: ye.li
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: whisper
+    url: ''
+    license: ''
+    raw_model_path: /data01/datasets/whisper-large-v3-turbo
+  components:
+  - id: model
+    display_name: whisper
+    type: other_models
+    precision: w8a8_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: encoder
+    display_name: encoder
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: prefill
+    display_name: prefill
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: decoder
+    display_name: decoder
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/whisper/whisper.yaml
+    model_dir: /data01/datasets/whisper-large-v3-turbo
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        components_encoder: w8a8_sefp
+        components_prefill: w8a8_sefp
+        components_decoder: w8a8_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/whisper
+  release:
+    version_id: whisper_w8a8_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: whisper
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 whisper Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/asr/whisper
+      readme:
+      - examples_merak/asr/whisper/README.md
+  benchmark:
+    source: benchmark_test
+    status: mismatch
+    summary: 检测到关联 benchmark 脚本，但模型版本或量化配置不匹配，不能作为当前卡片精度证据。
+    cases:
+    - name: Whisper测试
+      script: benchmark_test/benchmark_test_whipser.py
+      match_status: mismatch
+      run_status: export_only
+      model_path: /data02/datasets/whisper_medium
+      quant_type: ''
+      weight_bits:
+      - 8
+      activation_bits:
+      - 8
+      dataset: ''
+      metric: ''
+      threshold: ''
+      result_path: ''
+      observed: ''
+      note: 脚本实际模型与当前模型卡版本不一致；当前仅验证导出，尚未实现精度评测

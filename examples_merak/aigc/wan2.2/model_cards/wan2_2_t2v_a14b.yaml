@@ -1,0 +1,143 @@
+schema_version: 2
+external:
+  model:
+    id: wan2_2_t2v_a14b
+    family: wan2_2
+    display_name: wan2 2 t2v A14B
+  parameters:
+    total: 28577413248
+    active: 14288706624
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 81, 720, 1280, 3]
+    prefill: 525333.0
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 端到端静态估算，场景为 1280x720、81 帧、40 步、CFG cond/uncond 双前向；包含 T5 文本编码、每步单路激活的 high/low 双专家 DiT 去噪与 VAE Decode，不含数据搬运和调度开销。
+  precision:
+    float_format: ''
+    quantized_format: w8a8_sefp
+    comparisons:
+    - name: t5_hmonnx_golden_cosine_failed_legacy
+      dataset: Wan2.2 T2V A14B T5 整网 golden tensor / call_0002
+      metric: cosine similarity（W8A8 HMONNX vs golden；旧模型，Jira 明确判定精度不足）
+      float: 1.0
+      quant: 0.887137
+      delta: -0.112863
+      evidence: http://jira.houmo.ai/browse/HMSW-4600
+      status: verified
+    - name: t5_updated_hmonnx_golden_status
+      dataset: Wan2.2 T2V A14B 更新后 T5 golden
+      metric: golden alignment（W8A8；最终评论仅说明正常，未提供数值）
+      float: 量化 golden
+      quant: 通过（未提供数值）
+      delta: 未提供
+      evidence: http://jira.houmo.ai/browse/HMSW-4531
+      status: verified
+    - name: dit_high_noise_hmonnx_golden_cosine
+      dataset: Wan2.2 T2V A14B DiT high_noise 整网 golden tensor
+      metric: cosine similarity（W8A8；Jira 仅提供 0.99+）
+      float: 1.0
+      quant: 0.99+
+      delta: '> -0.01'
+      evidence: http://jira.houmo.ai/browse/HMSW-4531
+      status: verified
+    - name: dit_low_noise_hmonnx_golden_cosine
+      dataset: Wan2.2 T2V A14B DiT low_noise 整网 golden tensor
+      metric: cosine similarity（W8A8；Jira 仅提供 0.99+）
+      float: 1.0
+      quant: 0.99+
+      delta: '> -0.01'
+      evidence: http://jira.houmo.ai/browse/HMSW-4531
+      status: verified
+  owner: 未分配
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: wan2 2 t2v A14B
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: wan2 2 t2v A14B
+    type: other_models
+    precision: w8a8_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/wan2_2/t2v_A14B/wan2_2_t2v_A14B.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        t5: w8a8_sefp
+        vae_decode: w8a8_sefp
+        low_noise_model: w8a8_sefp
+        high_noise_model: w8a8_ssfp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/wan2_2_t2v_a14b
+  release:
+    version_id: wan2_2_t2v_a14b_w8a8_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: wan2 2 t2v A14B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 wan2 2 t2v A14B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []

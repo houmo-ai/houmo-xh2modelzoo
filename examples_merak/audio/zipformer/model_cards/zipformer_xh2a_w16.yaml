@@ -1,0 +1,119 @@
+schema_version: 2
+external:
+  model:
+    id: zipformer_xh2a_w16
+    family: zipformer
+    display_name: zipformer xh2a w16
+  parameters:
+    total: 12164839
+    active: 12164839
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 39, 80]
+    prefill: 0.000136165
+    decode: 0.000007309
+    unit: TFLOPs
+    status: inferred
+    note: 基于官方 streaming Zipformer 14M 包；Prefill 为一个 39x80 Fbank chunk 的 Encoder 前向，Decode 为 Decoder+Joiner 生成一个 token，包含缓存复用。
+  precision:
+    float_format: FP32
+    quantized_format: w16a16_sefp
+    comparisons:
+    - name: corpus_cer_w16a16_softplus_fixed
+      dataset: 中文 Corpus / HMSW-3885
+      metric: CER (%)，ORT FP32 vs HMONNX W16A16，Softplus fusion fixed
+      float: 0.0
+      quant: 1.47
+      delta: 1.47
+      evidence: http://jira.houmo.ai/browse/HMSW-3885
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: zipformer xh2a w16
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: zipformer xh2a w16
+    type: other_models
+    precision: w16a16_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/zipformer/zipformer_xh2a_w16.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w16a16_sefp
+      components:
+        model: w16a16_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/zipformer_xh2a_w16
+  release:
+    version_id: zipformer_xh2a_w16_w16a16_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: zipformer xh2a w16
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w16a16_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 zipformer xh2a w16 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/audio/zipformer
+      readme:
+      - examples_merak/audio/zipformer/README.md

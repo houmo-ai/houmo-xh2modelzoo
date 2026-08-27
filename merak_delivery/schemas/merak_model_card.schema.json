@@ -6,138 +6,779 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "model",
-    "source",
-    "workflow",
-    "runtime",
-    "frontend",
-    "release"
+    "external",
+    "internal"
   ],
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1
+      "const": 2
     },
-    "model": {
+    "external": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "family", "display_name", "modality", "task", "tags"],
+      "required": [
+        "model",
+        "parameters",
+        "compute",
+        "precision",
+        "owner"
+      ],
       "properties": {
-        "id": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9_]*$"},
-        "family": {"type": "string", "minLength": 1},
-        "display_name": {"type": "string", "minLength": 1},
-        "modality": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"type": "string", "enum": ["text", "image", "video", "audio", "embedding"]},
-          "uniqueItems": true
-        },
-        "task": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"type": "string"},
-          "uniqueItems": true
-        },
-        "tags": {
-          "type": "array",
-          "items": {"type": "string"},
-          "uniqueItems": true
-        }
-      }
-    },
-    "source": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["provider", "name", "url", "license", "raw_model_path"],
-      "properties": {
-        "provider": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
-        "url": {"type": "string"},
-        "license": {"type": "string"},
-        "raw_model_path": {"type": "string", "minLength": 1}
-      }
-    },
-    "workflow": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["config_path", "model_dir", "class", "actions"],
-      "properties": {
-        "config_path": {"type": "string", "minLength": 1},
-        "model_dir": {"type": "string", "minLength": 1},
-        "class": {"type": "string", "minLength": 1},
-        "actions": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"type": "string", "enum": ["quant", "export", "dump_golden", "eval"]},
-          "uniqueItems": true
-        }
-      }
-    },
-    "runtime": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["device", "seed", "work_dir"],
-      "properties": {
-        "device": {"type": "string", "minLength": 1},
-        "seed": {"type": "integer", "minimum": 0},
-        "work_dir": {"type": "string", "minLength": 1}
-      }
-    },
-    "frontend": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary", "inputs", "outputs", "demo", "limitations"],
-      "properties": {
-        "summary": {"type": "string"},
-        "inputs": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"$ref": "#/$defs/io_item"}
-        },
-        "outputs": {
-          "type": "array",
-          "minItems": 1,
-          "items": {"$ref": "#/$defs/io_item"}
-        },
-        "demo": {
+        "model": {
           "type": "object",
-          "additionalProperties": true,
-          "required": ["kind"],
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "family",
+            "display_name"
+          ],
           "properties": {
-            "kind": {"type": "string", "minLength": 1}
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9_]*$"
+            },
+            "family": {
+              "type": "string",
+              "minLength": 1
+            },
+            "display_name": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
-        "limitations": {
-          "type": "array",
-          "items": {"type": "string"}
+        "parameters": {
+          "$ref": "#/$defs/measurement"
+        },
+        "compute": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "input_shape",
+            "prefill",
+            "decode",
+            "unit",
+            "status"
+          ],
+          "properties": {
+            "input_shape": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "minItems": 2,
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "prefill": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "decode": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "unit": {
+              "const": "TFLOPs"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "verified",
+                "inferred",
+                "missing"
+              ]
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "precision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "float_format",
+            "quantized_format",
+            "comparisons"
+          ],
+          "properties": {
+            "float_format": {
+              "type": "string"
+            },
+            "quantized_format": {
+              "type": "string"
+            },
+            "comparisons": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/accuracy_item"
+              }
+            }
+          }
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
-    "release": {
+    "internal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version_id", "target_status", "owner", "reviewer"],
+      "required": [
+        "model",
+        "source",
+        "components",
+        "io",
+        "workflow",
+        "runtime",
+        "release",
+        "presentation"
+      ],
       "properties": {
-        "version_id": {"type": "string", "minLength": 1},
-        "target_status": {
-          "type": "string",
-          "enum": ["draft", "ready", "exported", "golden_ready", "accuracy_passed", "released"]
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "modality",
+            "task",
+            "tags"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "modality": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "image",
+                  "video",
+                  "audio",
+                  "embedding"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "task": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            }
+          }
         },
-        "owner": {"type": "string"},
-        "reviewer": {"type": "string"}
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "name",
+            "url",
+            "license",
+            "raw_model_path"
+          ],
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "url": {
+              "type": "string"
+            },
+            "license": {
+              "type": "string"
+            },
+            "raw_model_path": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/submodel"
+          }
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inputs",
+            "outputs"
+          ],
+          "properties": {
+            "inputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/io_item"
+              }
+            },
+            "outputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/io_item"
+              }
+            }
+          }
+        },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "config_path",
+            "model_dir",
+            "class",
+            "actions"
+          ],
+          "properties": {
+            "config_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_dir": {
+              "type": "string",
+              "minLength": 1
+            },
+            "class": {
+              "type": "string",
+              "minLength": 1
+            },
+            "category": {
+              "type": "string"
+            },
+            "target_device": {
+              "type": "string"
+            },
+            "precision": {
+              "$ref": "#/$defs/precision"
+            },
+            "actions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "quant",
+                  "export",
+                  "dump_golden",
+                  "eval"
+                ]
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "device",
+            "seed",
+            "work_dir"
+          ],
+          "properties": {
+            "device": {
+              "type": "string",
+              "minLength": 1
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "work_dir": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version_id",
+            "target_status",
+            "reviewer"
+          ],
+          "properties": {
+            "version_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target_status": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "ready",
+                "exported",
+                "golden_ready",
+                "accuracy_passed",
+                "released"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "quant_models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/quant_model"
+              }
+            },
+            "reviewer": {
+              "type": "string"
+            }
+          }
+        },
+        "presentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "summary",
+            "demo",
+            "limitations",
+            "evidence"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "demo": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "limitations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "examples": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "readme": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "benchmark": {
+          "$ref": "#/$defs/benchmark"
+        }
       }
     }
   },
   "$defs": {
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "active",
+        "unit",
+        "status"
+      ],
+      "properties": {
+        "total": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ]
+        },
+        "active": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "inferred",
+            "missing"
+          ]
+        }
+      }
+    },
     "io_item": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type", "description"],
+      "required": [
+        "name",
+        "type",
+        "description"
+      ],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "type": {"type": "string", "minLength": 1},
-        "required": {"type": "boolean"},
-        "description": {"type": "string"}
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "dtype": {
+          "type": "string"
+        },
+        "shape": {
+          "type": "string"
+        },
+        "submodel": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "assumed",
+            "missing"
+          ]
+        }
+      }
+    },
+    "precision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overall",
+        "components"
+      ],
+      "properties": {
+        "overall": {
+          "type": "string"
+        },
+        "components": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "submodel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "inputs",
+        "outputs"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "precision": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/io_item"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/io_item"
+          }
+        }
+      }
+    },
+    "accuracy_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "dataset",
+        "metric",
+        "float",
+        "quant",
+        "delta",
+        "evidence"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "float": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "quant": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "delta": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "assumed",
+            "missing"
+          ]
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "status",
+        "summary",
+        "cases"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "const": "benchmark_test"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "measured",
+            "covered",
+            "mismatch",
+            "missing"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/benchmark_case"
+          }
+        }
+      }
+    },
+    "benchmark_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "script",
+        "match_status",
+        "run_status",
+        "model_path",
+        "quant_type",
+        "weight_bits",
+        "activation_bits",
+        "dataset",
+        "metric",
+        "threshold",
+        "result_path",
+        "observed",
+        "note"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1
+        },
+        "match_status": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "variant",
+            "mismatch"
+          ]
+        },
+        "run_status": {
+          "type": "string",
+          "enum": [
+            "measured",
+            "implemented",
+            "on_demand",
+            "export_only",
+            "skipped"
+          ]
+        },
+        "model_path": {
+          "type": "string"
+        },
+        "quant_type": {
+          "type": "string"
+        },
+        "weight_bits": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "activation_bits": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "threshold": {
+          "type": "string"
+        },
+        "result_path": {
+          "type": "string"
+        },
+        "observed": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "quant_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "release_path",
+        "release_url",
+        "version",
+        "date",
+        "quant_type",
+        "artifact_type",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "release_path": {
+          "type": "string"
+        },
+        "release_url": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "quant_type": {
+          "type": "string"
+        },
+        "artifact_type": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "missing",
+            "partial",
+            "ready",
+            "released"
+          ]
+        }
       }
     }
   }

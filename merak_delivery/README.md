@@ -18,8 +18,6 @@
 
 ```text
 merak_delivery/
-├── model_cards/                 # 每个模型的交付定义
-│   └── merak/
 ├── schemas/                     # 模型卡及交付产物 JSON Schema
 ├── tools/
 │   ├── merak_model_flow.py      # 统一 CLI 入口及兼容命令
@@ -42,6 +40,8 @@ merak_delivery/
 ```
 
 默认运行产物写入仓库根目录下的 `work_dirs/merak_delivery/`，而不是写入源码目录。
+模型卡随模型示例放在 `examples_merak/<类别>/<模型目录>/model_cards/`，
+`merak_delivery` 工具默认递归扫描这些 `model_cards/*.yaml`。
 
 ## 完整流程
 
@@ -80,7 +80,7 @@ python merak_delivery/tools/merak_model_flow.py validate
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py validate \
-  --root merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml
+  --root examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml
 ```
 
 ### 2. 查看流转计划
@@ -89,7 +89,7 @@ python merak_delivery/tools/merak_model_flow.py validate \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --dry-run
 ```
 
@@ -99,13 +99,13 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --dump-golden
 ```
 
 常用参数：
 
-- `--model-dir`：覆盖模型卡中的 `workflow.model_dir`
+- `--model-dir`：覆盖模型卡中的 `internal.workflow.model_dir`
 - `--work-dir`：覆盖本次流转工作目录
 - `--device`：覆盖模型卡中的运行设备
 - `--bits`：覆盖量化 bit 数
@@ -120,7 +120,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --dump-golden \
   --run-eval \
   --eval-backend hmonnx \
@@ -129,7 +129,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 默认行为：
 
-- `eval_model` 默认使用模型卡中的 `model.id`
+- `eval_model` 默认使用模型卡中的 `external.model.id`
 - 数据集默认仅使用 `ceval`
 - 数据集 Hub 默认使用 `modelscope`，可通过 `--eval-dataset-hub huggingface` 覆盖
 - HMONNX meta 默认使用本次导出生成的 `golden_meta_info.json`
@@ -149,7 +149,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --dump-golden \
   --run-eval \
   --eval-backend hmonnx \
@@ -167,7 +167,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-eval \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --eval-backend hmonnx \
   --eval-datasets ceval mmlu_pro \
   --hmonnx-meta work_dirs/path/to/golden_meta_info.json
@@ -178,7 +178,7 @@ python merak_delivery/tools/merak_model_flow.py run-eval \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-eval \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --eval-backend float
 ```
 
@@ -214,7 +214,7 @@ python merak_delivery/tools/merak_model_flow.py run-eval \
 
 ```bash
 python merak_delivery/tools/collect_merak_delivery_manifest.py \
-  --model-card merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
   --work-dir work_dirs/merak_delivery/qwen3_0_6b/example \
   --export-dir work_dirs/path/to/export \
   --golden-meta work_dirs/path/to/golden_meta_info.json \
@@ -254,23 +254,88 @@ python merak_delivery/tools/render_merak_readme.py \
 
 模型卡是完整流转的唯一输入定义。当前示例：
 
-- `model_cards/merak/qwen3/qwen3_0_6b.yaml`
-- `model_cards/merak/qwen3_5/qwen3_5_9b.yaml`
-- `model_cards/merak/gemma4_series/gemma4_e4b.yaml`
+- `examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml`
+- `examples_merak/llm/qwen3_5/model_cards/qwen3_5_9b.yaml`
+- `examples_merak/llm/gemma4_series/model_cards/gemma4_e4b.yaml`
+
+模型卡统一放在对应示例目录下的 `model_cards/` 子目录。一个基础模型只对应一张卡片；
+同一模型尺寸存在多个 workflow 时优先选择标准 `full` 配置作为主配置，GPTQ、MTP、
+DFlash、no-quant、visual-only 等技术变体不会生成重复的前端模型卡。
+
+可以从 `examples_merak` 中实际引用的 workflow YAML 自动生成卡片草稿：
+
+```bash
+python merak_delivery/tools/generate_merak_model_cards.py --dry-run
+python merak_delivery/tools/generate_merak_model_cards.py
+```
+
+生成器只扫描源码、README 和 YAML，不导入模型代码，也不运行 quant/export。
+默认不覆盖已有人工卡片；需要重建自动卡片时显式使用 `--overwrite`。扫描报告写入
+`work_dirs/merak_delivery/card_generation_report.json`。
+
+自动生成适合填充 config 路径、模型族、目标设备、量化格式、组件列表和 YAML 中
+显式声明的 IO。模型参数量、计算量和正式精度没有可靠来源时必须保留
+`status: missing` 或空的对比列表，不能依靠文件名猜测：
+
+Catalog 会区分两层量化口径：顶层 `quant.bits` 表示 weight-only 权重位宽，
+`export.*.quant_type` 表示 HMONNX 导出模板。列表中的“交付量化”会将前者的权重位宽
+与后者的激活位宽组合显示（例如 `quant.bits: 4` + `w8a8h1_sefp` 显示为
+`W4A8`）；详情仍保留完整的 HMONNX 导出模板，避免把 W4A8 链路误标为 W8A8。
+
+- 原始浮点模型来源、URL 和 license
+- 实际可用的模型目录
+- Merak 量化模型发版路径/下载链接
+- 正式的量化前后精度对比
+- 业务级输入输出含义，以及 YAML 未声明的子模型 IO
+
+schema v2 除 `schema_version` 外只有两个业务顶层模块：
+
+- `external`（对外信息）：模型公共标识、参数量/激活参数量、计算量、浮点与量化精度对比、负责人。
+- `internal`（对内信息）：模型类型和模态、来源、组件、输入输出语义与类型、workflow、运行和发版配置。
+
+前端列表与详情页均按这两个模块展示；子模型/计算图属于 `internal.components`，
+整体业务输入输出属于 `internal.io`。
 
 主要字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| `schema_version` | 模型卡 schema 版本，当前为 `1` |
-| `model` | 模型 ID、家族、显示名、模态、任务和标签 |
-| `source` | 原始模型来源及本地权重路径 |
-| `workflow` | Merak workflow 配置、模型目录、执行类和阶段 |
-| `runtime` | 设备、随机种子和默认工作目录 |
-| `frontend` | 输入输出、演示信息和限制说明 |
-| `release` | 版本 ID、目标状态、Owner 和 Reviewer |
+| `schema_version` | 模型卡 schema 版本，当前为 `2` |
+| `external.model` | 模型 ID、家族和显示名 |
+| `external.parameters` | 总参数量、激活参数量、单位和确认状态 |
+| `external.compute` | 输入维度、Prefill/Decode 计算量、统一单位、确认状态和可选计算口径备注 |
+| `external.precision` | 浮点格式、量化格式及浮点/量化精度对比证据 |
+| `external.owner` | 对外负责人 |
+| `internal.model` | 模型类型、模态、任务和标签 |
+| `internal.source` | 原始模型来源及本地权重路径 |
+| `internal.components` | 主模型及子模型/计算图的类型、精度和 IO |
+| `internal.io` | 整体输入输出名称、含义、类型、dtype 和 shape |
+| `internal.workflow` | Merak workflow 配置、模型目录、执行类和阶段 |
+| `internal.runtime` | 设备、随机种子和默认工作目录 |
+| `internal.release` | 版本、目标状态、Reviewer 和量化模型发版信息 |
+| `internal.benchmark` | benchmark 脚本覆盖、运行方式、指标门限、结果文件和版本匹配状态 |
 
-当前校验要求 `workflow.class` 为 `auto`，且阶段顺序为：
+参数量与计算量按以下统一口径维护：
+
+- `parameters.total` 记录卡片主模型的逻辑参数个数；共享/绑定权重只计一次，优化器状态、重复保存的替代 checkpoint 和不属于主模型的辅助资产不计入。
+- dense 模型的 `parameters.active` 等于 `total`；MoE 优先采用官方 active 口径，没有官方值时才按 checkpoint expert 张量与 top-k 配置推导。多运行分支无法用一个 active 数表达时保留 `null`。
+- checkpoint 或官方上游模型卡可直接确认的值标为 `verified`；架构静态计算、同族模型继承或近似口径标为 `inferred`；没有可靠证据继续标为 `missing`，不只按模型名猜数。
+- `compute` 保留 `input_shape`、`prefill`、`decode`、`unit`、`status` 和可选 `note`。当前文本模型统一使用 `[batch, sequence] = [1, 2048]` 的输入维度和 `MAC=2 FLOPs` 静态 profiler 口径。
+- 文本自回归模型中，`prefill` 是整段 2048-token 输入的计算量，`decode` 是复用同一 2048-token KV Cache 生成 1 个新 token 的计算量；两者统一使用 `TFLOPs`。非自回归模型则将绑定输入场景的一次完整前向或端到端推理计算量写入 `prefill`。
+- 没有自回归 Decoder 阶段的模型，将绑定输入场景的一次完整前向或端到端推理计算量记录在 `prefill`，并令 `decode: null`；多组件模型必须用 `note` 说明包含的组件、分辨率/帧数/步数和未计入项。
+- 这里记录的是理论计算量，不表示芯片峰值算力。真机时延、利用率和吞吐应进入 benchmark 或 profiler 证据。
+
+默认量化格式按参数量分档：有明确特殊配置的模型保留原值；其余总参数量小于 7B 的模型使用 `W8A8`，7B 及以上使用 `W4A8`。模型卡中的 `quantized_format` 继续携带 H0/H1、SEFP/SSFP 等实际导出后缀。
+
+`sync_merak_benchmarks.py` 只读取 benchmark 源码和已存在的结果文件，不导入或执行
+测试模块。脚本存在、导出成功和测试门限都不会自动写成正式精度；只有模型版本、
+量化配置和结果证据均匹配时才标记为实测。可单独刷新 benchmark 元数据：
+
+```bash
+python merak_delivery/tools/sync_merak_benchmarks.py
+```
+
+当前校验要求 `internal.workflow.class` 为 `auto`，且阶段顺序为：
 
 ```yaml
 actions: [quant, export, dump_golden, eval]

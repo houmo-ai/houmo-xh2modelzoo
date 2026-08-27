@@ -1,0 +1,210 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_tts_12hz_0_6b_base
+    family: qwen3_tts
+    display_name: Qwen3 TTS 12Hz 0.6B Base
+  parameters:
+    total: 1085200449
+    active: null
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256, 1024]
+    prefill: 0.193686
+    decode: 0.00127551
+    unit: TFLOPs
+    status: inferred
+    note: 依据 Qwen3-TTS-12Hz-0.6B-Base 官方 Talker、Code Predictor 与 SpeechTokenizer config；Prefill 另含 101760-sample 参考音频 Encoder，Decode 包含 Talker、Code Predictor 与 12-frame Stateful Decoder chunk。
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: cv3_eval_zero_shot_zh_w8a8_sefp_status
+      dataset: CV3-EVAL / zero_shot / zh
+      metric: 整体效果，浮点模型 vs W8A8 SEFP（周报仅给出“基本无损”，未提供数值）
+      float: 浮点基线
+      quant: 基本无损
+      delta: 未提供
+      evidence: https://houmo.feishu.cn/wiki/XONNwrhrOi2piwkQ0JTcS0yYnif
+      status: verified
+  owner: chuyuan.wei
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: Qwen3-TTS-12Hz-0.6B-Base
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: Qwen3 TTS 12Hz 0.6B Base
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: logits
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+    - name: past_hidden
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: code_predictor_model
+    display_name: code_predictor_model
+    type: XHQwen3TTSCodePredictor
+    precision: ''
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: code_predictor_model
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: code_predictor_model
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: code_predictor_model
+    outputs:
+    - name: logits
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+      submodel: code_predictor_model
+  - id: talker
+    display_name: talker
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: code_predictor
+    display_name: code_predictor
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: text_projection
+    display_name: text_projection
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: speech_tokenizer
+    display_name: speech_tokenizer
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: base_frontend
+    display_name: base_frontend
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: stateful_decoder
+    display_name: stateful_decoder
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: logits
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+    - name: past_hidden
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/qwen3_tts/0_6b_base/qwen3_tts_12hz_0_6b_base.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        talker: w8a8h1_sefp
+        code_predictor: w8a8h1_sefp
+        text_projection: w8a8h1_sefp
+        speech_tokenizer: w8a8h1_sefp
+        base_frontend: w8a8h1_sefp
+        stateful_decoder: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_tts_12hz_0_6b_base
+  release:
+    version_id: qwen3_tts_12hz_0_6b_base_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3 TTS 12Hz 0.6B Base
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3 TTS 12Hz 0.6B Base Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/tts/qwen3_tts
+      readme:
+      - examples_merak/tts/qwen3_tts/README.md

@@ -1,0 +1,120 @@
+schema_version: 2
+external:
+  model:
+    id: gemma4_e4b
+    family: gemma4_series
+    display_name: gemma 4 e4b
+  parameters:
+    total: 7996156490
+    active: 4500000000
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 2048]
+    prefill: 18.432
+    decode: 0.009
+    unit: TFLOPs
+    status: inferred
+    note: Gemma 4 E4B 文本侧统一 2048-token 静态口径，按官方 4.5B effective parameters、MAC=2 FLOPs 估算；权重总数含 PLE embedding，未计视觉/音频编码器。
+  precision:
+    float_format: ''
+    quantized_format: w4a8h1_sefp
+    comparisons:
+    - name: ceval_full_gptq_hmonnx
+      dataset: CEval full / 1346 samples
+      metric: Accuracy，FP vs GPTQ weight-only + HMONNX（max_tokens=512）
+      float: 0.5743
+      quant: 0.5505
+      delta: -0.0238
+      evidence: examples_merak/llm/gemma4_series/README.md#ceval-精度摘要
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: gemma4 e4b
+    url: ''
+    license: ''
+    raw_model_path: /data01/datasets/gemma-4-E4B-it
+  components:
+  - id: model
+    display_name: gemma 4 e4b
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b_full.yaml
+    model_dir: /data01/datasets/gemma-4-E4B-it
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        model_video_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/gemma4_e4b
+  release:
+    version_id: gemma4_e4b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: gemma 4 e4b
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 gemma 4 e4b Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/gemma4_series
+      readme:
+      - examples_merak/llm/gemma4_series/README.md

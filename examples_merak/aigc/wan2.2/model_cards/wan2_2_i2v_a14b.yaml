@@ -1,0 +1,130 @@
+schema_version: 2
+external:
+  model:
+    id: wan2_2_i2v_a14b
+    family: wan2_2
+    display_name: wan2 2 i2v A14B
+  parameters:
+    total: 28577413248
+    active: 14288706624
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 81, 720, 1280, 3]
+    prefill: 526179.0
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 端到端静态估算，场景为 1280x720、81 帧、40 步、CFG cond/uncond 双前向；包含 T5 文本编码、输入图像 VAE Encode、每步单路激活的 high/low 双专家 DiT 去噪与 VAE Decode，不含数据搬运和调度开销。
+  precision:
+    float_format: ''
+    quantized_format: w8a8_sefp
+    comparisons:
+    - name: dit_high_noise_hmonnx_golden_cosine
+      dataset: Wan2.2 I2V A14B DiT high_noise 整网 golden tensor
+      metric: cosine similarity（HMONNX W8A8 SSFP vs float golden；attention loop 修复后）
+      float: 1.0
+      quant: 0.997
+      delta: -0.003
+      evidence: http://jira.houmo.ai/browse/HMSW-4534
+      status: verified
+    - name: dit_low_noise_hmonnx_golden_cosine
+      dataset: Wan2.2 I2V A14B DiT low_noise 整网 golden tensor
+      metric: cosine similarity（HMONNX W8A8 SEFP vs float golden）
+      float: 1.0
+      quant: 0.994
+      delta: -0.006
+      evidence: http://jira.houmo.ai/browse/HMSW-4534
+      status: verified
+  owner: chen.xu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: ModelScope
+    name: wan2 2 i2v A14B
+    url: https://www.modelscope.cn/models/Wan-AI/Wan2.2-I2V-A14B
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: wan2 2 i2v A14B
+    type: other_models
+    precision: w8a8_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/wan2_2/i2v_A14B/wan2_2_i2v_A14B.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        t5: w8a8_sefp
+        vae_encode: w8a8_sefp
+        vae_decode: w8a8_sefp
+        low_noise_model: w8a8_sefp
+        high_noise_model: w8a8_ssfp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/wan2_2_i2v_a14b
+  release:
+    version_id: wan2_2_i2v_a14b_w8a8_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: wan2 2 i2v A14B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 wan2 2 i2v A14B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/aigc/wan2.2
+      readme:
+      - examples_merak/aigc/wan2.2/README.md

@@ -1,0 +1,120 @@
+schema_version: 2
+external:
+  model:
+    id: unlimited_ocr_base
+    family: unlimited_ocr
+    display_name: unlimited ocr base
+  parameters:
+    total: 3336106240
+    active: 500000000
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 1024, 1024, 3]
+    prefill: 1.369174
+    decode: 0.00115425
+    unit: TFLOPs
+    status: inferred
+    note: 绑定本仓库 1024×1024 base/no-crop 场景与约 278-token 图文 prompt；包含 SAM ViT-B、CLIP-L、projector 和 12 层稀疏文本模型，视觉分支由本仓库官方结构用 PyTorch FlopCounter 静态统计。
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: visual_hmonnx_hf_cosine_w8a8
+      dataset: Visual encoder alignment input
+      metric: cosine similarity，W8A8 HMONNX vs HF（文档仅提供 0.99+）
+      float: 1.0
+      quant: 0.99+
+      delta: '> -0.01'
+      evidence: examples_merak/llm/unlimited_ocr/README.md#验证方法与阈值
+      status: verified
+  owner: junjie.yang
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: unlimited ocr base xh2a w8a8
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: unlimited ocr base
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/unlimited_ocr/base/unlimited_ocr_base_xh2a_w8a8.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/unlimited_ocr_base
+  release:
+    version_id: unlimited_ocr_base_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: unlimited ocr base
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 unlimited ocr base Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/unlimited_ocr
+      readme:
+      - examples_merak/llm/unlimited_ocr/README.md

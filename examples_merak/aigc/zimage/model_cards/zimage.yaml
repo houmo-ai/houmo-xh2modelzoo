@@ -1,0 +1,121 @@
+schema_version: 2
+external:
+  model:
+    id: zimage
+    family: zimage
+    display_name: zimage
+  parameters:
+    total: 6154908736
+    active: 6154908736
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 1024, 1024, 3]
+    prefill: 5856.764507
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 绑定本仓库 1024×1024、50 steps、guidance_scale=5 CFG 场景；包含正/负 prompt 的 Qwen3 文本编码及每步双路 30 层 DiT + 2 层 noise/context refiner，VAE Decode 未计入，非自回归流程无独立 Decode。
+  precision:
+    float_format: FP16
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: evalmuse_fga_blip2_overall
+      dataset: EvalMuse / 199 prompts
+      metric: FGA_BLIP2Score overall
+      float: 3.6138
+      quant: 3.4911
+      delta: -0.1227
+      evidence: https://houmo.feishu.cn/wiki/NPrEwjGGli8lBUkH6xLcUQT6n7f
+      status: verified
+  owner: chen.xu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - image
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: zimage
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.24:10022/data01/datasets/Z-Image
+  components:
+  - id: model
+    display_name: zimage
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/zimage/zimage.yaml
+    model_dir: ssh://xuzk@10.30.0.24:10022/data01/datasets/Z-Image
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        zimage: w8a8h1_sefp
+        zimage_text_encoder: w8a8h1_sefp
+        zimage_vae: w8a8h1_sefp
+        zimage_dit: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/zimage
+  release:
+    version_id: zimage_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: zimage
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 zimage Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/aigc/zimage
+      readme: []

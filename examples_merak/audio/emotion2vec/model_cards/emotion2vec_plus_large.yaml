@@ -1,0 +1,119 @@
+schema_version: 2
+external:
+  model:
+    id: emotion2vec_plus_large
+    family: emotion2vec
+    display_name: emotion2vec plus large
+  parameters:
+    total: 486420573
+    active: 486420573
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256000]
+    prefill: 0.262849
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 依据 emotion2vec_plus_large 官方结构与本仓库 16 kHz、16 秒窗口配置；包含卷积前端和约 809-token 的 8 层音频 Transformer 完整前向，无自回归 Decode。
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: quantized_vs_float_output_cosine
+      dataset: 未注明评测集
+      metric: 余弦相似度 cos（量化输出 vs 浮点输出；浮点自相似参考值为 1.0）
+      float: 1.0
+      quant: 0.999
+      delta: -0.001
+      evidence: 用户提供（2026-09-01）
+      status: verified
+  owner: zukang.xu
+internal:
+  model:
+    type: audio_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - audio
+  source:
+    provider: 待补
+    name: iic/emotion2vec_plus_large
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/emotion2vec_plus_large
+  components:
+  - id: model
+    display_name: emotion2vec plus large
+    type: audio_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/audio_models/emotion2vec/emotion2vec_plus_large_xh2a_w8a8_16s.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/emotion2vec_plus_large
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: audio_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/emotion2vec_plus_large
+  release:
+    version_id: emotion2vec_plus_large_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: emotion2vec plus large
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 emotion2vec plus large Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/audio/emotion2vec
+      readme:
+      - examples_merak/audio/emotion2vec/README.md

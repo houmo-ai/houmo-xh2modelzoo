@@ -1,0 +1,145 @@
+schema_version: 2
+external:
+  model:
+    id: hy_mt2
+    family: hy_mt2
+    display_name: Hy-MT2-1.8B
+  parameters:
+    total: 2038515712
+    active: 2038515712
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 10.17
+    decode: 0.004966
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: bfloat16
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: flores_zho_hans_to_eng_latn
+      dataset: FLORES-200 devtest rows 0-99, greedy decoding
+      metric: chrF++
+      float: 54.7512
+      quant: 54.1775
+      delta: -0.5737
+      evidence: work_dirs/hy_mt2_1_8b_eval/hmonnx/hmonnx_summary.json
+      status: verified
+    - name: flores_zho_hans_to_eng_latn
+      dataset: FLORES-200 devtest rows 0-99, greedy decoding
+      metric: BLEU
+      float: 22.8875
+      quant: 22.5156
+      delta: -0.3719
+      evidence: work_dirs/hy_mt2_1_8b_eval/hmonnx/hmonnx_summary.json
+      status: verified
+    - name: flores_eng_latn_to_zho_hans
+      dataset: FLORES-200 devtest rows 0-99, greedy decoding
+      metric: chrF++
+      float: 29.4626
+      quant: 29.2464
+      delta: -0.2162
+      evidence: work_dirs/hy_mt2_1_8b_eval/hmonnx/hmonnx_summary.json
+      status: verified
+    - name: flores_eng_latn_to_zho_hans
+      dataset: FLORES-200 devtest rows 0-99, greedy decoding
+      metric: BLEU
+      float: 44.7296
+      quant: 44.4714
+      delta: -0.2582
+      evidence: work_dirs/hy_mt2_1_8b_eval/hmonnx/hmonnx_summary.json
+      status: verified
+  owner: chen.xu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    task:
+    - translation
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: Tencent Hunyuan
+    name: Hy-MT2-1.8B
+    url: https://huggingface.co/tencent/Hy-MT2-1.8B
+    license: Apache-2.0
+    raw_model_path: /data01/datasets/Hy-MT2-1.8B
+  components:
+  - id: model
+    display_name: Hy-MT2-1.8B
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: Chat-template token IDs for a translation instruction.
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: Next-token logits for greedy or sampled translation decoding.
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: Source text plus source/target language codes, rendered with the official prompt template.
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: Translated text without additional explanation.
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/hy_mt2/hy_mt2.yaml
+    model_dir: /data01/datasets/Hy-MT2-1.8B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        hy_mt2: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/hy_mt2_1_8b
+  release:
+    version_id: hy_mt2_1_8b_w8a8h1_sefp_20260826
+    target_status: accuracy_passed
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Hy-MT2-1.8B
+      release_path: work_dirs/hy_mt2_1_8b_w8a8
+      release_url: ''
+      version: '20260826'
+      date: '2026-08-26'
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: ready
+  presentation:
+    summary: Hy-MT2-1.8B Chinese-English translation workflow with XH2A W8A8 prefill/decode HMONNX.
+    demo:
+      kind: metadata_only
+    limitations:
+    - Export uses batch size 1, a 256-token fixed prefill window, and a 4096-token KV cache.
+    - PTQ calibration currently uses one deterministic official-template Chinese-to-English prompt.
+    - Accuracy covers a deterministic 100-row subset per FLORES direction, not all 1012 devtest rows.
+    - HMONNX validation used the XH2A-aligned CUDA simulator on A100 GPUs, not physical XH2A hardware.
+    evidence:
+      examples:
+      - examples_merak/llm/hy_mt2
+      readme:
+      - examples_merak/llm/hy_mt2/README.md

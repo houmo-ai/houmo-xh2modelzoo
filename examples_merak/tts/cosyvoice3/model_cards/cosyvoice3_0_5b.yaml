@@ -1,0 +1,198 @@
+schema_version: 2
+external:
+  model:
+    id: cosyvoice3_0_5b
+    family: cosyvoice3
+    display_name: CosyVoice3 0.5B
+  parameters:
+    total: 1244237431
+    active: null
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256, 896]
+    prefill: 0.189117
+    decode: 0.00101003
+    unit: TFLOPs
+    status: inferred
+    note: 主值为 CosyVoice3 LLM 的 256-token Prefill 和首 token Decode；多组件参数量包含 LLM、Flow、HiFT、SpeechTokenizer 与 CAM++。辅助 Flow DiT 的 2048-length 完整前向约 1.133871 TFLOPs，未混入 LLM Decode。
+  precision:
+    float_format: FP16
+    quantized_format: w8a16_sefp
+    comparisons:
+    - name: speaker_similarity_w8a16_sefp
+      dataset: CV3-EVAL zero-shot zh / 500 samples
+      metric: Speaker similarity (%)
+      float: 79.96
+      quant: 76.59
+      delta: -3.37
+      evidence: https://houmo.feishu.cn/wiki/M5LlwMsaziU5JpkqlcucEdXwnCX
+      status: verified
+    - name: dnsmos_mean_w8a16_sefp
+      dataset: CV3-EVAL zero-shot zh / 500 samples
+      metric: DNSMOS mean
+      float: 3.8628
+      quant: 3.7886
+      delta: -0.0742
+      evidence: https://houmo.feishu.cn/wiki/M5LlwMsaziU5JpkqlcucEdXwnCX
+      status: verified
+  owner: ye.li
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: CosyVoice3-0.5B
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/Fun-CosyVoice3-0.5B-2512
+  components:
+  - id: model
+    display_name: CosyVoice3 0.5B
+    type: other_models
+    precision: w8a16_sefp
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: logits
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: llm
+    display_name: llm
+    type: ''
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: llm_decoder
+    display_name: llm_decoder
+    type: ''
+    precision: w8a16h1_sefp
+    inputs: []
+    outputs: []
+  - id: speech_tokenizer_v3
+    display_name: speech_tokenizer_v3
+    type: ''
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: campplus
+    display_name: campplus
+    type: ''
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: flow_decoder
+    display_name: flow_decoder
+    type: ''
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: hift
+    display_name: hift
+    type: ''
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: spk_embed_affine_layer
+    display_name: spk_embed_affine_layer
+    type: ''
+    precision: w8a16h1_sefp
+    inputs: []
+    outputs: []
+  - id: pre_lookahead_layer
+    display_name: pre_lookahead_layer
+    type: ''
+    precision: w8a16h1_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: logits
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/cosyvoice3/cosyvoice3_0_5b.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/Fun-CosyVoice3-0.5B-2512
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a16_sefp
+      components:
+        llm: w8a16_sefp
+        llm_decoder: w8a16h1_sefp
+        speech_tokenizer_v3: w8a16_sefp
+        campplus: w8a16_sefp
+        flow_decoder: w8a16_sefp
+        hift: w8a16_sefp
+        spk_embed_affine_layer: w8a16h1_sefp
+        pre_lookahead_layer: w8a16h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/cosyvoice3_0_5b
+  release:
+    version_id: cosyvoice3_0_5b_w8a16_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: CosyVoice3 0.5B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a16_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 CosyVoice3 0.5B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/tts/cosyvoice3
+      readme:
+      - examples_merak/tts/cosyvoice3/README.md

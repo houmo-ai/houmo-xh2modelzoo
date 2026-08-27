@@ -1,0 +1,117 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_5_4b
+    family: qwen3_5
+    display_name: Qwen3.5 4B
+  parameters:
+    total: 4659865088
+    active: 4659865088
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 17.91
+    decode: 0.008745
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: GPU FP
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: mmlu_pro_xh2_v1_3_0
+      dataset: MMLU-Pro
+      metric: Overall accuracy (%)，GPU vs XH2 v1.3.0
+      float: 70.68
+      quant: 60.45
+      delta: -10.23
+      evidence: https://houmo.feishu.cn/wiki/Ybm3wgavyi7xc0kpPwycecOJnZj
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: Qwen3.5 4B
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/Qwen3.5-4B
+  components:
+  - id: model
+    display_name: Qwen3.5 4B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_5/4b/qwen3_5_4b_full.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/Qwen3.5-4B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_5_4b
+  release:
+    version_id: qwen3_5_4b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3.5 4B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3.5 4B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []

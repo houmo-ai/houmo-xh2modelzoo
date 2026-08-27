@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,12 +25,13 @@ if str(TOOLS_ROOT) not in sys.path:
 
 from core import MerakDeliveryStore, MerakEvaluator, MerakModelFlow, MerakModelFlowCLI
 from core.bindings import configure as configure_core
+from model_card_schema import ModelCardSchemaValidationError, normalize_model_card, validate_schema_instance
 
 ROOT = Path(__file__).resolve().parents[2]
 DELIVERY_ROOT = ROOT / "merak_delivery"
 WORK_DIRS_DELIVERY_ROOT = ROOT / "work_dirs" / "merak_delivery"
 SCHEMA_PATH = DELIVERY_ROOT / "schemas/merak_model_card.schema.json"
-REQUIRED_TOP_LEVEL_KEYS = ("schema_version", "model", "source", "workflow", "runtime", "frontend", "release")
+REQUIRED_TOP_LEVEL_KEYS = ("schema_version", "external", "internal")
 EXPECTED_ACTIONS = ["quant", "export", "dump_golden", "eval"]
 
 
@@ -68,20 +71,78 @@ def _require_list(mapping: dict[str, Any], key: str, path: Path, prefix: str) ->
 
 
 def validate_delivery_file(path: Path) -> dict[str, Any]:
-    """Validate one phase-1 Merak model card YAML file.
-
-    This intentionally avoids a hard jsonschema dependency. The JSON schema file
-    is still emitted as the public contract, while this script performs the
-    minimal checks needed for the first working stage.
-    """
+    """Validate one Merak model card against schema v2 and delivery rules."""
     data = _load_yaml(path)
+
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    try:
+        validate_schema_instance(data, schema)
+    except ModelCardSchemaValidationError as error:
+        raise DeliveryValidationError(f"{path}: schema violation at `{error.field}`: {error}") from error
 
     for key in REQUIRED_TOP_LEVEL_KEYS:
         if key not in data:
             raise DeliveryValidationError(f"{path}: missing top-level key `{key}`")
+    allowed_keys = set(REQUIRED_TOP_LEVEL_KEYS)
+    extra_keys = set(data) - allowed_keys
+    if extra_keys:
+        extra = ", ".join(sorted(extra_keys))
+        raise DeliveryValidationError(f"{path}: unexpected top-level key(s): {extra}")
 
-    if data["schema_version"] != 1:
-        raise DeliveryValidationError(f"{path}: `schema_version` must be 1")
+    if data["schema_version"] != 2:
+        raise DeliveryValidationError(f"{path}: `schema_version` must be 2")
+
+    external = _require_mapping(data, "external", path)
+    internal = _require_mapping(data, "internal", path)
+    _require_mapping(external, "model", path)
+    parameters = _require_mapping(external, "parameters", path)
+    compute = _require_mapping(external, "compute", path)
+    precision = _require_mapping(external, "precision", path)
+    if not isinstance(external.get("owner"), str):
+        raise DeliveryValidationError(f"{path}: `external.owner` must be a string")
+    if parameters.get("status") not in {"verified", "inferred", "missing"}:
+        raise DeliveryValidationError(f"{path}: `external.parameters.status` must be verified, inferred, or missing")
+    if compute.get("status") not in {"verified", "inferred", "missing"}:
+        raise DeliveryValidationError(f"{path}: `external.compute.status` must be verified, inferred, or missing")
+    if compute.get("unit") != "TFLOPs":
+        raise DeliveryValidationError(f"{path}: `external.compute.unit` must be TFLOPs")
+    if compute.get("status") != "missing":
+        input_shape = compute.get("input_shape")
+        if (
+            not isinstance(input_shape, list)
+            or len(input_shape) < 2
+            or any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in input_shape)
+        ):
+            raise DeliveryValidationError(
+                f"{path}: non-missing `external.compute.input_shape` must contain batch and at least one input dimension"
+            )
+        prefill = compute.get("prefill")
+        if not isinstance(prefill, (int, float)) or isinstance(prefill, bool) or prefill < 0:
+            raise DeliveryValidationError(
+                f"{path}: non-missing `external.compute.prefill` must be a non-negative number"
+            )
+        decode = compute.get("decode")
+        if decode is not None and (
+            not isinstance(decode, (int, float)) or isinstance(decode, bool) or decode < 0
+        ):
+            raise DeliveryValidationError(
+                f"{path}: `external.compute.decode` must be null or a non-negative number"
+            )
+    if "note" in compute and not isinstance(compute["note"], str):
+        raise DeliveryValidationError(f"{path}: `external.compute.note` must be a string")
+    comparisons = precision.get("comparisons")
+    if comparisons is not None and not isinstance(comparisons, list):
+        raise DeliveryValidationError(f"{path}: `external.precision.comparisons` must be a list")
+    _require_mapping(internal, "model", path)
+    _require_mapping(internal, "io", path)
+    _require_mapping(internal, "presentation", path)
+    components = internal.get("components")
+    if not isinstance(components, list) or not components:
+        raise DeliveryValidationError(f"{path}: `internal.components` must be a non-empty list")
+    if not any(isinstance(component, dict) and component.get("id") == "model" for component in components):
+        raise DeliveryValidationError(f"{path}: `internal.components` must include the main `model` component")
+
+    data = normalize_model_card(data)
 
     model = _require_mapping(data, "model", path)
     model_id = _require_non_empty_string(model, "id", path, "model")
@@ -121,6 +182,8 @@ def validate_delivery_file(path: Path) -> dict[str, Any]:
     frontend = _require_mapping(data, "frontend", path)
     _require_list(frontend, "inputs", path, "frontend")
     _require_list(frontend, "outputs", path, "frontend")
+    if frontend.get("submodels") is not None and not isinstance(frontend["submodels"], list):
+        raise DeliveryValidationError(f"{path}: `frontend.submodels` must be a list")
     demo = _require_mapping(frontend, "demo", path)
     _require_non_empty_string(demo, "kind", path, "frontend.demo")
     limitations = frontend.get("limitations")
@@ -132,6 +195,8 @@ def validate_delivery_file(path: Path) -> dict[str, Any]:
     if not version_id.startswith(model_id):
         raise DeliveryValidationError(f"{path}: `release.version_id` must start with model id `{model_id}`")
     _require_non_empty_string(release, "target_status", path, "release")
+    if data.get("accuracy") is not None and not isinstance(data["accuracy"], list):
+        raise DeliveryValidationError(f"{path}: `accuracy` must be a list")
 
     return data
 
@@ -442,11 +507,16 @@ def _run_register_release(
     )
 
 
-def _run_build_catalog(release_root: Path | None = None, catalog_root: Path | None = None) -> int:
+def _run_build_catalog(
+    release_root: Path | None = None,
+    catalog_root: Path | None = None,
+    model_card_root: Path | None = None,
+) -> int:
     return build_catalog_command(
         argparse.Namespace(
             release_root=str(release_root) if release_root else "",
             catalog_root=str(catalog_root) if catalog_root else "",
+            model_card_root=str(model_card_root) if model_card_root else "",
         )
     )
 
@@ -618,8 +688,16 @@ def register_release_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _find_model_cards() -> list[Path]:
-    return sorted((DELIVERY_ROOT / "model_cards" / "merak").rglob("*.yaml"))
+def discover_model_cards(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root]
+    if not root.is_dir():
+        raise DeliveryValidationError(f"model card root does not exist: {root}")
+    return sorted(path for path in root.rglob("*.yaml") if path.is_file() and path.parent.name == "model_cards")
+
+
+def _find_model_cards(root: Path | None = None) -> list[Path]:
+    return discover_model_cards(root or (ROOT / "examples_merak"))
 
 
 def _latest_release_for(model_id: str, release_root: Path | None = None) -> tuple[dict[str, Any] | None, Path | None]:
@@ -637,19 +715,128 @@ def _latest_release_for(model_id: str, release_root: Path | None = None) -> tupl
     return yaml.safe_load(release_file.read_text(encoding="utf-8")), release_file
 
 
-def build_catalog_command(args: argparse.Namespace) -> int:
-    generated_at = datetime.now(timezone.utc).isoformat()
-    release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
-    catalog_root = _resolve_path(getattr(args, "catalog_root", "")) if getattr(args, "catalog_root", "") else _default_catalog_root()
-    data_dir = catalog_root / "data"
-    models_dir = data_dir / "models"
-    models_dir.mkdir(parents=True, exist_ok=True)
+def _catalog_model_category(card: dict[str, Any]) -> str:
+    model = card.get("model", {})
+    workflow = card.get("workflow", {})
+    model_id = str(model.get("id", "")).lower()
+    family = str(model.get("family", "")).lower()
+    config_path = str(workflow.get("config_path", "")).lower()
+    text = " ".join((model_id, family, config_path))
+    components = workflow.get("precision", {}).get("components", {})
+    component_text = " ".join(str(key).lower() for key in components) if isinstance(components, dict) else ""
+
+    if family == "pi05" or "/vla/" in config_path:
+        return "VLA"
+    if any(token in text for token in ("zimage", "flux", "stable_diffusion", "sdxl")):
+        return "生图"
+    if any(token in text for token in ("wan2", "lingbot_video", "video_generation", "i2v", "t2v")):
+        return "视频理解"
+    if any(token in text for token in ("tts", "cosyvoice", "melotts", "voxcpm")):
+        return "TTS"
+    if any(token in text for token in ("asr", "whisper", "sensevoice", "zipformer", "forcealigner")):
+        return "ASR"
+    if "vad" in text:
+        return "VAD"
+    if "emotion2vec" in text:
+        return "音频理解"
+    if "embedding" in text:
+        return "Embedding"
+    if "mineru" in text:
+        return "文档理解"
+    if any(token in text for token in ("minicpm_v", "qwen3_5", "gemma4")) or "visual" in component_text:
+        return "VLM"
+    if workflow.get("category") == "llm_models":
+        return "LLM"
+    return "其他"
+
+
+_QUANT_TOKEN_RE = re.compile(r"(?i)w(?P<weight>\d+)a(?P<activation>\d+)")
+
+
+def _catalog_precision(card: dict[str, Any]) -> dict[str, Any]:
+    """Separate the effective delivery profile from the HMONNX export template.
+
+    Workflow YAML keeps the HMONNX quant scheme under ``export``. LLM/VLM
+    workflows can also produce a lower-bit weight-only checkpoint through the
+    top-level ``quant`` block. The catalog needs both facts: using only the
+    export template makes a W4A8 workflow look like W8A8.
+    """
+    workflow = card.get("workflow", {})
+    raw_precision = workflow.get("precision", {}) if isinstance(workflow, dict) else {}
+    raw_precision = raw_precision if isinstance(raw_precision, dict) else {}
+    export_overall = str(raw_precision.get("overall") or "")
+    components = raw_precision.get("components", {})
+    components = dict(components) if isinstance(components, dict) else {}
+    precision: dict[str, Any] = {
+        "overall": export_overall,
+        "display": export_overall.upper(),
+        "export_overall": export_overall,
+        "components": components,
+    }
+
+    match = _QUANT_TOKEN_RE.search(export_overall)
+    weight_bits = int(match.group("weight")) if match else None
+    activation_bits = int(match.group("activation")) if match else None
+
+    config_path = str(workflow.get("config_path") or "") if isinstance(workflow, dict) else ""
+    quant: dict[str, Any] = {}
+    if config_path:
+        path = ROOT / config_path
+        if path.is_file():
+            config = _load_yaml(path)
+            candidate = config.get("quant")
+            if isinstance(candidate, dict):
+                quant = candidate
+
+    if quant.get("bits") is not None:
+        weight_bits = int(quant["bits"])
+
+    if weight_bits is not None:
+        precision["weight_bits"] = weight_bits
+    if activation_bits is not None:
+        precision["activation_bits"] = activation_bits
+    if weight_bits is not None and activation_bits is not None:
+        precision["display"] = f"W{weight_bits}A{activation_bits}"
+    elif weight_bits is not None:
+        precision["display"] = f"W{weight_bits}"
+
+    for source_key, catalog_key in (
+        ("group_size", "weight_group_size"),
+        ("algorithm", "weight_algorithm"),
+        ("method", "weight_method"),
+    ):
+        value = quant.get(source_key)
+        if value not in (None, ""):
+            precision[catalog_key] = value
+    return precision
+
+
+def _collect_catalog_data(
+    *,
+    release_root: Path | None = None,
+    model_card_root: Path | None = None,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    release_root = release_root or _default_release_root()
+    model_card_root = model_card_root or ROOT / "examples_merak"
     index_models = []
     all_models = []
-    for card_path in _find_model_cards():
-        card = _load_model_card(card_path)
+    generated_models = []
+    model_cards = [(card_path, _load_model_card(card_path)) for card_path in _find_model_cards(model_card_root)]
+    model_cards.sort(key=lambda item: (str(item[1]["model"]["family"]), str(item[1]["model"]["id"])))
+    for card_path, card in model_cards:
         model_id = card["model"]["id"]
+        catalog_precision = _catalog_precision(card)
+        catalog_workflow = dict(card["workflow"])
+        catalog_workflow["precision"] = catalog_precision
         release, release_path = _latest_release_for(model_id, release_root)
+        if isinstance(release, dict):
+            release = deepcopy(release)
+            gates = release.get("gates")
+            metadata_gate = gates.get("metadata_valid") if isinstance(gates, dict) else None
+            if isinstance(metadata_gate, dict):
+                metadata_gate["evidence"] = _relative_or_str(card_path)
         versions = []
         latest_status = "draft"
         if release:
@@ -659,32 +846,134 @@ def build_catalog_command(args: argparse.Namespace) -> int:
             "schema_version": 1,
             "generated_at": generated_at,
             "model_id": model_id,
+            "external": card["external"],
+            "internal": card["internal"],
             "model": card["model"],
             "source": card["source"],
-            "workflow": card["workflow"],
+            "workflow": catalog_workflow,
             "frontend": card["frontend"],
+            "accuracy": card.get("accuracy", []),
+            "benchmark": card.get("benchmark"),
+            "release": card["release"],
             "latest_status": latest_status,
             "latest_release": _relative_or_str(release_path) if release_path else "",
             "versions": versions,
         }
-        detail_path = models_dir / f"{model_id}.json"
-        _write_json(detail_path, detail)
         index_models.append(
             {
                 "model_id": model_id,
                 "display_name": card["model"]["display_name"],
                 "family": card["model"]["family"],
+                "modality": card["model"]["modality"],
+                "precision": catalog_precision.get("display", ""),
+                "source_provider": card["source"].get("provider", ""),
+                "source_url": card["source"].get("url", ""),
+                "release_url": card["release"].get("url", ""),
                 "latest_status": latest_status,
                 "detail": f"models/{model_id}.json",
             }
         )
         all_models.append(detail)
-    _write_json(data_dir / "index.json", {"schema_version": 1, "generated_at": generated_at, "models": index_models})
-    _write_json(data_dir / "models.json", {"schema_version": 1, "generated_at": generated_at, "models": all_models})
+        release_artifacts = release.get("artifacts", {}) if isinstance(release, dict) else {}
+        release_gates = release.get("gates", {}) if isinstance(release, dict) else {}
+        gate_name_map = {
+            "metadata_valid": "metadata_valid",
+            "workflow_exported": "workflow_exported",
+            "golden_valid": "golden_valid",
+            "artifact_valid": "artifact_valid",
+            "accuracy_valid": "accuracy_valid",
+            "compiler_valid": "compiler_valid",
+        }
+        gates = []
+        for gate_name in gate_name_map:
+            gate = release_gates.get(gate_name, {}) if isinstance(release_gates, dict) else {}
+            state = gate.get("status", "pending") if isinstance(gate, dict) else "pending"
+            if state not in {"passed", "failed", "blocked", "pending", "not_applicable"}:
+                state = "pending"
+            gates.append(
+                {
+                    "name": gate_name,
+                    "state": state,
+                    "message": gate.get("evidence", "") if isinstance(gate, dict) else "",
+                }
+            )
+        generated_models.append(
+            {
+                "model_id": model_id,
+                "name": card["model"]["display_name"],
+                "family": card["model"]["family"],
+                "category": _catalog_model_category(card),
+                "owner": card.get("release", {}).get("owner", "") or "未分配",
+                "type": card["workflow"].get("category", "model"),
+                "size": next((tag for tag in card["model"].get("tags", []) if str(tag).lower().endswith("b")), ""),
+                "backends": [str(card["workflow"].get("target_device", "xh2a")).lower()],
+                "release_status": latest_status if latest_status != "draft" else "ready",
+                "gates": gates,
+                "artifacts": {
+                    "manifest": release_artifacts.get("manifest", "") if isinstance(release_artifacts, dict) else "",
+                    "hmonnx": release_artifacts.get("hmonnx", "") if isinstance(release_artifacts, dict) else "",
+                    "readme": release_artifacts.get("readme", "") if isinstance(release_artifacts, dict) else "",
+                },
+                "source": card["source"],
+                "workflow": {
+                    "config_path": card["workflow"]["config_path"],
+                    "target_device": card["workflow"].get("target_device", ""),
+                    "precision": catalog_precision,
+                },
+                "release": {
+                    "url": card["release"].get("url", ""),
+                    "quant_models": card["release"].get("quant_models", []),
+                },
+                "external": card["external"],
+                "internal": card["internal"],
+                "accuracy": card.get("accuracy", []),
+                "benchmark": card.get("benchmark"),
+                "io": {
+                    "inputs": card["frontend"]["inputs"],
+                    "outputs": card["frontend"]["outputs"],
+                    "submodels": card["frontend"].get("submodels", []),
+                },
+                "updated_at": release.get("updated_at", generated_at) if isinstance(release, dict) else generated_at,
+            }
+        )
+    return {
+        "index": {"schema_version": 1, "generated_at": generated_at, "models": index_models},
+        "models": {"schema_version": 1, "generated_at": generated_at, "models": all_models},
+        "generated": {"last_updated": generated_at, "models": generated_models},
+    }
+
+
+def build_catalog_command(args: argparse.Namespace) -> int:
+    release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
+    catalog_root = _resolve_path(getattr(args, "catalog_root", "")) if getattr(args, "catalog_root", "") else _default_catalog_root()
+    model_card_root = _resolve_path(getattr(args, "model_card_root", "")) if getattr(args, "model_card_root", "") else ROOT / "examples_merak"
+    data_dir = catalog_root / "data"
+    models_dir = data_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    catalog = _collect_catalog_data(release_root=release_root, model_card_root=model_card_root)
+    current_detail_paths: set[Path] = set()
+    for detail in catalog["models"]["models"]:
+        detail_path = models_dir / f"{detail['model_id']}.json"
+        _write_json(detail_path, detail)
+        current_detail_paths.add(detail_path.resolve())
+    for stale_detail in models_dir.glob("*.json"):
+        if stale_detail.resolve() not in current_detail_paths:
+            stale_detail.unlink()
+    _write_json(data_dir / "index.json", catalog["index"])
+    _write_json(data_dir / "models.json", catalog["models"])
+    _write_json(data_dir / "models.generated.json", catalog["generated"])
     overrides = data_dir / "models.overrides.json"
     if not overrides.is_file():
         _write_json(overrides, {"schema_version": 1, "overrides": {}})
     print(f"Wrote {_relative_or_str(data_dir / 'index.json')}")
+    return 0
+
+
+def query_catalog_command(args: argparse.Namespace) -> int:
+    release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
+    model_card_root = _resolve_path(getattr(args, "model_card_root", "")) if getattr(args, "model_card_root", "") else ROOT / "examples_merak"
+    catalog = _collect_catalog_data(release_root=release_root, model_card_root=model_card_root)
+    print(json.dumps(catalog["generated"], indent=2, ensure_ascii=False))
     return 0
 
 
@@ -694,7 +983,13 @@ def render_readme_command(args: argparse.Namespace) -> int:
     release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
     detail_path = catalog_root / "data" / "models" / f"{model_id}.json"
     if not detail_path.is_file():
-        build_catalog_command(argparse.Namespace(release_root=str(release_root), catalog_root=str(catalog_root)))
+        build_catalog_command(
+            argparse.Namespace(
+                release_root=str(release_root),
+                catalog_root=str(catalog_root),
+                model_card_root="",
+            )
+        )
     detail = _read_json(detail_path)
     versions = detail.get("versions", [])
     version = versions[0] if versions else {"version_id": "draft", "status": "draft", "gates": {}, "artifacts": {}}
@@ -725,17 +1020,12 @@ def render_readme_command(args: argparse.Namespace) -> int:
 
 
 def iter_delivery_files(root: Path) -> list[Path]:
-    if root.is_file():
-        return [root]
-    if not root.is_dir():
-        raise DeliveryValidationError(f"model card root does not exist: {root}")
-    return sorted(path for path in root.rglob("*.yaml") if path.is_file())
+    return discover_model_cards(root)
 
 
 def validate_command(args: argparse.Namespace) -> int:
     if not SCHEMA_PATH.is_file():
         raise DeliveryValidationError(f"schema file does not exist: {SCHEMA_PATH.relative_to(ROOT)}")
-    # Ensure the schema itself is valid JSON for tooling consumption.
     json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
     root = (ROOT / args.root).resolve() if not Path(args.root).is_absolute() else Path(args.root)
@@ -756,7 +1046,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser("validate", help="validate phase-1 model card YAML files")
     validate_parser.add_argument(
         "--root",
-        default="merak_delivery/model_cards/merak",
+        default="examples_merak",
         help="model card YAML file or directory",
     )
     validate_parser.set_defaults(func=validate_command)
@@ -836,7 +1126,13 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_parser = subparsers.add_parser("build-catalog", help="build frontend catalog files")
     catalog_parser.add_argument("--release-root", default="", help="release root directory")
     catalog_parser.add_argument("--catalog-root", default="", help="catalog root directory")
+    catalog_parser.add_argument("--model-card-root", default="", help="model card root directory; defaults to examples_merak")
     catalog_parser.set_defaults(func=build_catalog_command)
+
+    query_catalog_parser = subparsers.add_parser("query-catalog", help="print frontend catalog JSON without writing files")
+    query_catalog_parser.add_argument("--release-root", default="", help="release root directory")
+    query_catalog_parser.add_argument("--model-card-root", default="", help="model card root directory; defaults to examples_merak")
+    query_catalog_parser.set_defaults(func=query_catalog_command)
 
     readme_parser = subparsers.add_parser("render-readme", help="render README from catalog/release data")
     readme_parser.add_argument("--model-id", required=True, help="model id to render")

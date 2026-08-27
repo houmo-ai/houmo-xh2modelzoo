@@ -1,0 +1,180 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_asr
+    family: qwen3_asr
+    display_name: Qwen3 ASR
+  parameters:
+    total: 938008576
+    active: 938008576
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 1500, 128]
+    prefill: 0.822931
+    decode: 0.00072953
+    unit: TFLOPs
+    status: inferred
+    note: 依据 Qwen3-ASR-0.6B 官方 config 和本仓库工作流静态计算；Prefill 包含 1500 帧音频 Encoder 与 216-token 文本 LLM，Decode 为复用同一缓存生成首个 token，MAC 按 2 FLOPs。
+  precision:
+    float_format: GPU baseline
+    quantized_format: w8a8_sefp
+    comparisons:
+    - name: librispeech_clean_xh2_v1_4_0
+      dataset: LibriSpeech clean / English / 2620 samples
+      metric: WER (%)，GPU vs XH2 v1.4.0
+      float: 2.80
+      quant: 3.82
+      delta: 1.02
+      evidence: https://houmo.feishu.cn/wiki/HOUlwbO4riKdx5kSVzRcgPConsc
+      status: verified
+    - name: fleurs_zh_xh2_v1_4_0
+      dataset: FLEURS / Chinese / 945 samples
+      metric: CER (%)，GPU vs XH2 v1.4.0
+      float: 7.69
+      quant: 8.67
+      delta: 0.98
+      evidence: https://houmo.feishu.cn/wiki/HOUlwbO4riKdx5kSVzRcgPConsc
+      status: verified
+    - name: aishell1_xh2_v1_4_0
+      dataset: AIShell-1 / Chinese / 7176 samples
+      metric: CER (%)，GPU vs XH2 v1.4.0
+      float: 2.09
+      quant: 2.21
+      delta: 0.12
+      evidence: https://houmo.feishu.cn/wiki/HOUlwbO4riKdx5kSVzRcgPConsc
+      status: verified
+  owner: chuyuan.wei
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: Qwen3 ASR
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/Qwen3-ASR-0.6B
+  components:
+  - id: model
+    display_name: Qwen3 ASR
+    type: other_models
+    precision: w8a8_sefp
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_key_cache
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_value_cache
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: last_hidden_state
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: encoder
+    display_name: encoder
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: prefill_decode
+    display_name: prefill_decode
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_key_cache
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_value_cache
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: last_hidden_state
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/qwen3_asr/0_6b/qwen3_asr.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/Qwen3-ASR-0.6B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        components_encoder: w8a8_sefp
+        components_prefill_decode: w8a8_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_asr
+  release:
+    version_id: qwen3_asr_w8a8_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3 ASR
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3 ASR Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/asr/qwen3_asr
+      readme:
+      - examples_merak/asr/qwen3_asr/README.md

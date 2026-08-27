@@ -1,0 +1,119 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_6_35b_a3b
+    family: qwen3_5_moe
+    display_name: Qwen3.6 35B a3b
+  parameters:
+    total: 35951822704
+    active: 3000000000
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 2048]
+    prefill: 12.92
+    decode: 0.006309
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: GPU baseline
+    quantized_format: w4a8h1_sefp
+    comparisons:
+    - name: mmmu_pro_xh2_w8a8_896px
+      dataset: MMMU-Pro / 3460 questions
+      metric: Accuracy (%)，GPU vs XH2 W8A8，896px，no thinking
+      float: 65.78
+      quant: 62.43
+      delta: -3.35
+      evidence: https://houmo.feishu.cn/wiki/Vuv7ww11qiZW76khUYJc8kzwnFe
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: Qwen3.6 35B a3b
+    url: ''
+    license: ''
+    raw_model_path: /data01/datasets/Qwen3.6-35B-A3B
+  components:
+  - id: model
+    display_name: Qwen3.6 35B a3b
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml
+    model_dir: /data01/datasets/Qwen3.6-35B-A3B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_6_35b_a3b
+  release:
+    version_id: qwen3_6_35b_a3b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3.6 35B a3b
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3.6 35B a3b Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/qwen3_5
+      readme:
+      - examples_merak/llm/qwen3_5/README.md

@@ -1,0 +1,175 @@
+schema_version: 2
+external:
+  model:
+    id: minicpm_v_4_6
+    family: minicpm_v_4_6
+    display_name: minicpm v 4 6 Qwen3 5 0.8B
+  parameters:
+    total: 1300428016
+    active: 1300428016
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 3.34
+    decode: 0.001631
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: ocrbench_w8a8_hmonnx
+      dataset: OCRBench
+      metric: Score，Torch vs W8A8 SEFP HMONNX
+      float: 833
+      quant: 841
+      delta: 8
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#F3RDdnikao89O9xGni4cXCIon3b
+      status: verified
+    - name: chartqa_w8a8_hmonnx
+      dataset: ChartQA
+      metric: Accuracy (%)，Torch vs W8A8 SEFP HMONNX
+      float: '76.60'
+      quant: '76.72'
+      delta: 0.12
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#F3RDdnikao89O9xGni4cXCIon3b
+      status: verified
+    - name: ai2d_direct_w8a8_hmonnx
+      dataset: AI2D Direct
+      metric: Accuracy (%)，Torch vs W8A8 SEFP HMONNX
+      float: '80.38'
+      quant: '79.95'
+      delta: -0.43
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#F3RDdnikao89O9xGni4cXCIon3b
+      status: verified
+  owner: she.gao
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: minicpm v 4 6 xh2a w8a8
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/MiniCPM-V-4.6
+  components:
+  - id: model
+    display_name: minicpm v 4 6 Qwen3 5 0.8B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: vision_4x
+    display_name: vision_4x
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: vision_16x
+    display_name: vision_16x
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: llm
+    display_name: llm
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/minicpm_v_4_6/0_8b/minicpm_v_4_6_xh2a_w8a8.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/MiniCPM-V-4.6
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        components_vision_4x: w8a8h1_sefp
+        components_vision_16x: w8a8h1_sefp
+        components_llm: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/minicpm_v_4_6
+  release:
+    version_id: minicpm_v_4_6_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: minicpm v 4 6 Qwen3 5 0.8B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 minicpm v 4 6 Qwen3 5 0.8B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/minicpm_v_4_6
+      readme:
+      - examples_merak/llm/minicpm_v_4_6/README.md
+  benchmark:
+    source: benchmark_test
+    status: mismatch
+    summary: 检测到关联 benchmark 脚本，但模型版本或量化配置不匹配，不能作为当前卡片精度证据。
+    cases:
+    - name: Minicpm 模型测试
+      script: benchmark_test/benchmark_test_minicpm.py
+      match_status: mismatch
+      run_status: skipped
+      model_path: /data02/datasets/Qwen3-8B
+      quant_type: w8a8h1_sefp
+      weight_bits:
+      - 8
+      activation_bits:
+      - 8
+      dataset: ''
+      metric: PPL
+      threshold: ''
+      result_path: work_dirs/Qwen3-8B-XH2a-2k-w8a8h0_sefp/eval_ppl.txt
+      observed: ''
+      note: 脚本实际模型与当前模型卡版本不一致；脚本标记模型未完成迁移并提前返回；仓库中未找到脚本引用的结果文件

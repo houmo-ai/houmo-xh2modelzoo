@@ -1,0 +1,157 @@
+schema_version: 2
+external:
+  model:
+    id: mineru2_5_pro_xh2a_4k
+    family: mineru2_5
+    display_name: mineru2 5 pro 2604 1.2B
+  parameters:
+    total: 1156026624
+    active: 1156026624
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 4.33
+    decode: 0.002114
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: legacy_vision_hmonnx_golden_cosine
+      dataset: MinerU2.5 旧版 4K vision golden tensor
+      metric: cosine similarity（W8A8H1 SEFP；旧版模型代理，并非当前 Pro-2604 实测；distance 0.001148）
+      float: 1.0
+      quant: 0.997324
+      delta: -0.002676
+      evidence: http://jira.houmo.ai/browse/HMSW-3030
+      status: assumed
+    - name: legacy_prefill_hmonnx_golden_cosine
+      dataset: MinerU2.5 旧版 4K prefill golden tensor
+      metric: cosine similarity（W8A8H1 SEFP；旧版模型代理，Jira 标记 distance 0.132870 偏大）
+      float: 1.0
+      quant: 0.998538
+      delta: -0.001462
+      evidence: http://jira.houmo.ai/browse/HMSW-3030
+      status: assumed
+    - name: legacy_decode_hmonnx_golden_cosine
+      dataset: MinerU2.5 旧版 4K decode golden tensor
+      metric: cosine similarity（W8A8H1 SEFP；旧版模型代理，并非当前 Pro-2604 实测；distance 0.004920）
+      float: 1.0
+      quant: 0.998743
+      delta: -0.001257
+      evidence: http://jira.houmo.ai/browse/HMSW-3030
+      status: assumed
+  owner: chuyuan.wei
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: mineru2 5 pro xh2a 4k
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.24:10022/data01/datasets/MinerU2.5-Pro-2604-1.2B
+  components:
+  - id: model
+    display_name: mineru2 5 pro 2604 1.2B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/mineru2_5/mineru2_5_pro_xh2a_4k.yaml
+    model_dir: ssh://xuzk@10.30.0.24:10022/data01/datasets/MinerU2.5-Pro-2604-1.2B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        visual_buckets_model_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/mineru2_5_pro_xh2a_4k
+  release:
+    version_id: mineru2_5_pro_xh2a_4k_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: mineru2 5 pro 2604 1.2B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 mineru2 5 pro 2604 1.2B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/mineru2.5
+      readme:
+      - examples_merak/llm/mineru2.5/README.md
+  benchmark:
+    source: benchmark_test
+    status: mismatch
+    summary: 关联 benchmark 与 Jira 均为 W8A8H1 SEFP，但模型版本早于当前 Pro-2604；精度仅作为旧版代理展示。
+    cases:
+    - name: Mineru2.5测试
+      script: benchmark_test/benchmark_test_mineru2_5.py
+      match_status: mismatch
+      run_status: on_demand
+      model_path: ''
+      quant_type: w8a8h1_sefp
+      weight_bits:
+      - 8
+      activation_bits:
+      - 8
+      dataset: ''
+      metric: ''
+      threshold: ''
+      result_path: ''
+      observed: ''
+      note: 量化配置已与 Jira 对齐为 w8a8h1_sefp，但旧版 checkpoint 与当前 Pro-2604 仍不一致；默认跳过，需设置 TEST_ALL_MODEL=true 才执行

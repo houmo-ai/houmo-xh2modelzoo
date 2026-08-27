@@ -1,0 +1,118 @@
+schema_version: 2
+external:
+  model:
+    id: laguna_s_2_1
+    family: laguna
+    display_name: laguna s 2 1
+  parameters:
+    total: 117561977600
+    active: 8000000000
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 2048]
+    prefill: 33.82
+    decode: 0.016514
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: BF16
+    quantized_format: w4a8h0_ssfp
+    comparisons:
+    - name: weighted_overall_hmonnx_a8
+      dataset: 当前同 ID 样本 / 2833 samples
+      metric: Weighted accuracy (%)，BF16 vs HMONNX A8
+      float: 71.20
+      quant: 70.56
+      delta: -0.64
+      evidence: http://jira.houmo.ai/browse/QTL-427
+      status: verified
+  owner: zukang.xu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: laguna s 2 1 xh2a w4a8
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: laguna s 2 1
+    type: llm_models
+    precision: w4a8h0_ssfp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/laguna_s_2_1_xh2a_w4a8.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w4a8h0_ssfp
+      components:
+        model_quant_scheme: w4a8h0_ssfp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/laguna_s_2_1
+  release:
+    version_id: laguna_s_2_1_w4a8h0_ssfp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: laguna s 2 1
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w4a8h0_ssfp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 laguna s 2 1 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/laguna
+      readme:
+      - examples_merak/llm/laguna/README.md

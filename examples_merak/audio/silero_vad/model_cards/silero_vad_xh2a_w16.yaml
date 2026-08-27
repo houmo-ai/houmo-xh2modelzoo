@@ -1,0 +1,128 @@
+schema_version: 2
+external:
+  model:
+    id: silero_vad_xh2a_w16
+    family: silero_vad
+    display_name: silero vad xh2a w16
+  parameters:
+    total: 462594
+    active: 243585
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 512]
+    prefill: 0.00000048717
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 16 kHz 主分支单窗口静态计算，输入 512 samples、状态 [2,1,128]；8 kHz 分支输入 256 samples 时约 0.000000438018 TFLOPs。两分支按请求二选一，无 Decode。
+  precision:
+    float_format: ''
+    quantized_format: w16a16_sefp
+    comparisons:
+    - name: real_audio_8khz_frame_cosine_w16_hmonnx
+      dataset: 官方真实 WAV / 8 kHz / 94 frames
+      metric: Frame-probability cosine，source vs W16 HMONNX（0.5 判决一致率 100%）
+      float: 1.0
+      quant: '0.9999998267'
+      delta: -0.0000001733
+      evidence: examples_merak/audio/silero_vad/README.md#9-真实音频精度
+      status: verified
+    - name: real_audio_16khz_frame_cosine_w16_hmonnx
+      dataset: 官方真实 WAV / 16 kHz / 94 frames
+      metric: Frame-probability cosine，source vs W16 HMONNX（0.5 判决一致率 100%）
+      float: 1.0
+      quant: '0.9999996620'
+      delta: -0.000000338
+      evidence: examples_merak/audio/silero_vad/README.md#9-真实音频精度
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: silero vad xh2a w16
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: silero vad xh2a w16
+    type: other_models
+    precision: w16a16_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/silero_vad/silero_vad_xh2a_w16.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w16a16_sefp
+      components:
+        variants_0: w16a16_sefp
+        variants_1: w16a16_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/silero_vad_xh2a_w16
+  release:
+    version_id: silero_vad_xh2a_w16_w16a16_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: silero vad xh2a w16
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w16a16_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 silero vad xh2a w16 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/audio/silero_vad
+      readme:
+      - examples_merak/audio/silero_vad/README.md

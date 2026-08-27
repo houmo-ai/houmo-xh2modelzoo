@@ -1,0 +1,211 @@
+schema_version: 2
+external:
+  model:
+    id: pi05_libero
+    family: pi05
+    display_name: pi05 libero
+  parameters:
+    total: 3616757520
+    active: 3616757520
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2, 224, 224, 3]
+    prefill: 3.704916
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 2 路 224×224 RGB 图像、200-token 文本上限、712-token 前缀和 50 步动作块；包含 SigLIP、PaliGemma 与 Gemma expert 的 10 次 flow-matching 前向，非自回归流程无独立 Decode。
+  precision:
+    float_format: torch
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: libero_goal_full_w8a8_hmonnx
+      dataset: LIBERO-Goal / 10 tasks x 50 episodes
+      metric: Success rate (%)，50-step full W8A8 HMONNX
+      float: 94.8
+      quant: 82.0
+      delta: -12.8
+      evidence: https://houmo.feishu.cn/wiki/EWxswrJdMi4YYqkckADcqEuongf
+      status: verified
+    - name: libero_goal_hybrid_w8a8
+      dataset: LIBERO-Goal / 10 tasks x 50 episodes
+      metric: Success rate (%)，vision+Gemma2B W8A8；Gemma300M torch
+      float: 94.8
+      quant: 93.2
+      delta: -1.6
+      evidence: https://houmo.feishu.cn/wiki/EWxswrJdMi4YYqkckADcqEuongf
+      status: verified
+  owner: chuyuan.wei
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: pi05 libero
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.23:10022/data01/datasets/pi05_libero_finetuned
+  components:
+  - id: model
+    display_name: pi05 libero
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: attention_mask
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: last_hidden_state
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: expert_model
+    display_name: expert_model
+    type: XHGemma05CLLMModel
+    precision: ''
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: expert_model
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: expert_model
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: expert_model
+    - name: cond
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: expert_model
+    - name: attention_mask
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: expert_model
+    outputs:
+    - name: last_hidden_state
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+      submodel: expert_model
+  - id: vision
+    display_name: vision
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: gemma
+    display_name: gemma
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: expert
+    display_name: expert
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: other
+    display_name: other
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    - name: attention_mask
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: last_hidden_state
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/pi05/libero/pi05_libero.yaml
+    model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/pi05_libero_finetuned
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        vision: w8a8h1_sefp
+        gemma: w8a8h1_sefp
+        expert: w8a8h1_sefp
+        other: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/pi05_libero
+  release:
+    version_id: pi05_libero_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: pi05 libero
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 pi05 libero Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []

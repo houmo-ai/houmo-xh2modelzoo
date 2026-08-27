@@ -9,9 +9,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOW = ROOT / "merak_delivery/tools/merak_model_flow.py"
-MODEL_CARD = ROOT / "merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml"
+MODEL_CARD = ROOT / "examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml"
+OLD_MODEL_CARD = "merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml"
 MODEL_ID = "qwen3_0_6b"
-VERSION_ID = "qwen3_0_6b_xh2a_w8a16_256_2k_20260708"
+VERSION_ID = "qwen3_0_6b_w8a16h1_sefp_draft"
 TOOL_ENTRYPOINTS = [
     "merak_version_flow.py",
     "collect_merak_delivery_manifest.py",
@@ -338,8 +339,18 @@ def test_full_metadata_flow_generates_manifest_release_catalog_and_readme(tmp_pa
     release_state = yaml.safe_load(release_file.read_text(encoding="utf-8"))
     assert release_state["status"] == "accuracy_passed"
     assert release_state["gates"]["artifact_valid"]["status"] == "passed"
+    release_state["gates"]["metadata_valid"]["evidence"] = OLD_MODEL_CARD
+    release_file.write_text(yaml.safe_dump(release_state, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-    catalog = run_flow("build-catalog", "--release-root", str(release_root), "--catalog-root", str(catalog_root))
+    catalog = run_flow(
+        "build-catalog",
+        "--release-root",
+        str(release_root),
+        "--catalog-root",
+        str(catalog_root),
+        "--model-card-root",
+        "examples_merak",
+    )
     assert catalog.returncode == 0, catalog.stdout + catalog.stderr
     index_path = catalog_root / "data/index.json"
     detail_path = catalog_root / f"data/models/{MODEL_ID}.json"
@@ -352,6 +363,11 @@ def test_full_metadata_flow_generates_manifest_release_catalog_and_readme(tmp_pa
     detail = json.loads(detail_path.read_text(encoding="utf-8"))
     assert detail["model_id"] == MODEL_ID
     assert detail["versions"][0]["version_id"] == VERSION_ID
+    assert detail["versions"][0]["gates"]["metadata_valid"]["evidence"] == str(MODEL_CARD.relative_to(ROOT))
+    generated = (catalog_root / "data/models.generated.json").read_text(encoding="utf-8")
+    assert OLD_MODEL_CARD not in generated
+    assert OLD_MODEL_CARD not in models_path.read_text(encoding="utf-8")
+    assert OLD_MODEL_CARD not in detail_path.read_text(encoding="utf-8")
 
     readme = run_flow(
         "render-readme",
@@ -368,3 +384,54 @@ def test_full_metadata_flow_generates_manifest_release_catalog_and_readme(tmp_pa
     content = readme_path.read_text(encoding="utf-8")
     assert "# Qwen3 0.6B" in content
     assert VERSION_ID in content
+
+
+def test_query_catalog_reads_modelzoo_cards_without_writing_catalog(tmp_path):
+    release_root = tmp_path / "releases"
+    catalog_root = tmp_path / "catalog"
+    release_dir = release_root / MODEL_ID
+    release_dir.mkdir(parents=True)
+    release_file = release_dir / f"{VERSION_ID}.yaml"
+    release_file.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model_id": MODEL_ID,
+                "version_id": VERSION_ID,
+                "status": "accuracy_passed",
+                "gates": {
+                    "metadata_valid": {
+                        "status": "passed",
+                        "evidence": OLD_MODEL_CARD,
+                    }
+                },
+                "artifacts": {},
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (release_dir / "latest.yaml").write_text(
+        yaml.safe_dump({"latest_version_id": VERSION_ID, "latest_file": release_file.name}, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    result = run_flow(
+        "query-catalog",
+        "--release-root",
+        str(release_root),
+        "--model-card-root",
+        "examples_merak",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not catalog_root.exists()
+    payload = json.loads(result.stdout)
+    cards = list((ROOT / "examples_merak").glob("**/model_cards/*.yaml"))
+    assert len(payload["models"]) == len(cards)
+    qwen = next(model for model in payload["models"] if model["model_id"] == MODEL_ID)
+    metadata_gate = next(gate for gate in qwen["gates"] if gate["name"] == "metadata_valid")
+    assert metadata_gate["message"] == str(MODEL_CARD.relative_to(ROOT))
+    assert OLD_MODEL_CARD not in result.stdout

@@ -1,0 +1,120 @@
+schema_version: 2
+external:
+  model:
+    id: hunyuan_ocr_base
+    family: hunyuan_ocr
+    display_name: hunyuan ocr base
+  parameters:
+    total: 1119925744
+    active: 1119925744
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 960, 1280, 3]
+    prefill: 8.195529
+    decode: 0.00132917
+    unit: TFLOPs
+    status: inferred
+    note: 绑定本仓库 1280×960 bucket（4800 个 ViT patch、1232 个合并视觉 token、1278-token canonical prefill）；包含 27 层视觉编码器和 24 层文本解码器，Decode 为复用 1278-token KV Cache 的首个生成 token。
+  precision:
+    float_format: ''
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: ocrbench_hessian_mixed_w8a8_w4a8
+      dataset: OCRBench
+      metric: Score，Float vs Hessian mixed quantization（self_attn W8A8，其余 W4A8，平均位宽 4.20）
+      float: 454
+      quant: 430
+      delta: -24
+      evidence: https://houmo.feishu.cn/wiki/XONNwrhrOi2piwkQ0JTcS0yYnif#ErhGdywfToo3Y6xJO8hc1tG9nvf
+      status: verified
+  owner: junjie.yang
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: hunyuan ocr base xh2a w8a8
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: hunyuan ocr base
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/hunyuan_ocr/base/hunyuan_ocr_base_xh2a_w8a8.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/hunyuan_ocr_base
+  release:
+    version_id: hunyuan_ocr_base_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: hunyuan ocr base
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 hunyuan ocr base Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/hunyuan_ocr
+      readme:
+      - examples_merak/llm/hunyuan_ocr/README.md

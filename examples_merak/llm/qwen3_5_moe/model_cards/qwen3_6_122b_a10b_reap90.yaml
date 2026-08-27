@@ -1,0 +1,189 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_6_122b_a10b_reap90
+    family: qwen3_5_moe
+    display_name: Qwen3.6 122B a10b reap90
+  parameters:
+    total: 125086497008
+    active: 10000000000
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 2048]
+    prefill: 40.96
+    decode: 0.02
+    unit: TFLOPs
+    status: inferred
+    note: 未发现 qwen3_6_122b_a10b_reap90 的独立公开配置；参数与计算量采用同架构 Qwen3.5-122B-A10B 的 Hugging Face 权重总数和 10B 激活口径作为 family proxy，待内部 checkpoint config 复核。
+  precision:
+    float_format: ''
+    quantized_format: w4a8h0_ssfp
+    comparisons:
+    - name: qwen35_122b_prune30_gsm8k_proxy
+      dataset: GSM8K
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 96.82
+      quant: 96.89
+      delta: 0.07
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_math500_proxy
+      dataset: MATH-500
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 86.6
+      quant: 84.42
+      delta: -2.18
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_ifeval_proxy
+      dataset: IFEval
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 87.8
+      quant: 81.15
+      delta: -6.65
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_triviaqa_proxy
+      dataset: TriviaQA
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 80.36
+      quant: 41.13
+      delta: -39.23
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_aime25_proxy
+      dataset: AIME25 / 4K context（Jira 注明非实际长上下文指标）
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 36.66
+      quant: 33.33
+      delta: -3.33
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_aime24_proxy
+      dataset: AIME24 / 4K context（Jira 注明非实际长上下文指标）
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 50.0
+      quant: 53.33
+      delta: 3.33
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_bbh_proxy
+      dataset: BBH
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 92.81
+      quant: 91.41
+      delta: -1.4
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_drop_proxy
+      dataset: DROP
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 69.89
+      quant: 69.48
+      delta: -0.41
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_livecodebench_proxy
+      dataset: LiveCodeBench
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 67.68
+      quant: 68.72
+      delta: 1.04
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+    - name: qwen35_122b_prune30_cmmlu_proxy
+      dataset: CMMLU
+      metric: Accuracy (%)，Qwen3.5 122B 30% 剪枝代理；并非当前 reap90/W4A8 实测
+      float: 88.07
+      quant: 79.97
+      delta: -8.1
+      evidence: http://jira.houmo.ai/browse/TEOS-9
+      status: assumed
+  owner: 未分配
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: Qwen3.6 122B a10b reap90
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: Qwen3.6 122B a10b reap90
+    type: llm_models
+    precision: w4a8h0_ssfp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_6_122b_a10b_reap90_autoround.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w4a8h0_ssfp
+      components:
+        model_quant_scheme: w4a8h0_ssfp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_6_122b_a10b_reap90
+  release:
+    version_id: qwen3_6_122b_a10b_reap90_w4a8h0_ssfp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3.6 122B a10b reap90
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w4a8h0_ssfp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3.6 122B a10b reap90 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []

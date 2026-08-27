@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "merak_model_flow.py"
@@ -39,6 +40,63 @@ def test_cli_builds_existing_commands():
     args = parser.parse_args(["run-eval", "--model-card", "card.yaml"])
     assert args.func is flow.run_eval_command
     assert args.eval_dataset_hub == "modelscope"
+
+    args = parser.parse_args(["query-catalog"])
+    assert args.func is flow.query_catalog_command
+
+
+def test_model_card_discovery_only_reads_model_cards_directories(tmp_path: Path):
+    card = tmp_path / "examples_merak" / "llm" / "demo" / "model_cards" / "demo.yaml"
+    unrelated = tmp_path / "examples_merak" / "llm" / "demo" / "workflow.yaml"
+    nested = card.parent / "archive" / "old.yaml"
+    for path in (card, unrelated, nested):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("model: {}\n", encoding="utf-8")
+
+    assert flow.discover_model_cards(tmp_path / "examples_merak") == [card]
+
+
+def test_catalog_precision_uses_workflow_weight_bits_for_delivery_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config_path = Path("configs_merak/workflows/xh2a/llm_models/demo/demo.yaml")
+    full_path = tmp_path / config_path
+    full_path.parent.mkdir(parents=True)
+    full_path.write_text(
+        yaml.safe_dump(
+            {
+                "quant": {
+                    "algorithm": "gptqmodel",
+                    "method": "autoround",
+                    "bits": 4,
+                    "group_size": 64,
+                },
+                "export": {"model": {"quant_scheme": {"quant_type": "w8a8h1_sefp"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(flow, "ROOT", tmp_path)
+    card = {
+        "workflow": {
+            "config_path": str(config_path),
+            "precision": {
+                "overall": "w8a8h1_sefp",
+                "components": {"model_quant_scheme": "w8a8h1_sefp"},
+            },
+        }
+    }
+
+    precision = flow._catalog_precision(card)
+
+    assert precision["display"] == "W4A8"
+    assert precision["weight_bits"] == 4
+    assert precision["activation_bits"] == 8
+    assert precision["weight_group_size"] == 64
+    assert precision["weight_algorithm"] == "gptqmodel"
+    assert precision["weight_method"] == "autoround"
+    assert precision["export_overall"] == "w8a8h1_sefp"
 
 
 def test_evaluator_writes_normalized_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -145,3 +203,54 @@ def test_float_cli_does_not_require_model_dir():
     )
     assert args.eval_backend == "float"
     assert not hasattr(args, "eval_model_dir")
+
+
+@pytest.mark.parametrize(
+    ("model_id", "family", "category", "config_path", "expected"),
+    [
+        (
+            "pi05_droid",
+            "pi05",
+            "other_models",
+            "configs_merak/workflows/xh2a/other_models/pi05/droid/pi05_droid.yaml",
+            "VLA",
+        ),
+        (
+            "qwen3_0_6b",
+            "qwen3",
+            "llm_models",
+            "configs_merak/workflows/xh2a/llm_models/qwen3/0_6b/model.yaml",
+            "LLM",
+        ),
+        (
+            "zimage",
+            "zimage",
+            "other_models",
+            "configs_merak/workflows/xh2a/other_models/zimage/zimage.yaml",
+            "生图",
+        ),
+        (
+            "wan2_2_i2v",
+            "wan2_2",
+            "other_models",
+            "configs_merak/workflows/xh2a/other_models/wan2_2/i2v/model.yaml",
+            "视频理解",
+        ),
+        (
+            "qwen3_tts",
+            "qwen3_tts",
+            "other_models",
+            "configs_merak/workflows/xh2a/other_models/qwen3_tts/model.yaml",
+            "TTS",
+        ),
+    ],
+)
+def test_catalog_model_category(
+    model_id: str, family: str, category: str, config_path: str, expected: str
+):
+    card = {
+        "model": {"id": model_id, "family": family},
+        "workflow": {"category": category, "config_path": config_path, "precision": {"components": {}}},
+    }
+
+    assert flow._catalog_model_category(card) == expected

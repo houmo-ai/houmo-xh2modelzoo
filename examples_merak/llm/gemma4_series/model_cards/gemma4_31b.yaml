@@ -1,0 +1,151 @@
+schema_version: 2
+external:
+  model:
+    id: gemma4_31b
+    family: gemma4_series
+    display_name: gemma 4.31B
+  parameters:
+    total: 31273088876
+    active: 31273088876
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 131.94
+    decode: 0.064424
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: BF16
+    quantized_format: w4a8h1_sefp
+    comparisons:
+    - name: arc_challenge_autoround_w4g64
+      dataset: lm-evaluation-harness / ARC-Challenge
+      metric: Accuracy (%)，Mode1 AutoRound W4G64
+      float: 49.23
+      quant: 50.68
+      delta: 1.45
+      evidence: https://houmo.feishu.cn/wiki/UPQVwS1JGiGVkLkC8dpcQ0qOn5g
+      status: verified
+    - name: hellaswag_autoround_w4g64
+      dataset: lm-evaluation-harness / HellaSwag
+      metric: Accuracy (%)，Mode1 AutoRound W4G64
+      float: 62.62
+      quant: 65.14
+      delta: 2.52
+      evidence: https://houmo.feishu.cn/wiki/UPQVwS1JGiGVkLkC8dpcQ0qOn5g
+      status: verified
+    - name: truthfulqa_mc2_autoround_w4g64
+      dataset: lm-evaluation-harness / TruthfulQA MC2
+      metric: Accuracy (%)，Mode1 AutoRound W4G64
+      float: 64.60
+      quant: 63.77
+      delta: -0.83
+      evidence: https://houmo.feishu.cn/wiki/UPQVwS1JGiGVkLkC8dpcQ0qOn5g
+      status: verified
+    - name: winogrande_autoround_w4g64
+      dataset: lm-evaluation-harness / Winogrande
+      metric: Accuracy (%)，Mode1 AutoRound W4G64
+      float: 65.11
+      quant: 65.75
+      delta: 0.63
+      evidence: https://houmo.feishu.cn/wiki/UPQVwS1JGiGVkLkC8dpcQ0qOn5g
+      status: verified
+    - name: mmlu_pro_10pct_autoround_w4g64
+      dataset: MMLU-Pro / 10% sample
+      metric: Accuracy (%)，Mode1 AutoRound W4G64
+      float: 84.53
+      quant: 83.95
+      delta: -0.58
+      evidence: https://houmo.feishu.cn/wiki/UPQVwS1JGiGVkLkC8dpcQ0qOn5g
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: gemma4 31B
+    url: ''
+    license: ''
+    raw_model_path: /data01/datasets/gemma-4-31b-it
+  components:
+  - id: model
+    display_name: gemma 4.31B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml
+    model_dir: /data01/datasets/gemma-4-31b-it
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        model_video_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/gemma4_31b
+  release:
+    version_id: gemma4_31b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: gemma 4.31B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 gemma 4.31B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/gemma4_series
+      readme:
+      - examples_merak/llm/gemma4_series/README.md

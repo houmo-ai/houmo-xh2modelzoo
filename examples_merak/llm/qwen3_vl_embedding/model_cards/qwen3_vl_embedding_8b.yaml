@@ -1,0 +1,189 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_vl_embedding_8b
+    family: qwen3_vl_embedding
+    display_name: Qwen3 vl embedding 8B
+  parameters:
+    total: 8144793840
+    active: 8144793840
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 448, 448, 3]
+    prefill: 4.381583
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 固定 448×448 图像，视觉侧 784 个 patch 经 merge 形成 196 token；包含 Transformers 官方 Qwen3-VL 27 层视觉编码器静态 profile 与本仓库 256-token prefill 图，Embedding 模型无自回归 Decode。
+  precision:
+    float_format: ''
+    quantized_format: w4a8h1_sefp
+    comparisons:
+    - name: text_to_image_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@1 (%)
+      float: 78.75
+      quant: 79.26
+      delta: 0.51
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: text_to_image_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@5 (%)
+      float: 93.72
+      quant: 94.38
+      delta: 0.66
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: text_to_image_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@10 (%)
+      float: 96.85
+      quant: 97.02
+      delta: 0.17
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: text_to_image_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: MRR@10 (%)
+      float: 85.33
+      quant: 85.75
+      delta: 0.42
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: text_to_image_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: nDCG@10 (%)
+      float: 88.15
+      quant: 88.52
+      delta: 0.37
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: image_to_text_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@1 (%)
+      float: 93.87
+      quant: 94.61
+      delta: 0.74
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: image_to_text_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@5 (%)
+      float: 99.37
+      quant: 99.37
+      delta: 0.0
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: image_to_text_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: Recall@10 (%)
+      float: 99.89
+      quant: 99.89
+      delta: 0.0
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: image_to_text_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: MRR@10 (%)
+      float: 96.24
+      quant: 96.7
+      delta: 0.46
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+    - name: image_to_text_fixed_448
+      dataset: Flickr30K 946 images / 4730 captions, fixed 448x448
+      metric: nDCG@10 (%)
+      float: 87.75
+      quant: 88.12
+      delta: 0.37
+      evidence: examples/llm/qwen3-vl-embedding/README.md#73-8b-固定窗口量化差异
+      status: verified
+  owner: she.gao
+internal:
+  model:
+    type: llm_models
+    modality:
+    - embedding
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: Qwen3 vl embedding 8B xh2a w8a8
+    url: ''
+    license: ''
+    raw_model_path: /data01/datasets/Qwen3-VL-8B-Instruct
+  components:
+  - id: model
+    display_name: Qwen3 vl embedding 8B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_vl_embedding/8b/qwen3_vl_embedding_8b_xh2a_w8a8.yaml
+    model_dir: /data01/datasets/Qwen3-VL-8B-Instruct
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_vl_embedding_8b
+  release:
+    version_id: qwen3_vl_embedding_8b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3 vl embedding 8B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen3 vl embedding 8B Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []

@@ -1,0 +1,135 @@
+schema_version: 2
+external:
+  model:
+    id: sensevoice_small
+    family: sensevoice_small
+    display_name: sensevoice small xh2a
+  parameters:
+    total: 233999167
+    active: 233999167
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 512, 560]
+    prefill: 0.187905
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 依据 SenseVoiceSmall 官方 FunASR config（output_size=512、linear_units=2048、num_blocks=50）按 512 帧 LFR/Fbank 输入静态估算；一次完整 Encoder 前向写入 Prefill，无自回归 Decode。
+  precision:
+    float_format: FP32
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: librispeech_clean_w8a8_aligned
+      dataset: LibriSpeech clean / 500 samples
+      metric: WER (%)，修复后 aligned mode
+      float: 3.63
+      quant: 3.67
+      delta: 0.04
+      evidence: https://houmo.feishu.cn/wiki/PTFTwBXA1iNsWEk8eywcEiDRn6g
+      status: verified
+    - name: librispeech_other_w8a8_aligned
+      dataset: LibriSpeech other / 500 samples
+      metric: WER (%)，修复后 aligned mode
+      float: 6.16
+      quant: 6.17
+      delta: 0.01
+      evidence: https://houmo.feishu.cn/wiki/PTFTwBXA1iNsWEk8eywcEiDRn6g
+      status: verified
+    - name: aishell1_w8a8_aligned
+      dataset: AIShell-1 / Chinese / 500 samples
+      metric: CER (%)，修复后 aligned mode
+      float: 1.93
+      quant: 1.89
+      delta: -0.04
+      evidence: https://houmo.feishu.cn/wiki/PTFTwBXA1iNsWEk8eywcEiDRn6g
+      status: verified
+  owner: chuyuan.wei
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: sensevoice small xh2a
+    url: ''
+    license: ''
+    raw_model_path: ssh://xuzk@10.30.0.21/data01/datasets/Funasr/senseVoice_small
+  components:
+  - id: model
+    display_name: sensevoice small xh2a
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/sensevoice_small/sensevoice_small_xh2a.yaml
+    model_dir: ssh://xuzk@10.30.0.21/data01/datasets/Funasr/senseVoice_small
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        hmonnx: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/sensevoice_small
+  release:
+    version_id: sensevoice_small_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: sensevoice small xh2a
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 sensevoice small xh2a Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/asr/sensevoice_small
+      readme:
+      - examples_merak/asr/sensevoice_small/README.md

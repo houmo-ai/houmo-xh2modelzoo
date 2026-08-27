@@ -1,0 +1,211 @@
+schema_version: 2
+external:
+  model:
+    id: voxcpm2
+    family: voxcpm2
+    display_name: VoxCPM2
+  parameters:
+    total: 2290004544
+    active: 2290004544
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256, 2048]
+    prefill: 0.779296
+    decode: 0.00270136
+    unit: TFLOPs
+    status: inferred
+    note: 依据 openbmb/VoxCPM2 官方 config；Prefill 包含 LM、LocEnc 与 LocDiT，Decode 为复用 256-token 缓存的 LM token。AudioVAE 卷积 Encoder/Decoder 未纳入主值，需单独 profiler 复核。
+  precision:
+    float_format: ''
+    quantized_format: w8a8_sefp
+    comparisons:
+    - name: cv3_eval_en_dnsmos_w8a8_hmonnx
+      dataset: CV3-EVAL / en
+      metric: DNSMOS，Torch vs W8A8 SEFP HMONNX
+      float: '3.62412'
+      quant: '3.5501'
+      delta: -0.07402
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#NKOMdSMYKoJjHRxyvLRcvdv1nbf
+      status: verified
+    - name: cv3_eval_en_speaker_similarity_w8a8_hmonnx
+      dataset: CV3-EVAL / en
+      metric: Speaker similarity，Torch vs W8A8 SEFP HMONNX
+      float: '68.78'
+      quant: '68.22'
+      delta: -0.56
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#NKOMdSMYKoJjHRxyvLRcvdv1nbf
+      status: verified
+    - name: cv3_eval_zh_dnsmos_w8a8_hmonnx
+      dataset: CV3-EVAL / zh
+      metric: DNSMOS，Torch vs W8A8 SEFP HMONNX
+      float: '3.69136'
+      quant: '3.63721'
+      delta: -0.05415
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#NKOMdSMYKoJjHRxyvLRcvdv1nbf
+      status: verified
+    - name: cv3_eval_zh_speaker_similarity_w8a8_hmonnx
+      dataset: CV3-EVAL / zh
+      metric: Speaker similarity，Torch vs W8A8 SEFP HMONNX
+      float: '73.00'
+      quant: '72.76'
+      delta: -0.24
+      evidence: https://houmo.feishu.cn/wiki/ATzIwUjyTi4ZlJkuUGzcb2kynHf#NKOMdSMYKoJjHRxyvLRcvdv1nbf
+      status: verified
+  owner: she.gao
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: VoxCPM2
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: VoxCPM2
+    type: other_models
+    precision: w8a8_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: lm
+    display_name: lm
+    type: ''
+    precision: w8a8_sefp
+    inputs:
+    - name: inputs_embeds
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: lm
+    - name: past_seq_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: lm
+    - name: current_input_length
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+      submodel: lm
+    outputs:
+    - name: hidden
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+      submodel: lm
+  - id: locenc
+    display_name: locenc
+    type: ''
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  - id: locdit
+    display_name: locdit
+    type: ''
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  - id: audiovae_encoder
+    display_name: audiovae_encoder
+    type: ''
+    precision: w16a16_sefp
+    inputs: []
+    outputs: []
+  - id: audiovae_decoder_stream
+    display_name: audiovae_decoder_stream
+    type: ''
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  - id: audiovae_decoder_full
+    display_name: audiovae_decoder_full
+    type: ''
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  - id: audiovae_decoder_stateful
+    display_name: audiovae_decoder_stateful
+    type: ''
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/voxcpm2/default/voxcpm2_xh2a.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        lm: w8a8_sefp
+        locenc: w8a8_sefp
+        locdit: w8a8_sefp
+        audiovae_encoder: w16a16_sefp
+        audiovae_decoder_stream: w8a8_sefp
+        audiovae_decoder_full: w8a8_sefp
+        audiovae_decoder_stateful: w8a8_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/voxcpm2
+  release:
+    version_id: voxcpm2_w8a8_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: VoxCPM2
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 VoxCPM2 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/tts/voxcpm2
+      readme:
+      - examples_merak/tts/voxcpm2/README.md

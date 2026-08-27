@@ -1,0 +1,132 @@
+schema_version: 2
+external:
+  model:
+    id: melotts_xh2a_w16_l32_t64
+    family: melotts
+    display_name: melotts xh2a w16 l32 t64
+  parameters:
+    total: 51851441
+    active: 41563457
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 32, 64]
+    prefill: 0.044786
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 基于 myshell-ai/MeloTTS-Chinese 官方 config 和本仓库静态导出图计算；包含 L32 文本 Encoder/Duration Predictor 与 T64 Flow+Vocoder Decoder，MAC 按 2 FLOPs，BERT 文本前端未计入，无自回归 Decode 阶段。
+  precision:
+    float_format: ''
+    quantized_format: w16a16_sefp
+    comparisons:
+    - name: real_text_waveform_cosine_w16_hmonnx
+      dataset: 真实文本“你好。” / 26112 audio samples
+      metric: Waveform cosine，PyTorch reference vs W16 HMONNX
+      float: 1.0
+      quant: '0.9994688902'
+      delta: -0.0005311098
+      evidence: examples_merak/audio/melotts/README.md#10-真实文本精度
+      status: verified
+  owner: jiangyong.yu
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - other
+  source:
+    provider: 待补
+    name: melotts xh2a w16 l32 t64
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: melotts xh2a w16 l32 t64
+    type: other_models
+    precision: w16a16_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  - id: encoder
+    display_name: encoder
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  - id: decoder
+    display_name: decoder
+    type: ''
+    precision: ''
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/other_models/melotts/melotts_xh2a_w16_l32_t64.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: XH2a
+    precision:
+      overall: w16a16_sefp
+      components:
+        components_encoder: w16a16_sefp
+        components_decoder: w16a16_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/melotts_xh2a_w16_l32_t64
+  release:
+    version_id: melotts_xh2a_w16_l32_t64_w16a16_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: melotts xh2a w16 l32 t64
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w16a16_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 melotts xh2a w16 l32 t64 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples:
+      - examples_merak/audio/melotts
+      readme:
+      - examples_merak/audio/melotts/README.md

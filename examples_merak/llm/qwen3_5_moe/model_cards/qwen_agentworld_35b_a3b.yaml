@@ -1,0 +1,165 @@
+schema_version: 2
+external:
+  model:
+    id: qwen_agentworld_35b_a3b
+    family: qwen3_5_moe
+    display_name: Qwen agentworld 35B a3b
+  parameters:
+    total: 35000000000
+    active: 3000000000
+    unit: parameters
+    status: inferred
+  compute:
+    input_shape: [1, 2048]
+    prefill: 12.92
+    decode: 0.006309
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: ''
+    quantized_format: w4a8h1_sefp
+    comparisons:
+    - name: agentworld_overall
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: OVERALL（FlashAttention HMONNX）
+      float: 0.2921
+      quant: 0.2913
+      delta: -0.0008
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_top_score
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: top_score（FlashAttention HMONNX）
+      float: 0.8702
+      quant: 0.8673
+      delta: -0.0029
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_simple
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: simple（FlashAttention HMONNX）
+      float: 0.8875
+      quant: 0.8875
+      delta: 0.0
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_multiple
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: multiple（FlashAttention HMONNX）
+      float: 0.905
+      quant: 0.885
+      delta: -0.02
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_parallel
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: parallel（FlashAttention HMONNX）
+      float: 0.765
+      quant: 0.77
+      delta: 0.005
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_irrelevance
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: irrelevance（FlashAttention HMONNX）
+      float: 0.9
+      quant: 0.9
+      delta: 0.0
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+    - name: agentworld_non_live
+      dataset: AgentWorld（1040/1040，无 API 错误）
+      metric: NON_LIVE（FlashAttention HMONNX）
+      float: 0.8762
+      quant: 0.8738
+      delta: -0.0024
+      evidence: http://jira.houmo.ai/browse/HMSW-4407
+      status: verified
+  owner: 未分配
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+  source:
+    provider: 待补
+    name: Qwen agentworld 35B a3b
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: Qwen agentworld 35B a3b
+    type: llm_models
+    precision: w4a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen_agentworld_35b_a3b_autoround_attn8_shared4_expert4.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w4a8h1_sefp
+      components:
+        attention_quant_scheme: w8a8h1_sefp
+        shared_expert_quant_scheme: w4a8h1_sefp
+        routed_expert_quant_scheme: w4a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen_agentworld_35b_a3b
+  release:
+    version_id: qwen_agentworld_35b_a3b_w4a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen agentworld 35B a3b
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w4a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: 自动发现的 Qwen agentworld 35B a3b Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 自动生成卡片；来源、发版链接、精度实测和部分业务 IO 需要人工确认。
+    evidence:
+      examples: []
+      readme: []
