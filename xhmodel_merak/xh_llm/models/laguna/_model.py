@@ -12,7 +12,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
-from xhquant.nn import FlashAttention, LLMCacheV2, MaskedSoftmax, RMSNorm
+from xhquant.nn import FlashAttention, LLMCacheV2, MaskedAdd, MaskedSoftmax, RMSNorm, SoftmaxPlus
 from xhquant.nn.modules.moeblock import MoeBlock
 from xhquant.utils.registry import DynamicModule
 
@@ -213,8 +213,6 @@ class _LagunaAttention(DynamicModule):
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
 
         if self.use_flash_attention:
-            if attention_mask is not None:
-                raise ValueError("Laguna FlashAttention export does not support an explicit attention_mask")
             attn_output = self.flash_attn(
                 query_states,
                 key_states,
@@ -230,8 +228,8 @@ class _LagunaAttention(DynamicModule):
             if attention_mask is None:
                 attn_weights = self.masked_softmax(attn_weights, past_seq_length)
             else:
-                attn_weights = attn_weights + attention_mask
-                attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights = self.masked_add(attn_weights, attention_mask)
+                attn_weights = self.softmax(attn_weights).to(query_states.dtype)
 
             value_states = self.v_repeat_interleave(value_states, self.num_key_value_groups, 1)
             attn_output = torch.matmul(attn_weights, value_states)
@@ -247,6 +245,7 @@ class _LagunaAttention(DynamicModule):
             else:
                 attn_output = attn_output * gate
 
+        attn_output = attn_output.to(self.o_proj.weight.dtype)
         attn_output = self.o_proj(attn_output)
         return attn_output, None, None
 
@@ -273,6 +272,8 @@ class _LagunaAttention(DynamicModule):
         self.v_repeat_interleave = xhnn.RepeatInterleave()
         attention_max_length = self.sliding_window if getattr(self, "is_sliding", False) else -1
         attention_max_length = int(attention_max_length) if attention_max_length is not None else -1
+        self.masked_add = MaskedAdd()
+        self.softmax = SoftmaxPlus(dim=-1)
         self.masked_softmax = MaskedSoftmax(dim=-1, attention_max_length=attention_max_length)
         flash_attention_cfg = _cfg_get(cfg, "flash_attention", None)
         self.use_flash_attention = bool(
@@ -336,7 +337,7 @@ class _LagunaSparseMoeBlock(DynamicModule):
 
         expert_output = self.moeblock(
             hidden_states,
-            routing_scores.reshape(batch_size, sequence_length, -1),
+            routing_scores.to(dtype=hidden_states.dtype).reshape(batch_size, sequence_length, -1),
             selected_experts=selected_experts.reshape(batch_size, sequence_length, self.top_k),
         )
         if self.routed_scaling_factor != 1.0:
@@ -520,6 +521,7 @@ class _LagunaModel(DynamicModule):
         inputs_embeds: torch.FloatTensor,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
+        sliding_attention_mask: Optional[Tensor] = None,
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
     ):
@@ -531,9 +533,10 @@ class _LagunaModel(DynamicModule):
             if self.max_layers > 0 and idx >= self.max_layers:
                 break
             layer_type = layer_types[idx]
+            attention_mask = sliding_attention_mask if layer_type == "sliding_attention" else None
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=attention_mask,
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
                 past_k_cache=past_key_cache[idx] if past_key_cache is not None else None,
@@ -557,6 +560,7 @@ class _LagunaForCausalLM(DynamicModule):
         inputs_embeds: Tensor,
         past_seq_length: Optional[Tensor] = None,
         current_input_length: Optional[Tensor] = None,
+        sliding_attention_mask: Optional[Tensor] = None,
         past_key_cache: Optional[list[Tensor]] = None,
         past_value_cache: Optional[list[Tensor]] = None,
     ) -> Tensor:
@@ -564,6 +568,7 @@ class _LagunaForCausalLM(DynamicModule):
             inputs_embeds=inputs_embeds,
             past_seq_length=past_seq_length,
             current_input_length=current_input_length,
+            sliding_attention_mask=sliding_attention_mask,
             past_key_cache=past_key_cache,
             past_value_cache=past_value_cache,
         )

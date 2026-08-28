@@ -19,7 +19,7 @@ export:
       s_bits: 8
       p_bits: 8
     quant_scheme:
-      quant_type: w4a8h0_ssfp
+      quant_type: w8a8h0_ssfp
       nodes:
         lm_head:
           quant_type: w8a8h1_sefp

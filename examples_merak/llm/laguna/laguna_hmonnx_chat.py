@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedTokenizerFast
 
+from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig
+from xhmodel_merak.xh_llm.models.laguna.data_preprocess import LagunaDataPreprocess
 from xhquant.core.cache_tensor import CacheTensor
 from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 from xhquant.xhonnxruntime.llm_hmonnx_loader import LLMHMONNXLoader
@@ -40,7 +42,8 @@ class LagunaRelease:
     context_length: int
     prefill_length: int
     num_layers: int
-    cache_shape: tuple[int, ...]
+    layer_cache_shapes: tuple[tuple[int, ...], ...]
+    sliding_window: int
 
 
 def _parse_devices(value: str) -> list[str]:
@@ -66,18 +69,35 @@ def _resolve_release(model_dir: Path) -> LagunaRelease:
         eos_token_ids = (eos_token_id,)
     else:
         eos_token_ids = tuple(int(token_id) for token_id in eos_token_id)
+    pad_token_id = meta.get("pad_token_id")
+    if pad_token_id is None:
+        pad_token_id = generation_config.get("pad_token_id")
+    if pad_token_id is None:
+        raise ValueError("Laguna release does not define pad_token_id in metadata or generation_config.json")
+
+    num_layers = int(kv_cache["num_layers"])
+    default_cache_shape = tuple(int(dim) for dim in kv_cache["kv_cache_shape"])
+    layer_cache_shapes = tuple(
+        tuple(int(dim) for dim in shape)
+        for shape in (meta.get("layer_kv_shapes") or [default_cache_shape] * num_layers)
+    )
+    if len(layer_cache_shapes) != num_layers:
+        raise ValueError(
+            f"Laguna release defines {len(layer_cache_shapes)} layer cache shapes for {num_layers} layers"
+        )
 
     release = LagunaRelease(
         prefill_hmonnx=root / meta["prefill_hmonnx"],
         decode_hmonnx=root / meta["decode_hmonnx"],
         hf_config=hf_config,
         quant_embedding=root / meta["quant_embedding"],
-        pad_token_id=int(meta["pad_token_id"]),
+        pad_token_id=int(pad_token_id),
         eos_token_ids=eos_token_ids,
         context_length=int(model_config["context_max_length"]),
         prefill_length=int(model_config["prefill_chunk_length"]),
-        num_layers=int(kv_cache["num_layers"]),
-        cache_shape=tuple(int(dim) for dim in kv_cache["kv_cache_shape"]),
+        num_layers=num_layers,
+        layer_cache_shapes=layer_cache_shapes,
+        sliding_window=int(meta.get("sliding_window") or 0),
     )
     for required_file in (
         release.prefill_hmonnx,
@@ -135,11 +155,18 @@ class LagunaHMONNXChat:
             str(release.decode_hmonnx), loader.decode_graph, decode_config
         )
         self.embedding = _load_embedding(release.quant_embedding, self.prefill_session.device)
+        self.mask_processor = LagunaDataPreprocess(
+            BaseInputProcessorConfig(
+                embed_tokens=None,
+                input_sequence_length=release.prefill_length,
+            ),
+            sliding_window=release.sliding_window,
+        )
         self.key_caches = [
-            CacheTensor(torch.zeros(release.cache_shape, dtype=torch.float16)) for _ in range(release.num_layers)
+            CacheTensor(torch.zeros(shape, dtype=torch.float16)) for shape in release.layer_cache_shapes
         ]
         self.value_caches = [
-            CacheTensor(torch.zeros(release.cache_shape, dtype=torch.float16)) for _ in range(release.num_layers)
+            CacheTensor(torch.zeros(shape, dtype=torch.float16)) for shape in release.layer_cache_shapes
         ]
 
     def _reset_caches(self) -> None:
@@ -159,6 +186,10 @@ class LagunaHMONNXChat:
             "input_1": inputs_embeds,
             "valid_length": torch.tensor([past_length], dtype=torch.int32, device=embedding_device),
             "current_length": torch.tensor([current_length], dtype=torch.int32, device=embedding_device),
+            "sliding_attention_mask": self.mask_processor.build_attention_mask(
+                inputs_embeds,
+                past_length,
+            ),
         }
         for layer_index, cache in enumerate(self.key_caches):
             feed[f"model_layers_{layer_index}_self_attn_kcache_input"] = cache

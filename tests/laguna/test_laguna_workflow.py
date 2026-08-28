@@ -32,14 +32,14 @@ def test_laguna_workflow_config_exports_float_model_with_native_w4a8_ptq() -> No
     assert config.export["model"]["max_pe_length"] == 1048576
 
 
-def test_laguna_autoround_workflow_config_preserves_source_checkpoint_identity() -> None:
+def test_laguna_autoround_workflow_config_defaults_non_checkpoint_weights_to_w8() -> None:
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
     config = WorkflowConfig.from_file(str(AUTOROUND_WORKFLOW_CONFIG))
 
     assert config.quant is None
     assert config.export["model"]["model_name"] == "laguna_s_2_1_autoround_expert_w4_rest_w8_g64"
-    assert config.export["model"]["quant_scheme"]["quant_type"] == "w4a8h0_ssfp"
+    assert config.export["model"]["quant_scheme"]["quant_type"] == "w8a8h0_ssfp"
     assert config.export["model"]["quant_scheme"]["nodes"]["lm_head"]["quant_type"] == "w8a8h1_sefp"
 
 
@@ -110,6 +110,69 @@ def test_laguna_example_selects_requested_cuda_device(monkeypatch: pytest.Monkey
     assert selected == [6]
 
 
+def test_laguna_example_defaults_to_low_memory_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    from examples_merak.llm.laguna.laguna_workflow import parse_args
+
+    monkeypatch.setattr("sys.argv", ["laguna_workflow.py"])
+
+    assert parse_args().low_memory is True
+
+
+def test_laguna_example_can_disable_low_memory_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    from examples_merak.llm.laguna.laguna_workflow import parse_args
+
+    monkeypatch.setattr("sys.argv", ["laguna_workflow.py", "--no-low-memory"])
+
+    assert parse_args().low_memory is False
+
+
+def test_laguna_example_configures_framework_low_memory_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from examples_merak.llm.laguna.laguna_workflow import _configure_low_memory_export
+
+    monkeypatch.delenv("HUGE_MODEL_EXPORT_ENABLED", raising=False)
+
+    _configure_low_memory_export(True)
+
+    assert os.environ["HUGE_MODEL_EXPORT_ENABLED"] == "1"
+
+
+def test_laguna_hmonnx_chat_resolves_pad_and_per_layer_cache_shapes(tmp_path: Path) -> None:
+    from examples_merak.llm.laguna.laguna_hmonnx_chat import _resolve_release
+
+    hf_config = tmp_path / "hf_config"
+    hf_config.mkdir()
+    (hf_config / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": [2, 24], "pad_token_id": 9}),
+        encoding="utf-8",
+    )
+    for filename in ("tokenizer.json", "chat_template.jinja"):
+        (hf_config / filename).touch()
+    for filename in ("prefill.onnx", "decode.onnx", "quant_embedding.pt"):
+        (tmp_path / filename).touch()
+    (tmp_path / "golden_meta_info.json").write_text(
+        json.dumps(
+            {
+                "model_config": {"context_max_length": 2048, "prefill_chunk_length": 256},
+                "kv_cache": {"num_layers": 2, "kv_cache_shape": [1, 8, 2048, 128]},
+                "hf_config": "hf_config",
+                "quant_embedding": "quant_embedding.pt",
+                "prefill_hmonnx": "prefill.onnx",
+                "decode_hmonnx": "decode.onnx",
+                "pad_token_id": None,
+                "sliding_window": 512,
+                "layer_kv_shapes": [[1, 8, 2048, 128], [1, 8, 768, 128]],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    release = _resolve_release(tmp_path)
+
+    assert release.pad_token_id == 9
+    assert release.sliding_window == 512
+    assert release.layer_cache_shapes == ((1, 8, 2048, 128), (1, 8, 768, 128))
+
+
 def test_laguna_golden_normalizes_single_and_multi_device_maps() -> None:
     from xhmodel_merak.xh_llm.models.laguna.workflow import LagunaWorkflow
 
@@ -168,6 +231,7 @@ def test_laguna_example_overwrite_clears_export_before_workflow(
         dump_golden=False,
         prompt="test",
         debug=False,
+        low_memory=True,
     )
     monkeypatch.setattr(laguna_workflow, "parse_args", lambda: args)
     monkeypatch.setattr(laguna_workflow, "_configure_cuda_device", lambda _device: None)
@@ -296,7 +360,11 @@ def test_laguna_autoround_load_defers_expert_fusion_until_after_dequantization(
             events.append("exit_split_loader")
 
     monkeypatch.setattr(laguna_model.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: native_model.config)
-    monkeypatch.setattr(laguna_model.XHLagunaModel, "_ensure_autoround_available", lambda *_args: events.append("ensure_autoround"))
+    monkeypatch.setattr(
+        laguna_model.XHLagunaModel,
+        "_ensure_autoround_available",
+        lambda *_args: events.append("ensure_autoround"),
+    )
     monkeypatch.setattr(
         "xhmodel_merak.xh_llm.models.laguna.float_checkpoint_compat.split_expert_checkpoint_loader",
         lambda *_args: _Loader(),
@@ -448,11 +516,163 @@ def test_laguna_dynamic_remote_classes_wrap_and_frontend(tmp_path: Path) -> None
         "inputs_embeds",
         "past_seq_length",
         "current_input_length",
+        "sliding_attention_mask",
         "past_key_cache_0",
         "past_key_cache_1",
         "past_value_cache_0",
         "past_value_cache_1",
     ]
+    attention_targets = [f"{node.name} {node.target}".lower() for node in frontend.graph.nodes]
+    assert any("masked_softmax" in target for target in attention_targets)
+    assert any("masked_add" in target for target in attention_targets)
+
+
+def test_laguna_explicit_sliding_attention_mask_matches_window() -> None:
+    from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig
+    from xhmodel_merak.xh_llm.models.laguna.data_preprocess import LagunaDataPreprocess
+
+    processor = LagunaDataPreprocess(
+        BaseInputProcessorConfig(embed_tokens=None, input_sequence_length=4),
+        sliding_window=8,
+    )
+    inputs_embeds = torch.zeros((1, 4, 16), dtype=torch.float16)
+    sliding_attention_mask = processor.build_attention_mask(
+        inputs_embeds,
+        torch.tensor([8], dtype=torch.int32),
+    )
+
+    assert sliding_attention_mask.shape == (1, 1, 4, 16)
+    minimum = torch.finfo(torch.float16).min
+    for query_index in range(4):
+        sliding_visible_start = query_index
+        sliding_visible_end = query_index + 8
+        assert torch.all(
+            sliding_attention_mask[0, 0, query_index, :sliding_visible_start] == minimum
+        )
+        assert torch.all(
+            sliding_attention_mask[
+                0,
+                0,
+                query_index,
+                sliding_visible_start:sliding_visible_end,
+            ]
+            == 0
+        )
+        assert torch.all(
+            sliding_attention_mask[0, 0, query_index, sliding_visible_end:] == minimum
+        )
+
+
+@pytest.mark.parametrize(
+    ("query_length", "past_seq_length", "sliding_mask_length"),
+    [(256, 0, 768), (1, 1024, 512)],
+)
+def test_laguna_explicit_sliding_attention_mask_shape_matches_export_contract(
+    query_length: int,
+    past_seq_length: int,
+    sliding_mask_length: int,
+) -> None:
+    from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig
+    from xhmodel_merak.xh_llm.models.laguna.data_preprocess import LagunaDataPreprocess
+
+    processor = LagunaDataPreprocess(
+        BaseInputProcessorConfig(embed_tokens=None, input_sequence_length=query_length),
+        sliding_window=512,
+    )
+    inputs_embeds = torch.zeros((1, query_length, 16), dtype=torch.float16)
+    sliding_attention_mask = processor.build_attention_mask(
+        inputs_embeds,
+        torch.tensor([past_seq_length], dtype=torch.int32),
+    )
+
+    assert sliding_attention_mask.shape == (1, 1, query_length, sliding_mask_length)
+    assert sliding_attention_mask.dtype == inputs_embeds.dtype
+
+
+def test_laguna_cache_layout_uses_short_storage_for_sliding_layers() -> None:
+    from xhmodel_merak.xh_llm.models.laguna.kv_cache import build_laguna_layer_kv_shapes
+
+    shapes = build_laguna_layer_kv_shapes(
+        layer_types=["full_attention", "sliding_attention", "sliding_attention"],
+        batch_size=1,
+        num_key_value_heads=8,
+        context_max_length=2048,
+        sliding_window=512,
+        input_sequence_length=256,
+        head_dim=128,
+    )
+
+    assert shapes == [
+        [1, 8, 2048, 128],
+        [1, 8, 768, 128],
+        [1, 8, 768, 128],
+    ]
+
+
+def test_laguna_hmonnx_cache_uses_hybrid_tensor_only_for_sliding_layers() -> None:
+    from xhmodel_merak.xh_llm.models.laguna.kv_cache import LagunaKVCacheMixinHMONNX
+    from xhmodel_merak.xh_llm.types import KVCacheConfig
+    from xhquant.core import CacheTensor, HybridCacheTensor
+
+    cache_mixin = LagunaKVCacheMixinHMONNX(KVCacheConfig(use_cache=True))
+    cache_mixin.set_layer_kv_shapes(
+        [
+            [1, 8, 2048, 128],
+            [1, 8, 768, 128],
+        ]
+    )
+    cache_mixin.prepare_kv_cache()
+
+    assert type(cache_mixin.past_key_caches[0]) is CacheTensor
+    assert type(cache_mixin.past_value_caches[0]) is CacheTensor
+    assert type(cache_mixin.past_key_caches[1]) is HybridCacheTensor
+    assert type(cache_mixin.past_value_caches[1]) is HybridCacheTensor
+
+
+def test_laguna_forward_mixin_injects_sliding_mask_for_legacy_cache_arguments() -> None:
+    from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig
+    from xhmodel_merak.xh_llm.models.laguna.data_preprocess import (
+        LagunaDataPreprocess,
+        LagunaSlidingMaskForwardMixin,
+    )
+
+    processor = LagunaDataPreprocess(
+        BaseInputProcessorConfig(embed_tokens=None, input_sequence_length=4),
+        sliding_window=8,
+    )
+
+    class ForwardRecorder:
+        def forward(self, *args, **kwargs):
+            return args, kwargs
+
+    class ExplicitMaskModel(LagunaSlidingMaskForwardMixin, ForwardRecorder):
+        uses_explicit_sliding_attention_mask = True
+
+        def get_data_preprocessor(self):
+            return processor
+
+    model = ExplicitMaskModel()
+    inputs_embeds = torch.zeros((1, 4, 16), dtype=torch.float16)
+    past_seq_length = torch.tensor([0], dtype=torch.int32)
+    current_input_length = torch.tensor([4], dtype=torch.int32)
+    past_key_caches = [torch.zeros(1)]
+    past_value_caches = [torch.zeros(1)]
+
+    legacy_args, _ = model.forward(
+        inputs_embeds,
+        past_seq_length,
+        current_input_length,
+        past_key_caches,
+        past_value_caches,
+    )
+    assert len(legacy_args) == 6
+    assert legacy_args[3].shape == (1, 1, 4, 16)
+    assert legacy_args[4] is past_key_caches
+    assert legacy_args[5] is past_value_caches
+
+    explicit_args, _ = model.forward(*legacy_args)
+    assert len(explicit_args) == 6
+    assert explicit_args[3] is legacy_args[3]
 
 
 def test_tiny_laguna_initializes_all_expert_weights() -> None:
@@ -496,6 +716,95 @@ def test_laguna_float_checkpoint_experts_fuse_exactly() -> None:
     torch.testing.assert_close(fused.gate_up_proj, expected_gate_up)
     torch.testing.assert_close(fused.down_proj, expected_down)
     torch.testing.assert_close(hf_model.model.layers[1].mlp.gate.e_score_correction_bias, expected_correction_bias)
+
+
+def test_laguna_low_memory_checkpoint_layout_round_trips_router_bias() -> None:
+    from xhmodel_merak.xh_llm.models.laguna._laguna_big_export import (
+        move_router_bias_to_checkpoint_layout,
+        restore_router_bias_from_checkpoint_layout,
+    )
+    from xhmodel_merak.xh_llm.models.laguna.float_checkpoint_compat import LagunaSplitExperts
+
+    hf_model = build_tiny_laguna()
+    sparse_block = hf_model.model.layers[1].mlp
+    expected_bias = sparse_block.gate.e_score_correction_bias.detach().clone()
+    sparse_block.experts = LagunaSplitExperts(hf_model.config).to(dtype=expected_bias.dtype)
+
+    assert move_router_bias_to_checkpoint_layout(hf_model) == 1
+    assert "e_score_correction_bias" not in sparse_block.gate._parameters
+    torch.testing.assert_close(sparse_block.experts.e_score_correction_bias, expected_bias)
+
+    assert restore_router_bias_from_checkpoint_layout(hf_model) == 1
+    assert "e_score_correction_bias" not in sparse_block.experts._parameters
+    torch.testing.assert_close(sparse_block.gate.e_score_correction_bias, expected_bias)
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_key", "expected_layout"),
+    [
+        ("model.layers.1.mlp.experts.e_score_correction_bias", "experts"),
+        ("model.layers.1.mlp.gate.e_score_correction_bias", "gate"),
+    ],
+)
+def test_laguna_low_memory_detects_checkpoint_router_bias_layout(
+    tmp_path: Path,
+    checkpoint_key: str,
+    expected_layout: str,
+) -> None:
+    from xhmodel_merak.xh_llm.models.laguna._laguna_big_export import checkpoint_router_bias_layout
+
+    index = {"weight_map": {checkpoint_key: "model-00001-of-00001.safetensors"}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    assert checkpoint_router_bias_layout(tmp_path) == expected_layout
+
+
+def test_laguna_low_memory_export_uses_streamed_path_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.laguna.laguna_model import XHLagunaModel
+
+    expected_meta = object()
+    exported_info = SimpleNamespace(exported_dir=str(tmp_path), meta=SimpleNamespace())
+    model = XHLagunaModel.__new__(XHLagunaModel)
+    model.get_export_info = lambda _output_dir: exported_info
+    model._export_big_language_hmonnx = lambda info: expected_meta if info is exported_info else None
+    monkeypatch.setenv("HUGE_MODEL_EXPORT_ENABLED", "1")
+
+    assert model.export_hmonnx(str(tmp_path)) is expected_meta
+
+
+def test_laguna_low_memory_export_restores_active_flag_after_failure() -> None:
+    from xhmodel_merak.xh_llm.models.laguna.laguna_model import XHLagunaModel
+
+    model = XHLagunaModel.__new__(XHLagunaModel)
+    model._low_memory_export_active = False
+
+    def fail_export(_exported_info: object) -> None:
+        assert model._low_memory_export_active is True
+        raise RuntimeError("expected export failure")
+
+    model._export_big_language_hmonnx_impl = fail_export
+
+    with pytest.raises(RuntimeError, match="expected export failure"):
+        model._export_big_language_hmonnx(object())
+
+    assert model._low_memory_export_active is False
+
+
+def test_laguna_low_memory_export_uses_sparse_moe_placeholders() -> None:
+    from xhmodel_merak.xh_llm.models.laguna._laguna_big_export import LagunaBigHFModel
+    from xhmodel_merak.xh_llm.models.laguna.laguna_model import XHLagunaModel
+
+    model = XHLagunaModel.__new__(XHLagunaModel)
+
+    helper_cls, placeholder_types = model._get_big_language_placeholder_export_components()
+
+    assert helper_cls is LagunaBigHFModel
+    assert placeholder_types == ["LagunaSparseMoeBlock"]
 
 
 def test_laguna_autoround_expert_fusion_preserves_quant_weights() -> None:
@@ -645,6 +954,20 @@ def test_laguna_export_metadata_packages_remote_code(tmp_path: Path) -> None:
     meta = model.create_export_metadata(str(output_dir))
 
     assert meta.pad_token_id == 0
+    meta.pad_token_id = None
+    model._extra_export_metadata(str(output_dir), meta)
+    assert meta.pad_token_id == 0
+    assert meta.uses_explicit_sliding_attention_mask is True
+    assert meta.sliding_window == 8
+    assert meta.layer_types == ["full_attention", "sliding_attention"]
+    assert meta.layer_kv_shapes == [[1, 2, 16, 4], [1, 2, 16, 4]]
+    assert meta.sliding_kv_cache_input_mode == "slice_window"
+    assert model.get_export_cfg()["input_names"][:4] == [
+        "inputs_embeds",
+        "past_seq_length",
+        "current_input_length",
+        "sliding_attention_mask",
+    ]
     assert (output_dir / "hf_config" / "configuration_laguna.py").is_file()
     assert (output_dir / "hf_config" / "modeling_laguna.py").is_file()
     tokenizer_config = json.loads((output_dir / "hf_config" / "tokenizer_config.json").read_text(encoding="utf-8"))

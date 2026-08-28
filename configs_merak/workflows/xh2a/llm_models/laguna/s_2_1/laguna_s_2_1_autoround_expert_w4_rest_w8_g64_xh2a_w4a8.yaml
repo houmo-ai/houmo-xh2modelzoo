@@ -12,7 +12,7 @@ export:
     use_cache: true
     num_logits_to_keep: 1
     quant_scheme:
-      quant_type: w4a8h0_ssfp
+      quant_type: w8a8h0_ssfp
       nodes:
         lm_head:
           quant_type: w8a8h1_sefp

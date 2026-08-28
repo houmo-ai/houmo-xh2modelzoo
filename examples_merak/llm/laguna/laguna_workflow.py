@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     layer_group.add_argument("--only-first-block", action="store_true", help="Export only layer 0 for debugging.")
     layer_group.add_argument("--max-layers", type=int, default=None, help="Export the first N decoder layers.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--low-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stream sparse MoE blocks during export (enabled by default).",
+    )
     parser.add_argument("--dump-golden", action="store_true")
     parser.add_argument("--prompt", default="Briefly explain what makes Laguna-S-2.1 useful for coding tasks.")
     parser.add_argument("--debug", action="store_true")
@@ -67,9 +73,16 @@ def _configure_cuda_device(device: str) -> None:
         torch.cuda.set_device(parsed_device.index)
 
 
+def _configure_low_memory_export(enabled: bool) -> None:
+    from xhmodel_merak.xh_llm.utils import configure_huge_model_export
+
+    configure_huge_model_export(enabled)
+
+
 def main() -> None:
     args = parse_args()
     _configure_cuda_device(args.device)
+    _configure_low_memory_export(args.low_memory)
 
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 

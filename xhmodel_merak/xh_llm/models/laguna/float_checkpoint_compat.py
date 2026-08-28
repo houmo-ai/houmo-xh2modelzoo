@@ -34,10 +34,23 @@ def split_expert_checkpoint_loader(model_dir: str):
     )
     remote_module = sys.modules[native_experts_cls.__module__]
     original_cls = remote_module.LagunaExperts
+    pretrained_model_cls = remote_module.LagunaPreTrainedModel
+    original_init_weights = pretrained_model_cls._init_weights
+
+    def split_compatible_init_weights(self, module):
+        # The checkpoint-compatible split shell intentionally has no fused
+        # gate_up_proj/down_proj attributes. Its parameters are populated from
+        # safetensors, so the remote fused-expert initializer must skip it.
+        if isinstance(module, LagunaSplitExperts):
+            return None
+        return original_init_weights(self, module)
+
     remote_module.LagunaExperts = LagunaSplitExperts
+    pretrained_model_cls._init_weights = split_compatible_init_weights
     try:
         yield original_cls
     finally:
+        pretrained_model_cls._init_weights = original_init_weights
         remote_module.LagunaExperts = original_cls
 
 

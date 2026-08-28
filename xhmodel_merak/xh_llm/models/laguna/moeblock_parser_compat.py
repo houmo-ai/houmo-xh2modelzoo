@@ -20,6 +20,11 @@ def install_moeblock_shared_initializer_compat() -> None:
     original_from_onnx_node = parser_module.MoeBlock.from_onnx_node.__func__
 
     def _from_onnx_node(cls, node, context):
+        if not hasattr(parser_module, "_release_constant_inputs"):
+            module = original_from_onnx_node(cls, node, context)
+            _release_constant_inputs(node.inputs, node)
+            return module
+
         original_release = parser_module._release_constant_inputs
         parser_module._release_constant_inputs = lambda inputs: _release_constant_inputs(inputs, node)
         try:

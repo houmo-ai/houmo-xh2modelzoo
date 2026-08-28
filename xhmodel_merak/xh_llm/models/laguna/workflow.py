@@ -106,7 +106,7 @@ class LagunaWorkflow(BaseLLMWorkflow):
             tokenize=False,
             add_generation_prompt=True,
         )
-        input_device = hmonnx_model.device
+        input_device = hmonnx_model.get_input_embeddings().weight.device
         model_inputs = tokenizer([text], return_tensors="pt", truncation=True).to(input_device)
 
         hmonnx_model.enable_golden = True
