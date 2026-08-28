@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 import torch
 import yaml
@@ -15,8 +16,17 @@ from examples_merak.audio.kokoro.bucketed_inference_demo import (
     _exercise_requests,
     _resolve_voice_path,
 )
+from xhmodel_merak.xh_other_model.models.kokoro import assets as assets_module
 from xhmodel_merak.xh_other_model.models.kokoro import runtime as runtime_module
 from xhmodel_merak.xh_other_model.models.kokoro.analysis import analyze_onnx
+from xhmodel_merak.xh_other_model.models.kokoro.assets import (
+    KOKORO_CHECKPOINT_SHA256,
+    KOKORO_CONFIG_SHA256,
+    KOKORO_SOURCE_COMMIT,
+    KOKORO_ZF001_SHA256,
+    resolve_model_assets,
+    verify_release_assets,
+)
 from xhmodel_merak.xh_other_model.models.kokoro.bucketed_runtime import (
     BUCKETED_PRECISION_SPLIT_GRAPH_MODE,
     KokoroBucketedRuntime,
@@ -33,8 +43,10 @@ from xhmodel_merak.xh_other_model.models.kokoro.buckets import (
 )
 from xhmodel_merak.xh_other_model.models.kokoro.graph import (
     GRAPH_ROLES,
+    PrefixReversedBidirectionalLSTMStatic,
     _masked_adain,
     _masked_adain_rmsnorm,
+    _masked_temporal_mean,
     _MaskedTemporalRMSNorm,
 )
 from xhmodel_merak.xh_other_model.models.kokoro.host import (
@@ -44,6 +56,7 @@ from xhmodel_merak.xh_other_model.models.kokoro.host import (
     duration_to_frame_indices,
     load_voice_style,
     make_attention_mask,
+    make_generator_rmsnorm_scales,
     make_reverse_idx,
     make_rmsnorm_scales,
     prepare_lstm_inputs,
@@ -78,6 +91,7 @@ from xhmodel_merak.xh_other_model.models.kokoro.runtime import KokoroStaticRunti
 from xhmodel_merak.xh_other_model.models.kokoro.single_graph import (
     SINGLE_GRAPH_ROLE,
     StaticAlignment,
+    _prefix_mask,
     _reverse_prefix_index,
 )
 from xhmodel_merak.xh_other_model.models.kokoro.static_dsp import (
@@ -93,6 +107,46 @@ from xhmodel_merak.xh_other_model.models.kokoro.workflow import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_quant_export_assets_do_not_require_released_onnx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source" / "kokoro"
+    config = tmp_path / "pytorch" / "config.json"
+    checkpoint = tmp_path / "pytorch" / "kokoro-v1_1-zh.pth"
+    voice = tmp_path / "pytorch" / "voices" / "zf_001.pt"
+    (source_root / "kokoro").mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    voice.parent.mkdir(parents=True)
+    (source_root / "kokoro" / "model.py").write_text("", encoding="utf-8")
+    config.write_text("{}\n", encoding="utf-8")
+    checkpoint.write_bytes(b"checkpoint")
+    voice.write_bytes(b"voice")
+
+    assets = resolve_model_assets(tmp_path)
+    assert not hasattr(assets, "reference_onnx")
+    assert assets.voice_pack is None
+
+    expected_hashes = {
+        config.resolve(): KOKORO_CONFIG_SHA256,
+        checkpoint.resolve(): KOKORO_CHECKPOINT_SHA256,
+        voice.resolve(): KOKORO_ZF001_SHA256,
+    }
+    monkeypatch.setattr(
+        assets_module,
+        "sha256",
+        lambda path: expected_hashes[Path(path).resolve()],
+    )
+    monkeypatch.setattr(assets_module, "git_commit", lambda path: KOKORO_SOURCE_COMMIT)
+    identity = verify_release_assets(assets)
+    assert identity == {
+        "config_sha256": KOKORO_CONFIG_SHA256,
+        "checkpoint_sha256": KOKORO_CHECKPOINT_SHA256,
+        "voice_sha256": KOKORO_ZF001_SHA256,
+        "source_commit": KOKORO_SOURCE_COMMIT,
+    }
 
 
 def test_numpy_voice_pack_is_self_contained_and_matches_upstream_pt(tmp_path: Path) -> None:
@@ -173,6 +227,25 @@ def test_bucketed_config_accepts_matching_route_fields_and_rejects_mismatches() 
         _validate_export_config(export)
 
 
+@pytest.mark.parametrize("name", ["validate_onnx", "validate_hmonnx"])
+def test_workflow_routes_numerical_validation_to_demo(name: str) -> None:
+    export = {
+        "target_device": "XH2a",
+        "model": {"type": "XHKokoroModel"},
+        "graph_mode": BUCKETED_PRECISION_SPLIT_GRAPH_MODE,
+        "token_buckets": [32],
+        "audio_seconds_buckets": [4],
+        "components": {
+            TEXT_DURATION_ROLE: {"quant_type": "w16a16_sefp"},
+            FRAME_ACOUSTIC_ROLE: {"quant_type": "w16a16_sefp"},
+            INDEPENDENT_GENERATOR_ISTFT_ROLE: {"quant_type": "w16a16_sefp"},
+        },
+        name: True,
+    }
+    with pytest.raises(ValueError, match="compare_backends.py"):
+        _validate_export_config(export)
+
+
 def test_exercise_all_buckets_runs_exactly_the_four_paired_routes() -> None:
     routes = tuple(route.as_dict() for route in BUCKET_ROUTES)
     requests = _exercise_requests(routes, token_bucket=None, audio_seconds=None)
@@ -185,13 +258,9 @@ def test_exercise_all_buckets_runs_exactly_the_four_paired_routes() -> None:
     )
 
     selected = _exercise_requests(routes, token_bucket=256, audio_seconds=None)
-    assert selected == (
-        {"exercise": "t0256_f1280", "token_bucket": 256, "frame_bucket": 1280},
-    )
+    assert selected == ({"exercise": "t0256_f1280", "token_bucket": 256, "frame_bucket": 1280},)
     selected = _exercise_requests(routes, token_bucket=None, audio_seconds=16)
-    assert selected == (
-        {"exercise": "t0128_f0640", "token_bucket": 128, "frame_bucket": 640},
-    )
+    assert selected == ({"exercise": "t0128_f0640", "token_bucket": 128, "frame_bucket": 640},)
     with pytest.raises(ValueError, match="no unique paired route"):
         _exercise_requests(routes, token_bucket=33, audio_seconds=None)
 
@@ -368,7 +437,9 @@ def test_masked_temporal_rmsnorm_is_equivalent_to_masked_adain_variance(valid_le
         scales[:, 1:2, :],
     )
 
-    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    # At L=1, reconstructing T/L from the independently rounded sqrt pair
+    # leaves a tiny centered residual that is amplified by AdaIN's epsilon.
+    torch.testing.assert_close(actual, expected, atol=5e-5, rtol=2e-4)
 
 
 def test_rmsnorm_scales_are_host_computed_reciprocal_pair() -> None:
@@ -379,6 +450,51 @@ def test_rmsnorm_scales_are_host_computed_reciprocal_pair() -> None:
     torch.testing.assert_close(scales[0, 0, 0], torch.sqrt(torch.tensor(120.0 / 110.0)))
     torch.testing.assert_close(scales[0, 1, 0], torch.sqrt(torch.tensor(110.0 / 120.0)))
     torch.testing.assert_close(scales.prod(), torch.tensor(1.0), atol=1e-7, rtol=1e-7)
+
+
+def test_generator_rmsnorm_scales_use_exact_stage_lengths() -> None:
+    scales = make_generator_rmsnorm_scales(torch.tensor([810]), 1280)
+
+    assert tuple(scales.shape) == (1, 2, 2, 1)
+    assert scales.dtype == torch.float32
+    expected = torch.tensor(
+        [
+            [
+                [
+                    [np.sqrt((20 * 1280) / (20 * 810))],
+                    [np.sqrt((20 * 810) / (20 * 1280))],
+                ],
+                [
+                    [np.sqrt((120 * 1280 + 1) / (120 * 810 + 1))],
+                    [np.sqrt((120 * 810 + 1) / (120 * 1280 + 1))],
+                ],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(scales, expected)
+    torch.testing.assert_close(
+        scales[:, :, 0, :] * scales[:, :, 1, :],
+        torch.ones(1, 2, 1),
+        atol=1e-7,
+        rtol=1e-7,
+    )
+
+
+def test_masked_temporal_mean_does_not_overflow_fp16_long_axis() -> None:
+    temporal_length = 70_000
+    valid_length = 66_000
+    values = torch.ones(1, 1, temporal_length, dtype=torch.float16)
+    mask = (torch.arange(temporal_length) < valid_length).to(torch.float16).reshape(1, 1, -1)
+    scale = torch.tensor(
+        [[[np.sqrt(temporal_length / valid_length)]]],
+        dtype=torch.float16,
+    )
+
+    assert torch.isinf((values * mask).sum())
+    actual = _masked_temporal_mean(values, mask, scale)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual.float(), torch.ones_like(actual).float(), atol=2e-3, rtol=2e-3)
 
 
 def test_duration_alignment_is_exact_and_rejects_bucket_overflow() -> None:
@@ -476,6 +592,73 @@ def test_bidirectional_host_bridge_reverses_only_the_valid_prefix() -> None:
     assert torch.equal(restored[:, :3, 4:], values[:, :3])
     assert torch.count_nonzero(restored[:, 3:]) == 0
     assert make_reverse_idx(5, valid_len).tolist() == [2, 1, 0, 3, 4]
+
+
+@pytest.mark.parametrize("valid_length", [1, 3, 5])
+def test_prefix_reversed_wrapper_matches_packed_bilstm_and_exports_standard_onnx(
+    tmp_path: Path,
+    valid_length: int,
+) -> None:
+    torch.manual_seed(41)
+    total_length = 5
+    source = torch.nn.LSTM(
+        input_size=3,
+        hidden_size=4,
+        batch_first=True,
+        bidirectional=True,
+    ).eval()
+    values = torch.randn(1, total_length, 3)
+    valid_len = torch.tensor([valid_length], dtype=torch.int64)
+    packed = torch.nn.utils.rnn.pack_padded_sequence(
+        values,
+        valid_len,
+        batch_first=True,
+        enforce_sorted=True,
+    )
+    packed_output, _ = source(packed)
+    expected, _ = torch.nn.utils.rnn.pad_packed_sequence(
+        packed_output,
+        batch_first=True,
+        total_length=total_length,
+    )
+
+    reverse_indices = make_reverse_idx(total_length, valid_len).to(torch.int64)
+    wrapper = PrefixReversedBidirectionalLSTMStatic(source, total_length).eval()
+    mask = (torch.arange(total_length) < valid_length).reshape(1, total_length, 1)
+    actual = wrapper(values, reverse_indices) * mask
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=0)
+
+    path = tmp_path / f"prefix_reversed_l{valid_length}.onnx"
+    torch.onnx.export(
+        wrapper,
+        (values, reverse_indices),
+        path,
+        input_names=["values", "reverse_indices"],
+        output_names=["output"],
+        opset_version=17,
+        dynamo=False,
+    )
+    graph = onnx.load(path)
+    onnx.checker.check_model(graph)
+    lstm_nodes = [node for node in graph.graph.node if node.op_type == "LSTM"]
+    assert len(lstm_nodes) == 2
+    assert sum(node.op_type == "Gather" for node in graph.graph.node) >= 2
+    for node in lstm_nodes:
+        attributes = {
+            attribute.name: helper.get_attribute_value(attribute)
+            for attribute in node.attribute
+        }
+        assert attributes.get("direction", b"forward") == b"forward"
+        assert len(node.input) < 5 or node.input[4] == ""
+    session = ort.InferenceSession(
+        str(path),
+        providers=["CPUExecutionProvider"],
+    )
+    ort_output = session.run(
+        None,
+        {"values": values.numpy(), "reverse_indices": reverse_indices.numpy()},
+    )[0]
+    np.testing.assert_allclose(ort_output, wrapper(values, reverse_indices).detach().numpy(), atol=2e-6)
 
 
 def test_sine_generation_is_seeded_without_changing_global_rng() -> None:
@@ -578,6 +761,37 @@ def test_length_aware_reflect_exports_integer_bounds_as_where(tmp_path: Path) ->
     graph = onnx.load(path, load_external_data=False)
     assert not [node for node in graph.graph.node if node.op_type == "Clip"]
     assert len([node for node in graph.graph.node if node.op_type == "Where"]) >= 4
+    assert not [
+        node
+        for node in graph.graph.node
+        if node.op_type == "Cast"
+        and any(attribute.name == "to" and attribute.i == TensorProto.FLOAT for attribute in node.attribute)
+    ]
+
+
+def test_prefix_mask_exports_where_without_fp32_cast(tmp_path: Path) -> None:
+    class PrefixMask(torch.nn.Module):
+        def forward(self, length: torch.Tensor) -> torch.Tensor:
+            return _prefix_mask(length, 16, channel_axis=True)
+
+    path = tmp_path / "prefix_mask.onnx"
+    torch.onnx.export(
+        PrefixMask(),
+        (torch.tensor([7], dtype=torch.int32),),
+        path,
+        input_names=["length"],
+        output_names=["mask"],
+        opset_version=17,
+        dynamo=False,
+    )
+    graph = onnx.load(path, load_external_data=False)
+    assert any(node.op_type == "Where" for node in graph.graph.node)
+    assert not [
+        node
+        for node in graph.graph.node
+        if node.op_type == "Cast"
+        and any(attribute.name == "to" and attribute.i == TensorProto.FLOAT for attribute in node.attribute)
+    ]
 
 
 def test_static_istft20_matches_torch_istft() -> None:
@@ -838,12 +1052,14 @@ def test_precision_split_keeps_only_phase_core_on_host() -> None:
             f0: torch.Tensor,
             style: torch.Tensor,
             valid_frames: torch.Tensor,
+            generator_norm_scales: torch.Tensor,
         ) -> torch.Tensor:
             assert tuple(decoder_feature.shape) == (1, 2, 6)
             assert tuple(sine.shape) == (1, 1800, 9)
             assert torch.count_nonzero(f0 == 3.0) == f0.numel()
             assert tuple(style.shape) == (1, 256)
             assert valid_frames.tolist() == [2]
+            assert tuple(generator_norm_scales.shape) == (1, 2, 2, 1)
             return torch.full((1, 1800), 7.0)
 
     root = FakeRoot()
@@ -862,6 +1078,7 @@ def test_precision_split_keeps_only_phase_core_on_host() -> None:
         f0,
         torch.zeros(1, 256),
         valid_frames,
+        make_generator_rmsnorm_scales(valid_frames, 3),
     )
 
     assert tuple(decoder_feature.shape) == (1, 2, 6)
@@ -897,6 +1114,7 @@ def test_precision_split_runtime_keeps_only_cumsum_phase_and_sin_in_fp32() -> No
             assert feed["sine"].dtype == np.float32
             assert feed["f0"].dtype == np.float32
             assert feed["valid_frames"].dtype == np.int32
+            assert feed["generator_norm_scales"].shape == (1, 2, 2, 1)
             return {"waveform": np.arange(1800, dtype=np.float32).reshape(1, -1)}
 
     runtime = KokoroPrecisionSplitRuntime(

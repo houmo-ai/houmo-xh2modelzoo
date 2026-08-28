@@ -111,8 +111,8 @@ class StaticSTFT20(nn.Module):
                 indices,
             )
             waveform = torch.index_select(waveform, 2, indices)
-            active = (positions < length + padding).to(dtype=waveform.dtype)
-            waveform = waveform * active.reshape(1, 1, -1)
+            active = (positions < length + padding).reshape(1, 1, -1)
+            waveform = torch.where(active, waveform, torch.zeros_like(waveform))
         elif self.pad_mode == "constant":
             waveform = F.pad(waveform, (padding, padding), mode="constant", value=0.0)
         else:
@@ -173,8 +173,8 @@ class StaticISTFT20(nn.Module):
             raise ValueError(f"spec_phase channel count must be {2 * self.FREQUENCY_BINS}")
         if not torch.jit.is_tracing() and spec_phase.shape[2] != self.spectral_frames:
             raise ValueError(f"spec_phase frame count must be {self.spectral_frames}")
-        magnitude = spec_phase[:, : self.FREQUENCY_BINS].float()
-        phase = spec_phase[:, self.FREQUENCY_BINS :].float()
+        magnitude = spec_phase[:, : self.FREQUENCY_BINS]
+        phase = spec_phase[:, self.FREQUENCY_BINS :]
         real = magnitude * torch.cos(phase)
         imag = magnitude * torch.sin(phase)
         waveform = F.conv_transpose1d(

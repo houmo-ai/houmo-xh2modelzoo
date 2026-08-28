@@ -16,8 +16,6 @@ export:
   opset: 17
   seed: 1234
   simplify: false
-  validate_onnx: true
-  validate_hmonnx: true
   convert_hmonnx: true
   allow_decomposed_failure: true
   # Required to inline pkg.onnxscript.torch_lib functions in decomposed LSTM

@@ -70,7 +70,6 @@ def _assets_from_export(source_export_dir: Path) -> tuple[KokoroAssets, dict[str
         config=Path(paths["config"]).resolve(),
         checkpoint=Path(paths["checkpoint"]).resolve(),
         voice=Path(paths["voice"]).resolve(),
-        reference_onnx=Path(paths["reference_onnx"]).resolve(),
         voice_pack=None,
     )
     for path in (
@@ -78,7 +77,6 @@ def _assets_from_export(source_export_dir: Path) -> tuple[KokoroAssets, dict[str
         assets.config,
         assets.checkpoint,
         assets.voice,
-        assets.reference_onnx,
     ):
         if not path.exists():
             raise FileNotFoundError(path)

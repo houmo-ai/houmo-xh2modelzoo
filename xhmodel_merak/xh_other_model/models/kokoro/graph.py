@@ -15,7 +15,6 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.nn.utils import parametrize
 from torch.nn.utils import remove_weight_norm as remove_legacy_weight_norm
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from xhquant import nn as xhnn
 
@@ -28,6 +27,7 @@ from .host import (
     harmonic_spectrogram,
     istft_waveform,
     make_frame_masks,
+    make_generator_rmsnorm_scales,
     make_reverse_idx,
     make_rmsnorm_scales,
     make_text_mask,
@@ -376,13 +376,15 @@ class DualForwardLSTMStatic(nn.Module):
         return forward, backward
 
 
-class PackedBidirectionalLSTMStatic(nn.Module):
-    """Keep one standard bidirectional ONNX LSTM with sequence lengths.
+class PrefixReversedBidirectionalLSTMStatic(nn.Module):
+    """Lower one padded BiLSTM to two standard all-valid forward LSTMs.
 
-    ``pack_padded_sequence`` is used only to express the valid-prefix contract
-    to the legacy ONNX exporter.  For batch 1 and ``enforce_sorted=True`` it
-    exports one ``direction=bidirectional`` LSTM node with ``sequence_lens``;
-    no forward/backward weight copying or Host-side reversal is involved.
+    ONNX ``LSTM`` has no private valid-prefix permutation input.  Kokoro's
+    padded batch-1 inputs therefore make the reverse dataflow explicit:
+    Gather the valid prefix into reverse order, run the copied reverse weights
+    through a normal forward LSTM, then Gather once more to restore time order.
+    Both recurrent nodes exported by this wrapper are standards-compliant
+    ``direction=forward`` ONNX LSTMs; padding is removed by the caller's mask.
     """
 
     def __init__(self, source_lstm: nn.LSTM, total_length: int) -> None:
@@ -393,29 +395,21 @@ class PackedBidirectionalLSTMStatic(nn.Module):
             raise ValueError("Kokoro deployment supports one-layer LSTM modules")
         if not source_lstm.batch_first:
             raise ValueError("Kokoro deployment expects batch_first LSTM modules")
-        self.lstm = source_lstm
+        self.forward_lstm, self.backward_lstm = _dual_forward_lstm(source_lstm)
         self.total_length = int(total_length)
 
-    def forward(self, values: Tensor, valid_lengths: Tensor) -> Tensor:
-        packed = pack_padded_sequence(
-            values,
-            valid_lengths.to(device="cpu"),
-            batch_first=True,
-            enforce_sorted=True,
-        )
-        packed_output, _ = self.lstm(packed)
-        output, _ = pad_packed_sequence(
-            packed_output,
-            batch_first=True,
-            total_length=self.total_length,
-        )
-        return output
+    def forward(self, values: Tensor, reverse_indices: Tensor) -> Tensor:
+        forward, _ = self.forward_lstm(values)
+        reversed_values = torch.index_select(values, 1, reverse_indices)
+        backward_reversed, _ = self.backward_lstm(reversed_values)
+        backward = torch.index_select(backward_reversed, 1, reverse_indices)
+        return torch.cat((forward, backward), dim=-1)
 
 
 class DurationBidirectionalLSTMBlockStatic(nn.Module):
     def __init__(self, source_lstm: nn.LSTM, adaln: nn.Module, text_max_length: int) -> None:
         super().__init__()
-        self.lstm = PackedBidirectionalLSTMStatic(source_lstm, text_max_length)
+        self.lstm = PrefixReversedBidirectionalLSTMStatic(source_lstm, text_max_length)
         self.adaln = adaln
         self.text_max_length = int(text_max_length)
 
@@ -423,10 +417,10 @@ class DurationBidirectionalLSTMBlockStatic(nn.Module):
         self,
         values: Tensor,
         style: Tensor,
-        valid_lengths: Tensor,
+        reverse_indices: Tensor,
         mask: Tensor,
     ) -> Tensor:
-        values = self.lstm(values, valid_lengths) * mask
+        values = self.lstm(values, reverse_indices) * mask
         values = self.adaln(values, style) * mask
         expanded_style = style.unsqueeze(1).expand(-1, self.text_max_length, -1)
         return torch.cat([values, expanded_style], dim=-1) * mask
@@ -435,11 +429,11 @@ class DurationBidirectionalLSTMBlockStatic(nn.Module):
 class DurationPredictorBidirectionalStatic(nn.Module):
     def __init__(self, model: nn.Module, text_max_length: int) -> None:
         super().__init__()
-        self.lstm = PackedBidirectionalLSTMStatic(model.predictor.lstm, text_max_length)
+        self.lstm = PrefixReversedBidirectionalLSTMStatic(model.predictor.lstm, text_max_length)
         self.projection = model.predictor.duration_proj
 
-    def forward(self, values: Tensor, valid_lengths: Tensor, mask: Tensor) -> Tensor:
-        return self.projection(self.lstm(values, valid_lengths) * mask)
+    def forward(self, values: Tensor, reverse_indices: Tensor, mask: Tensor) -> Tensor:
+        return self.projection(self.lstm(values, reverse_indices) * mask)
 
 
 class SharedChunkLSTMStatic(nn.Module):
@@ -482,7 +476,6 @@ def _eps(module: nn.Module) -> float:
 
 
 def _masked_adain(module: nn.Module, values: Tensor, style: Tensor, mask: Tensor) -> Tensor:
-    mask = mask.to(dtype=values.dtype)
     count = mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
     mean = (values * mask).sum(dim=-1, keepdim=True) / count
     variance = ((values - mean).square() * mask).sum(dim=-1, keepdim=True) / count
@@ -518,13 +511,20 @@ def _masked_adain_rmsnorm(
     scale: Tensor,
     inverse_scale: Tensor,
 ) -> Tensor:
-    mask = mask.to(dtype=values.dtype)
-    count = mask.sum(dim=-1, keepdim=True).clamp_min(1.0)
-    mean = (values * mask).sum(dim=-1, keepdim=True) / count
+    mean = _masked_temporal_mean(values, mask, scale)
     centered = (values - mean) * mask
     normalized = rmsnorm(centered, scale, inverse_scale)
     gamma, beta = module.fc(style).unsqueeze(-1).chunk(2, dim=1)
     return ((1.0 + gamma) * normalized + beta) * mask
+
+
+def _masked_temporal_mean(values: Tensor, mask: Tensor, scale: Tensor) -> Tensor:
+    """Compute a valid-prefix mean without an overflow-prone FP16 sum."""
+
+    # ReduceSum over Generator's 120F+1 axis overflows FP16 once the valid
+    # extent exceeds 65504.  ReduceMean keeps the reduction bounded; scale^2
+    # restores T/L exactly because Host supplies scale=sqrt(T/L).
+    return (values * mask).mean(dim=-1, keepdim=True) * scale.square()
 
 
 def _masked_adain_block(
@@ -617,6 +617,51 @@ def _masked_generator_block(
     return values
 
 
+def _masked_generator_block_rmsnorm(
+    block: nn.Module,
+    rmsnorm: _MaskedTemporalRMSNorm,
+    values: Tensor,
+    style: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    inverse_scale: Tensor,
+) -> Tensor:
+    values = values * mask
+    for conv1, conv2, norm1, norm2, alpha1, alpha2 in zip(
+        block.convs1,
+        block.convs2,
+        block.adain1,
+        block.adain2,
+        block.alpha1,
+        block.alpha2,
+        strict=True,
+    ):
+        residual = _masked_adain_rmsnorm(
+            norm1,
+            rmsnorm,
+            values,
+            style,
+            mask,
+            scale,
+            inverse_scale,
+        )
+        residual = (residual + torch.sin(alpha1 * residual).square() / alpha1) * mask
+        residual = conv1(residual) * mask
+        residual = _masked_adain_rmsnorm(
+            norm2,
+            rmsnorm,
+            residual,
+            style,
+            mask,
+            scale,
+            inverse_scale,
+        )
+        residual = (residual + torch.sin(alpha2 * residual).square() / alpha2) * mask
+        residual = conv2(residual) * mask
+        values = (values + residual) * mask
+    return values
+
+
 class F0BranchStatic(nn.Module):
     def __init__(
         self,
@@ -677,11 +722,11 @@ class F0BranchStatic(nn.Module):
             if norm_scales is None:
                 # Single-graph compatibility path. Standalone/modular F0 graphs
                 # supply these values from Host and do not export this path.
-                valid_count = mask_f.to(dtype=shared.dtype).sum(dim=-1, keepdim=True).clamp_min(1.0)
+                valid_count = mask_f.sum(dim=-1, keepdim=True).clamp_min(1.0)
                 scale = torch.sqrt(self.frame_bucket.to(dtype=shared.dtype) / valid_count)
                 inverse_scale = torch.reciprocal(scale)
             else:
-                if tuple(norm_scales.shape) != (1, 2, 1):
+                if not torch.jit.is_tracing() and tuple(norm_scales.shape) != (1, 2, 1):
                     raise ValueError(f"norm_scales must be [1,2,1], got {tuple(norm_scales.shape)}")
                 scale = norm_scales[:, 0:1, :]
                 inverse_scale = norm_scales[:, 1:2, :]
@@ -779,9 +824,29 @@ class SourceMergeStatic(nn.Module):
 
 
 class GeneratorStatic(nn.Module):
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, frame_max_length: int) -> None:
         super().__init__()
         self.generator = model.decoder.generator
+        self.frame_max_length = int(frame_max_length)
+        if self.frame_max_length <= 0:
+            raise ValueError("frame_max_length must be positive")
+        if self.generator.num_upsamples != 2:
+            raise ValueError(f"Kokoro Generator must have two upsample stages, got {self.generator.num_upsamples}")
+
+        stage_lengths = (20 * self.frame_max_length, 120 * self.frame_max_length + 1)
+        self.rmsnorms = nn.ModuleList()
+        for stage, temporal_length in enumerate(stage_lengths):
+            blocks = [
+                self.generator.noise_res[stage],
+                *[
+                    self.generator.resblocks[stage * self.generator.num_kernels + branch]
+                    for branch in range(self.generator.num_kernels)
+                ],
+            ]
+            eps_values = {_eps(norm) for block in blocks for norms in (block.adain1, block.adain2) for norm in norms}
+            if len(eps_values) != 1:
+                raise ValueError(f"Generator stage {stage} AdaIN eps values must match, got {sorted(eps_values)}")
+            self.rmsnorms.append(_MaskedTemporalRMSNorm(temporal_length, eps_values.pop()))
 
     def forward(
         self,
@@ -791,26 +856,42 @@ class GeneratorStatic(nn.Module):
         mask_2f: Tensor,
         mask_20f: Tensor,
         mask_wave: Tensor,
+        norm_scales: Tensor,
     ) -> Tensor:
+        if not torch.jit.is_tracing() and tuple(norm_scales.shape) != (1, 2, 2, 1):
+            raise ValueError(f"norm_scales must be [1,2,2,1], got {tuple(norm_scales.shape)}")
         generator = self.generator
         values = generator_feature * mask_2f
         harmonic = harmonic * mask_wave
         stage_masks = (mask_20f, mask_wave)
         for stage in range(generator.num_upsamples):
             stage_mask = stage_masks[stage]
+            scale = norm_scales[:, stage, 0:1, :]
+            inverse_scale = norm_scales[:, stage, 1:2, :]
             values = F.leaky_relu(values, 0.1)
             source = generator.noise_convs[stage](harmonic) * stage_mask
-            source = _masked_generator_block(generator.noise_res[stage], source, style, stage_mask)
+            source = _masked_generator_block_rmsnorm(
+                generator.noise_res[stage],
+                self.rmsnorms[stage],
+                source,
+                style,
+                stage_mask,
+                scale,
+                inverse_scale,
+            )
             values = generator.ups[stage](values)
             if stage == generator.num_upsamples - 1:
                 values = torch.cat([values[:, :, 1:2], values], dim=-1)
             values = (values + source) * stage_mask
             branches = [
-                _masked_generator_block(
+                _masked_generator_block_rmsnorm(
                     generator.resblocks[stage * generator.num_kernels + branch],
+                    self.rmsnorms[stage],
                     values,
                     style,
                     stage_mask,
+                    scale,
+                    inverse_scale,
                 )
                 for branch in range(generator.num_kernels)
             ]
@@ -836,6 +917,7 @@ def export_static_graphs(
     seed: int,
     simplify: bool,
     validate_onnx: bool,
+    validate_outputs: bool = True,
     f0_norm_mode: str = "adain",
 ) -> StaticExportBundle:
     if frame_max_length % lstm_chunk_length:
@@ -847,14 +929,17 @@ def export_static_graphs(
     torch.set_grad_enabled(False)
     torch.set_num_threads(1)
 
-    dynamic_ids = sample.input_ids[:, : int(sample.valid_len.item())].long()
-    torch.manual_seed(seed)
-    with torch.no_grad():
-        dynamic_waveform, dynamic_duration = model.forward_with_tokens(
-            dynamic_ids,
-            sample.style,
-            float(sample.speed.item()),
-        )
+    dynamic_waveform: Tensor | None = None
+    dynamic_duration: Tensor | None = None
+    if validate_outputs:
+        dynamic_ids = sample.input_ids[:, : int(sample.valid_len.item())].long()
+        torch.manual_seed(seed)
+        with torch.no_grad():
+            dynamic_waveform, dynamic_duration = model.forward_with_tokens(
+                dynamic_ids,
+                sample.style,
+                float(sample.speed.item()),
+            )
 
     rewrites = {"weight_norm_materialized": materialize_weight_norm(model)}
     feeds: dict[str, dict[str, Tensor]] = {}
@@ -1091,7 +1176,7 @@ def export_static_graphs(
     )
     result = emit(
         "generator",
-        GeneratorStatic(model),
+        GeneratorStatic(model, frame_max_length),
         {
             "generator_feature": generator_feature,
             "style": decoder_style,
@@ -1099,18 +1184,21 @@ def export_static_graphs(
             "mask_2f": mask_2f,
             "mask_20f": mask_20f,
             "mask_wave": mask_wave,
+            "norm_scales": make_generator_rmsnorm_scales(valid_frames, frame_max_length),
         },
         ("spec_phase",),
         f"kokoro_generator_b1_f{frame_max_length}.onnx",
     )
     waveform = istft_waveform(result["spec_phase"], valid_frames)
 
-    strict_validation = _validate_static_pipeline(
-        dynamic_waveform=dynamic_waveform,
-        dynamic_duration=dynamic_duration,
-        static_waveform=waveform,
-        static_duration=duration[:, : int(sample.valid_len.item())],
-    )
+    strict_validation = {}
+    if dynamic_waveform is not None and dynamic_duration is not None:
+        strict_validation = _validate_static_pipeline(
+            dynamic_waveform=dynamic_waveform,
+            dynamic_duration=dynamic_duration,
+            static_waveform=waveform,
+            static_duration=duration[:, : int(sample.valid_len.item())],
+        )
     return StaticExportBundle(
         graphs=artifacts,
         feeds=feeds,

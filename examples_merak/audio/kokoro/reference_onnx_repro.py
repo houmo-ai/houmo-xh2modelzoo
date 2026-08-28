@@ -23,6 +23,7 @@ from xhmodel_merak.xh_other_model.models.kokoro.host import (
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reproduce the released dynamic Kokoro ONNX")
     parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--output-wav", default="work_dirs/kokoro_reference.wav")
     parser.add_argument("--repeat", type=int, default=4)
     args = parser.parse_args()
@@ -42,7 +43,7 @@ def main() -> None:
     }
     started = time.perf_counter()
     session = ort.InferenceSession(
-        str(assets.reference_onnx),
+        str(args.onnx.expanduser().resolve()),
         providers=["CPUExecutionProvider"],
     )
     initialization_seconds = time.perf_counter() - started

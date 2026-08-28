@@ -13,7 +13,6 @@ import numpy as np
 
 from ...workflows.base import BaseOtherModelWorkflow
 from ...workflows.result import ExportResult, QuantResult
-from .analysis import analyze_onnx
 from .assets import resolve_model_assets, sha256, verify_release_assets
 from .bucketed_runtime import BUCKETED_PRECISION_SPLIT_GRAPH_MODE, KokoroBucketedRuntime
 from .buckets import (
@@ -106,7 +105,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         opset = int(export_cfg.get("opset", 17))
         seed = int(export_cfg.get("seed", self.seed))
         simplify = bool(export_cfg.get("simplify", True))
-        validate_onnx = bool(export_cfg.get("validate_onnx", True))
         convert_hmonnx = bool(export_cfg.get("convert_hmonnx", True))
         torch_onnx_internal_optimize = bool(
             export_cfg.get("torch_onnx_internal_optimize", True)
@@ -140,10 +138,8 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 opset=opset,
                 seed=seed,
                 simplify=simplify,
-                validate_onnx=validate_onnx,
                 convert_hmonnx=convert_hmonnx,
                 torch_onnx_internal_optimize=torch_onnx_internal_optimize,
-                device=device,
             )
         sample = default_static_sample(assets.voice, text_max_length)
         if graph_mode == PRECISION_SPLIT_GRAPH_MODE:
@@ -164,7 +160,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 opset=opset,
                 seed=seed,
                 simplify=simplify,
-                validate_onnx=validate_onnx,
                 convert_hmonnx=convert_hmonnx,
                 decompose_lstm=decompose_lstm,
                 torch_onnx_internal_optimize=torch_onnx_internal_optimize,
@@ -187,7 +182,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 opset=opset,
                 seed=seed,
                 simplify=simplify,
-                validate_onnx=validate_onnx,
                 convert_hmonnx=convert_hmonnx,
                 decompose_lstm=decompose_lstm,
                 torch_onnx_internal_optimize=torch_onnx_internal_optimize,
@@ -202,7 +196,8 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
             opset=opset,
             seed=seed,
             simplify=simplify,
-            validate_onnx=validate_onnx,
+            validate_onnx=False,
+            validate_outputs=False,
             f0_norm_mode=f0_norm_mode,
         )
 
@@ -243,11 +238,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "config": str(assets.config),
                 "checkpoint": str(assets.checkpoint),
                 "voice": str(assets.voice),
-                "reference_onnx": str(assets.reference_onnx),
             },
             "runtime_assets": runtime_assets,
             "torch_onnx_internal_optimize": torch_onnx_internal_optimize,
-            "reference_onnx_analysis": analyze_onnx(assets.reference_onnx),
             "target_device": target,
             "workflow_config": str(Path(config_file).relative_to(work_dir)),
             "sample_rate": SAMPLE_RATE,
@@ -267,7 +260,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "deterministic SineGen randomness",
                 "STFT and iSTFT",
             ],
-            "strict_pytorch_validation": bundle.strict_validation,
             "graph_rewrites": bundle.rewrites,
             "reference_sample": {
                 "text": sample.text,
@@ -303,10 +295,8 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         opset: int,
         seed: int,
         simplify: bool,
-        validate_onnx: bool,
         convert_hmonnx: bool,
         torch_onnx_internal_optimize: bool,
-        device: str,
     ) -> ExportResult:
         """Export the four approved paired T/F capacity gears.
 
@@ -336,7 +326,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         stft_pad_mode = str(export_cfg.get("stft_pad_mode", "length_aware_reflect"))
         stft_phase_mode = str(export_cfg.get("stft_phase_mode", "cordic"))
         f0_norm_mode = str(export_cfg.get("f0_norm_mode", "adain"))
-        validate_hmonnx = bool(export_cfg.get("validate_hmonnx", True)) and convert_hmonnx
         allow_decomposed_failure = bool(export_cfg.get("allow_decomposed_failure", True))
         component_cfg = export_cfg["components"]
         frame_lstm_role = FRAME_SYNTHESIS_ROLE if phase_on_npu else FRAME_ACOUSTIC_ROLE
@@ -354,15 +343,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
             role for role in component_order if role != INDEPENDENT_PHASE_CORE_ROLE
         )
 
-        reference_sample = default_static_sample(assets.voice, token_buckets[0])
-        dynamic_ids = reference_sample.input_ids[:, : int(reference_sample.valid_len.item())].long()
-        torch.manual_seed(seed)
-        with torch.no_grad():
-            dynamic_waveform, dynamic_duration = model.forward_with_tokens(
-                dynamic_ids,
-                reference_sample.style,
-                float(reference_sample.speed.item()),
-            )
         source_rewrites = prepare_independent_model(model)
 
         components: dict[str, dict[str, Any]] = {}
@@ -383,9 +363,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
 
         decomposed_failures: list[dict[str, Any]] = []
         text_reference: Any | None = None
-        text_validation: dict[str, Any] = {}
-        frame_validation: dict[str, Any] = {}
-
         for token_max_length in token_buckets:
             key = token_bucket_key(token_max_length)
             sample = default_static_sample(assets.voice, token_max_length)
@@ -400,7 +377,7 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 ),
                 text_max_length=token_max_length,
                 opset=opset,
-                validate_onnx=validate_onnx,
+                validate_onnx=False,
             )
             entry = artifact_metadata(exported.artifact, work_dir)
             entry.update(
@@ -415,22 +392,17 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                         target=target,
                         quant_type=str(component_cfg[TEXT_DURATION_ROLE]["quant_type"]),
                         variants=variants,
-                        expected_native_lstm_nodes=5,
+                        expected_native_lstm_nodes=10,
                         convert_hmonnx=convert_hmonnx,
-                        validate_hmonnx=validate_hmonnx,
                         allow_decomposed_failure=allow_decomposed_failure,
                         torch_onnx_internal_optimize=torch_onnx_internal_optimize,
                         debug=self.debug,
-                        device=device,
                         work_dir=work_dir,
                         failures=decomposed_failures,
                     ),
                 }
             )
             components[TEXT_DURATION_ROLE]["buckets"][key] = entry
-            text_validation[key] = {
-                metric["name"]: metric for metric in exported.artifact.pytorch_vs_onnx
-            }
             if text_reference is None:
                 text_reference = (sample, exported)
             if torch.cuda.is_available():
@@ -468,10 +440,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 stft_phase_mode=stft_phase_mode,
                 f0_norm_mode=f0_norm_mode,
                 opset=opset,
-                validate_onnx=validate_onnx,
+                validate_onnx=False,
                 phase_on_npu=phase_on_npu,
             )
-            frame_validation[key] = {}
             for role, artifact in exported.graphs.items():
                 entry = artifact_metadata(artifact, work_dir)
                 entry.update(
@@ -490,13 +461,11 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                         target=target,
                         quant_type=str(component_cfg[role]["quant_type"]),
                         variants=variants,
-                        expected_native_lstm_nodes=1,
+                        expected_native_lstm_nodes=2,
                         convert_hmonnx=convert_hmonnx,
-                        validate_hmonnx=validate_hmonnx,
                         allow_decomposed_failure=allow_decomposed_failure,
                         torch_onnx_internal_optimize=torch_onnx_internal_optimize,
                         debug=self.debug,
-                        device=device,
                         work_dir=work_dir,
                         failures=decomposed_failures,
                     )
@@ -520,17 +489,7 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                         torch_onnx_internal_optimize=torch_onnx_internal_optimize,
                     )
                     entry.update(_hmonnx_artifact_metadata(hmonnx_path, work_dir))
-                    if validate_hmonnx:
-                        entry["onnx_vs_hmonnx"] = _validate_hmonnx_artifact(
-                            artifact,
-                            exported.feeds[role],
-                            hmonnx_path,
-                            device=device,
-                        )
                 components[role]["buckets"][key] = entry
-                frame_validation[key][role] = {
-                    metric["name"]: metric for metric in artifact.pytorch_vs_onnx
-                }
             if reference_duration is None:
                 reference_duration = duration
                 reference_valid_frames = valid_frames
@@ -541,9 +500,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         if reference_duration is None or reference_valid_frames is None or reference_waveform is None:
             raise RuntimeError("Kokoro frame bucket export produced no graph")
         reference_samples = reference_valid_frames * 600
-        dynamic_prefix = dynamic_waveform.detach().cpu().numpy().reshape(-1)[:reference_samples]
-        static_prefix = reference_waveform.detach().cpu().numpy().reshape(-1)[:reference_samples]
-
         meta = {
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "model_type": "XHKokoroModel",
@@ -556,11 +512,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "config": str(assets.config),
                 "checkpoint": str(assets.checkpoint),
                 "voice": str(assets.voice),
-                "reference_onnx": str(assets.reference_onnx),
             },
             "runtime_assets": dict(runtime_assets),
             "torch_onnx_internal_optimize": torch_onnx_internal_optimize,
-            "reference_onnx_analysis": analyze_onnx(assets.reference_onnx),
             "target_device": target,
             "workflow_config": str(Path(config_file).relative_to(work_dir)),
             "graph_mode": BUCKETED_PRECISION_SPLIT_GRAPH_MODE,
@@ -609,11 +563,12 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "valid waveform prefix crop",
             ],
             "lstm_contract": {
-                "onnx_direction": "bidirectional",
-                "num_directions": 2,
-                "valid_region_mode": "reverse_index",
-                "reverse_index_contract": "reverse valid prefix; keep padded suffix in place",
-                "native_nodes": {TEXT_DURATION_ROLE: 5, frame_lstm_role: 1},
+                "onnx_direction": "forward",
+                "sequence_lens": "omitted; all T steps are valid",
+                "padded_bidirectional_lowering": (
+                    "forward LSTM + Gather(prefix reversal) + forward LSTM + Gather(time restore)"
+                ),
+                "onnx_nodes": {TEXT_DURATION_ROLE: 10, frame_lstm_role: 2},
                 "native_hmonnx": {
                     "operator": "ai.houmo.xh2a::LSTM",
                     "decompose_lstm": False,
@@ -630,8 +585,6 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
             "source_level_compatibility_lowerings": source_rewrites,
             "onnx_post_export_optimizations": 0,
             "xhquant_frontend_simplify": True,
-            "text_validation": text_validation,
-            "frame_validation": frame_validation,
             "decomposed_failures": decomposed_failures,
             "reference_sample": {
                 "text": reference_sample.text,
@@ -641,11 +594,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "duration": reference_duration[0, : int(reference_sample.valid_len.item())].tolist(),
                 "frames": reference_valid_frames,
                 "samples": reference_samples,
-                "dynamic_vs_static_pytorch": _array_error_metrics(dynamic_prefix, static_prefix),
-                "dynamic_duration": dynamic_duration.detach().cpu().reshape(-1).tolist(),
             },
             "hmonnx_converted": convert_hmonnx,
-            "hmonnx_validated": validate_hmonnx,
+            "numerical_validation": "run examples_merak/audio/kokoro/compare_backends.py",
         }
         meta_file = work_dir / "export_meta_info.json"
         meta_file.write_text(
@@ -673,29 +624,20 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         opset: int,
         seed: int,
         simplify: bool,
-        validate_onnx: bool,
         convert_hmonnx: bool,
         decompose_lstm: bool,
         torch_onnx_internal_optimize: bool,
     ) -> ExportResult:
         import torch
 
-        dynamic_ids = sample.input_ids[:, : int(sample.valid_len.item())].long()
-        torch.manual_seed(seed)
-        with torch.no_grad():
-            dynamic_waveform, dynamic_duration = model.forward_with_tokens(
-                dynamic_ids,
-                sample.style,
-                float(sample.speed.item()),
-            )
         stft_pad_mode = str(export_cfg.get("stft_pad_mode", "length_aware_reflect"))
         stft_phase_mode = str(export_cfg.get("stft_phase_mode", "cordic"))
         f0_norm_mode = str(export_cfg.get("f0_norm_mode", "adain"))
         bundle = export_precision_split_static(
             model=model,
             sample=sample,
-            dynamic_waveform=dynamic_waveform,
-            dynamic_duration=dynamic_duration,
+            dynamic_waveform=None,
+            dynamic_duration=None,
             output_dir=onnx_dir,
             text_max_length=text_max_length,
             frame_max_length=frame_max_length,
@@ -704,7 +646,8 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
             stft_phase_mode=stft_phase_mode,
             opset=opset,
             simplify=simplify,
-            validate_onnx=validate_onnx,
+            validate_onnx=False,
+            validate_outputs=False,
             f0_norm_mode=f0_norm_mode,
         )
 
@@ -755,11 +698,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "config": str(assets.config),
                 "checkpoint": str(assets.checkpoint),
                 "voice": str(assets.voice),
-                "reference_onnx": str(assets.reference_onnx),
             },
             "runtime_assets": dict(runtime_assets),
             "torch_onnx_internal_optimize": torch_onnx_internal_optimize,
-            "reference_onnx_analysis": analyze_onnx(assets.reference_onnx),
             "target_device": target,
             "workflow_config": str(Path(config_file).relative_to(work_dir)),
             "graph_mode": PRECISION_SPLIT_GRAPH_MODE,
@@ -791,17 +732,14 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "source_merge_execution": "generator_npu_w16a16",
                 "harmonic_stft_execution": "generator_npu_w16a16",
             },
-            "precision_split_validation": bundle.validation,
             "graph_rewrites": bundle.rewrites,
             "lstm_contract": {
-                "acoustic_native_lstm_nodes": 6,
-                "direction": "bidirectional",
-                "num_directions": 2,
+                "acoustic_native_lstm_nodes": 12,
+                "direction": "forward",
+                "sequence_lens": "omitted; all T/F bucket steps are valid",
                 "phase_core_cpu_lstm_nodes": 0,
                 "generator_istft_lstm_nodes": 0,
                 "time_step_unrolled_in_hmonnx": False,
-                "num_directions_supported": True,
-                "valid_region_modes": ["valid_length"],
             },
             "single_graph_status": {
                 "production": False,
@@ -844,29 +782,18 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
         opset: int,
         seed: int,
         simplify: bool,
-        validate_onnx: bool,
         convert_hmonnx: bool,
         decompose_lstm: bool,
         torch_onnx_internal_optimize: bool,
     ) -> ExportResult:
-        import torch
-
-        dynamic_ids = sample.input_ids[:, : int(sample.valid_len.item())].long()
-        torch.manual_seed(seed)
-        with torch.no_grad():
-            dynamic_waveform, dynamic_duration = model.forward_with_tokens(
-                dynamic_ids,
-                sample.style,
-                float(sample.speed.item()),
-            )
         stft_pad_mode = str(export_cfg.get("stft_pad_mode", "length_aware_reflect"))
         stft_phase_mode = str(export_cfg.get("stft_phase_mode", "cordic"))
         f0_norm_mode = str(export_cfg.get("f0_norm_mode", "adain"))
         result = export_end_to_end_static(
             model=model,
             sample=sample,
-            dynamic_waveform=dynamic_waveform,
-            dynamic_duration=dynamic_duration,
+            dynamic_waveform=None,
+            dynamic_duration=None,
             output_path=onnx_dir / f"kokoro_end_to_end_b1_t{text_max_length}_f{frame_max_length}.onnx",
             text_max_length=text_max_length,
             frame_max_length=frame_max_length,
@@ -875,7 +802,8 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
             stft_phase_mode=stft_phase_mode,
             opset=opset,
             simplify=simplify,
-            validate_onnx=validate_onnx,
+            validate_onnx=False,
+            validate_outputs=False,
             f0_norm_mode=f0_norm_mode,
         )
         quant_type = str(export_cfg["components"][SINGLE_GRAPH_ROLE]["quant_type"])
@@ -909,11 +837,9 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "config": str(assets.config),
                 "checkpoint": str(assets.checkpoint),
                 "voice": str(assets.voice),
-                "reference_onnx": str(assets.reference_onnx),
             },
             "runtime_assets": dict(runtime_assets),
             "torch_onnx_internal_optimize": torch_onnx_internal_optimize,
-            "reference_onnx_analysis": analyze_onnx(assets.reference_onnx),
             "target_device": target,
             "workflow_config": str(Path(config_file).relative_to(work_dir)),
             "graph_mode": "single_graph",
@@ -932,16 +858,14 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "voice-pack style lookup",
                 "F-bucket overflow retry and output-prefix crop",
             ],
-            "single_graph_validation": result.validation,
             "graph_rewrites": result.rewrites,
             "lstm_contract": {
                 "logical_bidirectional_lstm": 6,
-                "onnx_bidirectional_lstm_nodes": 6,
-                "valid_prefix": "standard ONNX sequence_lens input",
+                "onnx_forward_lstm_nodes": 12,
+                "valid_prefix": "explicit Gather prefix reversal outside standard forward LSTM",
                 "time_step_unrolled_in_onnx": False,
                 "native_hmonnx_lstm": convert_hmonnx and not decompose_lstm,
-                "num_directions_supported": True,
-                "valid_region_modes": ["valid_length"],
+                "sequence_lens": "omitted; padding is handled by explicit Gather indices",
             },
             "reference_sample": {
                 "text": sample.text,
@@ -1440,6 +1364,15 @@ class _RecordingRunner:
 
 
 def _validate_export_config(export_cfg: Mapping[str, Any]) -> None:
+    numerical_validation_keys = sorted(
+        {"validate_onnx", "validate_hmonnx"}.intersection(export_cfg)
+    )
+    if numerical_validation_keys:
+        raise ValueError(
+            "Kokoro workflow only quantizes and exports; run numerical validation "
+            "from examples_merak/audio/kokoro/compare_backends.py instead of setting "
+            f"export.{numerical_validation_keys[0]}"
+        )
     if not isinstance(export_cfg.get("torch_onnx_internal_optimize", True), bool):
         raise TypeError("export.torch_onnx_internal_optimize must be a boolean")
     if export_cfg.get("model", {}).get("type") != "XHKokoroModel":
@@ -1606,8 +1539,7 @@ def _hmonnx_artifact_metadata(path: Path, work_dir: Path) -> dict[str, Any]:
                     "name": node.name,
                     "domain": domain,
                     "direction": _decode_onnx_attribute(attributes.get("direction")),
-                    "num_directions": int(attributes.get("num_directions", 0)),
-                    "valid_region_mode": _decode_onnx_attribute(attributes.get("valid_region_mode")),
+                    "has_sequence_lens": len(node.input) > 8 and bool(node.input[8]),
                     "hidden_size": int(attributes.get("hidden_size", 0)),
                 }
             )
@@ -1722,11 +1654,9 @@ def _convert_lstm_bucket_variants(
     variants: tuple[str, ...],
     expected_native_lstm_nodes: int,
     convert_hmonnx: bool,
-    validate_hmonnx: bool,
     allow_decomposed_failure: bool,
     torch_onnx_internal_optimize: bool,
     debug: bool,
-    device: str,
     work_dir: Path,
     failures: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -1770,13 +1700,6 @@ def _convert_lstm_bucket_variants(
                     "conversion_seconds": time.perf_counter() - started,
                 }
             )
-            if validate_hmonnx:
-                entry["onnx_vs_hmonnx"] = _validate_hmonnx_artifact(
-                    artifact,
-                    feed,
-                    output_path,
-                    device=device,
-                )
             _validate_lstm_variant(
                 entry,
                 variant,
@@ -1816,60 +1739,8 @@ def _validate_lstm_variant(
     if count != expected_native_lstm_nodes:
         raise RuntimeError(f"native HMONNX must contain {expected_native_lstm_nodes} LSTM nodes, got {count}")
     for node in metadata["hmonnx_lstm_attributes"]:
-        if (
-            node["domain"] != "ai.houmo.xh2a"
-            or node["direction"] != "bidirectional"
-            or int(node["num_directions"]) != 2
-            or node["valid_region_mode"] != "reverse_index"
-        ):
-            raise RuntimeError(f"native HMONNX has an invalid bidirectional LSTM contract: {node}")
-
-
-def _validate_hmonnx_artifact(
-    artifact: GraphArtifact,
-    feed: Mapping[str, Any],
-    hmonnx_path: Path,
-    *,
-    device: str,
-) -> dict[str, Any]:
-    from .runtime import HmonnxRunner
-
-    numpy_feed = {
-        name: (value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value))
-        for name, value in feed.items()
-    }
-    reference = OrtRunner(artifact.reference_path or artifact.path).run(numpy_feed)
-    candidate = HmonnxRunner(hmonnx_path, device=device).run(numpy_feed)
-    if set(reference) != set(candidate):
-        raise RuntimeError(f"HMONNX output names differ from ONNX: {sorted(candidate)} != {sorted(reference)}")
-    metrics: dict[str, Any] = {}
-    for name in reference:
-        expected = np.asarray(reference[name])
-        actual = np.asarray(candidate[name])
-        if expected.shape != actual.shape:
-            raise RuntimeError(f"HMONNX output {name} shape {actual.shape} differs from ONNX {expected.shape}")
-        if not np.isfinite(actual).all():
-            raise RuntimeError(f"HMONNX output {name} contains NaN or infinity")
-        metrics[name] = _array_error_metrics(expected, actual)
-    return metrics
-
-
-def _array_error_metrics(expected: np.ndarray, actual: np.ndarray) -> dict[str, float | int]:
-    left = np.asarray(expected, dtype=np.float64).reshape(-1)
-    right = np.asarray(actual, dtype=np.float64).reshape(-1)
-    difference = np.abs(left - right)
-    denominator = np.maximum(np.abs(left), 1e-8)
-    norm_product = float(np.linalg.norm(left) * np.linalg.norm(right))
-    cosine = float(np.dot(left, right) / norm_product) if norm_product else float(np.array_equal(left, right))
-    return {
-        "elements": int(left.size),
-        "cosine": cosine,
-        "max_abs": float(difference.max(initial=0.0)),
-        "mean_abs": float(difference.mean()) if difference.size else 0.0,
-        "p99_abs": float(np.percentile(difference, 99.0)) if difference.size else 0.0,
-        "rmse": float(np.sqrt(np.mean((left - right) ** 2))) if difference.size else 0.0,
-        "max_relative": float((difference / denominator).max(initial=0.0)),
-    }
+        if node["domain"] != "ai.houmo.xh2a" or node["direction"] != "forward" or node["has_sequence_lens"]:
+            raise RuntimeError(f"native HMONNX does not follow Kokoro's standard forward LSTM contract: {node}")
 
 
 def _run_golden_component(

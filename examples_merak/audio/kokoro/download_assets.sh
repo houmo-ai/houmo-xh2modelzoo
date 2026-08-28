@@ -16,7 +16,7 @@ if ! command -v hf >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "${MODEL_ROOT}/source" "${PYTORCH_ROOT}" "${MODEL_ROOT}/onnx"
+mkdir -p "${MODEL_ROOT}/source" "${PYTORCH_ROOT}"
 
 if [[ ! -d "${SOURCE_ROOT}/.git" ]]; then
   git clone --filter=blob:none https://github.com/hexgrad/kokoro.git "${SOURCE_ROOT}"
@@ -30,13 +30,6 @@ hf download \
   kokoro-v1_1-zh.pth \
   voices/zf_001.pt \
   --local-dir "${PYTORCH_ROOT}"
-
-hf download \
-  xun/kokoro-v1.1-zh-onnx \
-  onnx/config.json \
-  onnx/kokoro-v1.1-zh.onnx \
-  onnx/voices-v1.1-zh.bin \
-  --local-dir "${MODEL_ROOT}"
 
 verify_sha256() {
   local expected=$1
@@ -60,9 +53,6 @@ verify_sha256 \
 verify_sha256 \
   9bdc9a87e13e9bb1ea3e7803259c2ecbfebaeeb2ff80b5d0c76df1a464c1c962 \
   "${PYTORCH_ROOT}/voices/zf_001.pt"
-verify_sha256 \
-  eefec708cbc7aba8e8129b5c2f7cb92e1fe7d281af1e1dd451592d9ff0714a0d \
-  "${MODEL_ROOT}/onnx/kokoro-v1.1-zh.onnx"
 
 echo "Kokoro assets are ready: ${MODEL_ROOT}"
 echo "Install the pinned model package before export:"

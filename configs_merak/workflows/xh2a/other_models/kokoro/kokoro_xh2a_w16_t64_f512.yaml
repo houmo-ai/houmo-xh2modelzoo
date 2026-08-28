@@ -10,7 +10,6 @@ export:
   opset: 17
   seed: 1234
   simplify: true
-  validate_onnx: true
   convert_hmonnx: true
   components:
     front_base:

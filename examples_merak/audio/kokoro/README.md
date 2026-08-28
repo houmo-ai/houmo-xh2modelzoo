@@ -57,7 +57,6 @@ Host 输出 `style[1,256]`，不会为每个音色重复导出模型。
 - 源码：[hexgrad/kokoro](https://github.com/hexgrad/kokoro)，commit
   `dfb907a02bba8152ca444717ca5d78747ccb4bec`；
 - PyTorch 模型：[hexgrad/Kokoro-82M-v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)；
-- 参考 ONNX：[xun/kokoro-v1.1-zh-onnx](https://huggingface.co/xun/kokoro-v1.1-zh-onnx)；
 - 默认 voice：`zf_001`。
 
 ```bash
@@ -67,8 +66,10 @@ bash examples_merak/audio/kokoro/download_assets.sh \
 python -m pip install work_dirs/model_assets/kokoro/source/kokoro
 ```
 
-工作流校验源码 commit、checkpoint、配置、voice 和参考 ONNX 的 SHA256，身份不匹配
-时直接停止。
+工作流只校验源码 commit、checkpoint、配置和 voice，随后由 PyTorch wrapper 直接导出
+新的标准 ONNX。发布版 ONNX 不参与建图、量化或 HMONNX 导出，也不由下载脚本获取。
+只有运行 `analyze_reference.py` 或 `reference_onnx_repro.py` 做独立上游对照时，才需要
+另外下载参考 ONNX 并通过 `--onnx` 显式传入。
 
 ## 3. T/F bucket
 
@@ -110,7 +111,7 @@ input_ids         [1,T]       INT32
 attention_mask    [1,1,T,T]   FP32
 style             [1,256]     FP32
 valid_len         [1]         INT32
-reverse_indices   [T]         ONNX INT64 / HMONNX INT32
+reverse_indices   [T]         INT64，供标准 Gather 使用
 
 输出：
 duration_features [1,T,640]
@@ -144,7 +145,7 @@ encoded           [1,640,F]
 asr               [1,512,F]
 style             [1,256]
 valid_frames      [1]
-reverse_indices   [F]         ONNX INT64 / HMONNX INT32
+reverse_indices   [F]         INT64，供标准 Gather 使用
 
 输出：
 decoder_feature   [1,512,2F]
@@ -186,8 +187,17 @@ Generator 和静态 iSTFT。reflect padding 按真实 valid length 计算，不�
 
 ## 5. 双向 LSTM
 
-Kokoro 主路径使用一个 `num_directions=2` 的逻辑双向 LSTM，不用两个单向节点
-拼接。有效区契约固定为 prefix reverse index：
+Kokoro 源模型仍是逻辑双向 LSTM，但 pad 后的有效前缀不能塞进 ONNX LSTM 的私有输入。
+每个逻辑双向层在 wrapper 中显式降低为两条标准数据流：
+
+```text
+forward:  X                 -> direction=forward LSTM(W_f/R_f)
+backward: Gather(X, P)      -> direction=forward LSTM(W_b/R_b)
+                            -> Gather(output, P)
+result:    Concat(forward, backward)
+```
+
+其中前缀反转索引为：
 
 ```text
 L=5, capacity=8
@@ -198,7 +208,11 @@ reverse_indices = [4,3,2,1,0,5,6,7]
 输入前和输出恢复时可以使用同一组 Gather；整条静态序列全反转会把 padding 搬到
 前面并污染反向 hidden state，因此不能使用。
 
-xhquant 的 QLSTM 内部由 QLinear、Add、Mul、Sigmoid、Tanh、Split 和 Gather 组成。
+因此导出的 FP32 ONNX 本身可直接通过 checker 和 ONNX Runtime：LSTM 第五输入为空，
+`reverse_indices` 只连接标准 Gather。T 图的 5 个逻辑 BiLSTM 对应 10 个 forward LSTM，
+F 图的 1 个逻辑 BiLSTM 对应 2 个 forward LSTM。
+
+xhquant 的 QLSTM 内部由 QLinear、Add、Mul、Sigmoid、Tanh 和 Split 组成。
 LSTM 使用与 Linear 相同的量化配置传递：一个 quant type 同时控制 X/H 激活以及 W、R
 两组权重。PTQ 固化时，W 和 R 都执行 `weight_static_quant()`，生成
 `qweight + scale_or_exp`。native 和 decomposed 只是导出表示不同，使用的是同一份量化
@@ -209,7 +223,7 @@ LSTM 使用与 Linear 相同的量化配置传递：一个 quant type 同时控�
 | 形态 | torch.export 结果 | 用途 |
 |---|---|---|
 | native | 保留带量化 W/R 输入的 `ai.houmo.xh2a::LSTM` | 编译器原生支持后的正式小图 |
-| decomposed | 展开为量化 Linear、门控、状态更新和 Gather | 默认兼容路径 |
+| decomposed | 展开为量化 Linear、门控、状态更新和 Gather | 默认展开路径 |
 
 选择方式：
 
@@ -221,9 +235,13 @@ Python API: decompose_lstm=False / True
 Python 参数优先级最高；未传参数、也未设置环境变量时默认导出 decomposed。需要 native
 时显式传 `decompose_lstm=False`，或设置环境变量为 `native`。
 
+当前 native HMONNX 的 LSTM 是严格 9 输入契约。早期把第 10 个输入解释成
+`reverse_indices` 的私有 HMONNX 已废弃，runtime 会直接拒绝，不做兼容读取；需要重新从
+标准 ONNX 导出。
+
 展开参考 RoIAlign 的 torch.export 机制，在导出阶段决定，不再先生成 native HMONNX
-再调用 `decompose_hmonnx_lstm()` 手工改最终文件。T 图 native 应有 5 个 BiLSTM，
-`frame_acoustic` 应有 1 个；`generator_istft` 不含 LSTM。decomposed 节点数随静态
+再调用 `decompose_hmonnx_lstm()` 手工改最终文件。T 图 native 应有 10 个 forward LSTM，
+`frame_acoustic` 应有 2 个；`generator_istft` 不含 LSTM。decomposed 节点数随静态
 序列长度线性增长，大 bucket 文件更大、编译更慢，失败会按 bucket 记录，不伪装成功。
 
 `torch_onnx_internal_optimize` 必须保持 `true`。T32/F120 的关闭实验中，native
@@ -292,9 +310,9 @@ work_dirs/kokoro_merak/bucketed_w16/
     └── generator_istft/fXXXX/
 ```
 
-每张含 LSTM 的 FP32 导出同时保存标准 ONNX companion，供 ONNX Runtime 做语义对照；
-部署 ONNX 的 LSTM 第五输入改为外部 `reverse_indices`。大权重可能使用同目录 external
-data，复制产物时不能只复制 `.onnx`。
+每张 FP32 ONNX 就是唯一的标准参考图和部署输入，不再生成 `_fp32.onnx` companion，
+也不会在导出后改写 LSTM 输入。大权重可能使用同目录 external data，复制产物时不能
+只复制 `.onnx`。
 
 ## 8. Inference demo
 
@@ -325,6 +343,15 @@ PYTHONPATH=. python examples_merak/audio/kokoro/bucketed_inference_demo.py \
   --route-report work_dirs/kokoro_merak/bucketed_w16/native_all_buckets.json
 ```
 
+workflow 只做量化和导出，不执行数值 gate。使用同一组逐图输入比较 ORT 与 HMONNX：
+
+```bash
+PYTHONPATH=. python examples_merak/audio/kokoro/compare_backends.py \
+  --export-dir work_dirs/kokoro_merak/bucketed_w16 \
+  --lstm-variant native \
+  --output-json work_dirs/kokoro_merak/bucketed_w16/native_compare.json
+```
+
 也可以用 `--token-bucket 128` 或 `--audio-seconds 16` 强制 T128/F640。生产模式总是
 从最小合法配对档位开始；duration 溢出当前 F 容量时才重跑下一档 T 图。
 新产物自带完整 `zf_001.npy` voice pack，demo 不依赖 PyTorch 源模型目录；只有读取旧
@@ -349,7 +376,7 @@ log spectrum、ASR、说话人相似度和人工听测，不能只看一个 cosi
 ## 10. 全 bucket 导出与路由实测
 
 最终 `bucketed_w16` 产物只包含 T32/F160、T64/F320、T128/F640、T256/F1280
-四个配对档位。native 图保留双向 LSTM 大算子；decomposed 图的 LSTM 数为 0，节点数
+四个配对档位。native 图保留标准 forward LSTM 大算子；decomposed 图的 LSTM 数为 0，节点数
 随 T/F 线性增长。28 token 用例自动路由到 T32/F160，输出 110 帧、66,000 个采样点
 （2.75 秒）。`--exercise-all-routes` 会逐一验证四个 route，而不是组合出 16 条路径。
 报告与 WAV 保存在：

@@ -327,7 +327,7 @@ def _merge_failures(shard_meta: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _refresh_and_validate_hmonnx_metadata(meta: dict[str, Any], output_dir: Path) -> None:
     if not meta.get("hmonnx_converted"):
         return
-    for role, expected_nodes in ((TEXT_DURATION_ROLE, 5), (FRAME_ACOUSTIC_ROLE, 1)):
+    for role, expected_nodes in ((TEXT_DURATION_ROLE, 10), (FRAME_ACOUSTIC_ROLE, 2)):
         for bucket in meta["components"][role]["buckets"].values():
             for variant in LSTM_VARIANTS:
                 entry = bucket["hmonnx_variants"][variant]

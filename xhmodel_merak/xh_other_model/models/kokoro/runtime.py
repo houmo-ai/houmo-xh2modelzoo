@@ -17,6 +17,7 @@ from .host import (
     harmonic_spectrogram,
     istft_waveform,
     make_frame_masks,
+    make_generator_rmsnorm_scales,
     make_reverse_idx,
     make_rmsnorm_scales,
     make_text_mask,
@@ -302,6 +303,7 @@ class KokoroStaticRuntime:
                 "mask_2f": _numpy(mask_2f),
                 "mask_20f": _numpy(mask_20f),
                 "mask_wave": _numpy(mask_wave),
+                "norm_scales": _numpy(make_generator_rmsnorm_scales(valid_frames, self.frame_max_length)),
             },
         )
         waveform = istft_waveform(_torch(generated["spec_phase"]), valid_frames)

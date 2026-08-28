@@ -277,6 +277,33 @@ def make_rmsnorm_scales(valid_frames: Tensor, frame_max_length: int) -> Tensor:
     )
 
 
+def make_generator_rmsnorm_scales(valid_frames: Tensor, frame_max_length: int) -> Tensor:
+    """Return per-stage Generator masked-RMSNorm scales as ``[1,2,2,1]``.
+
+    Generator stage 0 normalizes ``20F`` samples, while stage 1 normalizes the
+    centered-STFT extent ``120F + 1``.  The ``+1`` must be included in both the
+    static and valid lengths; reusing the frame-level ratio is only approximate
+    for short utterances.
+
+    Axis 1 selects the Generator stage.  Axis 2 contains ``sqrt(T/L)`` followed
+    by ``sqrt(L/T)``.
+    """
+
+    valid = _scalar_length(valid_frames, frame_max_length, "valid_frames")
+    stage_lengths = (
+        (20 * int(frame_max_length), 20 * valid),
+        (120 * int(frame_max_length) + 1, 120 * valid + 1),
+    )
+    pairs = [
+        [
+            [math.sqrt(float(total) / float(effective))],
+            [math.sqrt(float(effective) / float(total))],
+        ]
+        for total, effective in stage_lengths
+    ]
+    return torch.tensor([pairs], dtype=torch.float32)
+
+
 def prepare_shared_lstm_inputs(encoded: Tensor, valid_frames: Tensor) -> tuple[Tensor, Tensor]:
     if encoded.ndim != 3 or encoded.shape[0] != 1:
         raise ValueError("encoded features must be [1,C,F]")
@@ -400,6 +427,7 @@ __all__ = [
     "load_voice_pack",
     "load_voice_style",
     "make_frame_masks",
+    "make_generator_rmsnorm_scales",
     "make_attention_mask",
     "make_rmsnorm_scales",
     "make_reverse_idx",

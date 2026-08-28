@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,12 @@ from .graph import (
     GraphArtifact,
     _value_contract,
 )
-from .host import ATTENTION_MASK_MIN, WAVEFORM_SAMPLES_PER_FRAME, make_attention_mask
+from .host import (
+    ATTENTION_MASK_MIN,
+    WAVEFORM_SAMPLES_PER_FRAME,
+    make_attention_mask,
+    make_generator_rmsnorm_scales,
+)
 from .runtime import HmonnxRunner, OrtRunner, Runner
 from .single_graph import (
     KokoroEndToEndStatic,
@@ -89,6 +93,7 @@ class GeneratorISTFTStatic(nn.Module):
         f0: Tensor,
         style: Tensor,
         valid_frames: Tensor,
+        generator_norm_scales: Tensor,
     ) -> Tensor:
         return self.model.forward_generator_from_sine(
             decoder_feature,
@@ -96,6 +101,7 @@ class GeneratorISTFTStatic(nn.Module):
             f0,
             style,
             valid_frames,
+            generator_norm_scales,
         )
 
 
@@ -115,8 +121,8 @@ def export_precision_split_static(
     *,
     model: nn.Module,
     sample: Any,
-    dynamic_waveform: Tensor,
-    dynamic_duration: Tensor,
+    dynamic_waveform: Tensor | None,
+    dynamic_duration: Tensor | None,
     output_dir: str | Path,
     text_max_length: int,
     frame_max_length: int,
@@ -126,6 +132,7 @@ def export_precision_split_static(
     opset: int,
     simplify: bool,
     validate_onnx: bool,
+    validate_outputs: bool = True,
     f0_norm_mode: str = "adain",
     roles: Sequence[str] | None = None,
     output_paths: Mapping[str, str | Path] | None = None,
@@ -179,23 +186,31 @@ def export_precision_split_static(
             "f0": acoustic_outputs["f0"],
             "style": acoustic_feed["style"],
             "valid_frames": acoustic_outputs["valid_frames"],
+            "generator_norm_scales": make_generator_rmsnorm_scales(
+                acoustic_outputs["valid_frames"],
+                frame_max_length,
+            ),
         }
         split_waveform = generator(*tuple(generator_feed.values()))
 
     valid_samples = int(single_frames.item()) * WAVEFORM_SAMPLES_PER_FRAME
-    validation: dict[str, Any] = {
-        "single_vs_dynamic": _metrics(
-            dynamic_waveform.reshape(-1).float().cpu(),
-            single_waveform.reshape(-1)[:valid_samples].float().cpu(),
-            dynamic_duration.reshape(-1).cpu(),
-            single_duration.reshape(-1)[: int(sample.valid_len.item())].cpu(),
-        ),
-        "split_vs_single_pytorch": _tensor_metric(
-            "waveform",
-            single_waveform.detach().cpu().numpy(),
-            split_waveform.detach().cpu().numpy(),
-        ),
-    }
+    validation: dict[str, Any] = {}
+    if validate_outputs:
+        if dynamic_waveform is None or dynamic_duration is None:
+            raise ValueError("dynamic waveform and duration are required for output validation")
+        validation = {
+            "single_vs_dynamic": _metrics(
+                dynamic_waveform.reshape(-1).float().cpu(),
+                single_waveform.reshape(-1)[:valid_samples].float().cpu(),
+                dynamic_duration.reshape(-1).cpu(),
+                single_duration.reshape(-1)[: int(sample.valid_len.item())].cpu(),
+            ),
+            "split_vs_single_pytorch": _tensor_metric(
+                "waveform",
+                single_waveform.detach().cpu().numpy(),
+                split_waveform.detach().cpu().numpy(),
+            ),
+        }
 
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -220,7 +235,7 @@ def export_precision_split_static(
             opset=opset,
             simplify=simplify,
             validate_onnx=validate_onnx,
-            expected_lstm_nodes=6,
+            expected_lstm_nodes=12,
             npu_graph=True,
         )
         graphs[ACOUSTIC_ROLE] = acoustic_artifact
@@ -258,6 +273,10 @@ def export_precision_split_static(
             "style": acoustic_feed["style"],
             "valid_frames": _int32_tensor(acoustic_actual["valid_frames"]),
         }
+        generator_feed["generator_norm_scales"] = make_generator_rmsnorm_scales(
+            generator_feed["valid_frames"],
+            frame_max_length,
+        )
         with torch.no_grad():
             split_waveform = generator(*tuple(generator_feed.values()))
     generator_outputs = {"waveform": split_waveform}
@@ -277,7 +296,7 @@ def export_precision_split_static(
         )
         graphs[GENERATOR_ISTFT_ROLE] = generator_artifact
     outputs[GENERATOR_ISTFT_ROLE] = _clone_outputs(generator_outputs)
-    if validate_onnx and GENERATOR_ISTFT_ROLE in selected_roles:
+    if validate_outputs and validate_onnx and GENERATOR_ISTFT_ROLE in selected_roles:
         chain_metric = _tensor_metric(
             "waveform",
             single_waveform.detach().cpu().numpy(),
@@ -419,6 +438,10 @@ class KokoroPrecisionSplitRuntime:
                 "f0": np.asarray(acoustic["f0"], dtype=np.float32),
                 "style": style_array,
                 "valid_frames": np.asarray([valid_frames], dtype=np.int32),
+                "generator_norm_scales": make_generator_rmsnorm_scales(
+                    torch.tensor([valid_frames], dtype=torch.int32),
+                    self.frame_max_length,
+                ).numpy(),
             },
         )
         valid_samples = valid_frames * WAVEFORM_SAMPLES_PER_FRAME
@@ -448,7 +471,6 @@ def _export_partition(
     validate_onnx: bool,
     expected_lstm_nodes: int,
     npu_graph: bool,
-    lstm_reverse_indices: Tensor | None = None,
 ) -> tuple[GraphArtifact, dict[str, np.ndarray]]:
     _validate_attention_mask_feed(feed)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,7 +489,7 @@ def _export_partition(
     # xhquant owns backend lowering; Kokoro must not mutate the ONNX graph with
     # onnxsim or model-specific post-export optimization passes.
     del simplify
-    structural = {"post_export_optimizations": 0, "lstm_reverse_index_inputs": 0}
+    structural = {"post_export_optimizations": 0}
     graph = onnx.load(output_path, load_external_data=False)
     onnx.checker.check_model(graph)
     op_counts: dict[str, int] = {}
@@ -480,8 +502,8 @@ def _export_partition(
         if node.op_type != "LSTM":
             continue
         attributes = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
-        if attributes.get("direction") != b"bidirectional":
-            raise RuntimeError(f"{role} LSTM {node.name!r} is not bidirectional")
+        if attributes.get("direction", b"forward") not in {b"", b"forward"}:
+            raise RuntimeError(f"{role} LSTM {node.name!r} is not forward")
     if npu_graph:
         forbidden = sorted(FORBIDDEN_NPU_OPS.intersection(op_counts))
         if forbidden:
@@ -495,9 +517,7 @@ def _export_partition(
         metrics = tuple(_tensor_metric(name, expected[name].detach().cpu().numpy(), actual[name]) for name in expected)
         failed = []
         for metric in metrics:
-            if metric["name"] == "sine" or (
-                role == "frame_synthesis" and metric["name"] == "waveform"
-            ):
+            if metric["name"] == "sine" or (role == "frame_synthesis" and metric["name"] == "waveform"):
                 # Phase-integrated outputs are intentionally phase-sensitive.
                 # Retain every metric here; the independent-bucket workflow
                 # applies waveform, spectral and listening gates end to end.
@@ -515,47 +535,6 @@ def _export_partition(
                 f"{[(metric['name'], metric['max_abs'], limit) for metric, limit in failed]}"
             )
 
-    reference_path: Path | None = None
-    if lstm_reverse_indices is not None:
-        if expected_lstm_nodes <= 0:
-            raise ValueError("lstm_reverse_indices requires at least one LSTM node")
-        # Keep a standards-compliant ONNX companion for ORT reference runs.
-        # The deployment ONNX below deliberately repurposes the fifth LSTM
-        # input as a prefix-reversal index understood by xhquant, which is not
-        # valid ONNX Runtime sequence_lens semantics.
-        reference_path = output_path.with_name(f"{output_path.stem}_fp32.onnx")
-        shutil.copy2(output_path, reference_path)
-        indices = lstm_reverse_indices.detach().cpu().to(dtype=torch.int64).reshape(-1).contiguous()
-        if indices.numel() <= 0:
-            raise ValueError("lstm_reverse_indices must not be empty")
-        input_name = "reverse_indices"
-        if any(value.name == input_name for value in graph.graph.input):
-            raise ValueError(f"duplicate graph input {input_name!r}")
-        graph.graph.input.append(
-            onnx.helper.make_tensor_value_info(
-                input_name,
-                onnx.TensorProto.INT64,
-                [int(indices.numel())],
-            )
-        )
-        rewritten = 0
-        for node in graph.graph.node:
-            if node.op_type != "LSTM":
-                continue
-            while len(node.input) < 5:
-                node.input.append("")
-            node.input[4] = input_name
-            rewritten += 1
-        if rewritten != expected_lstm_nodes:
-            raise RuntimeError(
-                f"{role} reverse-index rewrite expected {expected_lstm_nodes} LSTM nodes, got {rewritten}"
-            )
-        feed[input_name] = indices
-        structural["lstm_reverse_index_inputs"] = rewritten
-        onnx.save(graph, output_path)
-        graph = onnx.load(output_path, load_external_data=False)
-        onnx.checker.check_model(graph)
-
     artifact = GraphArtifact(
         role=role,
         path=output_path,
@@ -568,7 +547,6 @@ def _export_partition(
         onnx_sha256=sha256(output_path),
         pytorch_vs_onnx=metrics,
         structural_rewrites=structural,
-        reference_path=reference_path,
     )
     return artifact, actual
 

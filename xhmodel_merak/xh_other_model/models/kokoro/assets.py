@@ -20,7 +20,6 @@ class KokoroAssets:
     config: Path
     checkpoint: Path
     voice: Path
-    reference_onnx: Path
     voice_pack: Path | None
 
 
@@ -47,11 +46,6 @@ def resolve_model_assets(model_dir: str | Path) -> KokoroAssets:
         ("pytorch/voices/zf_001.pt", "voices/zf_001.pt", "zf_001.pt"),
         "the zf_001 reference voice",
     )
-    reference_onnx = _one_file(
-        root,
-        ("onnx/kokoro-v1.1-zh.onnx", "kokoro-v1.1-zh.onnx"),
-        "the released Kokoro v1.1-zh ONNX",
-    )
     voice_pack = _optional_file(
         root,
         ("onnx/voices-v1.1-zh.bin", "voices-v1.1-zh.bin"),
@@ -62,7 +56,6 @@ def resolve_model_assets(model_dir: str | Path) -> KokoroAssets:
         config=config,
         checkpoint=checkpoint,
         voice=voice,
-        reference_onnx=reference_onnx,
         voice_pack=voice_pack,
     )
 
@@ -72,7 +65,6 @@ def verify_release_assets(assets: KokoroAssets) -> dict[str, str | None]:
         "config": (assets.config, KOKORO_CONFIG_SHA256),
         "checkpoint": (assets.checkpoint, KOKORO_CHECKPOINT_SHA256),
         "voice": (assets.voice, KOKORO_ZF001_SHA256),
-        "reference_onnx": (assets.reference_onnx, KOKORO_REFERENCE_ONNX_SHA256),
     }
     hashes: dict[str, str | None] = {}
     for name, (path, wanted) in expected.items():

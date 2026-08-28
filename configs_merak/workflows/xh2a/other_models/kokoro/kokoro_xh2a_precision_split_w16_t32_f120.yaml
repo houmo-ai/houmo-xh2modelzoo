@@ -10,7 +10,6 @@ export:
   opset: 17
   seed: 1234
   simplify: true
-  validate_onnx: true
   stft_pad_mode: length_aware_reflect
 
   # CORDIC keeps the exported phase on the same principal branch.  Direct
@@ -23,8 +22,8 @@ export:
   f0_norm_mode: adain
 
   # Keep the acoustic graph's recurrent blocks as native XH2a::LSTM nodes.
-  # The registered operator supports num_directions=1/2 and both valid-length
-  # and reverse-index valid-region contracts without timestep expansion.
+  # The registered operator supports standard forward/reverse/bidirectional
+  # ONNX LSTM. Kokoro's padded reverse prefix is explicit Gather dataflow.
   convert_hmonnx: true
   decompose_lstm: false
   components:

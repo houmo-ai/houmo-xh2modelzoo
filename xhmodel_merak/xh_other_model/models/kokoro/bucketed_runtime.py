@@ -20,6 +20,7 @@ from .host import (
     ATTENTION_MASK_MIN,
     WAVEFORM_SAMPLES_PER_FRAME,
     duration_from_logits,
+    make_generator_rmsnorm_scales,
     make_reverse_idx,
 )
 from .independent_split import (
@@ -126,9 +127,7 @@ class KokoroBucketedRuntime:
         gc.collect()
         device = torch.device(
             self.device
-            if self.backend == "hmonnx"
-            and str(self.device).startswith("cuda")
-            and torch.cuda.is_available()
+            if self.backend == "hmonnx" and str(self.device).startswith("cuda") and torch.cuda.is_available()
             else "cpu"
         )
         if device.type == "cuda":
@@ -211,15 +210,9 @@ class KokoroBucketedRuntime:
         frame_key = frame_bucket_key(frame_capacity)
         frame_inputs, checked_duration = run_duration_alignment_host(
             {
-                "duration_features": torch.from_numpy(
-                    np.asarray(text_output["duration_features"], dtype=np.float32)
-                ),
-                "text_encoded": torch.from_numpy(
-                    np.asarray(text_output["text_encoded"], dtype=np.float32)
-                ),
-                "duration_logits": torch.from_numpy(
-                    np.asarray(text_output["duration_logits"], dtype=np.float32)
-                ),
+                "duration_features": torch.from_numpy(np.asarray(text_output["duration_features"], dtype=np.float32)),
+                "text_encoded": torch.from_numpy(np.asarray(text_output["text_encoded"], dtype=np.float32)),
+                "duration_logits": torch.from_numpy(np.asarray(text_output["duration_logits"], dtype=np.float32)),
             },
             speed=speed_tensor,
             valid_len=valid_len,
@@ -235,11 +228,22 @@ class KokoroBucketedRuntime:
             "reverse_indices": make_reverse_idx(
                 frame_capacity,
                 torch.tensor([valid_frames], dtype=torch.int32),
-            ).numpy().astype(np.int64, copy=False),
+            )
+            .numpy()
+            .astype(np.int64, copy=False),
         }
+        generator_norm_scales = make_generator_rmsnorm_scales(
+            torch.tensor([valid_frames], dtype=torch.int32),
+            frame_capacity,
+        ).numpy()
 
         if self.phase_on_npu:
-            generated = self._runner(FRAME_SYNTHESIS_ROLE, frame_key).run(frame_feed)
+            generated = self._runner(FRAME_SYNTHESIS_ROLE, frame_key).run(
+                {
+                    **frame_feed,
+                    "generator_norm_scales": generator_norm_scales,
+                }
+            )
         else:
             acoustic = self._runner(FRAME_ACOUSTIC_ROLE, frame_key).run(frame_feed)
             phase = self._runner(PHASE_CORE_ROLE, frame_key).run(
@@ -252,6 +256,7 @@ class KokoroBucketedRuntime:
                     "f0": np.asarray(acoustic["f0"], dtype=np.float32),
                     "style": style_array,
                     "valid_frames": np.asarray([valid_frames], dtype=np.int32),
+                    "generator_norm_scales": generator_norm_scales,
                 }
             )
 
@@ -333,7 +338,9 @@ class KokoroBucketedRuntime:
             "reverse_indices": make_reverse_idx(
                 text_max_length,
                 torch.tensor([tokens.size], dtype=torch.int32),
-            ).numpy().astype(np.int64, copy=False),
+            )
+            .numpy()
+            .astype(np.int64, copy=False),
         }
 
     def _runner(self, role: str, key: str) -> Runner:

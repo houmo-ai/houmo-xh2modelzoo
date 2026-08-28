@@ -10,7 +10,6 @@ export:
   opset: 17
   seed: 1234
   simplify: true
-  validate_onnx: true
   stft_pad_mode: length_aware_reflect
   stft_phase_mode: cordic
 

@@ -21,7 +21,7 @@ from .graph import (
     GraphArtifact,
     KokoroFrontBaseStatic,
     NoiseBranchStatic,
-    PackedBidirectionalLSTMStatic,
+    PrefixReversedBidirectionalLSTMStatic,
     SourceMergeStatic,
     _canonicalize_static_graph,
     _fix_negative_transpose_permutations,
@@ -39,10 +39,19 @@ SINGLE_GRAPH_ROLE = "end_to_end"
 
 def _prefix_mask(length: Tensor, maximum: int, *, channel_axis: bool) -> Tensor:
     positions = torch.arange(maximum, device=length.device, dtype=torch.int64)
-    mask = positions < length.reshape(-1)[0].to(dtype=torch.int64)
+    active = positions < length.reshape(-1)[0].to(dtype=torch.int64)
+    # Do not use ``active.to(torch.float32)`` here.  ONNX would freeze that
+    # cast to FP32, so a W16 activation multiplied by the mask would promote
+    # the complete downstream branch back to FP32.  Where keeps the mask in
+    # the normal activation precision selected by xhquant.
+    mask = torch.where(
+        active,
+        torch.ones(maximum, device=length.device, dtype=torch.float32),
+        torch.zeros(maximum, device=length.device, dtype=torch.float32),
+    )
     if channel_axis:
-        return mask.to(dtype=torch.float32).reshape(1, 1, maximum)
-    return mask.to(dtype=torch.float32).reshape(1, maximum, 1)
+        return mask.reshape(1, 1, maximum)
+    return mask.reshape(1, maximum, 1)
 
 
 def _reverse_prefix_index(length: Tensor, maximum: int) -> Tensor:
@@ -120,7 +129,7 @@ class StaticSineSource(nn.Module):
 
     def upsample_f0(self, f0_prediction: Tensor) -> Tensor:
         return F.interpolate(
-            f0_prediction.float().unsqueeze(1),
+            f0_prediction.unsqueeze(1),
             scale_factor=self.F0_UPSAMPLE,
         ).transpose(1, 2)
 
@@ -157,7 +166,11 @@ class StaticSineSource(nn.Module):
         f0_up: Tensor,
         waveform_mask: Tensor,
     ) -> Tensor:
-        voiced = (f0_up > 10).to(dtype=sine.dtype)
+        voiced = torch.where(
+            f0_up > 10,
+            torch.ones_like(f0_up),
+            torch.zeros_like(f0_up),
+        )
         noise_amplitude = voiced * 0.003 + (1.0 - voiced) * (0.1 / 3.0)
         sine = sine * voiced + noise_amplitude * self.noise
         source = self.source_merge(sine)
@@ -208,11 +221,11 @@ class KokoroEndToEndStatic(nn.Module):
             model,
             self.text_max_length,
         )
-        self.text_lstm = PackedBidirectionalLSTMStatic(
+        self.text_lstm = PrefixReversedBidirectionalLSTMStatic(
             model.text_encoder.lstm,
             self.text_max_length,
         )
-        self.shared_lstm = PackedBidirectionalLSTMStatic(
+        self.shared_lstm = PrefixReversedBidirectionalLSTMStatic(
             model.predictor.shared,
             self.frame_max_length,
         )
@@ -234,7 +247,18 @@ class KokoroEndToEndStatic(nn.Module):
             waveform_length=(self.waveform_length if stft_pad_mode == "length_aware_reflect" else None),
             phase_mode=stft_phase_mode,
         )
-        self.generator = GeneratorStatic(model)
+        self.generator = GeneratorStatic(model, self.frame_max_length)
+        self.register_buffer(
+            "generator_stage_lengths",
+            torch.tensor(
+                [
+                    20 * self.frame_max_length,
+                    120 * self.frame_max_length + 1,
+                ],
+                dtype=torch.float32,
+            ).reshape(1, 2),
+            persistent=False,
+        )
         self.istft = StaticISTFT20(self.frame_max_length)
 
     def forward(
@@ -273,6 +297,7 @@ class KokoroEndToEndStatic(nn.Module):
         """Run the acoustic graph and expose its precision-split boundaries."""
 
         duration_base, text_features = self.front(input_ids, attention_mask, valid_len)
+        text_reverse_indices = _reverse_prefix_index(valid_len, self.text_max_length)
         text_mask = _prefix_mask(valid_len, self.text_max_length, channel_axis=False)
         prosody_style = style[:, 128:]
         values = duration_base.transpose(1, 2)
@@ -290,13 +315,13 @@ class KokoroEndToEndStatic(nn.Module):
             values = block(
                 values,
                 prosody_style,
-                valid_len,
+                text_reverse_indices,
                 text_mask,
             )
         duration_features = values
         duration_logits = self.duration_predictor(
             duration_features,
-            valid_len,
+            text_reverse_indices,
             text_mask,
         )
         duration = torch.round(torch.sigmoid(duration_logits.float()).sum(dim=-1) / speed.reshape(1, 1).float()).clamp(
@@ -307,7 +332,7 @@ class KokoroEndToEndStatic(nn.Module):
         text_values = text_features.transpose(1, 2) * text_mask
         text_encoded = self.text_lstm(
             text_values,
-            valid_len,
+            text_reverse_indices,
         )
         text_encoded = text_encoded * text_mask
         text_encoded = text_encoded.transpose(1, 2)
@@ -349,7 +374,7 @@ class KokoroEndToEndStatic(nn.Module):
     ) -> Tensor:
         shared = self.shared_lstm(
             shared_input,
-            valid_frames,
+            _reverse_prefix_index(valid_frames, self.frame_max_length),
         )
         return shared.transpose(1, 2) * mask_f
 
@@ -399,6 +424,7 @@ class KokoroEndToEndStatic(nn.Module):
         f0: Tensor,
         style: Tensor,
         valid_frames: Tensor,
+        generator_norm_scales: Tensor | None = None,
     ) -> Tensor:
         mask_spec = _prefix_mask(
             valid_frames * 120 + 1,
@@ -429,6 +455,7 @@ class KokoroEndToEndStatic(nn.Module):
             harmonic,
             style,
             valid_frames,
+            generator_norm_scales,
         )
 
     def forward_generator_istft(
@@ -437,6 +464,7 @@ class KokoroEndToEndStatic(nn.Module):
         harmonic: Tensor,
         style: Tensor,
         valid_frames: Tensor,
+        generator_norm_scales: Tensor | None = None,
     ) -> Tensor:
         mask_2f = _prefix_mask(valid_frames * 2, 2 * self.frame_max_length, channel_axis=True)
         mask_20f = _prefix_mask(
@@ -454,6 +482,22 @@ class KokoroEndToEndStatic(nn.Module):
             self.waveform_length,
             channel_axis=True,
         )
+        if generator_norm_scales is None:
+            valid = valid_frames.reshape(1).to(dtype=torch.float32)
+            effective_lengths = torch.stack(
+                (
+                    valid * 20.0,
+                    valid * 120.0 + 1.0,
+                ),
+                dim=1,
+            )
+            total_lengths = self.generator_stage_lengths.to(device=valid.device)
+            scale = torch.sqrt(total_lengths / effective_lengths)
+            inverse_scale = torch.sqrt(effective_lengths / total_lengths)
+            generator_norm_scales = torch.stack(
+                (scale, inverse_scale),
+                dim=2,
+            ).unsqueeze(-1)
         decoder_style = style[:, :128]
         spec_phase = self.generator(
             generator_feature,
@@ -462,6 +506,7 @@ class KokoroEndToEndStatic(nn.Module):
             mask_2f,
             mask_20f,
             mask_spec,
+            generator_norm_scales,
         )
         return self.istft(spec_phase, waveform_mask)
 
@@ -510,8 +555,8 @@ def export_end_to_end_static(
     *,
     model: nn.Module,
     sample: StaticSample,
-    dynamic_waveform: Tensor,
-    dynamic_duration: Tensor,
+    dynamic_waveform: Tensor | None,
+    dynamic_duration: Tensor | None,
     output_path: str | Path,
     text_max_length: int,
     frame_max_length: int,
@@ -521,6 +566,7 @@ def export_end_to_end_static(
     opset: int,
     simplify: bool,
     validate_onnx: bool,
+    validate_outputs: bool = True,
     f0_norm_mode: str = "adain",
 ) -> SingleGraphExport:
     wrapper, rewrites = build_end_to_end_static(
@@ -542,17 +588,17 @@ def export_end_to_end_static(
     inputs = tuple(feed.values())
     with torch.no_grad():
         waveform, duration, valid_frames = wrapper(*inputs)
-    valid_samples = int(valid_frames.item()) * 600
-    reference_waveform = dynamic_waveform.reshape(-1).float().cpu()
-    candidate_waveform = waveform.reshape(-1)[:valid_samples].float().cpu()
-    reference_duration = dynamic_duration.reshape(-1).cpu()
-    candidate_duration = duration.reshape(-1)[: int(sample.valid_len.item())].cpu()
-    validation = _metrics(
-        reference_waveform,
-        candidate_waveform,
-        reference_duration,
-        candidate_duration,
-    )
+    validation: dict[str, Any] = {}
+    if validate_outputs:
+        if dynamic_waveform is None or dynamic_duration is None:
+            raise ValueError("dynamic waveform and duration are required for output validation")
+        valid_samples = int(valid_frames.item()) * 600
+        validation = _metrics(
+            dynamic_waveform.reshape(-1).float().cpu(),
+            waveform.reshape(-1)[:valid_samples].float().cpu(),
+            dynamic_duration.reshape(-1).cpu(),
+            duration.reshape(-1)[: int(sample.valid_len.item())].cpu(),
+        )
 
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -589,12 +635,12 @@ def export_end_to_end_static(
     for node in graph.graph.node:
         op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
     lstm_nodes = [node for node in graph.graph.node if node.op_type == "LSTM"]
-    if len(lstm_nodes) != 6:
-        raise RuntimeError(f"single graph must preserve 6 high-level bidirectional LSTM nodes, got {len(lstm_nodes)}")
+    if len(lstm_nodes) != 12:
+        raise RuntimeError(f"single graph must preserve 12 high-level forward LSTM nodes, got {len(lstm_nodes)}")
     for node in lstm_nodes:
         attributes = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
-        if attributes.get("direction") != b"bidirectional":
-            raise RuntimeError(f"single graph LSTM {node.name!r} is not bidirectional")
+        if attributes.get("direction", b"forward") not in {b"", b"forward"}:
+            raise RuntimeError(f"single graph LSTM {node.name!r} is not forward")
     forbidden = sorted(FORBIDDEN_NPU_OPS.intersection(op_counts))
     if forbidden:
         raise RuntimeError(f"single graph contains forbidden NPU operators: {forbidden}")

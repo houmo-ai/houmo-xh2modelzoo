@@ -18,48 +18,36 @@ from onnx import TensorProto, helper, numpy_helper
 class LSTMPreset:
     name: str
     forward_node: str
-    backward_node: str | None
     sequence_length: int
     input_size: int
     hidden_size: int
     direction: str
-    valid_region_mode: str
-    valid_length: int
 
 
 PRESETS = (
     LSTMPreset(
         name="text_t32_c512_forward_full",
         forward_node="/text_lstm/forward_lstm/LSTM",
-        backward_node=None,
         sequence_length=32,
         input_size=512,
         hidden_size=256,
         direction="forward",
-        valid_region_mode="full",
-        valid_length=28,
     ),
     LSTMPreset(
-        name="duration_t32_c640_bidir_valid_length",
+        name="duration_t32_c640_forward_full",
         forward_node="/duration_predictor/forward_lstm/LSTM",
-        backward_node="/duration_predictor/backward_lstm/LSTM",
         sequence_length=32,
         input_size=640,
         hidden_size=256,
-        direction="bidirectional",
-        valid_region_mode="valid_length",
-        valid_length=28,
+        direction="forward",
     ),
     LSTMPreset(
-        name="shared_f120_c640_bidir_reverse_index",
+        name="shared_f120_c640_forward_full",
         forward_node="/shared_lstm/forward_lstm/LSTM",
-        backward_node="/shared_lstm/backward_lstm/LSTM",
         sequence_length=120,
         input_size=640,
         hidden_size=256,
-        direction="bidirectional",
-        valid_region_mode="reverse_index",
-        valid_length=110,
+        direction="forward",
     ),
 )
 
@@ -91,12 +79,7 @@ def _preset_weights(
     preset: LSTMPreset,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     forward = _extract_direction_weights(_node_by_name(source, preset.forward_node), initializers)
-    values = [[value] for value in forward]
-    if preset.backward_node is not None:
-        backward = _extract_direction_weights(_node_by_name(source, preset.backward_node), initializers)
-        for destination, value in zip(values, backward, strict=True):
-            destination.append(value)
-    combined = tuple(np.concatenate(value, axis=0) for value in values)
+    combined = tuple(value.copy() for value in forward)
     expected_directions = 2 if preset.direction == "bidirectional" else 1
     if combined[0].shape != (
         expected_directions,
@@ -105,13 +88,6 @@ def _preset_weights(
     ):
         raise ValueError(f"unexpected W shape for {preset.name}: {combined[0].shape}")
     return combined
-
-
-def _make_reverse_indices(sequence_length: int, valid_length: int) -> np.ndarray:
-    return np.asarray(
-        [*range(valid_length - 1, -1, -1), *range(valid_length, sequence_length)],
-        dtype=np.int64,
-    )
 
 
 def _make_source_model(
@@ -128,22 +104,9 @@ def _make_source_model(
             [preset.sequence_length, 1, preset.input_size],
         )
     ]
-    valid_region_name = ""
-    if preset.valid_region_mode == "valid_length":
-        valid_region_name = "valid_lengths"
-        inputs.append(helper.make_tensor_value_info(valid_region_name, TensorProto.INT32, [1]))
-    elif preset.valid_region_mode == "reverse_index":
-        valid_region_name = "reverse_indices"
-        inputs.append(
-            helper.make_tensor_value_info(
-                valid_region_name,
-                TensorProto.INT64,
-                [preset.sequence_length],
-            )
-        )
     node = helper.make_node(
         "LSTM",
-        ["X", "W", "R", "B", valid_region_name, "initial_h", "initial_c"],
+        ["X", "W", "R", "B", "", "initial_h", "initial_c"],
         ["Y", "Y_h", "Y_c"],
         name=preset.name,
         hidden_size=preset.hidden_size,
@@ -187,10 +150,6 @@ def _make_feed(preset: LSTMPreset, seed: int) -> dict[str, np.ndarray]:
         "X": generator.standard_normal((preset.sequence_length, 1, preset.input_size), dtype=np.float32)
         * np.float32(0.25)
     }
-    if preset.valid_region_mode == "valid_length":
-        feed["valid_lengths"] = np.asarray([preset.valid_length], dtype=np.int32)
-    elif preset.valid_region_mode == "reverse_index":
-        feed["reverse_indices"] = _make_reverse_indices(preset.sequence_length, preset.valid_length)
     return feed
 
 
@@ -215,10 +174,6 @@ def _reference_outputs(
         zero_state,
         hidden_size=preset.hidden_size,
         direction=preset.direction,
-        num_directions=num_directions,
-        valid_region_mode=preset.valid_region_mode,
-        valid_lengths=(torch.from_numpy(feed["valid_lengths"]) if "valid_lengths" in feed else None),
-        reverse_indices=(torch.from_numpy(feed["reverse_indices"]) if "reverse_indices" in feed else None),
     )
     return tuple(value.float().cpu().numpy() for value in outputs)
 
@@ -404,11 +359,14 @@ def main() -> None:
             "shape": {
                 "X": [preset.sequence_length, 1, preset.input_size],
                 "hidden_size": preset.hidden_size,
-                "num_directions": 2 if preset.direction == "bidirectional" else 1,
+                "Y": [
+                    preset.sequence_length,
+                    2 if preset.direction == "bidirectional" else 1,
+                    1,
+                    preset.hidden_size,
+                ],
             },
             "direction": preset.direction,
-            "valid_region_mode": preset.valid_region_mode,
-            "valid_length": preset.valid_length,
             "source_onnx": str(source_path),
             "inputs": str(input_path),
             "variants": variants,
