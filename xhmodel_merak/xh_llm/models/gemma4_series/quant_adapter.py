@@ -375,11 +375,14 @@ def build_gptqmodel_recipe_kwargs(
 def _call_gptqmodel_recipe(recipe_entrypoint: str, recipe_kwargs: dict[str, Any]) -> Any:
     recipe = _load_recipe_callable(recipe_entrypoint)
     signature = inspect.signature(recipe)
-    accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
-    if accepts_var_kwargs:
-        return recipe(**recipe_kwargs)
-    accepted_kwargs = {key: value for key, value in recipe_kwargs.items() if key in signature.parameters}
-    return recipe(**accepted_kwargs)
+    try:
+        signature.bind(**recipe_kwargs)
+    except TypeError as exc:
+        raise TypeError(
+            "Gemma4 ModelZoo/GPTQModel recipe contract drift for "
+            f"{recipe_entrypoint!r}: {exc}. Update both sides in the same change."
+        ) from exc
+    return recipe(**recipe_kwargs)
 
 
 def _load_recipe_callable(recipe_entrypoint: str):

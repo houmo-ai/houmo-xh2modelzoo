@@ -206,6 +206,7 @@ data/
 !data/calib_data/sampledata/
 !data/calib_data/sampledata/*.png
 benchmark_test/allure-results
+benchmark_test/.env_benchmark
 /drafts
 /weights
 xhmodel_merak/xh_llm/models/spark_xh/grouped-gemm-v1.1.4i/third_party/cutlass/include

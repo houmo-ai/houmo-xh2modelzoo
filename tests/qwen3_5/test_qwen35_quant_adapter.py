@@ -23,6 +23,7 @@ def _local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     return dataset
 
@@ -95,6 +96,7 @@ def test_build_autoround_moe_kwargs_matches_script_defaults(tmp_path, monkeypatc
 
 
 def test_autoround_default_dataset_requires_local_pile10k(tmp_path, monkeypatch):
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     with pytest.raises(FileNotFoundError, match="data/calib_data/NeelNanda-pile-10k.jsonl"):
         build_qwen35_autoround_kwargs(
@@ -111,6 +113,7 @@ def test_autoround_default_dataset_finds_data_calib_data(tmp_path, monkeypatch):
     dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
     kwargs = build_qwen35_autoround_kwargs(

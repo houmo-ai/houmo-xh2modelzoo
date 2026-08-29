@@ -15,6 +15,7 @@ def local_pile10k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dataset = tmp_path / "data" / "calib_data" / "NeelNanda-pile-10k.jsonl"
     dataset.parent.mkdir(parents=True)
     dataset.write_text('{"text":"offline pile sample"}\n', encoding="utf-8")
+    monkeypatch.setenv("XH2MODELZOO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     return dataset
 

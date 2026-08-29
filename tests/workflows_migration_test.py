@@ -596,7 +596,7 @@ def test_gemma4_package_exports_workflow_api():
 
     assert gemma4_series.Gemma4SeriesWorkflow is Gemma4SeriesWorkflow
     assert gemma4_series.XHGemma4HMONNXWorkflow is Gemma4SeriesWorkflow
-    assert set(gemma4_series.list_recommended_configs()) == {"e2b", "e4b", "31b", "26b-a4b"}
+    assert set(gemma4_series.list_recommended_configs()) == {"12b-unified", "e2b", "e4b", "31b", "26b-a4b"}
     assert "GPTQModel" in gemma4_series.get_quant_config_help()
     assert "Gemma4ForConditionalGeneration" in gemma4_series.get_export_config_help()
 
