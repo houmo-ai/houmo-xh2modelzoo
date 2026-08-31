@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--system-prompt")
+    parser.add_argument("--audio-duration-seconds", type=float)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
@@ -36,6 +37,8 @@ def main() -> None:
     overrides = {"export.runtime.audio": str(Path(args.audio).expanduser().resolve())}
     if args.system_prompt is not None:
         overrides["export.runtime.system_prompt"] = args.system_prompt
+    if args.audio_duration_seconds is not None:
+        overrides["export.audio_duration_seconds"] = args.audio_duration_seconds
 
     workflow = AutoWorkflow.from_config(
         model_dir=args.model_dir,

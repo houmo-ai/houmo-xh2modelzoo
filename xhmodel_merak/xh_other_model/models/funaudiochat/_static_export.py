@@ -60,7 +60,9 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
         self.register_buffer("aftercnn_lens", aftercnn_lens.to(torch.int32), persistent=False)
         self.register_buffer("feature_exist_mask", feature_exist_mask.to(torch.bool), persistent=False)
         self.register_buffer("audio_token_positions", audio_token_positions.to(torch.int64), persistent=False)
-        self.register_buffer("continuous_audio_output_lengths", torch.tensor(pooled_lengths, dtype=torch.int32), persistent=False)
+        self.register_buffer(
+            "continuous_audio_output_lengths", torch.tensor(pooled_lengths, dtype=torch.int32), persistent=False
+        )
 
         self.chunk_lengths = [int(x) for x in chunk_lengths]
         self.aftercnn_split_lengths = [int(x) for x in aftercnn_lens.tolist()]
@@ -82,7 +84,9 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
         self.register_buffer("cu_seqlens", cu_seqlens, persistent=False)
         self.register_buffer(
             "positional_embedding_cache",
-            self.audio_encoder.positional_embedding.positional_embedding[: self.max_conv_output_len, :].unsqueeze(0).to(torch.float16),
+            self.audio_encoder.positional_embedding.positional_embedding[: self.max_conv_output_len, :]
+            .unsqueeze(0)
+            .to(torch.float16),
             persistent=False,
         )
 
@@ -111,9 +115,14 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
             )[0]
             hidden_states = hidden_states * flat_valid_mask
 
-        pooled_concat = self.avg_pool2d(
-            hidden_states.transpose(0, 1).unsqueeze(0).unsqueeze(-1),
-        ).squeeze(0).squeeze(-1).transpose(0, 1)        
+        pooled_concat = (
+            self.avg_pool2d(
+                hidden_states.transpose(0, 1).unsqueeze(0).unsqueeze(-1),
+            )
+            .squeeze(0)
+            .squeeze(-1)
+            .transpose(0, 1)
+        )
 
         # hidden_states = hidden_states.reshape(self.num_chunks, self.max_aftercnn_len, -1)
 
@@ -148,14 +157,13 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
             aftercnn_valid_mask,
             attention_mask,
         )
-        # continuous_audio_features = torch.zeros(
-        #     (1, self.speech_maxlen, processed_concat.shape[-1]),
-        #     dtype=processed_concat.dtype,
-        #     device=processed_concat.device,
-        # )
-        # copy_length = min(self.fixed_total_pooled_length, processed_concat.shape[1], self.speech_maxlen)
-        # continuous_audio_features[:, :copy_length, :] = processed_concat[:, :copy_length, :]
-        continuous_audio_features = processed_concat
+        copy_length = min(self.fixed_total_pooled_length, self.speech_maxlen)
+        continuous_audio_features = processed_concat[:, :copy_length, :]
+        if copy_length < self.speech_maxlen:
+            continuous_audio_features = F.pad(
+                continuous_audio_features,
+                (0, 0, 0, self.speech_maxlen - copy_length),
+            )
 
         # grouped_valid_mask = continuous_audio_valid_mask.reshape(1, -1, self.group_size, 1).to(processed_concat.dtype)
         # grouped_features = continuous_audio_features.reshape(1, -1, self.group_size, processed_concat.shape[-1])
@@ -196,7 +204,7 @@ class FunAudioChatStaticDecoderPrefillWarp(nn.Module):
         super().__init__()
         self.decoder = decoder
         if not hasattr(self.decoder, "crq_audio_embeds"):
-            self.decoder.crq_audio_embeds =  self.decoder.get_embeddings(self.decoder.config.bos_token_id)[None, None, :]
+            self.decoder.crq_audio_embeds = self.decoder.get_embeddings(self.decoder.config.bos_token_id)[None, None, :]
 
     def forward(
         self,
@@ -244,7 +252,7 @@ class FunAudioChatStaticDecoderDecodeWarp(nn.Module):
             self.decoder.crq_audio_embeds = self.decoder.get_embeddings(self.decoder.config.bos_token_id)[None, None, :]
         elif self.decoder.crq_audio_embeds.ndim != 3:
             self.decoder.crq_audio_embeds = self.decoder.crq_audio_embeds.unsqueeze(0)
-        
+
     def forward(
         self,
         crq_inputs_embeds: torch.FloatTensor,

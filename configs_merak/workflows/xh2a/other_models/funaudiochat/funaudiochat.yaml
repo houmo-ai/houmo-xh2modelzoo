@@ -4,6 +4,7 @@ export:
   target_device: XH2a
   context_length: 256
   input_sequence_length: 256
+  audio_duration_seconds: 8.0
   components:
     audio_tower:
       enabled: true

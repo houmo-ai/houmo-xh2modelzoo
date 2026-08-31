@@ -115,6 +115,7 @@ class FunAudioChatWorkflow(BaseOtherModelWorkflow):
             "target_device": target_device,
             "context_length": context_length,
             "input_sequence_length": input_sequence_length,
+            "audio_duration_seconds": args.audio_duration_seconds,
             "components": components,
             "artifacts": artifacts,
         }
@@ -166,6 +167,9 @@ def _enabled_components(value: Any) -> list[str]:
 
 def _build_export_args(export_cfg: Mapping[str, Any], runtime_cfg: Mapping[str, Any]) -> SimpleNamespace:
     components = export_cfg["components"]
+    audio_duration_seconds = float(export_cfg.get("audio_duration_seconds", 8.0))
+    if audio_duration_seconds <= 0:
+        raise ValueError(f"export.audio_duration_seconds must be positive, got {audio_duration_seconds}")
 
     def quant_type(name: str) -> str:
         cfg = components.get(name) or {}
@@ -176,6 +180,7 @@ def _build_export_args(export_cfg: Mapping[str, Any], runtime_cfg: Mapping[str, 
         system_prompt=str(runtime_cfg.get("system_prompt") or ""),
         context_length=int(export_cfg.get("context_length", 256)),
         input_sequence_length=int(export_cfg.get("input_sequence_length", 256)),
+        audio_duration_seconds=audio_duration_seconds,
         audio_quant_type=quant_type("audio_encoder"),
         llm_quant_type=quant_type("qwen3"),
         decoder_quant_type=quant_type("audio_decoder"),
