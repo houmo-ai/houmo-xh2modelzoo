@@ -63,18 +63,34 @@ class LagunaWorkflow(BaseLLMWorkflow):
             return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 
         algorithm = str(quant_cfg.get("algorithm", "gptqmodel")).lower().replace("-", "_")
-        if algorithm not in {"gptq", "gptqmodel"}:
-            raise NotImplementedError(
-                "LagunaWorkflow.quant supports quant=None for the default HF floating-point path, "
-                "or quant.algorithm='gptqmodel' for the optional GPTQModel path."
-            )
-        from .quant_adapter import quantize_with_gptqmodel_api
+        method = str(quant_cfg.get("method", "gptq")).lower().replace("-", "_")
+        if algorithm in {"autoround", "auto_round"} or (
+            algorithm == "gptqmodel" and method in {"autoround", "auto_round"}
+        ):
+            from .quant_adapter import quantize_with_autoround_api
 
-        return quantize_with_gptqmodel_api(
-            model_dir=self.model_dir,
-            output_dir=output_dir,
-            device=device,
-            quant_cfg=quant_cfg,
+            return quantize_with_autoround_api(
+                model_dir=self.model_dir,
+                output_dir=output_dir,
+                device=device,
+                quant_cfg=quant_cfg,
+                workflow_seed=self.seed,
+            )
+
+        if algorithm in {"gptq", "gptqmodel"} and method == "gptq":
+            from .quant_adapter import quantize_with_gptqmodel_api
+
+            return quantize_with_gptqmodel_api(
+                model_dir=self.model_dir,
+                output_dir=output_dir,
+                device=device,
+                quant_cfg=quant_cfg,
+            )
+
+        raise NotImplementedError(
+            "LagunaWorkflow.quant supports quant=None, quant.algorithm='gptqmodel' "
+            "with method='gptq' or method='autoround', or the legacy "
+            "quant.algorithm='gptq'/'autoround' aliases."
         )
 
     def dump_golden(

@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -13,8 +15,11 @@ from .tiny_laguna import build_tiny_laguna
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_CONFIG = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/laguna_s_2_1_xh2a_w4a8.yaml"
 AUTOROUND_WORKFLOW_CONFIG = REPO_ROOT / (
+    "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/laguna_s_2_1_autoround_expert_w4_rest_w8_g64_xh2a_w4a8.yaml"
+)
+FULL_AUTOROUND_WORKFLOW_CONFIG = REPO_ROOT / (
     "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/"
-    "laguna_s_2_1_autoround_expert_w4_rest_w8_g64_xh2a_w4a8.yaml"
+    "laguna_s_2_1_full_autoround_expert_w4_rest_w8_g64_xh2a_w4a8.yaml"
 )
 
 
@@ -41,6 +46,22 @@ def test_laguna_autoround_workflow_config_defaults_non_checkpoint_weights_to_w8(
     assert config.export["model"]["model_name"] == "laguna_s_2_1_autoround_expert_w4_rest_w8_g64"
     assert config.export["model"]["quant_scheme"]["quant_type"] == "w8a8h0_ssfp"
     assert config.export["model"]["quant_scheme"]["nodes"]["lm_head"]["quant_type"] == "w8a8h1_sefp"
+
+
+def test_laguna_full_autoround_workflow_config_quantizes_bf16_checkpoint() -> None:
+    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+
+    config = WorkflowConfig.from_file(str(FULL_AUTOROUND_WORKFLOW_CONFIG))
+
+    assert config.quant["algorithm"] == "gptqmodel"
+    assert config.quant["method"] == "autoround"
+    assert config.quant["artifact_format"] == "gptqmodel_hf"
+    assert config.quant["bits"] == 8
+    assert config.quant["moe"]["expert_bits"] == 4
+    assert config.quant["group_size"] == 64
+    assert config.quant["rotation"] == "hadamard"
+    assert config.quant["runtime"]["dry_run"] is False
+    assert config.export["model"]["quant_scheme"]["quant_type"] == "w8a8h0_ssfp"
 
 
 def test_laguna_rejects_context_too_small_for_sliding_window_cache() -> None:
@@ -205,10 +226,14 @@ def test_laguna_example_overwrite_clears_export_before_workflow(
     export_dir = tmp_path / "export"
     export_dir.mkdir()
     (export_dir / "partial.onnx").write_bytes(b"partial")
+    quant_dir = tmp_path / "quantized"
+    quant_dir.mkdir()
+    (quant_dir / "partial.safetensors").write_bytes(b"partial")
 
     class _Workflow:
         def quant(self, **kwargs):
-            assert kwargs["output_dir"] == str(export_dir)
+            assert kwargs["output_dir"] == str(quant_dir)
+            assert not quant_dir.exists()
             assert export_dir.exists()
             return object()
 
@@ -220,6 +245,7 @@ def test_laguna_example_overwrite_clears_export_before_workflow(
     args = argparse.Namespace(
         model_dir="/tmp/model",
         config_path=str(WORKFLOW_CONFIG),
+        quant_output_dir=str(quant_dir),
         export_output_dir=str(export_dir),
         device="cpu",
         context_max_length=None,
@@ -302,9 +328,177 @@ def test_laguna_workflow_uses_optional_gptqmodel_only_when_explicitly_configured
     assert captured["quant_cfg"]["algorithm"] == "gptqmodel"
 
 
+def test_laguna_workflow_routes_gptqmodel_autoround_to_recipe_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xhmodel_merak.xh_llm.models.laguna import quant_adapter
+    from xhmodel_merak.xh_llm.models.laguna.workflow import LagunaWorkflow
+    from xhmodel_merak.xh_llm.workflows.result import QuantResult
+
+    workflow = LagunaWorkflow.__new__(LagunaWorkflow)
+    workflow.model_dir = "/tmp/laguna"
+    workflow.seed = 17
+    workflow.workflow_config = type(
+        "Config",
+        (),
+        {
+            "with_overrides": lambda self, _overrides: self,
+            "quant": {
+                "algorithm": "gptqmodel",
+                "method": "autoround",
+                "artifact_format": "gptqmodel_hf",
+            },
+        },
+    )()
+
+    captured = {}
+
+    def _quantize(**kwargs):
+        captured.update(kwargs)
+        return QuantResult(raw_model_dir=kwargs["model_dir"], quanted_model_dir="/tmp/quantized")
+
+    monkeypatch.setattr(quant_adapter, "quantize_with_autoround_api", _quantize)
+    result = workflow.quant(str(tmp_path), "cuda:3")
+
+    assert result.quanted_model_dir == "/tmp/quantized"
+    assert captured == {
+        "model_dir": "/tmp/laguna",
+        "output_dir": str(tmp_path),
+        "device": "cuda:3",
+        "quant_cfg": workflow.workflow_config.quant,
+        "workflow_seed": 17,
+    }
+
+
+def test_laguna_autoround_builds_stable_recipe_kwargs(
+    tmp_path: Path,
+) -> None:
+    from xhmodel_merak.xh_llm.models.laguna import quant_adapter
+
+    dataset = tmp_path / "calibration.jsonl"
+    dataset.touch()
+
+    kwargs = quant_adapter.build_laguna_autoround_kwargs(
+        hf_model_dir="/weights/Laguna-S-2.1",
+        output_dir=str(tmp_path / "quantized"),
+        device="cuda:7",
+        quant_cfg={
+            "algorithm": "gptqmodel",
+            "method": "autoround",
+            "artifact_format": "gptqmodel_hf",
+            "bits": 8,
+            "group_size": 64,
+            "sym": True,
+            "iters": 50,
+            "rotation": "hadamard",
+            "moe": {"expert_bits": 4},
+            "calibration": {"jsonl": str(dataset), "nsamples": 32, "seqlen": 1024},
+            "runtime": {
+                "python": "/opt/gptqmodel/bin/python",
+                "batch_size": 2,
+                "gradient_accumulate_steps": 3,
+                "device_map": "0,1,2,3",
+                "rotation_device": "cuda:0",
+                "dry_run": True,
+            },
+        },
+        workflow_seed=17,
+    )
+
+    assert "method" not in kwargs
+    assert "artifact_format" not in kwargs
+    assert kwargs["model_dir"] == "/weights/Laguna-S-2.1"
+    assert kwargs["output_dir"] == str((tmp_path / "quantized").resolve())
+    assert kwargs["rest_bits"] == 8
+    assert kwargs["expert_bits"] == 4
+    assert kwargs["seed"] == 17
+    assert kwargs["dataset"] == str(dataset.resolve())
+    assert kwargs["python"] == "/opt/gptqmodel/bin/python"
+    assert kwargs["device_map"] == "0,1,2,3"
+    assert kwargs["rotation"] == "hadamard"
+    assert kwargs["sym"] is True
+
+
+def test_laguna_autoround_adapter_delegates_to_recipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xhmodel_merak.xh_llm.models.laguna import quant_adapter
+
+    dataset = tmp_path / "calibration.jsonl"
+    dataset.touch()
+    output_dir = tmp_path / "quantized"
+    captured = {}
+    module = types.ModuleType("gptqmodel.recipes.laguna_autoround")
+
+    def _recipe(**kwargs):
+        captured.update(kwargs)
+        return {
+            "output_dir": kwargs["output_dir"],
+            "provenance": {
+                "recipe": "gptqmodel.recipes.laguna_autoround.quantize_laguna_autoround",
+                "dry_run": kwargs["dry_run"],
+            },
+        }
+
+    module.quantize_laguna_autoround = _recipe
+    monkeypatch.setitem(sys.modules, "gptqmodel.recipes.laguna_autoround", module)
+
+    result = quant_adapter.quantize_with_autoround_api(
+        model_dir="/weights/Laguna-S-2.1",
+        output_dir=str(output_dir),
+        device="cuda:0",
+        quant_cfg={
+            "algorithm": "gptqmodel",
+            "method": "autoround",
+            "artifact_format": "gptqmodel_hf",
+            "bits": 8,
+            "group_size": 64,
+            "moe": {"expert_bits": 4},
+            "calibration": {"jsonl": str(dataset)},
+            "runtime": {"dry_run": True},
+        },
+        workflow_seed=42,
+    )
+
+    assert result.raw_model_dir == "/weights/Laguna-S-2.1"
+    assert result.quanted_model_dir == str(output_dir.resolve())
+    assert captured["model_dir"] == "/weights/Laguna-S-2.1"
+    assert captured["dataset"] == str(dataset.resolve())
+    assert captured["rest_bits"] == 8
+    assert captured["expert_bits"] == 4
+    assert captured["group_size"] == 64
+    assert captured["rotation"] == "hadamard"
+    assert captured["dry_run"] is True
+    assert result.meta["recipe"] == "gptqmodel.recipes.laguna_autoround.quantize_laguna_autoround"
+    assert result.meta["dry_run"] is True
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        {"bits": 4, "group_size": 64, "moe": {"expert_bits": 4}},
+        {"bits": 8, "group_size": 128, "moe": {"expert_bits": 4}},
+        {"bits": 8, "group_size": 64, "moe": {"expert_bits": 8}},
+    ],
+)
+def test_laguna_autoround_rejects_unvalidated_precision_profiles(quant_cfg: dict) -> None:
+    from xhmodel_merak.xh_llm.models.laguna.quant_adapter import build_laguna_autoround_kwargs
+
+    with pytest.raises(ValueError, match="W8.*W4.*group_size=64"):
+        build_laguna_autoround_kwargs(
+            hf_model_dir="/weights/Laguna-S-2.1",
+            output_dir="/tmp/quantized",
+            device="cuda:0",
+            quant_cfg=quant_cfg,
+            workflow_seed=42,
+        )
+
+
 def test_laguna_registers_optional_gptqmodel_model_tree() -> None:
     from gptqmodel.models import auto as gptq_auto
-
     from xhmodel_merak.xh_llm.models.laguna import register_laguna_gptqmodel
 
     previous = gptq_auto.MODEL_MAP.pop("laguna", None)
@@ -546,9 +740,7 @@ def test_laguna_explicit_sliding_attention_mask_matches_window() -> None:
     for query_index in range(4):
         sliding_visible_start = query_index
         sliding_visible_end = query_index + 8
-        assert torch.all(
-            sliding_attention_mask[0, 0, query_index, :sliding_visible_start] == minimum
-        )
+        assert torch.all(sliding_attention_mask[0, 0, query_index, :sliding_visible_start] == minimum)
         assert torch.all(
             sliding_attention_mask[
                 0,
@@ -558,9 +750,7 @@ def test_laguna_explicit_sliding_attention_mask_matches_window() -> None:
             ]
             == 0
         )
-        assert torch.all(
-            sliding_attention_mask[0, 0, query_index, sliding_visible_end:] == minimum
-        )
+        assert torch.all(sliding_attention_mask[0, 0, query_index, sliding_visible_end:] == minimum)
 
 
 @pytest.mark.parametrize(

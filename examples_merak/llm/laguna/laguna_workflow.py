@@ -6,8 +6,7 @@ from pathlib import Path
 DEFAULT_MODEL_DIR = "/data01/datasets/Laguna-S-2.1"
 DEFAULT_CONFIG_PATH = "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/laguna_s_2_1_xh2a_w4a8.yaml"
 AUTOROUND_CONFIG_PATH = (
-    "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/"
-    "laguna_s_2_1_autoround_expert_w4_rest_w8_g64_xh2a_w4a8.yaml"
+    "configs_merak/workflows/xh2a/llm_models/laguna/s_2_1/laguna_s_2_1_autoround_expert_w4_rest_w8_g64_xh2a_w4a8.yaml"
 )
 
 
@@ -21,6 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Laguna-S-2.1 from floating-point HF weights to W4A8 HMONNX.")
     parser.add_argument("--model-dir", default=DEFAULT_MODEL_DIR, help="Downloaded Laguna HF model directory.")
     parser.add_argument("--config-path", default=DEFAULT_CONFIG_PATH, help="Merak workflow YAML path.")
+    parser.add_argument(
+        "--quant-output-dir",
+        default=None,
+        help="Quantized HF checkpoint directory; defaults to <export-output-dir>_quantized.",
+    )
     parser.add_argument("--export-output-dir", default="work_dirs/laguna_s_2_1_export")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -92,8 +96,12 @@ def main() -> None:
         debug=args.debug,
     )
 
+    quant_output_dir = args.quant_output_dir or f"{args.export_output_dir}_quantized"
+    if Path(quant_output_dir).resolve() == Path(args.export_output_dir).resolve():
+        raise ValueError("--quant-output-dir must differ from --export-output-dir")
+    _remove_output_dir_if_needed(quant_output_dir, args.overwrite)
     quant_result = workflow.quant(
-        output_dir=args.export_output_dir,
+        output_dir=quant_output_dir,
         device=args.device,
     )
     print(f"quant_result: {quant_result}")

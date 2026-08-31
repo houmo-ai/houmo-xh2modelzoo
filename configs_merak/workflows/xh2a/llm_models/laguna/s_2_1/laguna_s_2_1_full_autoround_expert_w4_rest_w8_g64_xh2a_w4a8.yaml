@@ -1,0 +1,49 @@
+export:
+  model:
+    chip_arch: XH2a
+    model_type: LagunaForCausalLM
+    hf_model: null
+    model_name: laguna_s_2_1_autoround_expert_w4_rest_w8_g64
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 1048576
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a8h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null
+
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 8
+  group_size: 64
+  sym: true
+  rotation: hadamard
+  iters: 200
+  format: auto_round
+  calibration:
+    dataset: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    dry_run: false
+    batch_size: 1
+    gradient_accumulate_steps: 1
+    device_map: '0,1,2,3'
+    rotation_device: cuda:0
+    rotation_compute_dtype: float64
+    rotation_chunk_rows: 1024
+    rotation_chunk_columns: 1024
+    rotation_matrix_batch: 4
+    low_gpu_mem_usage: true
+    low_cpu_mem_usage: true
+  moe:
+    expert_bits: 4
