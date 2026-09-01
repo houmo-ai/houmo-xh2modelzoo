@@ -200,8 +200,15 @@ class XHLagunaModel(LagunaSlidingMaskForwardMixin, TextLLMModel):
 
         with split_expert_checkpoint_loader(str(hf_model_dir)):
             hf_model = cls.get_empty_hf_model(hf_model_dir, **kwargs)
-        if cls._uses_autoround(getattr(hf_model.config, "quantization_config", None)):
+        quantization_config = getattr(hf_model.config, "quantization_config", None)
+        if cls._uses_autoround(quantization_config):
             cls._ensure_autoround_available(hf_model_dir)
+            # ARK needs post_init before forward, but low-memory FX tracing runs first.
+            if isinstance(quantization_config, dict):
+                if quantization_config.get("backend", "auto") == "auto":
+                    quantization_config["backend"] = "torch"
+            elif getattr(quantization_config, "backend", "auto") == "auto":
+                quantization_config.backend = "torch"
         expected_sparse_layers = int(hf_model.config.num_hidden_layers) - len(hf_model.config.mlp_only_layers)
         router_bias_layout = checkpoint_router_bias_layout(hf_model_dir)
         if router_bias_layout == "experts":

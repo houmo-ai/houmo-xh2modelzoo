@@ -31,6 +31,21 @@ def _cfg_get(cfg, name: str, default=None):
     return default
 
 
+def _module_floating_dtype_device(module: nn.Module) -> tuple[torch.dtype, torch.device]:
+    """Resolve the activation dtype/device for dense and packed linear modules."""
+
+    for name in ("weight", "scales", "bias"):
+        value = getattr(module, name, None)
+        if torch.is_tensor(value) and value.dtype.is_floating_point:
+            return value.dtype, value.device
+
+    for value in (*module.parameters(recurse=False), *module.buffers(recurse=False)):
+        if value.dtype.is_floating_point:
+            return value.dtype, value.device
+
+    raise TypeError(f"{type(module).__name__} has no floating-point parameter or buffer")
+
+
 def _register_or_replace_traceable(cls_to_key):
     def decorator(dm_class):
         for nn_cls, key in cls_to_key.items():
@@ -245,7 +260,7 @@ class _LagunaAttention(DynamicModule):
             else:
                 attn_output = attn_output * gate
 
-        attn_output = attn_output.to(self.o_proj.weight.dtype)
+        attn_output = attn_output.to(self.o_proj_dtype)
         attn_output = self.o_proj(attn_output)
         return attn_output, None, None
 
@@ -259,9 +274,10 @@ class _LagunaAttention(DynamicModule):
         self.attn_hidden_dim = self.num_heads * self.head_dim
         self.gating = bool(getattr(self, "gating", getattr(self.config, "gating", True)))
         self.gate_per_head = getattr(self, "gate_per_head", getattr(self.config, "gating", True) == "per-head")
+        self.o_proj_dtype, _ = _module_floating_dtype_device(self.o_proj)
         if self.gating:
             self.gate_compute_cast = xhnn.Cast(torch.float32)
-            self.gate_output_cast = xhnn.Cast(self.o_proj.weight.dtype)
+            self.gate_output_cast = xhnn.Cast(self.o_proj_dtype)
 
         self.enable_rope = bool(_cfg_get(cfg, "enable_rope", True))
         if self.enable_rope:
@@ -311,12 +327,13 @@ class _LagunaAttention(DynamicModule):
         else:
             self.k_cache = None
             self.v_cache = None
+        q_proj_dtype, q_proj_device = _module_floating_dtype_device(self.q_proj)
         self.register_buffer(
             "kv_scale",
             torch.tensor(
                 1.0 / math.sqrt(self.head_dim),
-                dtype=self.q_proj.weight.dtype,
-                device=self.q_proj.weight.device,
+                dtype=q_proj_dtype,
+                device=q_proj_device,
             ),
             persistent=True,
         )
