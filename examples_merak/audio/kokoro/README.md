@@ -95,8 +95,11 @@ T 图和 F 图在文件上仍分别保存，因此不是 4×4 的笛卡尔积；
 重算并继续，确保实际选择始终是表中的合法组合。T 超过 256 或 F 超过 1280 时由上层
 按自然句边界切句，不做静默截断。
 
-所有 attention mask 的有效位置为 0，无效位置为 `-65504`，不使用 `-inf`。T/F
-padding 特征显式清零，最终只保留 `valid_frames*600` 个波形采样点。
+所有 attention mask 的有效位置为 0，无效位置为 `-65504`，不使用 `-inf`。ALBERT
+attention 使用 Kokoro 自己的 wrapper，在 Softmax 前直接连续执行两次普通 mask Add，
+不依赖 `xhquant.nn` 的大模型专用算子，也不额外插入 Clip；饱和由目标 Add 保证，以满足编译器
+FlashAttention 融合契约。T/F padding 特征显式清零，最终只保留
+`valid_frames*600` 个波形采样点。
 
 ## 4. 三张 NPU 图和 Host 接口
 

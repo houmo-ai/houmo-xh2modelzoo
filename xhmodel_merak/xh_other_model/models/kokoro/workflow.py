@@ -552,6 +552,11 @@ class KokoroWorkflow(BaseOtherModelWorkflow):
                 "valid_key_value": 0.0,
                 "invalid_key_value": ATTENTION_MASK_MIN,
                 "contains_infinity": False,
+                "implementation": "kokoro_albert_attention_wrapper",
+                "operator": "Add",
+                "mask_additions_before_softmax": 2,
+                "explicit_clip": False,
+                "saturation": "target Add",
                 "padded_text_and_frame_features": 0.0,
             },
             "host_stages": [

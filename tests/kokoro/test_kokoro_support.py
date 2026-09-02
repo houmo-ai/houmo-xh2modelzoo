@@ -48,6 +48,7 @@ from xhmodel_merak.xh_other_model.models.kokoro.graph import (
     _masked_adain_rmsnorm,
     _masked_temporal_mean,
     _MaskedTemporalRMSNorm,
+    rewrite_albert_attention_double_mask_add,
 )
 from xhmodel_merak.xh_other_model.models.kokoro.host import (
     ATTENTION_MASK_MIN,
@@ -86,6 +87,7 @@ from xhmodel_merak.xh_other_model.models.kokoro.precision_split import (
     PhaseCoreStatic,
     _onnx_output_max_abs_limit,
     _validate_attention_mask_feed,
+    _validate_double_mask_add_before_softmax,
 )
 from xhmodel_merak.xh_other_model.models.kokoro.runtime import KokoroStaticRuntime
 from xhmodel_merak.xh_other_model.models.kokoro.single_graph import (
@@ -275,6 +277,49 @@ def test_attention_mask_uses_finite_fp16_min_instead_of_infinity() -> None:
     _validate_attention_mask_feed({"attention_mask": mask})
     with pytest.raises(ValueError, match="must not contain"):
         _validate_attention_mask_feed({"attention_mask": torch.full((1, 1, 2, 2), float("-inf"))})
+
+
+def test_albert_attention_uses_two_direct_mask_adds_before_softmax(
+    tmp_path: Path,
+) -> None:
+    from transformers import AlbertConfig
+    from transformers.models.albert.modeling_albert import AlbertAttention
+
+    config = AlbertConfig(
+        embedding_size=8,
+        hidden_size=8,
+        intermediate_size=16,
+        num_attention_heads=2,
+        attention_probs_dropout_prob=0.0,
+        hidden_dropout_prob=0.0,
+    )
+    attention = AlbertAttention(config).eval()
+    hidden = torch.randn(1, 4, 8)
+    mask = make_attention_mask(4, torch.tensor([2], dtype=torch.int32))
+    with torch.no_grad():
+        expected = attention(hidden, mask)
+
+    assert rewrite_albert_attention_double_mask_add(attention) == 1
+    assert rewrite_albert_attention_double_mask_add(attention) == 0
+    assert not hasattr(attention, "masked_add")
+    with torch.no_grad():
+        actual = attention(hidden, mask)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0.0, atol=0.0)
+
+    output_path = tmp_path / "albert_double_mask_add.onnx"
+    torch.onnx.export(
+        attention,
+        (hidden, mask),
+        output_path,
+        input_names=["hidden_states", "attention_mask"],
+        output_names=["attention_output", "attention_weights"],
+        opset_version=17,
+        dynamo=False,
+    )
+    graph = onnx.load(output_path, load_external_data=False)
+    assert "Clip" not in {node.op_type for node in graph.graph.node}
+    assert _validate_double_mask_add_before_softmax(graph) == 1
 
 
 @pytest.mark.parametrize(

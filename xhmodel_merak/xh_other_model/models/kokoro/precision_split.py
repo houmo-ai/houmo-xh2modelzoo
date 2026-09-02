@@ -492,6 +492,10 @@ def _export_partition(
     structural = {"post_export_optimizations": 0}
     graph = onnx.load(output_path, load_external_data=False)
     onnx.checker.check_model(graph)
+    if "attention_mask" in feed:
+        structural["double_mask_add_softmax_patterns"] = (
+            _validate_double_mask_add_before_softmax(graph)
+        )
     op_counts: dict[str, int] = {}
     for node in graph.graph.node:
         op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
@@ -549,6 +553,46 @@ def _export_partition(
         structural_rewrites=structural,
     )
     return artifact, actual
+
+
+def _validate_double_mask_add_before_softmax(
+    graph: onnx.ModelProto,
+    mask_name: str = "attention_mask",
+) -> int:
+    """Require every Softmax to consume a direct two-Add mask pattern."""
+
+    producers = {
+        output: node
+        for node in graph.graph.node
+        for output in node.output
+        if output
+    }
+    softmax_nodes = [node for node in graph.graph.node if node.op_type == "Softmax"]
+    if not softmax_nodes:
+        raise RuntimeError("attention-mask graph contains no Softmax node")
+
+    matched = 0
+    for softmax in softmax_nodes:
+        source = producers.get(softmax.input[0])
+        if source is None or source.op_type != "Add" or mask_name not in source.input:
+            raise RuntimeError(
+                f"Softmax {softmax.name!r} is not preceded by the second mask Add"
+            )
+        first_add_output = next(
+            (name for name in source.input if name != mask_name),
+            None,
+        )
+        first_add = producers.get(first_add_output or "")
+        if (
+            first_add is None
+            or first_add.op_type != "Add"
+            or mask_name not in first_add.input
+        ):
+            raise RuntimeError(
+                f"Softmax {softmax.name!r} is not preceded by two mask Adds"
+            )
+        matched += 1
+    return matched
 
 
 def _validate_attention_mask_feed(feed: Mapping[str, Tensor]) -> None:

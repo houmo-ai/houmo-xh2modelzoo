@@ -20,6 +20,7 @@ from .graph import (
     PrefixReversedBidirectionalLSTMStatic,
     SourceMergeStatic,
     materialize_weight_norm,
+    rewrite_albert_attention_double_mask_add,
     rewrite_depthwise_deconvolution,
 )
 from .host import (
@@ -356,6 +357,9 @@ class FrameBucketExport:
 
 def prepare_independent_model(model: nn.Module) -> dict[str, int]:
     return {
+        "albert_attention_double_mask_add": rewrite_albert_attention_double_mask_add(
+            model.bert
+        ),
         "weight_norm_materialized": materialize_weight_norm(model),
         "depthwise_deconv_output_padding_lowered": rewrite_depthwise_deconvolution(model),
     }

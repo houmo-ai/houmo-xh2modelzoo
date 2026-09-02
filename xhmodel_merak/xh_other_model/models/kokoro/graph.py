@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -289,9 +290,71 @@ def _dual_forward_lstm(source: nn.LSTM) -> tuple[nn.LSTM, nn.LSTM]:
     return forward, backward
 
 
+def _double_mask_add_albert_attention_forward(
+    self: nn.Module,
+    hidden_states: Tensor,
+    attention_mask: Tensor | None = None,
+    **kwargs: Any,
+) -> tuple[Tensor, Tensor]:
+    """Keep ALBERT eager attention with two explicit mask Add operations."""
+
+    del kwargs
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, self.attention_head_size)
+    query = self.query(hidden_states).view(*hidden_shape).transpose(1, 2)
+    key = self.key(hidden_states).view(*hidden_shape).transpose(1, 2)
+    value = self.value(hidden_states).view(*hidden_shape).transpose(1, 2)
+
+    attention_weights = torch.matmul(query, key.transpose(2, 3)) * self.scaling
+    if attention_mask is not None:
+        attention_weights = attention_weights + attention_mask
+        attention_weights = attention_weights + attention_mask
+    attention_weights = F.softmax(attention_weights, dim=-1)
+    attention_weights = F.dropout(
+        attention_weights,
+        p=self.attention_dropout.p,
+        training=self.training,
+    )
+
+    attention_output = torch.matmul(attention_weights, value)
+    attention_output = attention_output.transpose(1, 2).contiguous()
+    attention_output = attention_output.reshape(*input_shape, -1).contiguous()
+    attention_output = self.dense(attention_output)
+    attention_output = self.output_dropout(attention_output)
+    attention_output = self.LayerNorm(hidden_states + attention_output)
+    return attention_output, attention_weights
+
+
+def rewrite_albert_attention_double_mask_add(root: nn.Module) -> int:
+    """Wrap ALBERT attention so ONNX contains two direct mask Adds."""
+
+    from transformers.models.albert.modeling_albert import AlbertAttention
+
+    rewritten = 0
+    for module in root.modules():
+        if not isinstance(module, AlbertAttention):
+            continue
+        if getattr(module, "_kokoro_double_mask_add_rewritten", False):
+            continue
+        module.forward = types.MethodType(
+            _double_mask_add_albert_attention_forward,
+            module,
+        )
+        module._kokoro_double_mask_add_rewritten = True
+        rewritten += 1
+    if rewritten == 0 and not any(
+        isinstance(module, AlbertAttention)
+        and getattr(module, "_kokoro_double_mask_add_rewritten", False)
+        for module in root.modules()
+    ):
+        raise RuntimeError("Kokoro BERT contains no Transformers AlbertAttention module")
+    return rewritten
+
+
 class KokoroFrontBaseStatic(nn.Module):
     def __init__(self, model: nn.Module, text_max_length: int) -> None:
         super().__init__()
+        rewrite_albert_attention_double_mask_add(model.bert)
         self.bert = model.bert
         self.bert_encoder = model.bert_encoder
         self.embedding = model.text_encoder.embedding
