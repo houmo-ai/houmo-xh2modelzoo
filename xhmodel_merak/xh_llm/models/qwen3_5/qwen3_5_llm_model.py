@@ -1432,7 +1432,11 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             adapter_export.meta = adapter_meta
             adapter_export.model_name = f"{exported_info.model_name}_{adapter.name}"
             adapter_export.str_datetime = exported_info.str_datetime
-            self._export_hmonnx(adapter_export)
+            # The embedding is not affected by the supported Linear-only LoRA
+            # adapters. finalize_lora_metadata() exposes the root embedding in
+            # each adapter directory through a symlink, so do not write a
+            # redundant regular file at that destination first.
+            self._export_hmonnx(adapter_export, save_token_embedding=False)
             exported_adapters.append((adapter, adapter_export))
 
             del self._quanted_model

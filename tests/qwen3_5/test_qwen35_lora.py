@@ -369,6 +369,50 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
     assert (child_visual_step / "visual_external_data").is_symlink()
 
 
+def test_lora_variant_export_leaves_embedding_destination_for_shared_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
+    from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import XHQwen3_5ModelConfig
+    from xhmodel_merak.xh_llm.types import ExportData, VLLMModelMeta
+
+    source_adapter_dir = tmp_path / "source-adapter"
+    _write_adapter(source_adapter_dir)
+    adapter = inspect_lora_adapter(str(source_adapter_dir))
+
+    root_dir = tmp_path / "hmquant-model"
+    root_dir.mkdir()
+    root_meta = VLLMModelMeta(quant_embedding="quant_embedding.pt")
+    exported_info = ExportData()
+    exported_info.exported_dir = str(root_dir)
+    exported_info.meta = root_meta
+    exported_info.model_name = "hmquant-model"
+    exported_info.str_datetime = "20260903"
+
+    model = XHQwen3_5Model(XHQwen3_5ModelConfig(model_name="qwen3_5"))
+    export_calls = []
+
+    def _quantize_variant(_wrap_model, _adapter=None):
+        model._quanted_model = SimpleNamespace()
+
+    def _export_variant(adapter_export, *, save_token_embedding=True):
+        export_calls.append((adapter_export, save_token_embedding))
+        if save_token_embedding:
+            (Path(adapter_export.exported_dir) / "quant_embedding.pt").write_bytes(b"unexpected duplicate")
+
+    monkeypatch.setattr(model, "_quantize_wrap_variant", _quantize_variant)
+    monkeypatch.setattr(model, "_configure_spec_decode_target_export", lambda: None)
+    monkeypatch.setattr(model, "_export_hmonnx", _export_variant)
+
+    exported_adapters = model._export_lora_variants(exported_info, nn.Linear(1, 1), [adapter])
+
+    child_embedding = Path(exported_adapters[0][1].exported_dir) / "quant_embedding.pt"
+    assert len(export_calls) == 1
+    assert export_calls[0][1] is False
+    assert not child_embedding.exists()
+
+
 def test_spec_runtime_path_preserves_lora_file_symlink(tmp_path: Path):
     from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import _resolve_path
 

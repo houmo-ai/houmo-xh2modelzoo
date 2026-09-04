@@ -7,8 +7,6 @@ from torch import Tensor, nn
 from xhquant.api import HMONNXGoldenInference as HMONNXInference
 from xhquant.core import CacheTensor
 
-from xhquant_llm.api import Config
-
 from ..builder import MODELS
 from ..device_dtype_mixin import DeviceDtypeMixin
 from ..llm_onnx_model import LLMONNXModel

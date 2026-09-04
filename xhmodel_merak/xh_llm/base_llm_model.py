@@ -682,13 +682,14 @@ class BaseLLMModel(XHBaseModel):
         return False
 
     @log_function_call()
-    def _export_hmonnx(self, exported_info: ExportData):
+    def _export_hmonnx(self, exported_info: ExportData, *, save_token_embedding: bool = True):
         meta_info = exported_info.meta
         logger = get_xhquant_logger()
         model_name = exported_info.model_name
         export_model_name = exported_info.model_name
         output_dir_path = Path(exported_info.exported_dir)
-        self._save_export_token_embedding(output_dir_path, meta_info)
+        if save_token_embedding:
+            self._save_export_token_embedding(output_dir_path, meta_info)
         meta_info.kv_cache = self.kvcache_config
         with self.get_kvcache_mixin().kv_cache_scope(device="meta"):
             self.set_input_sequence_length(self.wrap_cfg.prefill_chunk_length)
