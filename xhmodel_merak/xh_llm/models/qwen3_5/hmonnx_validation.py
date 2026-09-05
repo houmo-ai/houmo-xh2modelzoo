@@ -8,10 +8,12 @@ summarize MTP/DFlash speculative-decoding acceptance metrics.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,8 +39,22 @@ class HMONNXQuickTestResult:
         return asdict(self)
 
 
+@contextmanager
+def _patches_runtime_scope():
+    env_name = "ENABLE_HMINFERENCE_V2"
+    previous = os.environ.get(env_name)
+    os.environ[env_name] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = previous
+
+
 def find_hmonnx_meta_file(export_result_or_path: Any) -> str:
-    """Resolve the golden_meta_info.json used by HMONNX runtime inference."""
+    """Resolve a full-model or standalone-visual HMONNX metadata file."""
     if hasattr(export_result_or_path, "work_dir"):
         path = Path(export_result_or_path.work_dir)
     else:
@@ -58,7 +74,12 @@ def find_hmonnx_meta_file(export_result_or_path: Any) -> str:
             meta_files.append(meta_file)
 
     if not meta_files:
-        raise FileNotFoundError(f"No hmquant*/golden_meta_info.json found under {path}")
+        visual_meta_file = path / "visual_meta_info.json"
+        if visual_meta_file.is_file():
+            return str(visual_meta_file)
+        raise FileNotFoundError(
+            f"No hmquant*/golden_meta_info.json or visual_meta_info.json found under {path}"
+        )
     if len(meta_files) > 1:
         found = ", ".join(str(item) for item in meta_files)
         raise ValueError(f"Found multiple HMONNX meta files under {path}: {found}")
@@ -80,24 +101,73 @@ def quick_test_hmonnx(
     meta_info = _load_meta_info(meta_file)
     spec_decode = meta_info.get("spec_decode")
     spec_mode = spec_decode.get("mode") if isinstance(spec_decode, dict) else None
-    if spec_mode in {"mtp", "dflash"}:
-        return spec_decode_generate(
+    with _patches_runtime_scope():
+        if (
+            Path(meta_file).name == "visual_meta_info.json"
+            and meta_info.get("visual_input_mode") == "patches"
+            and meta_info.get("gears")
+        ):
+            return visual_hmonnx_smoke_test(meta_file=meta_file, device=device)
+        if spec_mode in {"mtp", "dflash"}:
+            return spec_decode_generate(
+                meta_file=meta_file,
+                prompt=prompt,
+                device=device or "cuda:0",
+                exec_device=kwargs.pop("exec_device", device or "cuda:0"),
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                **kwargs,
+            )
+        return hmonnx_generate(
             meta_file=meta_file,
             prompt=prompt,
-            device=device or "cuda:0",
-            exec_device=kwargs.pop("exec_device", device or "cuda:0"),
+            image_path=image_path,
+            device=device,
             max_new_tokens=max_new_tokens,
             do_sample=do_sample,
             **kwargs,
         )
-    return hmonnx_generate(
-        meta_file=meta_file,
-        prompt=prompt,
-        image_path=image_path,
-        device=device,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        **kwargs,
+
+
+def visual_hmonnx_smoke_test(
+    *,
+    meta_file: str | Path,
+    device: str | None = None,
+) -> HMONNXQuickTestResult:
+    """Load a standalone visual release and execute every static token gear."""
+
+    import torch
+
+    from xhquant.api import xhquant_init
+
+    from .qwen3_5_hmonnx_inference import VisualTokenGearHMONNXModel
+
+    resolved_meta = str(meta_file)
+    runtime_device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    xhquant_init(None, False)
+    start = time.perf_counter()
+    visual = VisualTokenGearHMONNXModel.from_meta_file(
+        resolved_meta,
+        device=runtime_device,
+        enable_golden=False,
+    )
+    try:
+        output_shapes = visual.run_all_gears()
+    finally:
+        del visual
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    latency_s = time.perf_counter() - start
+    serializable_shapes = {str(gear): list(shape) for gear, shape in output_shapes.items()}
+    output_text = ", ".join(f"m{gear}={tuple(shape)}" for gear, shape in output_shapes.items())
+    return HMONNXQuickTestResult(
+        meta_file=resolved_meta,
+        output_text=f"visual gears ok: {output_text}",
+        output_tokens=0,
+        latency_s=latency_s,
+        tokens_per_second=0.0,
+        stats={"visual_output_shapes": serializable_shapes},
     )
 
 
@@ -721,4 +791,5 @@ __all__ = [
     "print_quick_test_result",
     "quick_test_hmonnx",
     "spec_decode_generate",
+    "visual_hmonnx_smoke_test",
 ]

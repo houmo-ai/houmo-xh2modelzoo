@@ -499,7 +499,7 @@ def test_qwen3_next_mtp_workflow_keeps_shared_gdr_configuration_parity():
     assert "max_pe_length" not in model
 
 
-def test_qwen35_moe_and_next_leaves_share_export_optimization_profiles():
+def test_qwen35_moe_and_next_leaves_share_non_gdr_optimization_profiles():
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
     config_root = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models"
@@ -532,8 +532,6 @@ def test_qwen35_moe_and_next_leaves_share_export_optimization_profiles():
         "split_conv_cache",
         "normalize_force_fp32",
         "use_manual_depthwise_conv1d",
-        "fuse_gdr_ops",
-        "fuse_gdr_block_recurrent_ops",
         "quant_scheme",
         "only_first_block",
     }
@@ -546,6 +544,8 @@ def test_qwen35_moe_and_next_leaves_share_export_optimization_profiles():
         assert {key: q35_model[key] for key in optimization_fields} == {
             key: next_model[key] for key in optimization_fields
         }
+        assert q35_model["fuse_gdr_ops"] is True
+        assert q35_model["fuse_gdr_block_recurrent_ops"] is True
         if q35_path.name.endswith("full_fa_all16.yaml"):
             assert q35_model["flash_attention"] == next_model["flash_attention"]
             assert q35_workflow.quant is not None

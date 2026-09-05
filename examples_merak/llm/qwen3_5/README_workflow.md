@@ -61,7 +61,8 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/
 - `full_gptq.yaml`：完整导出，使用 GPTQModel GPTQ 量化。
 - `full_mtp.yaml` / `full_mtp_gptq.yaml`：MTP speculative decoding 导出。
 - `full_dflash.yaml` / `full_dflash_gptq.yaml`：DFlash speculative decoding 导出。
-- `visual_only_448.yaml` / `visual_only_896.yaml`：只导出 visual tower。
+- `visual_only_token_gears_99p_candidate.yaml`：按 `96/196/384/704/1536`
+  五档 token gears 单独导出 visual tower。
 - 带 `_gptq` 后缀的 YAML 使用 `quant.method: gptq`。
 - 不带 `_gptq` 后缀的 YAML 使用 `quant.method: autoround`。
 
@@ -69,10 +70,10 @@ configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/
 
 | 模型            | 默认 full 配置                                    | 其他导出形态                                                            |
 | --------------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
-| Qwen3.5-9B      | `qwen3_5/9b/qwen3_5_9b_full.yaml`               | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
-| Qwen3.6-27B     | `qwen3_5/27b/qwen3_6_27b_full.yaml`             | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.5-9B      | `qwen3_5/9b/qwen3_5_9b_full.yaml`               | `full_mtp`、`full_dflash`、`visual_only_token_gears_99p_candidate` |
+| Qwen3.6-27B     | `qwen3_5/27b/qwen3_6_27b_full.yaml`             | `full_mtp`、`full_dflash`、`visual_only_token_gears_99p_candidate` |
 | Qwen3.8-27B     | `qwen3_5/27b/qwen3_8_27b_full.yaml`             | `qwen3_8_27b_full_mtp`、`qwen3_8_27b_visual_only_token_gears_99p_candidate` |
-| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_448`、`visual_only_896` |
+| Qwen3.6-35B-A3B | `qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml` | `full_mtp`、`full_dflash`、`visual_only_token_gears_99p_candidate` |
 
 ## Qwen3.8-27B 发布 Demo
 
@@ -152,9 +153,10 @@ CUDA_VISIBLE_DEVICES=3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --overwrite
 ```
 
-多尺寸 visual tower 使用静态 token gears `96/196/384/704/1536`，运行时按
-`smallest_fit` 选择最小可容纳图。先导出五档共享权重图，再把它叠加到已验证的
-256K base 模型：
+所有 full 配置都直接导出静态 token gears `96/196/384/704/1536`，运行时按
+`smallest_fit` 选择最小可容纳图。完整包名带
+`visualm96_196_384_704_1536` 后缀，视觉图位于
+`visual/m96` 至 `visual/m1536`。如只需单独导出 visual tower：
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
@@ -165,10 +167,6 @@ CUDA_VISIBLE_DEVICES=4 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
   --device cuda:0 \
   --overwrite
 
-python tools/qwen35_build_visual_gear_overlay.py \
-  --fixed-model-dir "$RELEASE_DIR/base_256k_flash_gdr/hmquant_xh2_qwen3_8_27b_w4a8_256_256k_mpe256k_448x448_<date>" \
-  --visual-gear-dir "$RELEASE_DIR/visual_token_gears" \
-  --output-dir "$RELEASE_DIR/base_256k_visual_gears_overlay"
 ```
 
 MTP 的 vLLM Merak 服务必须使用自定义 proposer，并让服务端
@@ -489,8 +487,8 @@ export_result = workflow.export(
     output_dir="./work_dirs/qwen3_5_export",
     device="cuda",
     config_overrides={
-        "export.model.visual_config.max_size_h": 896,
-        "export.model.visual_config.max_size_w": 896,
+        "export.model.visual_config.image_token_gears": [96, 196, 384, 704, 1536],
+        "export.model.visual_config.image_token_capacity": 1536,
     },
 )
 ```
@@ -594,7 +592,7 @@ quick_result = quick_test_hmonnx(
 
 ```bash
 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
-  --config  work_dirs/qwen3_5_122B_export/hmquant_xh2_qwen3_5_122b_a10b_w4a8_256_2k_mpe256k_448x448_20260702/golden_meta_info.json \
+  --config  work_dirs/qwen3_5_122B_export/hmquant_xh2_qwen3_5_122b_a10b_w4a8_256_2k_mpe256k_visualm96_196_384_704_1536_20260702/golden_meta_info.json \
   --prompt "用中文介绍一下 Qwen3.5" \
   --no-sample \
   --max-new-tokens 128 \
@@ -603,7 +601,7 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
   --use-v2
 
 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
-  --config  work_dirs/qwen3_5_9b_flashattention_fuse_gdr_export/hmquant_xh2_qwen3_5_9b_w4a8_256_256k_mpe256k_448x448_20260707/golden_meta_info.json \
+  --config  work_dirs/qwen3_5_9b_flashattention_fuse_gdr_export/hmquant_xh2_qwen3_5_9b_w4a8_256_256k_mpe256k_visualm96_196_384_704_1536_20260707/golden_meta_info.json \
   --prompt "你好，用一句话介绍北京。" \
   --think \
   --no-sample \
@@ -638,7 +636,6 @@ python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
 - `--export-from-quanted-model`：跳过量化，直接从 `--model-dir` 指定的 HF 目录导出。
 - `--model-name`：临时覆盖 `export.model.model_name`，用于 YAML 架构相同但导出命名不同的 checkpoint；`.` 和 `-` 会归一化成 `_`。
 - `--bits`：临时覆盖 `quant.bits`。
-- `--max-size-h` / `--max-size-w`：临时覆盖 visual tower 输入尺寸。
 - `--context-max-length` / `--context-length`：临时覆盖导出最大上下文长度（`export.model.context_max_length`），并在 MTP/DFlash 配置存在时同步覆盖 draft cache 长度。
 - `--enable-flash-attention` / `--disable-flash-attention`：临时覆盖 FlashAttention 开关。
 - `--enable-fuse-gdr-ops` / `--disable-fuse-gdr-ops`：临时覆盖 GDRChunkScan fuse。

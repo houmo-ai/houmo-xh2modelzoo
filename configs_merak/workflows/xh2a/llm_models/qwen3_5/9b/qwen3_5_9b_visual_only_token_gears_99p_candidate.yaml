@@ -26,8 +26,6 @@ export:
     # The workflow replaces this placeholder with --model-dir.
     hf_model: null
     model_name: qwen3_5_9b_visual_token_gears
-    max_size_w: 448
-    max_size_h: 448
     visual_input_mode: patches
     # Post-spatial-merge image-token capacities. This five-gear candidate
     # covered 99.409% of the measured CMMMU image requests; release values
@@ -38,5 +36,5 @@ export:
     quant_scheme:
       quant_type: w8a8h1_sefp
       ops: {}
-    fuse_gdr_ops: false
-    fuse_gdr_block_recurrent_ops: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true

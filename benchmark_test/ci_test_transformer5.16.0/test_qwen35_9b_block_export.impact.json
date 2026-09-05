@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "transformer516-block-export-harness",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_transformer516_block_export.py"
+      ]
+    },
+    {
+      "id": "qwen35-shared-source",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5/**",
+        "examples_merak/llm/qwen3_5/**"
+      ]
+    },
+    {
+      "id": "qwen35-9b-block",
+      "patterns": [
+        "configs_merak/workflows/**/qwen3_5/9b/**"
+      ]
+    }
+  ]
+}

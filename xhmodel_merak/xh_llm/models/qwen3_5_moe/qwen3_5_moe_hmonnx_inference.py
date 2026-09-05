@@ -1,6 +1,5 @@
 import torch
 
-from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel
 from ...types import LLMModelMeta
 from ..qwen3_5.hybrid_cache_runtime import (
@@ -14,6 +13,7 @@ from ..qwen3_5.qwen3_5_hmonnx_inference import (
     VisualTokenGearHMONNXModel,
 )
 from ..qwen3_5.qwen3_5_processor import XHQwen3_5Processor
+from ..qwen3_5.visual_token_gears import VISUAL_INPUT_PATCHES
 from .data_preprocess import Qwen3_5_DataPreprocess
 
 
@@ -23,29 +23,18 @@ def _model_config_prefill_recurrent_state_uses_cache(model_config) -> bool:
     return model_config_prefill_recurrent_state_uses_cache(model_config)
 
 
-class VisualHMONNXModel(HMONNXModel):
-    def forward(self, *args):
-        out = super().forward(*args)
-        return out
-
-
 class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
     def __init__(self, meta_info: LLMModelMeta, **kwargs):
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         enable_golden = kwargs.get("enable_golden", False)
-        if getattr(self.visual_meta, "gears", None):
-            self.visual = VisualTokenGearHMONNXModel(
-                self.visual_meta,
-                device=self.prefill_model.device,
-                enable_golden=enable_golden,
-            )
-        else:
-            self.visual = VisualHMONNXModel(
-                self.visual_meta.hmonnx,
-                device_map=[self.prefill_model.device],
-                enable_golden=enable_golden,
-            )
+        if not getattr(self.visual_meta, "gears", None):
+            raise ValueError("Qwen3.5 MoE visual metadata must contain patch-token gears")
+        self.visual = VisualTokenGearHMONNXModel(
+            self.visual_meta,
+            device=self.prefill_model.device,
+            enable_golden=enable_golden,
+        )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
         self._sync_page_attention_mode_to_kvcache()
@@ -81,16 +70,10 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
 
     def get_tf_processor(self):
         processor = XHQwen3_5Processor.from_pretrained(self.hf_model_dir)
-        meta_info = self.meta_info.model_config
-        processor.config.patch_size = meta_info.visual_config.patch_size
-        processor.config.max_size_h = meta_info.visual_config.max_size_h
-        processor.config.max_size_w = meta_info.visual_config.max_size_w
-        processor.config.visual_input_mode = getattr(meta_info.visual_config, "visual_input_mode", "image")
-        if getattr(meta_info.visual_config, "gears", None):
-            max_patch_capacity = max(
-                int(gear.patch_token_capacity) for gear in meta_info.visual_config.gears
-            )
-            processor.config.max_pixels = max_patch_capacity * int(meta_info.visual_config.patch_size) ** 2
+        processor.config.patch_size = self.visual_meta.patch_size
+        processor.config.visual_input_mode = VISUAL_INPUT_PATCHES
+        max_patch_capacity = max(int(gear.patch_token_capacity) for gear in self.visual_meta.gears)
+        processor.config.max_pixels = max_patch_capacity * int(self.visual_meta.patch_size) ** 2
         return processor
 
     def to_fast(self):
@@ -116,8 +99,6 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         data_preprocess = Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=input_sequence_length,
-            image_size_w=self.visual_meta.max_size_w,
-            image_size_h=self.visual_meta.max_size_h,
             past_key_caches=self.past_key_caches,
             past_value_caches=self.past_value_caches,
             past_conv_caches=self.past_conv_caches,

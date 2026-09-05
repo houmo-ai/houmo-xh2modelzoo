@@ -127,8 +127,10 @@ def test_visual_lora_tensor_is_rejected(tmp_path: Path):
     with pytest.raises(ValueError, match="visual export does not support LoRA"):
         XHQwen3_5_VisualConfig(
             model_name="visual",
-            max_size_w=448,
-            max_size_h=448,
+            visual_input_mode="patches",
+            image_token_gears=[96, 196, 384, 704, 1536],
+            image_token_capacity=1536,
+            spatial_merge_size=2,
             lora={"path": [str(adapter_dir)]},
         )
 

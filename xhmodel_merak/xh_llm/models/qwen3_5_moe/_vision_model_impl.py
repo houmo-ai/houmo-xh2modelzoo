@@ -2,8 +2,8 @@
 
 The dense and MoE language models use different Transformers vision class
 identities, but their vision tower implementation and weights have the same
-contract.  Register the MoE identities against the common wrappers so fixed
-image export and patch-token gears cannot drift apart.
+contract. Register the MoE identities against the common patch-token wrappers
+so dense and MoE gear exports cannot drift apart.
 """
 
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (

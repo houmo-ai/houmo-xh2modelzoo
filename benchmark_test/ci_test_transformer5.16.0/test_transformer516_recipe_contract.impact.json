@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-shared-source",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5/**",
+        "examples_merak/llm/qwen3_5/**"
+      ]
+    },
+    {
+      "id": "qwen35-config-contract",
+      "patterns": [
+        "configs_merak/workflows/**/qwen3_5/**",
+        "configs_merak/workflows/**/qwen3_5_moe/**"
+      ]
+    },
+    {
+      "id": "gemma4-shared-source",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/gemma4_series/**",
+        "examples_merak/llm/gemma4_series/**"
+      ]
+    },
+    {
+      "id": "gemma4e-shared-source",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/gemma4e/**"
+      ]
+    },
+    {
+      "id": "gemma4-config-contract",
+      "patterns": [
+        "configs_merak/workflows/**/gemma4_series/**"
+      ]
+    }
+  ]
+}

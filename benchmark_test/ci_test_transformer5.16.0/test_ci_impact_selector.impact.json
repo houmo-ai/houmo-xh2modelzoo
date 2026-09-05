@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "retired-ci-test-suite",
+      "patterns": [
+        "benchmark_test/ci_test/**"
+      ]
+    },
+    {
+      "id": "retired-transformer55-suite",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.5.0/**"
+      ]
+    }
+  ]
+}

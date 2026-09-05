@@ -37,12 +37,6 @@ WORKFLOW_122B_DFLASH = (
     / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b"
     / "qwen3_5_122b_a10b_full_dflash.yaml"
 )
-WORKFLOW_27B_VISUAL_448 = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_448.yaml"
-)
-WORKFLOW_27B_VISUAL_896 = (
-    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_visual_only_896.yaml"
-)
 WORKFLOW_27B_MTP = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b_full_mtp.yaml"
 WORKFLOW_38_27B_FULL = (
     REPO_ROOT
@@ -57,6 +51,11 @@ WORKFLOW_38_27B_VISUAL_GEARS = (
     / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b"
     / "qwen3_8_27b_visual_only_token_gears_99p_candidate.yaml"
 )
+WORKFLOW_ROOTS = (
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5",
+    REPO_ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe",
+)
+VISUAL_TOKEN_GEARS = [96, 196, 384, 704, 1536]
 
 
 def _install_stub_modules(monkeypatch):
@@ -147,14 +146,31 @@ def test_readme_does_not_document_model_override_cli():
 def test_workflow_config_paths_cover_requested_models():
     assert _load_yaml(WORKFLOW_9B_FULL)["export"]["model"]["hf_model"] is None
     assert _load_yaml(WORKFLOW_MOE_FULL)["export"]["model"]["hf_model"] is None
-    assert _load_yaml(WORKFLOW_27B_VISUAL_448)["export"]["model"]["hf_model"] is None
-    assert _load_yaml(WORKFLOW_27B_VISUAL_896)["export"]["model"]["hf_model"] is None
     assert _load_yaml(WORKFLOW_38_27B_FULL)["export"]["model"]["hf_model"] is None
     assert _load_yaml(WORKFLOW_38_27B_MTP)["export"]["model"]["hf_model"] is None
     assert (
         _load_yaml(WORKFLOW_38_27B_VISUAL_GEARS)["export"]["model"]["hf_model"]
         is None
     )
+
+
+def test_all_qwen35_workflow_yamls_use_gdr_fusion_and_patch_token_gears():
+    config_paths = sorted(path for root in WORKFLOW_ROOTS for path in root.rglob("*.yaml"))
+    assert config_paths
+    assert not any("visual_only_448" in path.name or "visual_only_896" in path.name for path in config_paths)
+
+    for config_path in config_paths:
+        model = _load_yaml(config_path)["export"]["model"]
+        assert model["fuse_gdr_ops"] is True, config_path
+        assert model["fuse_gdr_block_recurrent_ops"] is True, config_path
+
+        visual = model if str(model["model_type"]).endswith("_visual") else model["visual_config"]
+        assert visual["visual_input_mode"] == "patches", config_path
+        assert visual["image_token_gears"] == VISUAL_TOKEN_GEARS, config_path
+        assert visual["image_token_capacity"] == VISUAL_TOKEN_GEARS[-1], config_path
+        assert visual["spatial_merge_size"] == 2, config_path
+        assert "max_size_w" not in visual, config_path
+        assert "max_size_h" not in visual, config_path
 
 
 def test_qwen38_workflows_reuse_qwen35_family_contract():
@@ -166,8 +182,8 @@ def test_qwen38_workflows_reuse_qwen35_family_contract():
         assert model["model_type"] == "Qwen3_5ForConditionalGeneration"
         assert model["model_name"] == "qwen3_8_27b"
         assert model["context_max_length"] == 2048
-        assert model["fuse_gdr_ops"] is False
-        assert model["fuse_gdr_block_recurrent_ops"] is False
+        assert model["fuse_gdr_ops"] is True
+        assert model["fuse_gdr_block_recurrent_ops"] is True
 
     assert mtp["spec_decode_mode"] == "mtp"
     assert mtp["num_draft_tokens"] == 4
@@ -177,7 +193,7 @@ def test_qwen38_workflows_reuse_qwen35_family_contract():
 
     assert visual["model_type"] == "Qwen3_5ForConditionalGeneration_visual"
     assert visual["model_name"] == "qwen3_8_27b_visual_token_gears"
-    assert visual["image_token_gears"] == [96, 196, 384, 704, 1536]
+    assert visual["image_token_gears"] == VISUAL_TOKEN_GEARS
     assert visual["image_token_capacity"] == 1536
 
 

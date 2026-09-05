@@ -227,7 +227,7 @@ def test_export_hmonnx_uses_release_spec_decode_dirs():
 
 def test_golden_export_layout_validator_accepts_release_spec(tmp_path):
     """Lightweight fixture for HM golden export naming/layout checks."""
-    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_448x448_20260603"
+    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_visualm96_196_384_704_1536_20260603"
     release_prefix = export_dir.name
     (export_dir / "hf_config").mkdir(parents=True)
     (export_dir / "hf_config" / "config.json").write_text("{}")
@@ -278,7 +278,7 @@ def test_golden_export_layout_validator_accepts_release_spec(tmp_path):
 
 def test_golden_export_layout_validator_allows_visual_branch(tmp_path):
     """VLM exports may include a top-level visual/ branch."""
-    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_448x448_20260603"
+    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_visualm96_196_384_704_1536_20260603"
     release_prefix = export_dir.name
     (export_dir / "hf_config").mkdir(parents=True)
     (export_dir / "hf_config" / "config.json").write_text("{}")
@@ -307,7 +307,7 @@ def test_golden_export_layout_validator_allows_visual_branch(tmp_path):
 def test_release_layout_validator_checks_onnx_external_data_location(tmp_path):
     """Validator catches stale ONNX external_data locations after artifact renames."""
     validator = _load_layout_validator()
-    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_448x448_20260603"
+    export_dir = tmp_path / "hmquant_xh2_qwen3_5_4w4a_256_32768_visualm96_196_384_704_1536_20260603"
     release_prefix = export_dir.name
     (export_dir / "hf_config").mkdir(parents=True)
     (export_dir / "hf_config" / "config.json").write_text("{}")
@@ -370,13 +370,11 @@ def test_get_export_cfg_handles_spec_decode_outputs():
     assert "output_post_norm_hidden" in src
 
 
-def test_visual_export_uses_release_prefix_and_resolution_suffix():
-    """Visual branch names must stay release-scoped and resolution-specific."""
+def test_visual_export_uses_release_prefix_and_token_gear_suffix():
+    """Visual branch names stay release-scoped and advertise all token gears."""
     src = MERAK_MODEL.read_text()
-    # The release prefix already embeds WxH; the visual subgraph must reuse it
-    # rather than append a second, duplicated resolution suffix.
     assert (
-        'f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"'
+        'f"hmquant_{model_name}_visualm{visual_gear_token}_{str_datetime}"'
         in src
     )
     assert 'f"{exported_info.model_name}_visual"' in src

@@ -1,6 +1,5 @@
 import inspect
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +26,6 @@ from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
     _ensure_gptq_desc_act_default,
     _resolve_qwen_export_pad_token_id,
 )
-from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import _visual_simplified_onnx_needs_refresh
 from xhmodel_merak.xh_llm.models.qwen3_5_moe import _qwen3_5_moe_big_export as moe_big_export
 from xhmodel_merak.xh_llm.models.qwen3_5_moe._moe_model import (
     _Qwen3_5MoeAttention,
@@ -126,6 +124,8 @@ def test_qwen_export_metadata_sets_pad_token_before_parent_metadata(
     model = object.__new__(XHQwen3_5Model)
     model.hf_model_dir = str(model_dir)
     model._default_pad_token_id = 123
+    model.config = SimpleNamespace(context_max_length=2048, only_first_block=False)
+    model._kvcache_config = SimpleNamespace()
     observed_pad_token_ids = []
 
     def fake_create_export_metadata(self, output_dir):
@@ -159,26 +159,6 @@ def test_remove_registered_members_hides_modules_parameters_and_buffers_from_to(
     assert module._modules == {}
     assert module._parameters == {}
     assert module._buffers == {}
-
-
-def test_visual_simplified_onnx_cache_refreshes_when_source_is_newer(tmp_path):
-    onnx_file = tmp_path / "qwen3_5_visual.onnx"
-    simplified_onnx_file = tmp_path / "qwen3_5_visual_simplified.onnx"
-    onnx_file.write_bytes(b"new source")
-
-    assert _visual_simplified_onnx_needs_refresh(onnx_file, simplified_onnx_file)
-
-    simplified_onnx_file.write_bytes(b"old simplified")
-    old_time = onnx_file.stat().st_mtime - 10
-    simplified_onnx_file.touch()
-    os.utime(simplified_onnx_file, (old_time, old_time))
-
-    assert _visual_simplified_onnx_needs_refresh(onnx_file, simplified_onnx_file)
-
-    fresh_time = onnx_file.stat().st_mtime + 10
-    os.utime(simplified_onnx_file, (fresh_time, fresh_time))
-
-    assert not _visual_simplified_onnx_needs_refresh(onnx_file, simplified_onnx_file)
 
 
 def test_gated_delta_net_placeholder_accepts_missing_conv_cache():
@@ -286,7 +266,7 @@ def test_resolve_hf_qwen35_class_allows_missing_parent_package(monkeypatch):
 def test_export_visual_hmonnx_impl_updates_meta_without_releasing_visual(tmp_path):
     exported_dir = tmp_path / "release"
     exported_dir.mkdir()
-    visual_hmonnx = exported_dir / "visual" / "vision.onnx"
+    visual_hmonnx = exported_dir / "visual" / "m1536" / "vision.onnx"
 
     class FakeVisual:
         def __init__(self):
@@ -301,8 +281,17 @@ def test_export_visual_hmonnx_impl_updates_meta_without_releasing_visual(tmp_pat
             assert Path(output_dir) == exported_dir / "visual"
             visual_hmonnx.parent.mkdir(parents=True)
             visual_hmonnx.touch()
-            meta = VisualModelMeta(image_size_w=448, image_size_h=448)
+            meta = VisualModelMeta()
             meta.hmonnx = str(visual_hmonnx)
+            meta.visual_input_mode = "patches"
+            meta.image_token_gears = [96, 196, 384, 704, 1536]
+            meta.gears = [
+                {
+                    "image_token_capacity": 1536,
+                    "patch_token_capacity": 6144,
+                    "hmonnx": "m1536/vision.onnx",
+                }
+            ]
             return meta
 
     model = XHQwen3_5Model.__new__(XHQwen3_5Model)
@@ -316,8 +305,9 @@ def test_export_visual_hmonnx_impl_updates_meta_without_releasing_visual(tmp_pat
     model._export_visual_hmonnx_impl(exported_info)
 
     assert hasattr(model, "visual")
-    assert meta_info.visual_config.hmonnx == "visual/vision.onnx"
-    assert meta_info.visual_config.image_size_w == 448
+    assert meta_info.visual_config.hmonnx == "visual/m1536/vision.onnx"
+    assert meta_info.visual_config.visual_input_mode == "patches"
+    assert meta_info.visual_config.gears[0]["hmonnx"] == "visual/m1536/vision.onnx"
     assert (exported_dir / "golden_meta_info.json").exists()
 
 

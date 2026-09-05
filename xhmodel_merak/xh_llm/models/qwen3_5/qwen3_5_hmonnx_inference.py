@@ -1,3 +1,7 @@
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import torch
 
 from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheWithLinearMixin
@@ -26,6 +30,7 @@ from .visual_token_gears import (
     VISUAL_INPUT_PATCHES,
     VISUAL_ROTARY_POSITION_FORMAT,
     build_visual_token_gear_inputs,
+    factor_image_token_grid,
     pad_flattened_patches,
     patch_token_capacity,
     select_image_token_gear,
@@ -105,7 +110,44 @@ class VisualTokenGearHMONNXModel:
             )
         self._device = self.models[self.gears[-1]].device
         self._dtype = torch.float16
-        self._enable_golden = enable_golden
+        self._golden_capture_capable = bool(enable_golden)
+        self._enable_golden = False
+        if enable_golden:
+            # HMONNXInferenceV2 installs its intermediate-output hooks only at
+            # session construction.  Re-apply the public setter here to reset
+            # every independent gear session to ``step_0`` as well.
+            self.enable_golden = True
+
+    @classmethod
+    def from_meta_file(cls, meta_file: str | Path, *, device, enable_golden: bool = False):
+        """Load a standalone patches-only visual release."""
+
+        meta_path = Path(meta_file)
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError(f"visual metadata must be a JSON object: {meta_path}")
+        raw_gears = data.get("gears")
+        if not isinstance(raw_gears, list) or not raw_gears:
+            raise ValueError(f"visual metadata must contain a non-empty gears list: {meta_path}")
+
+        resolved_gears = []
+        for raw_gear in raw_gears:
+            if not isinstance(raw_gear, dict):
+                raise TypeError(f"visual gear metadata must be an object: {raw_gear!r}")
+            gear = dict(raw_gear)
+            raw_hmonnx = str(gear.get("hmonnx", "")).strip()
+            if not raw_hmonnx:
+                raise ValueError(f"visual gear is missing hmonnx: {raw_gear!r}")
+            hmonnx = Path(raw_hmonnx)
+            if not hmonnx.is_absolute():
+                hmonnx = meta_path.parent / hmonnx
+            if not hmonnx.is_file():
+                raise FileNotFoundError(f"visual gear HMONNX does not exist: {hmonnx}")
+            gear["hmonnx"] = str(hmonnx)
+            resolved_gears.append(SimpleNamespace(**gear))
+
+        data["gears"] = resolved_gears
+        return cls(SimpleNamespace(**data), device=device, enable_golden=enable_golden)
 
     @property
     def device(self):
@@ -125,6 +167,10 @@ class VisualTokenGearHMONNXModel:
 
     @enable_golden.setter
     def enable_golden(self, enabled: bool):
+        if enabled and not self._golden_capture_capable:
+            raise RuntimeError(
+                "visual golden capture must be enabled when the token-gear runtime is constructed"
+            )
         for model in self.models.values():
             model.enable_golden = enabled
         self._enable_golden = enabled
@@ -158,6 +204,49 @@ class VisualTokenGearHMONNXModel:
             info = self._session_input_info(model, name)
             inputs.append(values[name].to(device=model.device, dtype=info.dtype))
         return tuple(inputs)
+
+    def _full_capacity_inputs(self, gear: int) -> tuple[torch.Tensor, ...]:
+        model = self.models[int(gear)]
+        merge_size = int(self.visual_meta.spatial_merge_size)
+        patch_capacity = patch_token_capacity(gear, merge_size)
+        patch_dim = (
+            int(self.visual_meta.in_channels)
+            * int(self.visual_meta.temporal_patch_size)
+            * int(self.visual_meta.patch_size) ** 2
+        )
+        grid_thw = factor_image_token_grid(gear, merge_size)
+        position_dtype = self._session_input_info(model, "position_weights").dtype
+        values = {
+            "pixel_values": torch.zeros((1, patch_capacity, patch_dim), dtype=torch.float32),
+        }
+        values.update(
+            build_visual_token_gear_inputs(
+                grid_thw,
+                patch_capacity=patch_capacity,
+                num_position_embeddings=int(self.visual_meta.num_position_embeddings),
+                spatial_merge_size=merge_size,
+                dtype=position_dtype,
+                rotary_cache_length=int(self.visual_meta.visual_rope_cache_length),
+            )
+        )
+        return self._coerce_inputs(model, values)
+
+    def run_all_gears(self) -> dict[int, tuple[int, ...]]:
+        """Execute every static visual graph once and return its output shape."""
+
+        output_shapes = {}
+        for gear in self.gears:
+            output = self.models[gear].forward(*self._full_capacity_inputs(gear))
+            output_shapes[gear] = tuple(int(dim) for dim in output.shape)
+        return output_shapes
+
+    def advance_golden_steps(self) -> None:
+        """Keep later image inference separate from the per-gear step-0 baseline."""
+
+        if not self.enable_golden:
+            raise RuntimeError("cannot advance visual golden steps when golden capture is disabled")
+        for model in self.models.values():
+            model.update_step()
 
     def _prepare_image(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> tuple[int, tuple, int]:
         grid_thw = grid_thw.reshape(1, 3)
@@ -342,16 +431,13 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         enable_golden = kwargs.get("enable_golden", False)
-        if getattr(self.visual_meta, "gears", None):
-            self.visual = VisualTokenGearHMONNXModel(
-                self.visual_meta,
-                device=self.prefill_model.device,
-                enable_golden=enable_golden,
-            )
-        else:
-            self.visual = VisualHMONNXModel(
-                self.visual_meta.hmonnx, device_map=[self.prefill_model.device], enable_golden=enable_golden
-            )
+        if not getattr(self.visual_meta, "gears", None):
+            raise ValueError("Qwen3.5 visual metadata must contain patch-token gears")
+        self.visual = VisualTokenGearHMONNXModel(
+            self.visual_meta,
+            device=self.prefill_model.device,
+            enable_golden=enable_golden,
+        )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
         self._sync_page_attention_mode_to_kvcache()
@@ -387,14 +473,10 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
 
     def get_tf_processor(self):
         processor = XHQwen3_5Processor.from_pretrained(self.hf_model_dir)
-        meta_info = self.meta_info.model_config
-        processor.config.patch_size = meta_info.visual_config.patch_size
-        processor.config.max_size_h = meta_info.visual_config.max_size_h
-        processor.config.max_size_w = meta_info.visual_config.max_size_w
-        processor.config.visual_input_mode = getattr(meta_info.visual_config, "visual_input_mode", "image")
-        if getattr(meta_info.visual_config, "gears", None):
-            max_patch_capacity = max(int(gear.patch_token_capacity) for gear in meta_info.visual_config.gears)
-            processor.config.max_pixels = max_patch_capacity * int(meta_info.visual_config.patch_size) ** 2
+        processor.config.patch_size = self.visual_meta.patch_size
+        processor.config.visual_input_mode = VISUAL_INPUT_PATCHES
+        max_patch_capacity = max(int(gear.patch_token_capacity) for gear in self.visual_meta.gears)
+        processor.config.max_pixels = max_patch_capacity * int(self.visual_meta.patch_size) ** 2
         return processor
 
     def to_fast(self):
@@ -420,8 +502,6 @@ class XHQwen3_5_HMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         data_preprocess = Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=input_sequence_length,
-            image_size_w=self.visual_meta.max_size_w,
-            image_size_h=self.visual_meta.max_size_h,
             past_key_caches=self.past_key_caches,
             past_value_caches=self.past_value_caches,
             past_conv_caches=self.past_conv_caches,

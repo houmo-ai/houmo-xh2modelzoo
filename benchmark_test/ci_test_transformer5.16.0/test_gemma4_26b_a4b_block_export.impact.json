@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "transformer516-block-export-harness",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_transformer516_block_export.py"
+      ]
+    },
+    {
+      "id": "gemma4-shared-source",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/gemma4_series/**",
+        "examples_merak/llm/gemma4_series/**"
+      ]
+    },
+    {
+      "id": "gemma4-26b-a4b-block",
+      "patterns": [
+        "configs_merak/workflows/**/gemma4_series/26b_a4b/**"
+      ]
+    }
+  ]
+}

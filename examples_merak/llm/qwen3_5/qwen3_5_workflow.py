@@ -1,8 +1,8 @@
 """Standard Qwen3.5/Qwen3.6 Merak workflow example.
 
-Run this file from the repository root.  Model shape, quantization, visual
-size, MTP/DFlash, FlashAttention, and GDR defaults stay in YAML.  The CLI only
-adds explicit run-local overrides.
+Run this file from the repository root. Model shape, quantization, visual
+token gears, MTP/DFlash, FlashAttention, and GDR defaults stay in YAML. The
+CLI only adds explicit run-local overrides.
 """
 
 import argparse
@@ -157,18 +157,6 @@ def parse_args() -> argparse.Namespace:
         help="quantization bits, set this param to override config.yaml",
     )
     parser.add_argument(
-        "--max-size-h",
-        type=int,
-        default=None,
-        help="ViT input height, set this param to override config.yaml",
-    )
-    parser.add_argument(
-        "--max-size-w",
-        type=int,
-        default=None,
-        help="ViT input width, set this param to override config.yaml",
-    )
-    parser.add_argument(
         "--context-max-length",
         "--context-length",
         type=int,
@@ -250,10 +238,6 @@ def main() -> None:
     _remove_output_dir_if_needed(args.export_output_dir, args.overwrite)
     config_overrides = {}
     _apply_model_name_override(config_overrides, args.model_name)
-    if args.max_size_h:
-        config_overrides["export.model.visual_config.max_size_h"] = args.max_size_h
-    if args.max_size_w:
-        config_overrides["export.model.visual_config.max_size_w"] = args.max_size_w
     _add_context_length_overrides(
         config_overrides,
         args.context_max_length,

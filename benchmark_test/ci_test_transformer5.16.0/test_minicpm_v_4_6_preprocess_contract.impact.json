@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v46-text-preprocess-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_6/inference.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_6/text_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/data_preprocess.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/split_conv_cache_utils.py"
+      ]
+    }
+  ]
+}

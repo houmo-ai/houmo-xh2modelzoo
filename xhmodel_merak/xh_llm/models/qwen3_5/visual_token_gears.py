@@ -14,9 +14,7 @@ from typing import Iterable
 import torch
 
 
-VISUAL_INPUT_IMAGE = "image"
 VISUAL_INPUT_PATCHES = "patches"
-SUPPORTED_VISUAL_INPUT_MODES = frozenset({VISUAL_INPUT_IMAGE, VISUAL_INPUT_PATCHES})
 VISUAL_ATTENTION_MASK_FORMAT = "additive_key_padding_bias"
 VISUAL_ATTENTION_MASK_SHAPE = "[1,1,1,patch_token_capacity]"
 VISUAL_ATTENTION_MASK_OPERATOR = "xhquant.nn.MaskedAdd+Softmax"

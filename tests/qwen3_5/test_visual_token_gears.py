@@ -1,8 +1,104 @@
 import copy
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+
+def _visual_export_config(**overrides):
+    from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import XHQwen3_5_VisualConfig
+
+    values = {
+        "model_name": "qwen3_5_visual",
+        "visual_input_mode": "patches",
+        "image_token_gears": [96, 196, 384, 704, 1536],
+        "image_token_capacity": 1536,
+        "spatial_merge_size": 2,
+    }
+    values.update(overrides)
+    return XHQwen3_5_VisualConfig(**values)
+
+
+def test_visual_config_only_accepts_patch_token_gears():
+    config = _visual_export_config()
+
+    assert config.visual_input_mode == "patches"
+    assert config.image_token_gears == [96, 196, 384, 704, 1536]
+    assert config.image_token_capacity == 1536
+    assert config.visual_rope_cache_length == 3072
+    assert not hasattr(config, "max_size_w")
+    assert not hasattr(config, "max_size_h")
+
+    with pytest.raises(ValueError, match="only supports 'patches'"):
+        _visual_export_config(visual_input_mode="image")
+    with pytest.raises(TypeError, match="no longer accepts fixed image sizes"):
+        _visual_export_config(max_size_w=448, max_size_h=448)
+
+
+def test_full_export_directory_name_contains_visual_token_gears(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5 import qwen3_5_llm_model as model_module
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls):
+            return SimpleNamespace(strftime=lambda _format: "20260825")
+
+    monkeypatch.setattr(model_module, "datetime", FixedDatetime)
+    model = model_module.XHQwen3_5Model.__new__(model_module.XHQwen3_5Model)
+    model.config = SimpleNamespace(model_name="xh2_qwen3_8_27b_w4a8_256_256k_mpe256k")
+    model.visual = SimpleNamespace(
+        config=SimpleNamespace(image_token_gears=[96, 196, 384, 704, 1536])
+    )
+    model.create_export_metadata = lambda _output_dir: SimpleNamespace()
+
+    export_info = model.get_export_info(tmp_path)
+
+    expected_name = (
+        "hmquant_xh2_qwen3_8_27b_w4a8_256_256k_mpe256k_"
+        "visualm96_196_384_704_1536_20260825"
+    )
+    assert export_info.model_name == expected_name
+    assert export_info.exported_dir == str(tmp_path / expected_name)
+
+
+def test_visual_export_metadata_resolves_flat_gears_after_relocation(tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
+    from xhmodel_merak.xh_llm.types import VisualModelMeta
+
+    class ExportFixture(XHQwen3_5VisionModel):
+        def __init__(self, config):
+            self.config = config
+
+        def create_export_metadata(self, _output_dir):
+            return VisualModelMeta()
+
+        def _export_single_hmonnx(self, output_dir):
+            graph = Path(output_dir) / f"{self.config.model_name}.onnx"
+            graph.parent.mkdir(parents=True)
+            graph.touch()
+            meta = VisualModelMeta()
+            meta.hmonnx = str(graph)
+            return meta
+
+    gears = [96, 196, 384, 704, 1536]
+    model = ExportFixture(_visual_export_config())
+    output_dir = tmp_path / "visual"
+    model.export_hmonnx(str(output_dir))
+    relocated = tmp_path / "relocated_visual"
+    output_dir.rename(relocated)
+
+    metadata = json.loads((relocated / "visual_meta_info.json").read_text())
+    manifest = json.loads((relocated / metadata["gear_manifest"]).read_text())
+    expected_paths = [f"m{gear}/qwen3_5_visual_m{gear}.onnx" for gear in gears]
+    assert [entry["hmonnx"] for entry in metadata["gears"]] == expected_paths
+    assert [entry["hmonnx"] for entry in manifest["gears"]] == expected_paths
+    assert metadata["hmonnx"] == expected_paths[-1]
+    assert sorted(path.name for path in relocated.iterdir() if path.is_dir()) == sorted(
+        f"m{gear}" for gear in gears
+    )
+    assert all((relocated / path).is_file() for path in expected_paths)
 
 
 def _tiny_vision_config():
@@ -70,9 +166,9 @@ def test_visual_gear_manifest_is_sorted_and_uses_smallest_fit_contract():
 
     manifest = build_visual_gear_manifest(
         [
-            {"image_token_capacity": 512, "patch_token_capacity": 2048, "hmonnx": "gears/m512/v.onnx"},
-            {"image_token_capacity": 96, "patch_token_capacity": 384, "hmonnx": "gears/m96/v.onnx"},
-            {"image_token_capacity": 320, "patch_token_capacity": 1280, "hmonnx": "gears/m320/v.onnx"},
+            {"image_token_capacity": 512, "patch_token_capacity": 2048, "hmonnx": "m512/v.onnx"},
+            {"image_token_capacity": 96, "patch_token_capacity": 384, "hmonnx": "m96/v.onnx"},
+            {"image_token_capacity": 320, "patch_token_capacity": 1280, "hmonnx": "m320/v.onnx"},
         ],
         visual_rope_cache_length=1024,
     )
@@ -164,8 +260,6 @@ def test_visual_token_graph_matches_native_and_masks_padding():
     patch_capacity = image_token_capacity * config.spatial_merge_size**2
     wrap_cfg = ConfigDict(
         dict(
-            max_size_w=8,
-            max_size_h=8,
             max_size_t=2,
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
@@ -342,6 +436,7 @@ def test_visual_hmonnx_router_groups_by_gear_and_restores_image_order(monkeypatc
             self.device = torch.device("cpu")
             self.hmonnx_session = FakeSession()
             self.enable_golden = False
+            self.steps_advanced = 0
 
         def forward(self, *args):
             calls.append(self.gear)
@@ -353,6 +448,9 @@ def test_visual_hmonnx_router_groups_by_gear_and_restores_image_order(monkeypatc
 
         def _set_dtype(self, dtype):
             return self
+
+        def update_step(self):
+            self.steps_advanced += 1
 
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
     monkeypatch.setattr(runtime, "MultiHMONNXLoader", FakeLoader)
@@ -368,12 +466,15 @@ def test_visual_hmonnx_router_groups_by_gear_and_restores_image_order(monkeypatc
         attention_mask_operator="xhquant.nn.MaskedAdd+Softmax",
         rotary_position_format="height_width_2d_ids",
         spatial_merge_size=2,
+        temporal_patch_size=2,
+        patch_size=2,
+        in_channels=3,
         visual_rope_cache_length=20,
         hidden_size=128,
         num_heads=2,
         num_position_embeddings=16,
     )
-    router = runtime.VisualTokenGearHMONNXModel(meta, device="cpu")
+    router = runtime.VisualTokenGearHMONNXModel(meta, device="cpu", enable_golden=True)
 
     grids = torch.tensor([[1, 4, 8], [1, 4, 4]], dtype=torch.int64)
     first = torch.randn(32, 24)
@@ -404,3 +505,43 @@ def test_visual_hmonnx_router_groups_by_gear_and_restores_image_order(monkeypatc
     )
     assert direct.shape == (1, 4, 3)
     assert calls == [6, 10, 6]
+
+    assert router.run_all_gears() == {
+        6: (1, 6, 3),
+        10: (1, 10, 3),
+    }
+    assert calls == [6, 10, 6, 6, 10]
+    assert all(model.enable_golden for model in router.models.values())
+    router.advance_golden_steps()
+    assert all(model.steps_advanced == 1 for model in router.models.values())
+
+
+def test_visual_hmonnx_router_rejects_late_golden_enable(monkeypatch):
+    from xhmodel_merak.xh_llm.models.qwen3_5 import qwen3_5_hmonnx_inference as runtime
+
+    class FakeLoader:
+        def __init__(self, graph_files):
+            self.graphs = {name: name for name in graph_files}
+
+    class FakeVisualModel:
+        def __init__(self, _path, onnx_graph=None, **_kwargs):
+            self.device = torch.device("cpu")
+            self.enable_golden = False
+
+    monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
+    monkeypatch.setattr(runtime, "MultiHMONNXLoader", FakeLoader)
+    monkeypatch.setattr(runtime, "VisualHMONNXModel", FakeVisualModel)
+    meta = SimpleNamespace(
+        gears=[SimpleNamespace(image_token_capacity=6, patch_token_capacity=24, hmonnx="m6.onnx")],
+        visual_input_mode="patches",
+        attention_mask_format="additive_key_padding_bias",
+        attention_mask_shape="[1,1,1,patch_token_capacity]",
+        attention_mask_operator="xhquant.nn.MaskedAdd+Softmax",
+        rotary_position_format="height_width_2d_ids",
+        spatial_merge_size=2,
+        visual_rope_cache_length=12,
+    )
+    router = runtime.VisualTokenGearHMONNXModel(meta, device="cpu")
+
+    with pytest.raises(RuntimeError, match="enabled when the token-gear runtime is constructed"):
+        router.enable_golden = True

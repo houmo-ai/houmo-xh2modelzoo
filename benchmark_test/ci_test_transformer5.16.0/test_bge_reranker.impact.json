@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "allure-compat",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_allure_compat.py"
+      ]
+    }
+  ]
+}

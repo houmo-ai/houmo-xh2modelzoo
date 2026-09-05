@@ -198,8 +198,6 @@ class Qwen35Workflow(BaseLLMWorkflow):
     ) -> str:
         from xhquant.api import get_xhquant_logger
 
-        root_meta_file = self._find_golden_meta_file(export_result)
-        messages = self.build_input_message(input_messages)
         logger = get_xhquant_logger()
         # Preserve the established single-device path unless the caller
         # explicitly requests a multi-device map.  The latter exists for
@@ -210,9 +208,21 @@ class Qwen35Workflow(BaseLLMWorkflow):
         if auto_offload is None:
             auto_offload = cuda_device_count > 1
         if use_v2 is None:
-            use_v2 = auto_offload or self._env_flag_enabled("ENABLE_HMINFERENCE_V2")
-        if auto_offload and not use_v2:
-            raise ValueError("Qwen3.5 golden auto-offload requires HMONNXInferenceV2.")
+            use_v2 = True
+        if not use_v2:
+            raise ValueError("patches-only Qwen3.5 golden generation requires HMONNXInferenceV2")
+
+        if self._is_visual_only_export(export_result):
+            with self._hmonnx_v2_scope(True):
+                return self._dump_visual_only_golden(
+                    export_result,
+                    device,
+                    device_map=resolved_device_map,
+                    logger=logger,
+                )
+
+        root_meta_file = self._find_golden_meta_file(export_result)
+        messages = self.build_input_message(input_messages)
 
         logger.info(
             f"Qwen3.5 golden runtime: device_map={resolved_device_map}, "
@@ -239,6 +249,60 @@ class Qwen35Workflow(BaseLLMWorkflow):
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
         return root_meta_file
+
+    @staticmethod
+    def _is_visual_only_export(export_result: ExportResult) -> bool:
+        meta = getattr(export_result, "meta", None)
+        if getattr(meta, "gears", None) and not getattr(meta, "model_config", None):
+            return True
+        work_dir = getattr(export_result, "work_dir", None)
+        return bool(work_dir and (Path(work_dir) / "visual_meta_info.json").is_file())
+
+    @staticmethod
+    def _normalize_visual_device(device: Any) -> torch.device:
+        if isinstance(device, torch.device):
+            return device
+        if isinstance(device, int):
+            return torch.device(f"cuda:{device}")
+        normalized = str(device).strip().lower()
+        if normalized.isdigit():
+            normalized = f"cuda:{normalized}"
+        return torch.device(normalized)
+
+    def _dump_visual_only_golden(
+        self,
+        export_result: ExportResult,
+        device: str,
+        *,
+        device_map: list[Any] | None,
+        logger: Any,
+    ) -> str:
+        from .qwen3_5_hmonnx_inference import VisualTokenGearHMONNXModel
+
+        meta_file = Path(export_result.work_dir) / "visual_meta_info.json"
+        if not meta_file.is_file():
+            raise FileNotFoundError(f"standalone visual metadata does not exist: {meta_file}")
+        selected_device = self._normalize_visual_device(device_map[0] if device_map else device)
+        if device_map and len(device_map) > 1:
+            logger.info(
+                "Standalone visual golden uses one device; selecting %s from device_map=%s",
+                selected_device,
+                device_map,
+            )
+        visual = VisualTokenGearHMONNXModel.from_meta_file(
+            meta_file,
+            device=selected_device,
+            enable_golden=True,
+        )
+        try:
+            output_shapes = visual.run_all_gears()
+            logger.info(f"Generated standalone visual golden for every token gear: {output_shapes}")
+        finally:
+            del visual
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return str(meta_file)
 
     def _dump_golden_for_meta(
         self,
@@ -318,6 +382,14 @@ class Qwen35Workflow(BaseLLMWorkflow):
                 inference_context,
             ]
             with ContextManagers(contexts):
+                visual = getattr(hmonnx_model, "visual", None)
+                run_all_gears = getattr(visual, "run_all_gears", None)
+                if callable(run_all_gears):
+                    output_shapes = run_all_gears()
+                    logger.info(f"Generated visual golden for every token gear: {output_shapes}")
+                    # Preserve deterministic full-capacity baselines in step_0;
+                    # the real image routed by generate() belongs to step_1.
+                    visual.advance_golden_steps()
                 generated_ids = hmonnx_model.generate(
                     **model_inputs,
                     max_new_tokens=2,
@@ -353,10 +425,6 @@ class Qwen35Workflow(BaseLLMWorkflow):
             return device.type == "cuda"
         normalized = str(device).strip().lower()
         return normalized == "cuda" or normalized.startswith("cuda:") or normalized.isdigit()
-
-    @staticmethod
-    def _env_flag_enabled(name: str) -> bool:
-        return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     @contextmanager

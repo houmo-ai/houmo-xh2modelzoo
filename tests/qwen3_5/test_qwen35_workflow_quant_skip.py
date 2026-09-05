@@ -77,12 +77,12 @@ def test_qwen35_workflow_context_length_override_has_one_source_of_truth():
 def test_qwen35_workflow_context_length_override_skips_missing_optional_draft_configs():
     from examples_merak.llm.qwen3_5.qwen3_5_workflow import _add_context_length_overrides
 
-    overrides = {"export.model.visual_config.max_size_h": 896}
+    overrides = {"export.model.visual_config.image_token_capacity": 704}
 
     _add_context_length_overrides(overrides, 4096)
 
     assert overrides == {
-        "export.model.visual_config.max_size_h": 896,
+        "export.model.visual_config.image_token_capacity": 704,
         "export.model.context_max_length": 4096,
     }
 
@@ -390,6 +390,8 @@ def test_qwen35_workflow_dump_golden_auto_offloads_only_when_explicit(monkeypatc
 
 
 def test_qwen35_workflow_dump_golden_keeps_default_single_device(monkeypatch):
+    import os
+
     from xhmodel_merak.xh_llm.models.qwen3_5 import workflow as workflow_module
 
     class FakeLogger:
@@ -402,7 +404,7 @@ def test_qwen35_workflow_dump_golden_keeps_default_single_device(monkeypatch):
     workflow.build_input_message = lambda _messages: []
     workflow._collect_golden_meta_files = lambda _root: ["root-meta"]
     workflow._dump_golden_for_meta = lambda meta, device, messages, **kwargs: calls.append(
-        (meta, device, messages, kwargs)
+        (meta, device, messages, kwargs, os.environ.get("ENABLE_HMINFERENCE_V2"))
     )
     monkeypatch.setattr("xhquant.api.get_xhquant_logger", lambda: FakeLogger())
     monkeypatch.setattr(workflow_module.torch.cuda, "is_available", lambda: True)
@@ -414,6 +416,56 @@ def test_qwen35_workflow_dump_golden_keeps_default_single_device(monkeypatch):
     assert calls[0][3]["auto_offload"] is False
     assert calls[0][3]["device_map"] is None
     assert calls[0][3]["resource_tight_mode"] is False
+    assert calls[0][4] == "1"
+    assert "ENABLE_HMINFERENCE_V2" not in os.environ
+
+
+def test_qwen35_workflow_dumps_every_standalone_visual_gear(monkeypatch, tmp_path: Path):
+    import os
+
+    from xhmodel_merak.xh_llm.models.qwen3_5 import qwen3_5_hmonnx_inference
+    from xhmodel_merak.xh_llm.models.qwen3_5 import workflow as workflow_module
+    from xhmodel_merak.xh_llm.workflows.result import ExportResult
+
+    meta_file = tmp_path / "visual_meta_info.json"
+    meta_file.write_text("{}", encoding="utf-8")
+    events = []
+
+    class FakeLogger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+    class FakeVisualRuntime:
+        def run_all_gears(self):
+            events.append("run_all_gears")
+            return {96: (1, 96, 32), 1536: (1, 1536, 32)}
+
+    def fake_from_meta_file(path, *, device, enable_golden):
+        events.append((str(path), str(device), enable_golden, os.environ.get("ENABLE_HMINFERENCE_V2")))
+        return FakeVisualRuntime()
+
+    monkeypatch.setattr(
+        qwen3_5_hmonnx_inference.VisualTokenGearHMONNXModel,
+        "from_meta_file",
+        fake_from_meta_file,
+    )
+    monkeypatch.setattr("xhquant.api.get_xhquant_logger", lambda: FakeLogger())
+    monkeypatch.setattr(workflow_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.delenv("ENABLE_HMINFERENCE_V2", raising=False)
+
+    workflow = workflow_module.Qwen35Workflow.__new__(workflow_module.Qwen35Workflow)
+    export_result = ExportResult(
+        work_dir=str(tmp_path),
+        config_file="effective.yaml",
+        meta=SimpleNamespace(gears=[96, 1536]),
+    )
+
+    assert workflow.dump_golden(export_result, "cuda:0", {}) == str(meta_file)
+    assert events == [
+        (str(meta_file), "cuda:0", True, "1"),
+        "run_all_gears",
+    ]
+    assert "ENABLE_HMINFERENCE_V2" not in os.environ
 
 
 def test_qwen35_workflow_spec_decode_golden_uses_real_generate_source(monkeypatch, tmp_path: Path):

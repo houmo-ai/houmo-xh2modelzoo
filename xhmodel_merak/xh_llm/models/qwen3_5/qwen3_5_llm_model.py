@@ -76,6 +76,7 @@ from .split_conv_cache_utils import (
     _is_grouped_split_conv_cache,
     _regroup_flat_split_conv_cache,
 )
+from .visual_token_gears import normalize_image_token_gears
 from .xh_qwen3_5_config import XHQwen3_5ModelConfig
 
 
@@ -1223,8 +1224,6 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         data_preprocess = Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=self.wrap_cfg.input_sequence_length,
-            image_size_w=self.config.visual_config.max_size_w,
-            image_size_h=self.config.visual_config.max_size_h,
             past_key_caches=self.past_key_caches,
             past_value_caches=self.past_value_caches,
             past_conv_caches=self.past_conv_caches,
@@ -1328,9 +1327,9 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             raise ValueError("Model name is not specified in config, please set model_name in config before exporting.")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         if getattr(self, "visual", None) is not None:
-            image_size_h = self.visual.config.max_size_h
-            image_size_w = self.visual.config.max_size_w
-            model_name = f"hmquant_{model_name}_{image_size_w}x{image_size_h}_{str_datetime}"
+            visual_gears = normalize_image_token_gears(self.visual.config.image_token_gears)
+            visual_gear_token = "_".join(str(gear) for gear in visual_gears)
+            model_name = f"hmquant_{model_name}_visualm{visual_gear_token}_{str_datetime}"
         else:
             model_name = f"hmquant_{model_name}_{str_datetime}"
         output_dir = Path(output_dir) / model_name

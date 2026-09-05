@@ -18,12 +18,15 @@ export:
     flash_attention:
       enable: false
       q_bits: 8
+      k_bits: 8
+      v_bits: 8
       s_bits: 8
+      p_bits: 8
     split_conv_cache: true
     normalize_force_fp32: false
     use_manual_depthwise_conv1d: false
-    fuse_gdr_ops: false
-    fuse_gdr_block_recurrent_ops: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
     quant_scheme:
       quant_type: w8a8h1_sefp
       nodes:
@@ -31,8 +34,10 @@ export:
           quant_type: w8a8h1_sefp
       ops: {}
     visual_config:
-      max_size_w: 448
-      max_size_h: 448
+      visual_input_mode: patches
+      image_token_gears: [96, 196, 384, 704, 1536]
+      image_token_capacity: 1536
+      spatial_merge_size: 2
       quant_scheme:
         quant_type: w8a8h1_sefp
         ops: {}

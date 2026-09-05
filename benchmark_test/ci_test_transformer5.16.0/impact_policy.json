@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "always_tests": [
+    "benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py"
+  ],
+  "frozen_patterns": [
+    "xh_model_zoo/**",
+    "xh_model_zoo_develop/**",
+    "examples/**",
+    "examples_develop/**",
+    "configs/**"
+  ],
+  "documentation_patterns": [
+    "docs/**",
+    "*.md",
+    "**/*.md",
+    "*.rst",
+    "**/*.rst",
+    "LICENSE*",
+    ".gitignore"
+  ],
+  "guarded_patterns": [
+    "xhmodel_merak/**/*.py",
+    "configs_merak/**/*.yaml",
+    "configs_merak/**/*.yml",
+    "examples_merak/**/*.py",
+    "benchmark_test/ci_test_transformer5.16.0/*.py",
+    "benchmark_test/ci_test_transformer5.16.0/*.sh"
+  ],
+  "full_suite_patterns": [
+    "benchmark_test/ci_test_transformer5.16.0/run.sh",
+    "benchmark_test/ci_test_transformer5.16.0/select_tests.py",
+    "benchmark_test/ci_test_transformer5.16.0/impact_policy.json",
+    "benchmark_test/ci_test_transformer5.16.0/conftest.py",
+    "benchmark_test/ci_test_transformer5.16.0/pytest.ini",
+    "xhmodel_merak/xh_llm/workflows/**",
+    "xhmodel_merak/xh_llm/base_model.py",
+    "xhmodel_merak/xh_llm/_dequant_converter.py",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements*.txt",
+    "benchmark_test/ci_test_transformer5.16.0/_impact_manifest.py"
+  ]
+}

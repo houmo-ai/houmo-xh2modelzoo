@@ -165,8 +165,8 @@ def test_flash_and_legacy_attention_preserve_same_bshd_wrapper_layout(monkeypatc
     )
     hidden_states = torch.randn(1, 3, 4)
 
-    legacy_output = legacy(hidden_states)[0]
-    flash_output = flash(hidden_states)[0]
+    legacy_output = legacy(hidden_states)
+    flash_output = flash(hidden_states)
 
     assert legacy_output.shape == flash_output.shape == (1, 3, 4)
     torch.testing.assert_close(flash_output, legacy_output)

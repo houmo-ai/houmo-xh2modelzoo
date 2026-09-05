@@ -65,8 +65,6 @@ class MiniCPMV46TextHMONNXModel(XHQwen3_5_HMONNXModel):
         return Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=self.get_input_sequence_length(),
-            image_size_w=448,
-            image_size_h=448,
             past_key_caches=self.past_key_caches,
             past_value_caches=self.past_value_caches,
             past_conv_caches=self.past_conv_caches,

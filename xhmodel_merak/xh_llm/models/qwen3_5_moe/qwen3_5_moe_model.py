@@ -245,9 +245,7 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
 
         if hasattr(config, "visual_config") and config.visual_config is not None and config.visual_config.enable:
             self.visual = XHQwen3_5MoeVisionModel(config.visual_config)
-            self.visual.config.model_name = (
-                f"{self.config.model_name}_{self.visual.config.max_size_w}x{self.visual.config.max_size_h}"
-            )
+            self.visual.config.model_name = f"{self.config.model_name}_visual"
         else:
             self.visual = None
         # self.full_attention_layer_indices: list[int] = []

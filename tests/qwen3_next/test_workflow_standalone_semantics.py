@@ -99,27 +99,31 @@ BASE_EXPORT_MODEL = {
     "num_logits_to_keep": 1,
     "linear_attention_mode": "auto",
     "linear_chunk_size": 64,
-    "flash_attention": {"enable": False, "q_bits": 8, "s_bits": 8},
+    "flash_attention": {
+        "enable": False, "q_bits": 8, "k_bits": 8, "v_bits": 8, "s_bits": 8, "p_bits": 8,
+    },
     "split_conv_cache": True,
     "normalize_force_fp32": False,
     "use_manual_depthwise_conv1d": False,
-    "fuse_gdr_ops": False,
-    "fuse_gdr_block_recurrent_ops": False,
+    "fuse_gdr_ops": True,
+    "fuse_gdr_block_recurrent_ops": True,
     "quant_scheme": {
         "quant_type": "w8a8h1_sefp",
         "nodes": {"lm_head": {"quant_type": "w8a8h1_sefp"}},
         "ops": {},
     },
     "visual_config": {
-        "max_size_w": 448,
-        "max_size_h": 448,
+        "visual_input_mode": "patches",
+        "image_token_gears": [96, 196, 384, 704, 1536],
+        "image_token_capacity": 1536,
+        "spatial_merge_size": 2,
         "quant_scheme": {"quant_type": "w8a8h1_sefp", "ops": {}},
     },
     "only_first_block": False,
 }
 
 
-def _legacy_q35_expected(
+def _q35_release_expected(
     *,
     model_name: str,
     profile: str,
@@ -160,8 +164,6 @@ def _legacy_q35_expected(
             "ops": {"MatMul": copy.deepcopy(matmul)},
         }
     if profile == "mtp_gptq":
-        # The legacy MTP leaf intentionally omitted flash_attention.
-        model.pop("flash_attention")
         model.update(
             {
                 "spec_decode_mode": "mtp",
@@ -174,7 +176,6 @@ def _legacy_q35_expected(
                     "head_dim": 256,
                     "batch_size": 1,
                     "input_sequence_length": 1,
-                    "context_max_length": 2048,
                     "max_pe_length": 262144,
                     "use_cache": True,
                 },
@@ -188,23 +189,23 @@ def _legacy_q35_expected(
     [
         (
             Q35_35B_ROOT / "qwen3_6_35b_a3b_full.yaml",
-            _legacy_q35_expected(model_name="qwen3_6_35b_a3b", profile="autoround"),
+            _q35_release_expected(model_name="qwen3_6_35b_a3b", profile="autoround"),
         ),
         (
             Q35_35B_ROOT / "qwen3_6_35b_a3b_full_fa_all16.yaml",
-            _legacy_q35_expected(model_name="qwen3_6_35b_a3b", profile="fa_all16"),
+            _q35_release_expected(model_name="qwen3_6_35b_a3b", profile="fa_all16"),
         ),
         (
             Q35_35B_ROOT / "qwen3_6_35b_a3b_full_gptq.yaml",
-            _legacy_q35_expected(model_name="qwen3_6_35b_a3b", profile="gptq"),
+            _q35_release_expected(model_name="qwen3_6_35b_a3b", profile="gptq"),
         ),
         (
             Q35_35B_ROOT / "qwen3_6_35b_a3b_full_mtp_gptq.yaml",
-            _legacy_q35_expected(model_name="qwen3_6_35b_a3b", profile="mtp_gptq"),
+            _q35_release_expected(model_name="qwen3_6_35b_a3b", profile="mtp_gptq"),
         ),
         (
             Q35_122B_ROOT / "qwen3_5_122b_a10b_full.yaml",
-            _legacy_q35_expected(
+            _q35_release_expected(
                 model_name="qwen3_5_122b_a10b",
                 profile="autoround",
                 autoround_dataset=True,
@@ -212,7 +213,7 @@ def _legacy_q35_expected(
         ),
         (
             Q35_122B_ROOT / "qwen3_5_122b_a10b_full_gptq.yaml",
-            _legacy_q35_expected(
+            _q35_release_expected(
                 model_name="qwen3_5_122b_a10b",
                 profile="gptq",
                 expert_down_bits=4,
@@ -220,7 +221,7 @@ def _legacy_q35_expected(
         ),
     ],
 )
-def test_standalone_qwen35_leaf_matches_legacy_semantics(path: Path, expected: dict):
+def test_standalone_qwen35_leaf_matches_release_contract(path: Path, expected: dict):
     assert WorkflowConfig.from_file(str(path)).data == expected
 
 

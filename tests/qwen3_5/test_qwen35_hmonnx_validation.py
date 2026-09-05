@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -43,12 +44,20 @@ def test_find_hmonnx_meta_file_accepts_export_result_dir_and_meta(monkeypatch, t
     assert runtime.find_hmonnx_meta_file(meta_file) == str(meta_file)
 
 
+def test_find_hmonnx_meta_file_accepts_standalone_visual_export(monkeypatch, tmp_path: Path):
+    runtime = _load_runtime_module(monkeypatch)
+    visual_meta = tmp_path / "visual_meta_info.json"
+    visual_meta.write_text('{"visual_input_mode": "patches", "gears": [{}]}', encoding="utf-8")
+
+    assert runtime.find_hmonnx_meta_file(tmp_path) == str(visual_meta)
+
+
 def test_quick_test_hmonnx_routes_plain_and_spec_decode_meta(monkeypatch, tmp_path: Path):
     runtime = _load_runtime_module(monkeypatch)
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
 
     def fake_generate(meta_file, **kwargs):
-        calls.append(("generate", str(meta_file)))
+        calls.append(("generate", str(meta_file), os.environ.get("ENABLE_HMINFERENCE_V2")))
         return runtime.HMONNXQuickTestResult(
             meta_file=str(meta_file),
             output_text="plain",
@@ -58,7 +67,7 @@ def test_quick_test_hmonnx_routes_plain_and_spec_decode_meta(monkeypatch, tmp_pa
         )
 
     def fake_spec(meta_file, **kwargs):
-        calls.append(("spec", str(meta_file)))
+        calls.append(("spec", str(meta_file), os.environ.get("ENABLE_HMINFERENCE_V2")))
         return runtime.HMONNXQuickTestResult(
             meta_file=str(meta_file),
             output_text="spec",
@@ -71,17 +80,40 @@ def test_quick_test_hmonnx_routes_plain_and_spec_decode_meta(monkeypatch, tmp_pa
             accept_rate=0.75,
         )
 
+    def fake_visual(*, meta_file, device):
+        calls.append(("visual", str(meta_file), os.environ.get("ENABLE_HMINFERENCE_V2")))
+        return runtime.HMONNXQuickTestResult(
+            meta_file=str(meta_file),
+            output_text=f"visual:{device}",
+            output_tokens=0,
+            latency_s=1.0,
+            tokens_per_second=0.0,
+        )
+
     monkeypatch.setattr(runtime, "hmonnx_generate", fake_generate)
     monkeypatch.setattr(runtime, "spec_decode_generate", fake_spec)
+    monkeypatch.setattr(runtime, "visual_hmonnx_smoke_test", fake_visual)
 
     plain_meta = tmp_path / "plain.json"
     plain_meta.write_text("{}", encoding="utf-8")
     spec_meta = tmp_path / "spec.json"
     spec_meta.write_text(json.dumps({"spec_decode": {"mode": "mtp"}}), encoding="utf-8")
+    visual_meta = tmp_path / "visual_meta_info.json"
+    visual_meta.write_text(
+        json.dumps({"visual_input_mode": "patches", "gears": [{"image_token_capacity": 96}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ENABLE_HMINFERENCE_V2", raising=False)
 
     assert runtime.quick_test_hmonnx(plain_meta).output_text == "plain"
     assert runtime.quick_test_hmonnx(spec_meta).accept_rate == 0.75
-    assert calls == [("generate", str(plain_meta)), ("spec", str(spec_meta))]
+    assert runtime.quick_test_hmonnx(visual_meta, device="cuda:3").output_text == "visual:cuda:3"
+    assert calls == [
+        ("generate", str(plain_meta), "1"),
+        ("spec", str(spec_meta), "1"),
+        ("visual", str(visual_meta), "1"),
+    ]
+    assert "ENABLE_HMINFERENCE_V2" not in os.environ
 
 
 def test_spec_decode_stats_are_summarized_with_accept_rate(monkeypatch, tmp_path: Path):

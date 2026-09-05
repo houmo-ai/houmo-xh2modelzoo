@@ -35,8 +35,6 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         *,
         token_embedding: nn.Embedding,
         input_sequence_length: int = 256,
-        image_size_w: int = 1204,
-        image_size_h: int = 1204,
         past_key_caches=None,
         past_value_caches=None,
         past_conv_caches=None,
@@ -70,8 +68,6 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
 
         self.patch_size = patch_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
-        self.image_size_w = image_size_w
-        self.image_size_h = image_size_h
 
         self.past_key_caches = past_key_caches
         self.past_value_caches = past_value_caches
@@ -114,8 +110,8 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
 
         Args:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-                it.
+                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default
+                should you provide it.
             image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
                 The temporal, height and width of feature shape of each image in LLM.
             video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
@@ -277,9 +273,7 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         # assert self.token_embedding is not None, "Token embedding is not available."
         # assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
 
-        # assert seq_length <= self.input_sequence_length, (
-        #     f"Input sequence length is too long. max input sequence length is {self.input_sequence_length} but got {seq_length}"
-        # )
+        # assert seq_length <= self.input_sequence_length
         # if self.input_sequence_length > seq_length:
         #     padding_input_ids = torch.zeros((1, self.input_sequence_length - seq_length), dtype=torch.long).to(device)
         #     padding_input_ids.fill_(self.pad_token_id)
@@ -308,7 +302,8 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
             n_image_features = image_embeds.shape[0]
             if n_image_tokens != n_image_features:
                 raise ValueError(
-                    f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+                    "Image features and image tokens do not match: "
+                    f"tokens: {n_image_tokens}, features {n_image_features}"
                 )
             image_mask = (
                 (input_ids == self.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)

@@ -4,9 +4,9 @@
 Selection is deterministic and auditable:
 
 1. reject changes under frozen legacy directories;
-2. apply explicit high-risk rules from ``impact_rules.json``;
+2. apply global safety policy and test-local ``*.impact.json`` declarations;
 3. follow reverse Python-import dependencies when no explicit rule owns the file;
-4. use model-family co-location for existing ``tests/<family>`` suites;
+4. use model-family naming as a fallback within the active CI suite;
 5. fail closed when guarded code has no matching test.
 
 The selector deliberately does not depend on pytest, PyYAML, CodeGraph, or a
@@ -28,12 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
+from _impact_manifest import load_manifests, manifest_test, read_json, validate_paths
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 SUITE_RELATIVE = SCRIPT_DIR.relative_to(REPO_ROOT).as_posix()
-DEFAULT_RULES = SCRIPT_DIR / "impact_rules.json"
-SOURCE_ROOTS = ("xhmodel_merak", "examples_merak", "benchmark_test", "tests")
+POLICY_RELATIVE = f"{SUITE_RELATIVE}/impact_policy.json"
+SOURCE_ROOTS = ("xhmodel_merak", "examples_merak", SUITE_RELATIVE)
 
 
 class FrozenPathError(RuntimeError):
@@ -51,6 +53,7 @@ class Selection:
     reasons: Mapping[str, tuple[str, ...]]
     uncovered_files: tuple[str, ...] = ()
     full_suite: bool = False
+    full_suite_reasons: tuple[str, ...] = ()
 
 
 def _normalized(path: str | os.PathLike[str]) -> str:
@@ -68,10 +71,7 @@ def _looks_like_test_path(path: str) -> bool:
     candidate = PurePosixPath(path)
     if candidate.suffix != ".py":
         return False
-    if not (
-        path.startswith(f"{SUITE_RELATIVE}/")
-        or path.startswith("tests/")
-    ):
+    if not path.startswith(f"{SUITE_RELATIVE}/"):
         return False
     return candidate.name.startswith("test_") or candidate.name.endswith("_test.py")
 
@@ -79,26 +79,17 @@ def _looks_like_test_path(path: str) -> bool:
 @functools.lru_cache(maxsize=4)
 def _test_candidates(repo_root: Path) -> set[str]:
     candidates: set[str] = set()
-    for root_name in (SUITE_RELATIVE, "tests"):
-        root = repo_root / root_name
-        if not root.is_dir():
-            continue
-        for path in root.rglob("*.py"):
-            name = path.name
-            if name.startswith("test_") or name.endswith("_test.py"):
-                candidates.add(path.relative_to(repo_root).as_posix())
+    root = repo_root / SUITE_RELATIVE
+    for path in root.rglob("*.py"):
+        name = path.name
+        if path.is_file() and (name.startswith("test_") or name.endswith("_test.py")):
+            candidates.add(path.relative_to(repo_root).as_posix())
     return candidates
 
 
 @functools.lru_cache(maxsize=4)
 def _default_suite(repo_root: Path) -> set[str]:
-    root = repo_root / SUITE_RELATIVE
-    return {
-        path.relative_to(repo_root).as_posix()
-        for path in root.glob("*.py")
-        if path.is_file()
-        and (path.name.startswith("test_") or path.name.endswith("_test.py"))
-    }
+    return set(_test_candidates(repo_root))
 
 
 def _module_name(path: Path, repo_root: Path) -> str | None:
@@ -229,34 +220,40 @@ def _family_tests(changed_file: str, test_candidates: set[str]) -> set[str]:
     return {test for test in test_candidates if key in _family_key(test)}
 
 
-def load_rules(path: Path = DEFAULT_RULES) -> dict:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("version") != 1:
-        raise ValueError(f"Unsupported impact rule version in {path}: {data.get('version')!r}")
+def load_policy(path: Path) -> dict:
+    data = read_json(path)
+    fields = {
+        "always_tests", "frozen_patterns", "documentation_patterns",
+        "guarded_patterns", "full_suite_patterns",
+    }
+    if set(data) != fields | {"version"} or type(data["version"]) is not int or data["version"] != 2:
+        raise ValueError(f"Invalid CI policy schema in {path}; expected version 2 and safety policy only")
+    for field in fields:
+        validate_paths(data[field], field=f"{path}:{field}", allow_empty=field != "always_tests")
     return data
 
 
-def _validate_rule_tests(rules: Mapping, repo_root: Path, test_candidates: set[str]) -> None:
-    declared = set(rules.get("always_tests", ()))
-    for rule in rules.get("rules", ()):
-        declared.update(rule.get("tests", ()))
+def _validate_policy_tests(policy: Mapping, repo_root: Path, test_candidates: set[str]) -> None:
+    declared = set(policy["always_tests"])
     missing = sorted(test for test in declared if test not in test_candidates or not (repo_root / test).is_file())
     if missing:
-        raise ValueError("Impact rules reference missing/non-test paths: " + ", ".join(missing))
+        raise ValueError("CI policy references missing/non-test paths: " + ", ".join(missing))
 
 
 def select_for_changes(
-    changed_files: Sequence[str],
+    changed_files: Sequence[str] | None,
     *,
     repo_root: Path = REPO_ROOT,
-    rules_path: Path = DEFAULT_RULES,
+    policy_path: Path | None = None,
     force_all: bool = False,
 ) -> Selection:
-    rules = load_rules(rules_path)
+    policy_path = policy_path or repo_root / POLICY_RELATIVE
+    policy = load_policy(policy_path)
     candidates = _test_candidates(repo_root)
-    _validate_rule_tests(rules, repo_root, candidates)
-    changed = tuple(sorted({_normalized(path) for path in changed_files if _normalized(path)}))
-    frozen = tuple(path for path in changed if _matches(path, rules.get("frozen_patterns", ())))
+    _validate_policy_tests(policy, repo_root, candidates)
+    rules = load_manifests(repo_root, SUITE_RELATIVE, candidates)
+    changed = tuple(sorted({_normalized(path) for path in changed_files or () if str(path).strip()}))
+    frozen = tuple(path for path in changed if _matches(path, policy["frozen_patterns"]))
     if frozen:
         joined = "\n  - ".join(frozen)
         raise FrozenPathError(
@@ -265,30 +262,29 @@ def select_for_changes(
             "Migrate the change to xhmodel_merak/, examples_merak/, or configs_merak/."
         )
 
+    # Both incremental and full selection have the same hard execution
+    # boundary. Declarations/imports/family inference cannot enroll tests from
+    # tests/ or another benchmark lane into this CI lane.
     default_suite = _default_suite(repo_root)
-    selected = set(rules.get("always_tests", ()))
+    selected = set(policy["always_tests"])
     reasons: dict[str, set[str]] = defaultdict(set)
     for test in selected:
         reasons[test].add("always:ci-impact-policy")
 
-    ran_full_suite = False
-    if force_all:
-        selected.update(default_suite)
-        for test in default_suite:
-            reasons[test].add("forced-full-suite")
-        ran_full_suite = True
-    elif not changed:
-        selected.update(default_suite)
-        for test in default_suite:
-            reasons[test].add("no-diff-full-suite")
-        return Selection(
-            changed,
-            tuple(sorted(selected)),
-            {key: tuple(sorted(value)) for key, value in reasons.items()},
-            full_suite=True,
-        )
+    full_reasons: set[str] = set()
 
-    reverse_graph, _ = _local_import_graph(repo_root)
+    def select_all(reason: str) -> None:
+        full_reasons.add(reason)
+        selected.update(default_suite)
+        for test in default_suite:
+            reasons[test].add(reason)
+
+    if force_all:
+        select_all("forced-full-suite")
+    elif changed_files is None:
+        select_all("unknown-diff-full-suite")
+
+    reverse_graph = None
     uncovered: list[str] = []
 
     for changed_file in changed:
@@ -304,30 +300,39 @@ def select_for_changes(
             # replacement impact mapping merely to satisfy fail-closed.
             covered = True
 
-        if _matches(changed_file, rules.get("documentation_patterns", ())):
+        owner = manifest_test(changed_file, SUITE_RELATIVE)
+        if owner is not None:
+            # Ownership is immutable and encoded in the filename, not in JSON.
+            # Edits/removals always select the surviving owner, and a rename
+            # selects both surviving owners when both paths are in the diff.
+            # This does not need a base revision or an old manifest snapshot.
+            covered = True
+            if owner in candidates:
+                selected.add(owner)
+                reasons[owner].add(f"changed-manifest:{changed_file}")
+
+        if _matches(changed_file, policy["documentation_patterns"]):
             covered = True
 
-        if _matches(changed_file, rules.get("full_suite_patterns", ())):
-            ran_full_suite = True
+        if changed_file == POLICY_RELATIVE or _matches(changed_file, policy["full_suite_patterns"]):
             covered = True
-            selected.update(default_suite)
-            for test in default_suite:
-                reasons[test].add(f"full-suite:{changed_file}")
+            select_all(f"full-suite:{changed_file}")
 
-        for rule in rules.get("rules", ()):
-            if not _matches(changed_file, rule.get("patterns", ())):
+        for rule in rules:
+            if not _matches(changed_file, rule.patterns):
                 continue
             covered = True
             matched_explicit_rule = True
-            for test in rule.get("tests", ()):
-                selected.add(test)
-                reasons[test].add(f"rule:{rule['id']}:{changed_file}")
+            selected.add(rule.test)
+            reasons[rule.test].add(f"rule:{rule.id}:{changed_file}")
 
         # A maintained rule is the authoritative boundary for its subsystem.
         # Import reachability is intentionally a fallback: shared helpers and
         # compatibility imports otherwise pull unrelated model families into a
         # focused change (for example Qwen3.5 -> Ling/Qwen3Next).
-        if not matched_explicit_rule:
+        if not matched_explicit_rule and changed_file.endswith(".py"):
+            if reverse_graph is None:
+                reverse_graph, _ = _local_import_graph(repo_root)
             for test in _dependent_tests(changed_file, reverse_graph, candidates):
                 covered = True
                 selected.add(test)
@@ -343,7 +348,7 @@ def select_for_changes(
                 selected.add(test)
                 reasons[test].add(f"model-family:{changed_file}")
 
-        if _matches(changed_file, rules.get("guarded_patterns", ())) and not covered:
+        if _matches(changed_file, policy["guarded_patterns"]) and not covered:
             uncovered.append(changed_file)
 
     result = Selection(
@@ -351,14 +356,15 @@ def select_for_changes(
         tuple(sorted(selected)),
         {key: tuple(sorted(value)) for key, value in reasons.items()},
         tuple(sorted(uncovered)),
-        ran_full_suite,
+        bool(full_reasons),
+        tuple(sorted(full_reasons)),
     )
     if result.uncovered_files:
         joined = "\n  - ".join(result.uncovered_files)
         raise MissingCoverageError(
             "Guarded source/config changes have no affected CI test:\n"
             f"  - {joined}\n"
-            "Add a focused test and/or an impact_rules.json mapping in the same change."
+            "Add a focused test and its adjacent <test-stem>.impact.json declaration in the same change."
         )
     return result
 
@@ -377,7 +383,7 @@ def _run_git(repo_root: Path, *args: str) -> list[str]:
     return [_normalized(os.fsdecode(item)) for item in process.stdout.split(b"\0") if item]
 
 
-def discover_changed_files(repo_root: Path, base_ref: str | None, head_ref: str) -> list[str]:
+def discover_changed_files(repo_root: Path, base_ref: str | None, head_ref: str) -> list[str] | None:
     base_ref = base_ref or os.environ.get("CI_TEST_BASE_REF") or os.environ.get("CI_MERGE_REQUEST_DIFF_BASE_SHA")
     head_ref = os.environ.get("CI_TEST_HEAD_REF", head_ref)
     if base_ref:
@@ -386,35 +392,52 @@ def discover_changed_files(repo_root: Path, base_ref: str | None, head_ref: str)
             "diff",
             "--name-only",
             "-z",
+            "--no-renames",
             "--diff-filter=ACDMRTUXB",
             f"{base_ref}...{head_ref}",
         )
 
-    dirty = _run_git(repo_root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", "HEAD")
+    # An exported CI source tree can have no Git metadata. It must use the
+    # runner's path list or conservatively select the full registered suite.
+    try:
+        _run_git(repo_root, "rev-parse", "--verify", "HEAD")
+    except subprocess.CalledProcessError:
+        return None
+    dirty = _run_git(repo_root, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", "HEAD")
     untracked = _run_git(repo_root, "ls-files", "--others", "--exclude-standard", "-z")
     if dirty or untracked:
         return sorted(set(dirty + untracked))
 
     try:
-        return _run_git(repo_root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", "HEAD^", "HEAD")
+        return _run_git(
+            repo_root, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACDMRTUXB", "HEAD^", "HEAD",
+        )
     except subprocess.CalledProcessError:
-        return []
+        return None
 
 
-def _report(selection: Selection) -> str:
+def _report(selection: Selection, *, detailed: bool = True) -> str:
     lines = ["CI impact selection:"]
-    lines.append("  changed: " + (", ".join(selection.changed_files) if selection.changed_files else "<none>"))
+    mode = "full" if selection.full_suite else "incremental"
+    lines.append(f"  mode: {mode}; {len(selection.changed_files)} changed paths; {len(selection.tests)} test files")
+    for reason in selection.full_suite_reasons:
+        lines.append(f"  full-suite reason: {reason}")
+    if detailed:
+        lines.append("  changed: " + (", ".join(selection.changed_files) if selection.changed_files else "<none>"))
     for test in selection.tests:
         lines.append(f"  test: {test}")
-        for reason in selection.reasons.get(test, ()):
+        test_reasons = selection.reasons.get(test, ())
+        for reason in test_reasons if detailed else test_reasons[:3]:
             lines.append(f"    <- {reason}")
+        if not detailed and len(test_reasons) > 3:
+            lines.append(f"    ... {len(test_reasons) - 3} more reasons (use --format json/report)")
     return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
-    parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
+    parser.add_argument("--policy", type=Path)
     parser.add_argument("--base-ref")
     parser.add_argument("--head-ref", default="HEAD")
     parser.add_argument("--changed-file", action="append", default=[])
@@ -424,32 +447,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root.resolve()
-    changed = list(args.changed_file)
-    if args.changed_files_file:
-        changed.extend(args.changed_files_file.read_text(encoding="utf-8").splitlines())
-    if not changed:
-        changed = discover_changed_files(repo_root, args.base_ref, args.head_ref)
-
     try:
+        # An explicitly supplied empty list is a known empty diff, not a
+        # request to inspect some unrelated local/last-commit changes.
+        changed = list(args.changed_file)
+        if args.changed_files_file is not None:
+            changed.extend(args.changed_files_file.read_text(encoding="utf-8").splitlines())
+        elif not changed:
+            changed = discover_changed_files(repo_root, args.base_ref, args.head_ref)
         selection = select_for_changes(
             changed,
             repo_root=repo_root,
-            rules_path=args.rules.resolve(),
+            policy_path=args.policy.resolve() if args.policy else None,
             force_all=args.force_all,
         )
-    except (FrozenPathError, MissingCoverageError, ValueError, subprocess.CalledProcessError) as exc:
+    except (FrozenPathError, MissingCoverageError, ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"ci-impact error: {exc}", file=sys.stderr)
         return 2
 
     if args.format == "paths":
         print("\n".join(selection.tests))
-        print(_report(selection), file=sys.stderr)
+        print(_report(selection, detailed=False), file=sys.stderr)
     elif args.format == "json":
         print(json.dumps({
             "changed_files": selection.changed_files,
             "tests": selection.tests,
             "reasons": selection.reasons,
             "full_suite": selection.full_suite,
+            "full_suite_reasons": selection.full_suite_reasons,
         }, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(_report(selection))

@@ -94,6 +94,12 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
 - `--golden` 会在 demo 推理时保存 golden 输出。
 - dense 与 MoE 都使用同一个 demo 入口；如果 meta 支持视觉分支且图片存在，则走图文输入，否则回退到纯文本输入。
 - PPL 烟测使用 `examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_ppl_eval.py`。
+- workflow 的 `--dump-golden` 会先为 m96 / m196 / m384 / m704 / m1536 五档
+  visual 图各执行一次并写入 `visual/m*/step_0`，再用真实图片完成 visual →
+  prefill → decode 链路；真实图片命中的 visual 档另写 `step_1`。visual-only 导出则在根目录写 `visual_meta_info.json`，
+  golden 位于 `m*/step_0`。
+- workflow 的 `--quick-test` 可直接识别 full-model 与 visual-only 产物；对
+  visual-only 会加载 `visual_meta_info.json` 并逐档校验输出 shape，不再误走文本生成。
 
 ## Spec decode / GDR fuse 验证矩阵
 
@@ -107,10 +113,10 @@ Merak 导出验证固定以下基础开关：
 
 | 组合名 | `fuse_gdr_ops` | `fuse_gdr_block_recurrent_ops` | `split_conv_cache` | 说明 |
 |---|---:|---:|---:|---|
-| `fuse0_split1` | `False` | `False` | `True` | 默认非 GDR fuse + split conv cache |
+| `fuse0_split1` | `False` | `False` | `True` | 显式关闭两项 GDR fuse 的对照路径 |
 | `fuse0_split0` | `False` | `False` | `False` | merged conv cache 导出路径 |
 | `gdr_block_recurrent_split1` | `False` | `True` | `True` | 仅启用不改变 I/O 契约的 GDRBlockTriInverse + GDRRecurrentScan |
-| `fuse1_split1` | `True` | `True` | `True` | 旧 all-GDR fused op 等价路径 |
+| `fuse1_split1` | `True` | `True` | `True` | 所有 checked-in YAML 的默认路径 |
 
 > `fuse_gdr_ops=True` 现在仅表示启用 GDRChunkScan；`split1` 表示 `split_conv_cache=True`。
 
@@ -167,4 +173,9 @@ model = dict(
 
 ## Golden 规范
 
-导出产物需保留 release-style layout：`prefill/`、`decode/`、可选 `visual/`、可选 `mtp_draft_*` / `dflash_draft_*`，并在 `golden_meta_info.json` 中记录相对路径，避免旧式 `decoder/`、`mtp/`、`dflash/` 顶层目录。
+完整导出产物保留 release-style layout：`prefill/`、`decode/`、可选
+`visual/m*`、可选 `mtp_draft_*` / `dflash_draft_*`，并在
+`golden_meta_info.json` 中记录相对路径。visual-only 产物以
+`visual_meta_info.json` 为入口，五档 HMONNX 和 golden 分别放在
+`m96`、`m196`、`m384`、`m704`、`m1536` 下。每次 golden 生成必须覆盖
+全部五档；真实图片命中的档位是端到端补充验证，不能代替逐档 golden。

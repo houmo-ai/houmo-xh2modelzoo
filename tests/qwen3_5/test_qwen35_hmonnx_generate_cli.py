@@ -28,13 +28,18 @@ def _install_stub(monkeypatch, name: str, attrs: dict | None = None) -> types.Mo
     module = sys.modules[name]
     if attrs:
         for key, value in attrs.items():
-            setattr(module, key, value)
+            monkeypatch.setattr(module, key, value, raising=False)
     return module
 
 
 def _load_generate_module(monkeypatch):
     torch_stub = _install_stub(monkeypatch, "torch")
-    torch_stub.cuda = types.SimpleNamespace(is_available=lambda: False, device_count=lambda: 0)
+    monkeypatch.setattr(
+        torch_stub,
+        "cuda",
+        types.SimpleNamespace(is_available=lambda: False, device_count=lambda: 0),
+        raising=False,
+    )
     _install_stub(monkeypatch, "transformers", {"TextStreamer": object})
     _install_stub(
         monkeypatch,

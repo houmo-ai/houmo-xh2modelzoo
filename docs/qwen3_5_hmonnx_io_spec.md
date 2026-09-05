@@ -6,9 +6,9 @@
 
 | 模型 | family | model_size | HF 默认路径 | 推荐 YAML 变体 |
 | --- | --- | --- | --- | --- |
-| Qwen3.5-9B | `qwen3_5` | `9b` | `weights/Qwen3.5-9B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
-| Qwen3.6-27B | `qwen3_5` | `27b` | `weights/Qwen3.6-27B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
-| Qwen3.6-35B-A3B | `qwen3_5_moe` | `35b_a3b` | `weights/Qwen3.6-35B-A3B` | full / mtp / dflash / visual_only_448 / visual_only_896 |
+| Qwen3.5-9B | `qwen3_5` | `9b` | `weights/Qwen3.5-9B` | full / mtp / dflash / visual_only_token_gears |
+| Qwen3.6-27B | `qwen3_5` | `27b` | `weights/Qwen3.6-27B` | full / mtp / dflash / visual_only_token_gears |
+| Qwen3.6-35B-A3B | `qwen3_5_moe` | `35b_a3b` | `weights/Qwen3.6-35B-A3B` | full / mtp / dflash / visual_only_token_gears |
 
 如果从已经量化好的 HF 模型目录导出，应直接把 `hf_model_dir` 指向该目录，并将 `quant` 设置为 `null`，让 workflow 跳过量化阶段。
 
@@ -66,8 +66,7 @@ YAML 名称只表达拓扑/导出形态，不表达量化格式。不要把 `w4`
 configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full.yaml
 configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_mtp.yaml
 configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_full_dflash.yaml
-configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_visual_only_448.yaml
-configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_visual_only_896.yaml
+configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b_visual_only_token_gears_99p_candidate.yaml
 configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/*.yaml
 configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/*.yaml
 ```
@@ -111,37 +110,47 @@ quant_result = workflow.quant(..., config_overrides={"quant": None})
 | `full` | LLM prefill/decode；YAML 带 `visual_config` 时包含视觉分支配置 | `context_max_length=2048`, `prefill_chunk_length=256` |
 | `mtp` | full + MTP draft 模型 | `spec_decode_mode=mtp`, `num_draft_tokens=4`, `output_post_norm_hidden=true`, `mtp_config` |
 | `dflash` | full + DFlash draft 模型 | `spec_decode_mode=dflash`, `num_draft_tokens=9`, `output_hidden_state_indices`, `dflash_config` |
-| `visual_only` | 只导出视觉塔 | `model_type=*_visual`, `max_size_w/h=448 or 896` |
+| `visual_only` | 只导出视觉塔 | `model_type=*_visual`, `visual_input_mode=patches`, `image_token_gears` |
 
-`fuse_gdr_ops` 默认 `False`。编译器支持成熟后，可以通过 override 或 YAML 改成 `True`：
+所有 Qwen3.5/Qwen3.5-MoE workflow YAML 默认同时启用两项 GDR fuse：
 
 ```python
-config_overrides={"export.model.fuse_gdr_ops": True}
+config_overrides={
+    "export.model.fuse_gdr_ops": True,
+    "export.model.fuse_gdr_block_recurrent_ops": True,
+}
 ```
 
 ## 7. Visual 支持
 
-默认 full YAML 里的 `visual_config` 使用 448×448：
+full YAML 和 visual-only YAML 统一使用多档 patch-token 输入：
 
 ```yaml
 visual_config:
-  max_size_w: 448
-  max_size_h: 448
+  visual_input_mode: patches
+  image_token_gears: [96, 196, 384, 704, 1536]
+  image_token_capacity: 1536
+  spatial_merge_size: 2
   quant_scheme:
     quant_type: w8a8h1_sefp
     ops: {}
 ```
 
-推荐 visual-only YAML 提供 448×448 和 896×896 两种尺寸。full 导出若要切换视觉尺寸，用：
+不再支持固定图像宽高或 `visual_input_mode: image`。Host 侧把图像转换为 flattened
+patches，根据 post-merge token 数按 `smallest_fit` 路由到最小可容纳档位；超过
+1536 image tokens 的输入会明确拒绝。
 
-```python
-config_overrides={
-    "export.model.visual_config.max_size_w": 896,
-    "export.model.visual_config.max_size_h": 896,
-}
-```
+完整导出包名使用 `visualm96_196_384_704_1536` 标记视觉档位，例如
+`hmquant_xh2_qwen3_8_27b_w4a8_256_256k_mpe256k_visualm96_196_384_704_1536_20260825`。
+五档图位于 `visual/m96`、`m196`、`m384`、`m704`、`m1536`，并由
+`visual/visual_gears.json` 和 `golden_meta_info.json` 记录运行时路由信息。
+visual-only 导出使用相同的五档目录（根目录为 `m*`），并额外写出
+`visual_meta_info.json` 作为独立加载入口以及 `visual_gears.json` 作为路由清单。
 
-visual-only 导出若要切换尺寸，用对应 `*_visual_only_448.yaml` 或 `*_visual_only_896.yaml`，或覆盖 `export.model.max_size_w/h`。
+golden 生成固定覆盖全部五档，每档执行满 capacity 的 deterministic patches，产物写入
+对应 `step_0`。完整模型随后还会用真实图片验证实际选档、visual 输出截断、prefill 和
+decode，命中档位的真实图片 golden 单独写入 `step_1`，不会覆盖逐档基准；visual-only 的 quick test 则逐档执行并报告
+`m96=(1,96,H)` ... `m1536=(1,1536,H)`，不依赖文本模型 metadata。
 
 ## 8. MTP 数据流
 
