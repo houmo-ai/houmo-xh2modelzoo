@@ -1,6 +1,4 @@
 import copy
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -63,42 +61,6 @@ def test_full_export_directory_name_contains_visual_token_gears(monkeypatch, tmp
     assert export_info.exported_dir == str(tmp_path / expected_name)
 
 
-def test_visual_export_metadata_resolves_flat_gears_after_relocation(tmp_path):
-    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
-    from xhmodel_merak.xh_llm.types import VisualModelMeta
-
-    class ExportFixture(XHQwen3_5VisionModel):
-        def __init__(self, config):
-            self.config = config
-
-        def create_export_metadata(self, _output_dir):
-            return VisualModelMeta()
-
-        def _export_single_hmonnx(self, output_dir):
-            graph = Path(output_dir) / f"{self.config.model_name}.onnx"
-            graph.parent.mkdir(parents=True)
-            graph.touch()
-            meta = VisualModelMeta()
-            meta.hmonnx = str(graph)
-            return meta
-
-    gears = [96, 196, 384, 704, 1536]
-    model = ExportFixture(_visual_export_config())
-    output_dir = tmp_path / "visual"
-    model.export_hmonnx(str(output_dir))
-    relocated = tmp_path / "relocated_visual"
-    output_dir.rename(relocated)
-
-    metadata = json.loads((relocated / "visual_meta_info.json").read_text())
-    manifest = json.loads((relocated / metadata["gear_manifest"]).read_text())
-    expected_paths = [f"m{gear}/qwen3_5_visual_m{gear}.onnx" for gear in gears]
-    assert [entry["hmonnx"] for entry in metadata["gears"]] == expected_paths
-    assert [entry["hmonnx"] for entry in manifest["gears"]] == expected_paths
-    assert metadata["hmonnx"] == expected_paths[-1]
-    assert sorted(path.name for path in relocated.iterdir() if path.is_dir()) == sorted(
-        f"m{gear}" for gear in gears
-    )
-    assert all((relocated / path).is_file() for path in expected_paths)
 
 
 def _tiny_vision_config():

@@ -1,6 +1,5 @@
 import inspect
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,7 +36,6 @@ from xhmodel_merak.xh_llm.models.qwen3_5_moe._qwen3_5_moe_big_export import (
     _Qwen3_5MoeAttention_PlaceHolder,
 )
 from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import XHQwen3_5MoeModel
-from xhmodel_merak.xh_llm.types import ExportData, VisualModelMeta, VLLMModelMeta
 from xhmodel_merak.xh_llm.vision_llm_model import VisionLLMModel
 from xhquant.utils.registry import _DMRegistryCls
 
@@ -263,52 +261,6 @@ def test_resolve_hf_qwen35_class_allows_missing_parent_package(monkeypatch):
     assert big_export._resolve_hf_qwen35_class("Qwen3_5Attention") is None
 
 
-def test_export_visual_hmonnx_impl_updates_meta_without_releasing_visual(tmp_path):
-    exported_dir = tmp_path / "release"
-    exported_dir.mkdir()
-    visual_hmonnx = exported_dir / "visual" / "m1536" / "vision.onnx"
-
-    class FakeVisual:
-        def __init__(self):
-            self.config = SimpleNamespace(model_name="old")
-            self.quanted = False
-
-        def to_quanted_aligned(self):
-            self.quanted = True
-
-        def export_hmonnx(self, output_dir):
-            assert self.quanted
-            assert Path(output_dir) == exported_dir / "visual"
-            visual_hmonnx.parent.mkdir(parents=True)
-            visual_hmonnx.touch()
-            meta = VisualModelMeta()
-            meta.hmonnx = str(visual_hmonnx)
-            meta.visual_input_mode = "patches"
-            meta.image_token_gears = [96, 196, 384, 704, 1536]
-            meta.gears = [
-                {
-                    "image_token_capacity": 1536,
-                    "patch_token_capacity": 6144,
-                    "hmonnx": "m1536/vision.onnx",
-                }
-            ]
-            return meta
-
-    model = XHQwen3_5Model.__new__(XHQwen3_5Model)
-    model.visual = FakeVisual()
-    meta_info = VLLMModelMeta()
-    exported_info = ExportData()
-    exported_info.exported_dir = str(exported_dir)
-    exported_info.model_name = "hmquant_qwen3_5"
-    exported_info.meta = meta_info
-
-    model._export_visual_hmonnx_impl(exported_info)
-
-    assert hasattr(model, "visual")
-    assert meta_info.visual_config.hmonnx == "visual/m1536/vision.onnx"
-    assert meta_info.visual_config.visual_input_mode == "patches"
-    assert meta_info.visual_config.gears[0]["hmonnx"] == "visual/m1536/vision.onnx"
-    assert (exported_dir / "golden_meta_info.json").exists()
 
 
 def test_qwen3_5_moe_big_export_uses_moe_placeholder_components():

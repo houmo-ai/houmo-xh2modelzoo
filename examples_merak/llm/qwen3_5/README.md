@@ -95,9 +95,9 @@ python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
 - dense 与 MoE 都使用同一个 demo 入口；如果 meta 支持视觉分支且图片存在，则走图文输入，否则回退到纯文本输入。
 - PPL 烟测使用 `examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_ppl_eval.py`。
 - workflow 的 `--dump-golden` 会先为 m96 / m196 / m384 / m704 / m1536 五档
-  visual 图各执行一次并写入 `visual/m*/step_0`，再用真实图片完成 visual →
+  visual 图各执行一次并写入 `visual_m*/step_0`，再用真实图片完成 visual →
   prefill → decode 链路；真实图片命中的 visual 档另写 `step_1`。visual-only 导出则在根目录写 `visual_meta_info.json`，
-  golden 位于 `m*/step_0`。
+  golden 位于 `visual_m*/step_0`。
 - workflow 的 `--quick-test` 可直接识别 full-model 与 visual-only 产物；对
   visual-only 会加载 `visual_meta_info.json` 并逐档校验输出 shape，不再误走文本生成。
 
@@ -174,8 +174,8 @@ model = dict(
 ## Golden 规范
 
 完整导出产物保留 release-style layout：`prefill/`、`decode/`、可选
-`visual/m*`、可选 `mtp_draft_*` / `dflash_draft_*`，并在
-`golden_meta_info.json` 中记录相对路径。visual-only 产物以
+`visual_m*`、可选 `mtp_draft_*` / `dflash_draft_*`，这些目录均位于包根目录，并在
+`golden_meta_info.json` 和根目录的 `visual_gears.json` 中记录相对路径。visual-only 产物以
 `visual_meta_info.json` 为入口，五档 HMONNX 和 golden 分别放在
-`m96`、`m196`、`m384`、`m704`、`m1536` 下。每次 golden 生成必须覆盖
+`visual_m96`、`visual_m196`、`visual_m384`、`visual_m704`、`visual_m1536` 下。每次 golden 生成必须覆盖
 全部五档；真实图片命中的档位是端到端补充验证，不能代替逐档 golden。

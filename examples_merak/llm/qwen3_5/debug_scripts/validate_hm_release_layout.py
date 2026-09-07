@@ -2,7 +2,7 @@
 """Validate HM release/golden HMONNX package layout for Qwen3.5/Qwen3.6 exports.
 
 The checks mirror the Feishu HM model release naming rules:
-release directories stay lowercase, stage folders are named prefill/decode/visual
+release directories stay lowercase, stage folders are named prefill/decode/visual_m*
 or the spec-decode draft stage names, and stage artifacts use
 <release_prefix>_<stage>_{with_act.onnx,external_data}.
 """
@@ -11,26 +11,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 
 STAGE_SUFFIXES = {
     "prefill": "prefill",
     "decode": "decode",
-    "visual": "visual",
     "mtp_draft_prefill": "mtp_draft_prefill",
     "mtp_draft_decode": "mtp_draft_decode",
     "dflash_draft_context": "dflash_draft_context",
     "dflash_draft_context_decode": "dflash_draft_context_decode",
     "dflash_draft_decode": "dflash_draft_decode",
 }
-LEGACY_STAGE_DIRS = {"decoder", "vision", "mtp", "dflash"}
+LEGACY_STAGE_DIRS = {"decoder", "vision", "visual", "mtp", "dflash"}
 REQUIRED_TOP_LEVEL = {"prefill", "decode", "hf_config", "quant_embedding.pt", "golden_meta_info.json"}
+
+
+def _stage_suffix(stage_name: str) -> str | None:
+    if re.fullmatch(r"visual_m[1-9][0-9]*", stage_name):
+        return stage_name
+    return STAGE_SUFFIXES.get(stage_name)
 
 
 def _failures_for_stage(stage_dir: Path, release_prefix: str) -> list[str]:
     failures: list[str] = []
-    stage_suffix = STAGE_SUFFIXES.get(stage_dir.name)
+    stage_suffix = _stage_suffix(stage_dir.name)
     if stage_suffix is None:
         return [f"unsupported stage directory: {stage_dir.name}"]
 
@@ -98,10 +104,10 @@ def ensure_step_artifact_links(export_dir: Path) -> None:
         if not isinstance(value, str) or not value:
             return
         relative_path = Path(value)
-        if relative_path.is_absolute() or len(relative_path.parts) < 2:
+        if relative_path.is_absolute() or ".." in relative_path.parts or len(relative_path.parts) != 2:
             return
         stage_name = relative_path.parts[0]
-        if stage_name in STAGE_SUFFIXES:
+        if _stage_suffix(stage_name) is not None:
             stage_models.setdefault(stage_name, export_dir / relative_path)
 
     _add_model(meta.get("prefill_hmonnx"))
@@ -109,6 +115,8 @@ def ensure_step_artifact_links(export_dir: Path) -> None:
     visual_config = meta.get("visual_config")
     if isinstance(visual_config, dict):
         _add_model(visual_config.get("hmonnx"))
+        for gear in visual_config.get("gears") or []:
+            _add_model(gear.get("hmonnx"))
     spec_decode = meta.get("spec_decode")
     if isinstance(spec_decode, dict):
         for key, value in spec_decode.items():
@@ -161,15 +169,37 @@ def validate_release_layout(export_dir: Path) -> list[str]:
         stage_dir = export_dir / stage_name
         if stage_dir.is_dir():
             failures.extend(_failures_for_stage(stage_dir, release_prefix))
-    for stage_name in sorted(STAGE_SUFFIXES.keys() - {"prefill", "decode"}):
-        stage_dir = export_dir / stage_name
-        if stage_dir.exists():
+    for stage_dir in sorted(export_dir.iterdir()):
+        if (
+            stage_dir.is_dir()
+            and stage_dir.name not in {"prefill", "decode"}
+            and _stage_suffix(stage_dir.name) is not None
+        ):
             failures.extend(_failures_for_stage(stage_dir, release_prefix))
 
     if isinstance(meta.get("visual_config"), dict):
-        visual_hmonnx = meta["visual_config"].get("hmonnx")
-        if not isinstance(visual_hmonnx, str) or not visual_hmonnx.startswith("visual/"):
-            failures.append("visual_config.hmonnx must be a visual/ relative path")
+        visual_config = meta["visual_config"]
+        visual_paths = [("visual_config.hmonnx", visual_config.get("hmonnx"), None)]
+        for index, gear in enumerate(visual_config.get("gears") or []):
+            visual_paths.append(
+                (f"visual_config.gears[{index}].hmonnx", gear.get("hmonnx"), gear.get("image_token_capacity"))
+            )
+        for field, value, capacity in visual_paths:
+            path = Path(value) if isinstance(value, str) and value else None
+            if (
+                path is None
+                or path.is_absolute()
+                or ".." in path.parts
+                or len(path.parts) != 2
+                or not re.fullmatch(r"visual_m[1-9][0-9]*", path.parent.name)
+            ):
+                failures.append(
+                    f"{field} must be a visual_m<capacity>/ root-relative artifact path"
+                )
+            elif capacity is not None and path.parent.name != f"visual_m{capacity}":
+                failures.append(f"{field} must use visual_m{capacity}/ for image_token_capacity={capacity}")
+            elif not (export_dir / path).is_file():
+                failures.append(f"{field} references missing artifact: {value}")
     spec_decode = meta.get("spec_decode", {})
     if isinstance(spec_decode, dict):
         for key, value in spec_decode.items():

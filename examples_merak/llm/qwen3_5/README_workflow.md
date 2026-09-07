@@ -156,7 +156,8 @@ CUDA_VISIBLE_DEVICES=3 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 所有 full 配置都直接导出静态 token gears `96/196/384/704/1536`，运行时按
 `smallest_fit` 选择最小可容纳图。完整包名带
 `visualm96_196_384_704_1536` 后缀，视觉图位于
-`visual/m96` 至 `visual/m1536`。如只需单独导出 visual tower：
+包根目录的 `visual_m96` 至 `visual_m1536`，与 `prefill`、`decode` 同级；
+路由清单位于根目录的 `visual_gears.json`。如只需单独导出 visual tower：
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \

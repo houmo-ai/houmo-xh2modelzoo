@@ -64,14 +64,23 @@ def test_qwen35_change_selects_only_active_ci_contract_and_exports():
 
 
 @pytest.mark.ci_policy
-@pytest.mark.parametrize("filename", (
-    "qwen3_5_moe_model.py", "qwen3_5_moe_hmonnx_inference.py", "_vision_model_impl.py",
+@pytest.mark.parametrize("filename,expects_layout", (
+    ("qwen3_5_moe_model.py", True),
+    ("qwen3_5_moe_vision_model.py", True),
+    ("xh_qwen3_5_moe_config.py", True),
+    ("qwen3_5_moe_hmonnx_inference.py", False),
+    ("_vision_model_impl.py", False),
 ))
-def test_moe_source_selects_its_registered_block_export(filename):
+def test_moe_source_selects_its_registered_block_export(filename, expects_layout):
     changed = f"xhmodel_merak/xh_llm/models/qwen3_5_moe/{filename}"
     selection = select_for_changes([changed], repo_root=REPO_ROOT)
     target = f"{SUITE_RELATIVE}/test_qwen35_35b_a3b_block_export.py"
-    assert set(selection.tests) == {f"{SUITE_RELATIVE}/test_ci_impact_selector.py", target}
+    expected = {f"{SUITE_RELATIVE}/test_ci_impact_selector.py", target}
+    if expects_layout:
+        layout = f"{SUITE_RELATIVE}/test_qwen35_visual_release_layout.py"
+        expected.add(layout)
+        assert f"rule:qwen35-visual-release-layout:{changed}" in selection.reasons[layout]
+    assert set(selection.tests) == expected
     assert f"rule:qwen35-moe-source:{changed}" in selection.reasons[target]
     assert selection.full_suite is False
 

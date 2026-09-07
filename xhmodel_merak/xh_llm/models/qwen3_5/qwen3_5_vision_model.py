@@ -282,8 +282,11 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
             output_names=["image_embeds"],
         )
 
-    def export_hmonnx(self, output_dir: str) -> VisualModelMeta:
-        return self._export_token_gear_set(output_dir, self.config.image_token_gears)
+    def export_hmonnx(self, output_dir: str, *, write_standalone_metadata: bool = True) -> VisualModelMeta:
+        """Export visual_m* stages directly under the full or visual-only package root."""
+        return self._export_token_gear_set(
+            output_dir, self.config.image_token_gears, write_standalone_metadata=write_standalone_metadata
+        )
 
     def _export_single_hmonnx(self, output_dir: str) -> VisualModelMeta:
         meta_info = self.create_export_metadata(output_dir)
@@ -291,7 +294,9 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         meta_info.hmonnx = str(exported_hmonnx_file)
         return meta_info
 
-    def _export_token_gear_set(self, output_dir: str, gears: list[int]) -> VisualModelMeta:
+    def _export_token_gear_set(
+        self, output_dir: str, gears: list[int], *, write_standalone_metadata: bool = True
+    ) -> VisualModelMeta:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         base_model_name = self.config.model_name
@@ -300,7 +305,7 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         artifacts_by_gear: dict[int, dict] = {}
 
         def export_one(model: "XHQwen3_5VisionModel", gear: int) -> None:
-            gear_dir = output_path / f"m{gear}"
+            gear_dir = output_path / f"visual_m{gear}"
             original_name = model.config.model_name
             model.config.model_name = f"{base_model_name}_m{gear}"
             try:
@@ -355,13 +360,16 @@ class XHQwen3_5VisionModel(BaseVisionModel):  # noqa: N801
         meta_info.routing_policy = manifest["routing_policy"]
         meta_info.shared_weight_loader = manifest["shared_weight_loader"]
 
-        standalone_meta = meta_info.to_dict()
-        standalone_meta["hmonnx"] = largest_artifact["hmonnx"]
-        standalone_meta["gear_manifest"] = manifest_path.name
-        (output_path / "visual_meta_info.json").write_text(
-            json.dumps(standalone_meta, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        # A full VLM package uses golden_meta_info.json; a visual-only marker at
+        # that root would make workflow/quick-test routing mistake it for visual-only.
+        if write_standalone_metadata:
+            standalone_meta = meta_info.to_dict()
+            standalone_meta["hmonnx"] = largest_artifact["hmonnx"]
+            standalone_meta["gear_manifest"] = manifest_path.name
+            (output_path / "visual_meta_info.json").write_text(
+                json.dumps(standalone_meta, indent=2) + "\n",
+                encoding="utf-8",
+            )
         return meta_info
 
     def create_export_metadata(self, output_dir: str) -> VisualModelMeta:

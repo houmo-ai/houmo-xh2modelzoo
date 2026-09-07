@@ -1451,7 +1451,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             return
 
         meta_info = cast(VLLMModelMeta, exported_info.meta)
-        visual_output_dir = str(Path(exported_info.exported_dir) / "visual")
+        visual_output_dir = str(Path(exported_info.exported_dir))
         logger = get_xhquant_logger()
         memory_info = get_cpu_memory_mb()
         logger.info(f"Initial CPU memory usage before exporting visual hmonnx: {str(memory_info)}")
@@ -1459,7 +1459,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         self.visual.config.model_name = f"{exported_info.model_name}_visual"
         self.visual.to_quanted_aligned()
-        visual_meta = self.visual.export_hmonnx(visual_output_dir)
+        visual_meta = self.visual.export_hmonnx(visual_output_dir, write_standalone_metadata=False)
         visual_meta.hmonnx = str(Path(visual_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
         if getattr(visual_meta, "gears", None):
             for gear in visual_meta.gears:

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-visual-release-layout",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_vision_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/lora.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_5_moe_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_5_moe_vision_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/xh_qwen3_5_moe_config.py",
+        "examples_merak/llm/qwen3_5/debug_scripts/validate_hm_release_layout.py"
+      ]
+    }
+  ]
+}

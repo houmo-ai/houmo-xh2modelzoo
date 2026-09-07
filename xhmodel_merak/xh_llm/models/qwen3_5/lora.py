@@ -364,8 +364,17 @@ def _materialize_lora_shared_artifacts(
     quant_embedding = _relative_export_path(meta_info.quant_embedding, "quant_embedding")
     _symlink_artifact_file(root_dir / quant_embedding, adapter_dir / quant_embedding)
 
-    for component_dir in _shared_hmonnx_component_dirs(meta_info):
+    component_dirs = _shared_hmonnx_component_dirs(meta_info)
+    for component_dir in component_dirs:
         _mirror_artifact_tree(root_dir / component_dir, adapter_dir / component_dir)
+
+    # Flat visual_m* stages share a root-level manifest outside their trees.
+    # Only link it separately when it was not already mirrored with a component.
+    gear_manifest = getattr(getattr(meta_info, "visual_config", None), "gear_manifest", None)
+    if gear_manifest:
+        manifest = _relative_export_path(gear_manifest, "gear_manifest")
+        if not any(manifest.is_relative_to(component_dir) for component_dir in component_dirs):
+            _symlink_artifact_file(root_dir / manifest, adapter_dir / manifest)
 
 
 def _shared_hmonnx_component_dirs(meta_info: VLLMModelMeta) -> list[Path]:

@@ -142,10 +142,13 @@ patches，根据 post-merge token 数按 `smallest_fit` 路由到最小可容纳
 
 完整导出包名使用 `visualm96_196_384_704_1536` 标记视觉档位，例如
 `hmquant_xh2_qwen3_8_27b_w4a8_256_256k_mpe256k_visualm96_196_384_704_1536_20260825`。
-五档图位于 `visual/m96`、`m196`、`m384`、`m704`、`m1536`，并由
-`visual/visual_gears.json` 和 `golden_meta_info.json` 记录运行时路由信息。
-visual-only 导出使用相同的五档目录（根目录为 `m*`），并额外写出
+五档图位于包根目录的 `visual_m96`、`visual_m196`、`visual_m384`、`visual_m704`、
+`visual_m1536`，与 `prefill`、`decode` 同级，不再嵌套在 `visual/` 下。根目录的
+`visual_gears.json` 和 `golden_meta_info.json` 记录运行时路由信息。
+visual-only 导出使用相同的五档目录（根目录为 `visual_m*`），并额外写出
 `visual_meta_info.json` 作为独立加载入口以及 `visual_gears.json` 作为路由清单。
+发布布局校验与 step 链接修复只支持根目录 `visual_m*`；不兼容旧 `visual/m*`
+或 `m*` 布局，旧格式产物需重新导出。
 
 golden 生成固定覆盖全部五档，每档执行满 capacity 的 deterministic patches，产物写入
 对应 `step_0`。完整模型随后还会用真实图片验证实际选档、visual 输出截断、prefill 和
